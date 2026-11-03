@@ -244,6 +244,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "nestadmin-simulators"
+version = "0.1.0"
+dependencies = [
+ "nestadmin-core",
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "num-traits"
 version = "0.2.19"
 source = "registry+https://github.com/rust-lang/crates.io-index"

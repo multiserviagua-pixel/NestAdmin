@@ -11,7 +11,7 @@ Formato que comprueba `scripts/check.py`: cada requisito tiene al menos una fila
 | R03 | T03: verificar selección local inicial; provocar error local y observar que no hay peticiones a Groq; seleccionar externo explícitamente y comprobar adaptador. | Pendiente |
 | R04 | T04: procesar texto, PDF textual y escaneado; forzar fallo de OCR y verificar incidencia recuperable. | Pendiente |
 | R05 | T05: comprobar ausencias, operaciones decimales, importes incoherentes y duplicados con explicación. | Parcial — validación decimal y duplicados sin extracción por IA, PDF ni OCR, [evidencia](../../evidence/t05-validacion.md) |
-| R06 | T06: consultar correo, crear borrador y registrar factura mediante simuladores; verificar aislamiento de cuentas reales. | Pendiente |
+| R06 | T06: consultar correo, crear borrador y registrar factura mediante simuladores; verificar aislamiento de cuentas reales. | Parcial — contratos como traits reemplazables y simuladores locales sin red con idempotencia, persistencia y reconciliación con el núcleo, sin interfaz, [evidencia](../../evidence/t06-simuladores.md) |
 | R07 | T07: comprobar revisión predeterminada, regla activada y desactivada, condiciones no coincidentes, historial y cambios tras aprobación. | Pendiente |
 | R08 | T08: en Windows probar instalaciones presentes y ausentes, descarga interrumpida/reintento, intervención y respuesta real del modelo. | Pendiente |
 | R09 | T09: inspeccionar persistencia, registros y artefactos con credenciales de prueba; verificar almacén protegido y ausencia de secretos. | Pendiente |

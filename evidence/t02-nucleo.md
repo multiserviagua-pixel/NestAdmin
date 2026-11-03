@@ -32,4 +32,5 @@ cargo test -p nestadmin-core --test recovery
 
 - Reinicio real de la aplicación Tauri y recuperación al arrancar (fase 6).
 - Mostrar estado, incidencias y pendientes en la interfaz.
-- Conectores simulados de correo y administración reales en lugar del conector de prueba (fase 3).
+
+La reconciliación con los simuladores de correo y administración en lugar del conector de prueba se verifica en [la evidencia T06](t06-simuladores.md) (`crates/simulators/tests/core_integration.rs`); las pruebas de este documento siguen usando el conector de prueba.
