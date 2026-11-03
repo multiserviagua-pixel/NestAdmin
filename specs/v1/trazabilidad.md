@@ -6,13 +6,13 @@ Formato que comprueba `scripts/check.py`: cada requisito tiene al menos una fila
 
 | Requisito | Casos de verificación previstos | Estado |
 | --- | --- | --- |
-| R01 | T01: cerrar ventana con tarea en curso, restaurar y salir desde el área de notificación; comprobar que el proceso termina. | Pendiente |
-| R02 | T02: interrumpir en distintos estados, reiniciar, verificar persistencia y ausencia de efectos duplicados. | Parcial — núcleo sin interfaz, [evidencia](../../evidence/t02-nucleo.md) |
-| R03 | T03: verificar selección local inicial; provocar error local y observar que no hay peticiones a Groq; seleccionar externo explícitamente y comprobar adaptador. | Parcial — biblioteca con servidor simulado, sin interfaz ni Groq real, [evidencia](../../evidence/t03-proveedores.md) |
+| R01 | T01: cerrar ventana con tarea en curso, restaurar y salir desde el área de notificación; comprobar que el proceso termina. | Parcial — cerrar oculta e instancia única comprobados; bandeja y salida por comprobar a mano, [evidencia](../../evidence/t01-escritorio.md) |
+| R02 | T02: interrumpir en distintos estados, reiniciar, verificar persistencia y ausencia de efectos duplicados. | Parcial — núcleo y capa de aplicación (reinicio sin efectos duplicados), sin ensayo desde la ventana, [evidencia](../../evidence/t02-nucleo.md) |
+| R03 | T03: verificar selección local inicial; provocar error local y observar que no hay peticiones a Groq; seleccionar externo explícitamente y comprobar adaptador. | Parcial — biblioteca con servidor simulado y selección explícita en la ventana, sin Groq real, [evidencia](../../evidence/t03-proveedores.md) |
 | R04 | T04: procesar texto, PDF textual y escaneado; forzar fallo de OCR y verificar incidencia recuperable. | Pendiente |
 | R05 | T05: comprobar ausencias, operaciones decimales, importes incoherentes y duplicados con explicación. | Parcial — validación decimal y duplicados sin extracción por IA, PDF ni OCR, [evidencia](../../evidence/t05-validacion.md) |
 | R06 | T06: consultar correo, crear borrador y registrar factura mediante simuladores; verificar aislamiento de cuentas reales. | Parcial — contratos como traits reemplazables y simuladores locales sin red con idempotencia, persistencia y reconciliación con el núcleo, sin interfaz, [evidencia](../../evidence/t06-simuladores.md) |
-| R07 | T07: comprobar revisión predeterminada, regla activada y desactivada, condiciones no coincidentes, historial y cambios tras aprobación. | Pendiente |
+| R07 | T07: comprobar revisión predeterminada, regla activada y desactivada, condiciones no coincidentes, historial y cambios tras aprobación. | Parcial — lógica probada con proveedor simulado y con Ollama local, sin recorrido desde la ventana, [evidencia](../../evidence/t07-revision-reglas.md) |
 | R08 | T08: en Windows probar instalaciones presentes y ausentes, descarga interrumpida/reintento, intervención y respuesta real del modelo. | Pendiente |
 | R09 | T09: inspeccionar persistencia, registros y artefactos con credenciales de prueba; verificar almacén protegido y ausencia de secretos. | Pendiente |
 | R10 | T10: ejecutar corpus sintético y calcular métricas por caso, incluidas ausencias y valores inventados. | Parcial — corpus completo con Ollama/Qwen3 8B, sin Groq ni memoria, [evidencia](../../evidence/t10-ollama-qwen3.md) |

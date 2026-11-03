@@ -1,0 +1,389 @@
+//! Ventana de NestAdmin (R01, flujo 5). Cerrar oculta la ventana y el trabajo sigue en un
+//! hilo propio; el icono del área de notificación permite restaurarla o salir por completo.
+//! La lógica vive en `nestadmin-app`; aquí solo se exponen comandos a la ventana principal.
+
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
+mod settings;
+
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::{Arc, Mutex, MutexGuard};
+use std::thread;
+use std::time::Duration;
+
+use nestadmin_ai::credentials::GROQ_API_KEY;
+use nestadmin_ai::{CredentialStore, ProviderChoice, Secret};
+use nestadmin_app::{App, AppPaths, ProviderInfo};
+use nestadmin_core::{AuditEntry, Rule, Task};
+use serde::Serialize;
+use serde_json::Value;
+use tauri::menu::{Menu, MenuItem};
+use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
+use tauri::{AppHandle, Emitter, Manager, State, WindowEvent};
+
+use crate::settings::{credential_store, provider_for, Settings};
+
+/// Evento que indica a la ventana que vuelva a leer tareas e historial.
+const CHANGED: &str = "nestadmin://changed";
+
+struct Shared {
+    app: Mutex<App>,
+    settings: Mutex<Settings>,
+    credentials: Box<dyn CredentialStore>,
+    data_dir: PathBuf,
+    wake: Mutex<Sender<()>>,
+    stopping: AtomicBool,
+}
+
+impl Shared {
+    fn app(&self) -> Result<MutexGuard<'_, App>, String> {
+        self.app
+            .lock()
+            .map_err(|_| "estado interno no disponible".to_owned())
+    }
+
+    fn wake(&self) {
+        if let Ok(sender) = self.wake.lock() {
+            let _ = sender.send(());
+        }
+    }
+}
+
+type SharedState = Arc<Shared>;
+type CmdResult<T> = Result<T, String>;
+
+fn changed(handle: &AppHandle) {
+    let _ = handle.emit(CHANGED, ());
+}
+
+fn text<E: ToString>(error: E) -> String {
+    error.to_string()
+}
+
+#[tauri::command]
+fn tasks(shared: State<'_, SharedState>) -> CmdResult<Vec<Task>> {
+    shared.app()?.tasks().map_err(text)
+}
+
+#[tauri::command]
+fn import_document(
+    shared: State<'_, SharedState>,
+    handle: AppHandle,
+    name: String,
+    text_content: String,
+) -> CmdResult<Task> {
+    let task = shared
+        .app()?
+        .import_document(&name, &text_content)
+        .map_err(text)?;
+    shared.wake();
+    changed(&handle);
+    Ok(task)
+}
+
+#[tauri::command]
+fn fetch_mail(shared: State<'_, SharedState>, handle: AppHandle) -> CmdResult<usize> {
+    let added = shared.app()?.fetch_mail().map_err(text)?;
+    shared.wake();
+    changed(&handle);
+    Ok(added)
+}
+
+#[tauri::command]
+fn approve(
+    shared: State<'_, SharedState>,
+    handle: AppHandle,
+    id: i64,
+    version: i64,
+) -> CmdResult<Task> {
+    let task = shared.app()?.approve(id, version).map_err(text);
+    changed(&handle);
+    task
+}
+
+#[tauri::command]
+fn edit_draft(
+    shared: State<'_, SharedState>,
+    handle: AppHandle,
+    id: i64,
+    body: String,
+) -> CmdResult<Task> {
+    let task = shared.app()?.edit_draft(id, &body).map_err(text)?;
+    changed(&handle);
+    Ok(task)
+}
+
+#[tauri::command]
+fn reject(shared: State<'_, SharedState>, handle: AppHandle, id: i64) -> CmdResult<Task> {
+    let task = shared.app()?.reject(id).map_err(text)?;
+    changed(&handle);
+    Ok(task)
+}
+
+#[tauri::command]
+fn retry(shared: State<'_, SharedState>, handle: AppHandle, id: i64) -> CmdResult<Task> {
+    let task = shared.app()?.retry(id).map_err(text)?;
+    shared.wake();
+    changed(&handle);
+    Ok(task)
+}
+
+#[tauri::command]
+fn rules(shared: State<'_, SharedState>) -> CmdResult<Vec<Rule>> {
+    shared.app()?.rules().map_err(text)
+}
+
+#[tauri::command]
+fn create_rule(
+    shared: State<'_, SharedState>,
+    handle: AppHandle,
+    id: String,
+    action_kind: String,
+    conditions: Value,
+) -> CmdResult<Rule> {
+    let rule = shared
+        .app()?
+        .create_rule(&id, &action_kind, &conditions)
+        .map_err(text)?;
+    changed(&handle);
+    Ok(rule)
+}
+
+#[tauri::command]
+fn update_rule(
+    shared: State<'_, SharedState>,
+    handle: AppHandle,
+    id: String,
+    conditions: Value,
+) -> CmdResult<Rule> {
+    let rule = shared.app()?.update_rule(&id, &conditions).map_err(text)?;
+    changed(&handle);
+    Ok(rule)
+}
+
+#[tauri::command]
+fn set_rule_active(
+    shared: State<'_, SharedState>,
+    handle: AppHandle,
+    id: String,
+    active: bool,
+) -> CmdResult<Rule> {
+    let rule = shared.app()?.set_rule_active(&id, active).map_err(text)?;
+    changed(&handle);
+    Ok(rule)
+}
+
+#[tauri::command]
+fn audit_log(shared: State<'_, SharedState>) -> CmdResult<Vec<AuditEntry>> {
+    shared.app()?.audit_log().map_err(text)
+}
+
+#[derive(Serialize)]
+struct SettingsView {
+    choice: ProviderChoice,
+    active: ProviderInfo,
+    groq_key_saved: bool,
+    data_dir: PathBuf,
+}
+
+#[tauri::command]
+fn settings(shared: State<'_, SharedState>) -> CmdResult<SettingsView> {
+    let choice = shared.settings.lock().map_err(text)?.provider.clone();
+    let groq_key_saved = shared
+        .credentials
+        .get(GROQ_API_KEY)
+        .map_err(text)?
+        .is_some();
+    Ok(SettingsView {
+        choice,
+        active: shared.app()?.provider(),
+        groq_key_saved,
+        data_dir: shared.data_dir.clone(),
+    })
+}
+
+/// Cambio explícito de proveedor. Si el elegido no se puede preparar (por ejemplo, Groq sin
+/// clave), se informa y se mantiene la selección anterior.
+#[tauri::command]
+fn select_provider(
+    shared: State<'_, SharedState>,
+    choice: ProviderChoice,
+) -> CmdResult<ProviderInfo> {
+    let provider = settings::build(&choice, shared.credentials.as_ref()).map_err(text)?;
+    let mut current = shared.settings.lock().map_err(text)?;
+    let updated = Settings { provider: choice };
+    updated.save(&shared.data_dir).map_err(text)?;
+    *current = updated;
+    let mut app = shared.app()?;
+    app.select_provider(provider);
+    Ok(app.provider())
+}
+
+/// La clave va directa al Administrador de credenciales de Windows; nunca se devuelve.
+#[tauri::command]
+fn save_groq_key(shared: State<'_, SharedState>, key: String) -> CmdResult<()> {
+    let key = key.trim();
+    if key.is_empty() {
+        return Err("la clave está vacía".into());
+    }
+    shared
+        .credentials
+        .set(GROQ_API_KEY, &Secret::new(key))
+        .map_err(text)
+}
+
+#[tauri::command]
+fn delete_groq_key(shared: State<'_, SharedState>) -> CmdResult<()> {
+    shared.credentials.delete(GROQ_API_KEY).map_err(text)
+}
+
+/// Procesa la cola sin bloquear la ventana: la llamada al modelo se hace sin el cerrojo.
+fn worker(shared: SharedState, handle: AppHandle, wake: Receiver<()>) {
+    while !shared.stopping.load(Ordering::SeqCst) {
+        let job = match shared.app() {
+            Ok(mut app) => app.begin_next(),
+            Err(_) => return,
+        };
+        match job {
+            Ok(Some(job)) => {
+                changed(&handle);
+                let completed = job.run();
+                if let Ok(mut app) = shared.app() {
+                    if let Err(error) = app.finish(completed) {
+                        eprintln!("no se pudo guardar el resultado: {error}");
+                    }
+                }
+                changed(&handle);
+            }
+            Ok(None) => {
+                let _ = wake.recv_timeout(Duration::from_secs(5));
+            }
+            Err(error) => {
+                eprintln!("cola no disponible: {error}");
+                let _ = wake.recv_timeout(Duration::from_secs(5));
+            }
+        }
+    }
+}
+
+fn show_main(handle: &AppHandle) {
+    if let Some(window) = handle.get_webview_window("main") {
+        let _ = window.unminimize();
+        let _ = window.show();
+        let _ = window.set_focus();
+    }
+}
+
+/// Salida completa: no se toman tareas nuevas; una tarea en curso se recupera al reabrir.
+fn quit(handle: &AppHandle) {
+    if let Some(shared) = handle.try_state::<SharedState>() {
+        shared.stopping.store(true, Ordering::SeqCst);
+        shared.wake();
+    }
+    handle.exit(0);
+}
+
+fn data_dir(handle: &AppHandle) -> PathBuf {
+    std::env::var_os("NESTADMIN_DATA_DIR")
+        .map(PathBuf::from)
+        .or_else(nestadmin_app::default_data_dir)
+        .or_else(|| handle.path().app_local_data_dir().ok())
+        .unwrap_or_else(|| PathBuf::from("NestAdmin"))
+}
+
+fn setup(handle: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
+    let data_dir = data_dir(handle);
+    std::fs::create_dir_all(&data_dir)?;
+    let credentials = credential_store();
+    let settings = Settings::load(&data_dir);
+    let provider = provider_for(&settings.provider, credentials.as_ref());
+    let app = App::open(&AppPaths::new(&data_dir), provider)?;
+    let (sender, receiver) = mpsc::channel();
+    let shared = Arc::new(Shared {
+        app: Mutex::new(app),
+        settings: Mutex::new(settings),
+        credentials,
+        data_dir,
+        wake: Mutex::new(sender),
+        stopping: AtomicBool::new(false),
+    });
+    handle.manage(Arc::clone(&shared));
+    let worker_handle = handle.clone();
+    thread::Builder::new()
+        .name("nestadmin-cola".into())
+        .spawn(move || worker(shared, worker_handle, receiver))?;
+
+    let show = MenuItem::with_id(handle, "show", "Mostrar NestAdmin", true, None::<&str>)?;
+    let exit = MenuItem::with_id(
+        handle,
+        "quit",
+        "Salir de NestAdmin por completo",
+        true,
+        None::<&str>,
+    )?;
+    let menu = Menu::with_items(handle, &[&show, &exit])?;
+    let mut tray = TrayIconBuilder::with_id("nestadmin")
+        .tooltip("NestAdmin")
+        .menu(&menu)
+        .show_menu_on_left_click(false)
+        .on_menu_event(|handle, event| match event.id().as_ref() {
+            "show" => show_main(handle),
+            "quit" => quit(handle),
+            _ => {}
+        })
+        .on_tray_icon_event(|tray, event| {
+            if let TrayIconEvent::Click {
+                button: MouseButton::Left,
+                button_state: MouseButtonState::Up,
+                ..
+            } = event
+            {
+                show_main(tray.app_handle());
+            }
+        });
+    if let Some(icon) = handle.default_window_icon() {
+        tray = tray.icon(icon.clone());
+    }
+    tray.build(handle)?;
+    Ok(())
+}
+
+fn main() {
+    tauri::Builder::default()
+        // Primero: una segunda ejecución solo muestra la ventana existente.
+        .plugin(tauri_plugin_single_instance::init(|handle, _args, _cwd| {
+            show_main(handle)
+        }))
+        .setup(|app| {
+            setup(app.handle())?;
+            Ok(())
+        })
+        .on_window_event(|window, event| {
+            if let WindowEvent::CloseRequested { api, .. } = event {
+                api.prevent_close();
+                let _ = window.hide();
+            }
+        })
+        .invoke_handler(tauri::generate_handler![
+            tasks,
+            import_document,
+            fetch_mail,
+            approve,
+            edit_draft,
+            reject,
+            retry,
+            rules,
+            create_rule,
+            update_rule,
+            set_rule_active,
+            audit_log,
+            settings,
+            select_provider,
+            save_groq_key,
+            delete_groq_key,
+        ])
+        .run(tauri::generate_context!())
+        .expect("no se pudo iniciar NestAdmin");
+}

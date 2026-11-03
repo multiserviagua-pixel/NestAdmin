@@ -1,13 +1,15 @@
 # NestAdmin
 
-Preparación del asistente administrativo local para Windows descrito en [PLAN.md](PLAN.md). El repositorio contiene el plan, especificaciones versionadas y herramientas de desarrollo y evaluación; **la aplicación, los conectores reales, el instalador y los modelos aún no están implementados**.
+Asistente administrativo local para Windows descrito en [PLAN.md](PLAN.md). Ya existen la cola durable, los proveedores de IA (Ollama local por defecto y Groq por elección explícita), la validación de facturas, los simuladores de correo y administración, las reglas con revisión predeterminada y una primera aplicación de escritorio Tauri. **Faltan PDF y OCR, el instalador, los conectores reales y las mediciones en el equipo objetivo**; el estado de cada requisito está en la [matriz de trazabilidad](specs/v1/trazabilidad.md).
 
 ## Contenido
 
-- [Especificaciones v1](specs/v1/README.md): requisitos, flujos, decisiones, contratos, tareas y trazabilidad de pruebas. Los criterios funcionales están pendientes de evidencia.
+- [Especificaciones v1](specs/v1/README.md): requisitos, flujos, decisiones, contratos, tareas y trazabilidad de pruebas.
 - [Instrucciones del proyecto](AGENTS.md): pautas para cambios y comprobaciones.
 - [Harness de evaluación](evaluation/README.md): 10 facturas y 20 correos sintéticos, expectativas separadas, evaluación sin red y pruebas del evaluador.
-- [Integración continua](.github/workflows/verify.yml): comprobaciones de especificaciones y del evaluador en Linux y Windows.
+- [Evidencias](evidence/): ejecuciones registradas de cada caso de prueba.
+- Código: `crates/core` (almacenamiento, cola y acciones idempotentes), `crates/ai` (proveedores), `crates/documents` (validación y duplicados), `crates/simulators`, `crates/app` (flujos, revisión y reglas), `crates/desktop` (ventana Tauri) y `ui/` (interfaz).
+- [Integración continua](.github/workflows/verify.yml): especificaciones, evaluador, interfaz y crates en Linux y Windows.
 
 ## Herramientas de desarrollo
 
@@ -25,17 +27,30 @@ Para la IA local, `scripts/setup-ai.ps1` instala Ollama y descarga `qwen3:8b` (u
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts/setup-ai.ps1
 ```
 
+## Abrir la aplicación en desarrollo
+
+```powershell
+npm ci --prefix ui
+cd crates/desktop
+..\..\ui\node_modules\.bin\tauri dev
+```
+
+La ventana usa los datos de `%LOCALAPPDATA%\NestAdmin`; para probar sin tocarlos, defina antes `$env:NESTADMIN_DATA_DIR` con otra carpeta. Cerrar la ventana la oculta: para salir, use «Salir de NestAdmin por completo» en el icono del área de notificación. Solo se importan documentos de texto hasta que se integren PDF y OCR.
+
+Para ver solo la interfaz en un navegador, con datos sintéticos simulados: `npm run dev --prefix ui` y abrir `http://localhost:5173`.
+
 ## Verificación local
 
-Con Python 3.9 o posterior, sin instalar dependencias adicionales, desde la raíz del repositorio:
+Desde la raíz del repositorio:
 
 ```sh
 python scripts/check.py
 python -m unittest discover -s scripts/tests -v
 python -m unittest discover -s evaluation/tests -v
-cargo test
+npm run build --prefix ui
+cargo test --workspace
 ```
 
-`cargo test` prueba el núcleo de `crates/core` (almacenamiento, cola durable y acciones idempotentes) y los simuladores locales de correo y administración de `crates/simulators` (sin red ni cuentas reales, con estado opcional en JSON); todavía no existe la aplicación de escritorio. Estas comprobaciones verifican la estructura y trazabilidad documental y el funcionamiento del evaluador; no acreditan los criterios de aceptación del producto. El protocolo para puntuar y comparar predicciones existentes se encuentra en [evaluation/README.md](evaluation/README.md). No se han medido todavía Ollama ni Groq; el evaluador no invoca modelos ni mide por sí mismo tiempo o memoria.
+`cargo test --workspace` usa un proveedor de IA simulado. La prueba del flujo completo con el Ollama local se ejecuta aparte: `cargo test -p nestadmin-app --test ollama -- --ignored`. Estas comprobaciones no acreditan por sí solas los criterios de aceptación: cada requisito necesita la evidencia indicada en la matriz. El protocolo para puntuar predicciones está en [evaluation/README.md](evaluation/README.md); las predicciones y resultados locales se guardan fuera del contenido del usuario y están excluidos de Git.
 
-La construcción y el empaquetado de Windows quedan pendientes de implementar junto con la aplicación y de fijar versiones de sus herramientas y dependencias. También quedan pendientes las pruebas de interfaz, OCR, instalador, privacidad y hardware objetivo. Los resultados locales de evaluación se guardan fuera del contenido del usuario y están excluidos de Git.
+Quedan pendientes el empaquetado Windows, las pruebas de OCR, instalador, privacidad y hardware objetivo, y la comparación con Groq.

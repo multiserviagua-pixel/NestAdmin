@@ -85,7 +85,7 @@ impl ActionOutcome {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct AuditEntry {
     pub task_id: Option<i64>,
     pub action: String,

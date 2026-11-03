@@ -4,6 +4,7 @@
 pub mod actions;
 pub mod error;
 pub mod queue;
+pub mod rules;
 pub mod store;
 
 pub use actions::{
@@ -11,4 +12,5 @@ pub use actions::{
 };
 pub use error::{CoreError, Result};
 pub use queue::{Task, TaskError, TaskState};
+pub use rules::Rule;
 pub use store::Store;

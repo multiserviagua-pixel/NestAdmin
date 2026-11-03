@@ -22,6 +22,14 @@ Registro fechado de decisiones que concretan [requisitos.md](requisitos.md). Una
 - **D13 Credenciales.** Se usa `keyring-core` con `windows-native-keyring-store` en lugar del crate `keyring`, que su propia documentación desaconseja para aplicaciones. Concreta D08 sin cambiarla.
 - **D14 Incidencias calculadas.** El modelo solo extrae campos; las etiquetas `missing_tax`, `missing_total`, `total_mismatch` y `possible_duplicate` las calcula el código de `crates/documents`. *Motivo:* comprobaciones programadas y reproducibles (R05); el modelo no decide sobre importes.
 
+## 2026-11-03 — Aplicación de escritorio (fase 6)
+
+- **D15 Capas.** `crates/app` contiene los flujos (cola, IA, validación, simuladores, reglas) sin depender de Tauri y se prueba sin ventana; `crates/desktop` solo expone comandos, el hilo de la cola y el área de notificación. La llamada al modelo se hace fuera del cerrojo para no bloquear la ventana.
+- **D16 Interfaz.** Vite y TypeScript sin framework en `ui/`; el texto se inserta siempre como texto, nunca como HTML. En desarrollo, fuera de Tauri, un servidor simulado con datos sintéticos permite ver la interfaz en un navegador; la compilación de producción lo elimina.
+- **D17 Reglas.** Condiciones cerradas por acción (proveedor y total máximo para registrar; categoría para enviar). Se automatiza solo con una única regla activa coincidente y sin incidencias, campos ilegibles ni borrador sin destinatario. *Motivo:* condiciones comprobables por código sobre datos validados (R07).
+- **D18 Datos y configuración.** Datos en `%LOCALAPPDATA%\NestAdmin` (`NESTADMIN_DATA_DIR` lo sustituye para pruebas). La elección de proveedor se guarda en `configuracion.json`; la clave de Groq solo en el almacén de credenciales (D13). Una elección guardada que no se puede preparar no se sustituye por otra al arrancar (flujo 4).
+- **D19 CI.** La aplicación de escritorio se compila y analiza solo en Windows; en Linux se excluye `nestadmin-desktop`, que necesita WebKitGTK y no es un objetivo de la v1.
+
 ## Versiones de desarrollo fijadas
 
 | Componente | Versión | Licencia | Dónde se fija |
@@ -29,7 +37,9 @@ Registro fechado de decisiones que concretan [requisitos.md](requisitos.md). Una
 | Rust | 1.99.1 (MSVC) | MIT/Apache-2.0 | `rust-toolchain.toml` |
 | Node.js | 26.13.0 | MIT | `.node-version` |
 | Python (harness) | 3.12 | PSF | CI |
-| Tauri / tauri-build / CLI | 2.12.5 / 2.7.4 / 2.12.4 | MIT/Apache-2.0 | `Cargo.lock`, `package-lock.json` |
+| Tauri / tauri-build / CLI | 2.12.5 / 2.7.4 / 2.12.4 | MIT/Apache-2.0 | `Cargo.lock`, `ui/package-lock.json` |
+| tauri-plugin-single-instance / `@tauri-apps/api` | 2.5.5 / 2.12.4 | MIT/Apache-2.0 | `Cargo.lock`, `ui/package-lock.json` |
+| Vite / TypeScript | 8.3.5 / 7.0.2 | MIT / Apache-2.0 | `ui/package-lock.json` |
 | Ollama | 0.40.14 | MIT | instalador |
 | Qwen3 8B | `qwen3:8b` (digest a registrar al descargar) | Apache-2.0 | instalador y evaluación |
 | Tesseract | 5.4.0 (build UB Mannheim) | Apache-2.0 | instalador |
