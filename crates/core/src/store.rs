@@ -6,7 +6,8 @@ use rusqlite::Connection;
 use crate::error::{CoreError, Result};
 
 /// Migraciones numeradas; la posición en la lista es la versión de esquema (D03).
-const MIGRATIONS: &[&str] = &[r#"
+const MIGRATIONS: &[&str] = &[
+    r#"
 CREATE TABLE tasks (
     id          INTEGER PRIMARY KEY,
     kind        TEXT NOT NULL,
@@ -52,7 +53,19 @@ CREATE TABLE audit_log (
     authorization   TEXT,
     detail          TEXT
 );
-"#];
+"#,
+    r#"
+CREATE TABLE rules (
+    id          TEXT NOT NULL,
+    version     INTEGER NOT NULL,
+    action_kind TEXT NOT NULL,
+    conditions  TEXT NOT NULL,
+    active      INTEGER NOT NULL,
+    created_at  INTEGER NOT NULL,
+    PRIMARY KEY (id, version)
+);
+"#,
+];
 
 /// Base de datos local. Cada operación pública se confirma en una transacción,
 /// de modo que una interrupción deja el estado anterior o el siguiente, nunca uno intermedio.

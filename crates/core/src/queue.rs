@@ -271,6 +271,43 @@ impl Store {
         )
     }
 
+    /// Sustituye el resultado de una tarea pendiente de revisión (por ejemplo, un borrador
+    /// editado) sin cambiar su estado, y deja constancia en el historial. Quien llama es
+    /// responsable de cambiar la versión del contenido para que exija nueva aprobación.
+    pub fn revise(&mut self, id: i64, result: &Value) -> Result<Task> {
+        let tx = self.conn.transaction()?;
+        let task = load(&tx, id)?;
+        if task.state != TaskState::AwaitingReview {
+            return Err(CoreError::InvalidTransition {
+                task: id,
+                from: task.state,
+                to: TaskState::AwaitingReview,
+            });
+        }
+        let now = now_ms();
+        tx.execute(
+            "UPDATE tasks SET result = ?2, updated_at = ?3 WHERE id = ?1",
+            params![id, serde_json::to_string(result)?, now],
+        )?;
+        tx.execute(
+            "INSERT INTO task_transitions (task_id, from_state, to_state, reason, at)
+             VALUES (?1, 'awaiting_review', 'awaiting_review', 'contenido revisado', ?2)",
+            params![id, now],
+        )?;
+        let task = load(&tx, id)?;
+        tx.commit()?;
+        Ok(task)
+    }
+
+    /// Todas las tareas, de la más reciente a la más antigua.
+    pub fn all_tasks(&self) -> Result<Vec<Task>> {
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT {TASK_COLUMNS} FROM tasks ORDER BY id DESC"
+        ))?;
+        let rows = stmt.query_map([], task_from_row)?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
     /// Tras una interrupción, devuelve a la cola las tareas que estaban en curso.
     /// Las acciones con efectos se reconcilian aparte (`reconcile_actions`).
     pub fn recover(&mut self) -> Result<Vec<i64>> {

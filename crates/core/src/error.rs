@@ -19,6 +19,8 @@ pub enum CoreError {
     UnsupportedSchema { found: i64, supported: i64 },
     #[error("la clave {0} ya existe con otro contenido")]
     IdempotencyConflict(String),
+    #[error("regla {0} inexistente")]
+    RuleNotFound(String),
     #[error("conector: {0}")]
     Connector(#[from] crate::actions::ConnectorError),
 }

@@ -33,10 +33,21 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .node-version
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+      # La aplicación de escritorio incrusta ui/dist al compilar.
+      - name: Build interface
+        run: |
+          npm ci --prefix ui
+          npm run build --prefix ui
       # rustup instala la versión de rust-toolchain.toml al primer uso.
       - name: Check formatting
         run: cargo fmt --all --check
+      # La ventana Tauri es solo para Windows (D19): en Linux se excluye.
       - name: Lint
-        run: cargo clippy --all-targets --locked -- -D warnings
-      - name: Test core
-        run: cargo test --locked
+        run: cargo clippy --workspace --all-targets --locked ${{ runner.os == 'Linux' && '--exclude nestadmin-desktop' || '' }} -- -D warnings
+      - name: Test
+        run: cargo test --workspace --locked ${{ runner.os == 'Linux' && '--exclude nestadmin-desktop' || '' }}
