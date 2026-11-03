@@ -1,0 +1,17 @@
+[package]
+name = "nestadmin-documents"
+version = "0.1.0"
+description = "Documentos de NestAdmin: entrada de texto, modelo de factura, validación decimal y posibles duplicados."
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+# Sin las opciones por defecto (borsh, rand...): solo aritmética y serde.
+rust_decimal = { version = "1", default-features = false, features = ["std", "serde"] }
+serde = { version = "1", features = ["derive"] }
+thiserror = "2"
+
+[dev-dependencies]
+serde_json = "1"
+tempfile = "3"
