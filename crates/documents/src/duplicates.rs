@@ -81,38 +81,64 @@ impl DuplicateRegistry {
         self.entries.is_empty()
     }
 
+    /// Posición de la entrada registrada con ese identificador, si existe.
+    fn position(&self, id: &str) -> Option<usize> {
+        self.entries.iter().position(|e| e.id == id)
+    }
+
     /// Candidatos entre las facturas ya registradas, en orden de llegada, sin modificar el
     /// registro.
     pub fn candidates(&self, invoice: &Invoice) -> Vec<DuplicateCandidate> {
-        let current = Entry::from_invoice(String::new(), invoice);
-        self.entries
-            .iter()
-            .filter_map(|seen| {
-                let mut reasons = Vec::new();
-                if both(&seen.supplier, &current.supplier) {
-                    if both(&seen.number, &current.number) {
-                        reasons.push(DuplicateReason::SameSupplierAndNumber);
-                    }
-                    if both(&seen.date, &current.date) && both(&seen.total, &current.total) {
-                        reasons.push(DuplicateReason::SameSupplierDateAndTotal);
-                    }
-                }
-                (!reasons.is_empty()).then(|| DuplicateCandidate {
-                    existing_id: seen.id.clone(),
-                    reasons,
-                })
-            })
-            .collect()
+        compare(&self.entries, invoice)
     }
 
     /// Busca candidatos y registra la factura, sea o no un posible duplicado.
+    ///
+    /// Es idempotente por `id`: si ya hay una factura con ese identificador (un trabajo
+    /// reintentado o recuperado tras una interrupción), solo se compara con las que llegaron
+    /// antes que ella y su entrada se sustituye en el mismo lugar. Así no se cuenta dos
+    /// veces ni se señala como duplicado de sí misma, y reprocesar sin cambios devuelve lo
+    /// mismo que la primera vez.
     pub fn check_and_add(
         &mut self,
         id: impl Into<String>,
         invoice: &Invoice,
     ) -> Vec<DuplicateCandidate> {
-        let found = self.candidates(invoice);
-        self.entries.push(Entry::from_invoice(id.into(), invoice));
-        found
+        let id = id.into();
+        match self.position(&id) {
+            Some(index) => {
+                let found = compare(&self.entries[..index], invoice);
+                self.entries[index] = Entry::from_invoice(id, invoice);
+                found
+            }
+            None => {
+                let found = compare(&self.entries, invoice);
+                self.entries.push(Entry::from_invoice(id, invoice));
+                found
+            }
+        }
     }
+}
+
+/// Compara la factura con las entradas dadas, en su orden.
+fn compare(entries: &[Entry], invoice: &Invoice) -> Vec<DuplicateCandidate> {
+    let current = Entry::from_invoice(String::new(), invoice);
+    entries
+        .iter()
+        .filter_map(|seen| {
+            let mut reasons = Vec::new();
+            if both(&seen.supplier, &current.supplier) {
+                if both(&seen.number, &current.number) {
+                    reasons.push(DuplicateReason::SameSupplierAndNumber);
+                }
+                if both(&seen.date, &current.date) && both(&seen.total, &current.total) {
+                    reasons.push(DuplicateReason::SameSupplierDateAndTotal);
+                }
+            }
+            (!reasons.is_empty()).then(|| DuplicateCandidate {
+                existing_id: seen.id.clone(),
+                reasons,
+            })
+        })
+        .collect()
 }

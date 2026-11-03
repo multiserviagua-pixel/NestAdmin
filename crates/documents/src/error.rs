@@ -20,6 +20,11 @@ pub enum DocumentError {
         field: &'static str,
         literal: String,
     },
+    #[error("moneda no admitida en {field}: {literal:?}")]
+    UnsupportedCurrency {
+        field: &'static str,
+        literal: String,
+    },
 }
 
 impl DocumentError {
@@ -32,6 +37,7 @@ impl DocumentError {
             Self::Io(_) => "io",
             Self::InvalidAmount { .. } => "invalid_amount",
             Self::InvalidDate { .. } => "invalid_date",
+            Self::UnsupportedCurrency { .. } => "unsupported_currency",
         }
     }
 }

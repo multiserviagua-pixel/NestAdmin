@@ -5,7 +5,8 @@ use std::path::{Path, PathBuf};
 
 use nestadmin_documents::{
     process_invoice, validate, DocumentError, DocumentFormat, DocumentText, DuplicateReason,
-    DuplicateRegistry, Evidenced, Invoice, Issue, LocalDocumentText, RawInvoice,
+    DuplicateRegistry, Evidenced, FieldError, FieldErrorKind, Invoice, IsoDate, Issue,
+    LocalDocumentText, RawInvoice,
 };
 use rust_decimal::Decimal;
 use serde_json::Value;
@@ -16,6 +17,7 @@ fn raw(fields: [Option<&str>; 6]) -> RawInvoice {
         supplier: f(fields[0]),
         invoice_number: f(fields[1]),
         date: f(fields[2]),
+        currency: None,
         subtotal: f(fields[3]),
         tax: f(fields[4]),
         total: f(fields[5]),
@@ -23,7 +25,9 @@ fn raw(fields: [Option<&str>; 6]) -> RawInvoice {
 }
 
 fn invoice(fields: [Option<&str>; 6]) -> Invoice {
-    Invoice::from_raw(&raw(fields)).expect("factura sintética válida")
+    let inv = Invoice::from_raw(&raw(fields));
+    assert_eq!(inv.unreadable, vec![], "factura sintética válida");
+    inv
 }
 
 #[test]
@@ -40,7 +44,7 @@ fn coherent_invoice_has_no_issues_and_keeps_evidence() {
         "121.00".to_owned(),
         "Total: 121.00 EUR",
     ));
-    let inv = Invoice::from_raw(&source).unwrap();
+    let inv = Invoice::from_raw(&source);
     assert_eq!(validate(&inv), vec![]);
     let total = inv.total.as_ref().unwrap();
     assert_eq!(total.value, Decimal::new(12100, 2));
@@ -111,25 +115,300 @@ fn absent_values_are_reported_and_never_inferred() {
 }
 
 #[test]
-fn unreadable_amount_or_date_is_an_error_not_a_zero() {
-    let err = Invoice::from_raw(&raw([
-        None,
-        None,
+fn unreadable_amount_or_date_is_a_field_error_not_a_zero() {
+    let mut source = raw([
+        Some("Ejemplo SL"),
+        Some("A-1"),
         None,
         Some("100.00"),
         Some("21,00"),
-        None,
-    ]))
-    .unwrap_err();
-    assert!(matches!(
-        &err,
-        DocumentError::InvalidAmount { field: "tax", literal } if literal == "21,00"
-    ));
-    assert_eq!(err.code(), "invalid_amount");
+        Some("121.00"),
+    ]);
+    source.tax = Some(Evidenced::with_evidence("21,00".to_owned(), "IVA: 21,00"));
+    let inv = Invoice::from_raw(&source);
+    // El campo ilegible no consta y queda anotado con su literal; el resto se conserva.
+    assert_eq!(inv.tax, None);
+    assert!(inv.is_unreadable("tax"));
+    assert_eq!(
+        inv.unreadable,
+        vec![FieldError {
+            field: "tax".to_owned(),
+            kind: FieldErrorKind::InvalidAmount,
+            literal: "21,00".to_owned(),
+            evidence: Some("IVA: 21,00".to_owned()),
+        }]
+    );
+    assert_eq!(inv.unreadable[0].code(), "invalid_amount");
+    assert_eq!(inv.subtotal.as_ref().unwrap().value, Decimal::new(10000, 2));
+    assert_eq!(inv.total.as_ref().unwrap().value, Decimal::new(12100, 2));
+    assert_eq!(inv.supplier.as_ref().unwrap().value, "Ejemplo SL");
+    // Sin IVA utilizable se pide revisión; no se compara base + IVA con el total.
+    assert_eq!(validate(&inv), vec![Issue::MissingTax]);
 
-    let err =
-        Invoice::from_raw(&raw([None, None, Some("31/01/2026"), None, None, None])).unwrap_err();
-    assert_eq!(err.code(), "invalid_date");
+    // Se anotan todos los campos ilegibles, no solo el primero.
+    let inv = Invoice::from_raw(&raw([
+        None,
+        None,
+        Some("31/01/2026"),
+        Some("1.000,00"),
+        None,
+        Some("abc"),
+    ]));
+    let got: Vec<_> = inv
+        .unreadable
+        .iter()
+        .map(|e| (e.field.as_str(), e.code()))
+        .collect();
+    assert_eq!(
+        got,
+        [
+            ("date", "invalid_date"),
+            ("subtotal", "invalid_amount"),
+            ("total", "invalid_amount")
+        ]
+    );
+    assert_eq!((inv.date, inv.subtotal, inv.total), (None, None, None));
+
+    // Los mismos errores siguen disponibles como función de interpretación directa.
+    let err = IsoDate::parse("date", "31/01/2026").unwrap_err();
+    assert!(
+        matches!(&err, DocumentError::InvalidDate { field: "date", literal } if literal == "31/01/2026")
+    );
+}
+
+#[test]
+fn unreadable_field_still_registers_and_detects_duplicates() {
+    let mut registry = DuplicateRegistry::new();
+    let first = invoice([
+        Some("Ejemplo SL"),
+        Some("X-1"),
+        Some("2026-05-01"),
+        Some("10.00"),
+        Some("2.10"),
+        Some("12.10"),
+    ]);
+    process_invoice(&mut registry, "a", &first);
+
+    // Misma factura con el IVA mal escrito: se registra y se señala como duplicado junto
+    // al error del campo.
+    let garbled = Invoice::from_raw(&raw([
+        Some("Ejemplo SL"),
+        Some("X-1"),
+        Some("2026-05-01"),
+        Some("10.00"),
+        Some("2,10"),
+        Some("12.10"),
+    ]));
+    let report = process_invoice(&mut registry, "b", &garbled);
+    assert_eq!(
+        report.issues,
+        vec![Issue::MissingTax, Issue::PossibleDuplicate]
+    );
+    assert_eq!(report.duplicates[0].existing_id, "a");
+    assert_eq!(
+        report.duplicates[0].reasons,
+        vec![
+            DuplicateReason::SameSupplierAndNumber,
+            DuplicateReason::SameSupplierDateAndTotal
+        ]
+    );
+    assert_eq!(report.unreadable.len(), 1);
+    assert_eq!(report.unreadable[0].field, "tax");
+    assert_eq!(report.unreadable[0].literal, "2,10");
+    assert_eq!(registry.len(), 2);
+
+    // Las facturas posteriores también se comparan con la de campo ilegible.
+    let later = Invoice::from_raw(&raw([
+        Some("Ejemplo SL"),
+        Some("X-1"),
+        None,
+        None,
+        None,
+        None,
+    ]));
+    let report = process_invoice(&mut registry, "c", &later);
+    let ids: Vec<_> = report
+        .duplicates
+        .iter()
+        .map(|c| c.existing_id.as_str())
+        .collect();
+    assert_eq!(ids, ["a", "b"]);
+}
+
+#[test]
+fn currency_is_kept_with_evidence_and_never_assumed() {
+    // Moneda explícita del extractor.
+    let mut source = raw([None, None, None, Some("10.00"), Some("2.10"), Some("12.10")]);
+    source.currency = Some(Evidenced::with_evidence("€".to_owned(), "Importes en €"));
+    let inv = Invoice::from_raw(&source);
+    assert_eq!(
+        inv.currency,
+        Some(Evidenced::with_evidence("EUR".to_owned(), "Importes en €"))
+    );
+
+    // Sin moneda explícita se toma del sufijo de un importe legible, con su literal.
+    let inv = invoice([
+        None,
+        None,
+        None,
+        Some("10.00"),
+        Some("2.10"),
+        Some("12.10 EUR"),
+    ]);
+    assert_eq!(
+        inv.currency,
+        Some(Evidenced::with_evidence("EUR".to_owned(), "12.10 EUR"))
+    );
+
+    // Sin indicio en el documento la moneda no consta; no se supone el euro.
+    let inv = invoice([None, None, None, Some("10.00"), Some("2.10"), Some("12.10")]);
+    assert_eq!(inv.currency, None);
+
+    // Un importe ilegible no sirve como indicio de moneda.
+    let inv = Invoice::from_raw(&raw([None, None, None, None, None, Some("12,10 EUR")]));
+    assert_eq!(inv.currency, None);
+
+    // Otra moneda es un error del campo, nunca una conversión ni un euro supuesto.
+    let mut source = raw([None, None, None, None, None, Some("12.10 EUR")]);
+    source.currency = Some(Evidenced::new("USD".to_owned()));
+    let inv = Invoice::from_raw(&source);
+    assert_eq!(inv.currency, None);
+    assert_eq!(inv.unreadable[0].field, "currency");
+    assert_eq!(inv.unreadable[0].code(), "unsupported_currency");
+    assert_eq!(inv.total.as_ref().unwrap().value, Decimal::new(1210, 2));
+}
+
+#[test]
+fn reprocessing_the_same_id_is_idempotent() {
+    let mut registry = DuplicateRegistry::new();
+    let first = invoice([
+        Some("Ejemplo SL"),
+        Some("X-1"),
+        Some("2026-05-01"),
+        Some("10.00"),
+        Some("2.10"),
+        Some("12.10"),
+    ]);
+    let other = invoice([
+        Some("Otro SL"),
+        Some("Y-1"),
+        Some("2026-05-02"),
+        Some("5.00"),
+        Some("1.05"),
+        Some("6.05"),
+    ]);
+    let initial = process_invoice(&mut registry, "a", &first);
+    process_invoice(&mut registry, "b", &other);
+
+    // Un trabajo recuperado vuelve a procesar "a": no es duplicado de sí mismo, el
+    // resultado coincide con el primero y el registro no crece.
+    let again = process_invoice(&mut registry, "a", &first);
+    assert_eq!(again, initial);
+    assert!(again.duplicates.is_empty());
+    assert_eq!(registry.len(), 2);
+
+    // Una copia real con otro id sí se señala, una sola vez y frente a "a".
+    let copy = process_invoice(&mut registry, "c", &first);
+    assert_eq!(copy.issues, vec![Issue::PossibleDuplicate]);
+    assert_eq!(copy.duplicates.len(), 1);
+    assert_eq!(copy.duplicates[0].existing_id, "a");
+
+    // Reintentar "c" da el mismo resultado sin añadir entradas.
+    assert_eq!(process_invoice(&mut registry, "c", &first), copy);
+    assert_eq!(registry.len(), 3);
+
+    // Reprocesar "a" con datos corregidos sustituye su entrada en el mismo lugar: "c" ya
+    // no coincide con la nueva "a" por número, solo por proveedor, fecha y total.
+    let corrected = invoice([
+        Some("Ejemplo SL"),
+        Some("X-9"),
+        Some("2026-05-01"),
+        Some("10.00"),
+        Some("2.10"),
+        Some("12.10"),
+    ]);
+    process_invoice(&mut registry, "a", &corrected);
+    assert_eq!(registry.len(), 3);
+    let check = registry.candidates(&first);
+    assert_eq!(check[0].existing_id, "a");
+    assert_eq!(
+        check[0].reasons,
+        vec![DuplicateReason::SameSupplierDateAndTotal]
+    );
+}
+
+#[test]
+fn overflowing_sum_is_a_total_mismatch() {
+    // Decimal::MAX con dos decimales: la suma desborda y no puede confirmar el total.
+    let max = "792281625142643375935439503.35";
+    let inv = invoice([None, None, None, Some(max), Some("1.00"), Some(max)]);
+    assert_eq!(validate(&inv), vec![Issue::TotalMismatch]);
+
+    // Si la suma no cabe con dos decimales, `rust_decimal` la redondearía a menos
+    // decimales: 503.35 + 0.06 = 503.41 no puede darse por igual a 503.40.
+    let inv = invoice([
+        None,
+        None,
+        None,
+        Some(max),
+        Some("0.06"),
+        Some("792281625142643375935439503.40"),
+    ]);
+    assert_eq!(validate(&inv), vec![Issue::TotalMismatch]);
+}
+
+#[test]
+fn same_supplier_date_and_total_without_number_is_flagged() {
+    // Duplicado escaneado de nuevo sin número legible en ninguna de las dos copias.
+    let mut registry = DuplicateRegistry::new();
+    let scan = invoice([
+        Some("Ejemplo SL"),
+        None,
+        Some("2026-05-01"),
+        Some("10.00"),
+        Some("2.10"),
+        Some("12.10"),
+    ]);
+    process_invoice(&mut registry, "a", &scan);
+    let report = process_invoice(&mut registry, "b", &scan);
+    assert_eq!(report.issues, vec![Issue::PossibleDuplicate]);
+    assert_eq!(
+        report.duplicates[0].reasons,
+        vec![DuplicateReason::SameSupplierDateAndTotal]
+    );
+}
+
+#[test]
+fn century_leap_year_rule() {
+    assert_eq!(
+        IsoDate::parse("date", "1900-02-29").unwrap_err().code(),
+        "invalid_date"
+    );
+    assert_eq!(
+        IsoDate::parse("date", "2000-02-29").unwrap().to_string(),
+        "2000-02-29"
+    );
+}
+
+#[test]
+fn total_mismatch_and_possible_duplicate_together() {
+    let mut registry = DuplicateRegistry::new();
+    let wrong = invoice([
+        Some("Ejemplo SL"),
+        Some("X-1"),
+        Some("2026-05-01"),
+        Some("10.00"),
+        Some("2.10"),
+        Some("12.00"),
+    ]);
+    let report = process_invoice(&mut registry, "a", &wrong);
+    assert_eq!(report.issues, vec![Issue::TotalMismatch]);
+    let report = process_invoice(&mut registry, "b", &wrong);
+    assert_eq!(
+        report.issues,
+        vec![Issue::TotalMismatch, Issue::PossibleDuplicate]
+    );
+    assert_eq!(report.duplicates[0].existing_id, "a");
 }
 
 #[test]
@@ -337,11 +616,13 @@ fn evaluation_corpus_labels_match_expected_in_order() {
             supplier: field("supplier"),
             invoice_number: field("invoice_number"),
             date: field("date"),
+            currency: None,
             subtotal: field("subtotal"),
             tax: field("tax"),
             total: field("total"),
         };
-        let inv = Invoice::from_raw(&source).unwrap_or_else(|e| panic!("{id}: {e}"));
+        let inv = Invoice::from_raw(&source);
+        assert_eq!(inv.unreadable, vec![], "{id}");
 
         // La normalización conserva exactamente los campos del contrato.
         for (name, value) in inv.contract_fields() {

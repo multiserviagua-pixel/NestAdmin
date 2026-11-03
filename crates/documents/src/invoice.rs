@@ -1,9 +1,10 @@
-//! Modelo de factura con los seis campos del contrato del evaluador. Cada campo puede
-//! faltar (`None`) y conserva opcionalmente la evidencia literal del documento.
+//! Modelo de factura con los seis campos del contrato del evaluador y la moneda (D04,
+//! contratos.md). Cada campo puede faltar (`None`) y conserva opcionalmente la evidencia
+//! literal del documento.
 //!
 //! Los importes son euros con punto decimal y exactamente dos decimales (D04); las fechas,
-//! ISO `AAAA-MM-DD`. Un valor ilegible es un error explícito, nunca un cero ni una fecha
-//! aproximada.
+//! ISO `AAAA-MM-DD`. Un valor ilegible se anota como error explícito del campo, nunca como
+//! un cero ni una fecha aproximada, y no impide validar el resto de la factura.
 
 use std::fmt;
 use std::str::FromStr;
@@ -42,6 +43,8 @@ pub struct RawInvoice {
     pub supplier: Option<Evidenced<String>>,
     pub invoice_number: Option<Evidenced<String>>,
     pub date: Option<Evidenced<String>>,
+    /// Moneda indicada por el extractor; si falta, se toma del sufijo de un importe.
+    pub currency: Option<Evidenced<String>>,
     pub subtotal: Option<Evidenced<String>>,
     pub tax: Option<Evidenced<String>>,
     pub total: Option<Evidenced<String>>,
@@ -132,32 +135,164 @@ pub fn parse_amount(field: &'static str, literal: &str) -> Result<Decimal> {
     Decimal::from_str(text).map_err(|_| invalid())
 }
 
-/// Factura con valores normalizados. `None` significa que el documento no aporta el dato.
+/// Moneda admitida. Solo euros por ahora (D04 y contrato del evaluador).
+pub const EUR: &str = "EUR";
+
+/// Campo presente en el documento cuyo valor no se pudo interpretar. Se conserva junto a
+/// la factura para que el resto de campos siga validándose y el usuario sepa por qué el
+/// valor no consta.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FieldError {
+    pub field: String,
+    pub kind: FieldErrorKind,
+    pub literal: String,
+    pub evidence: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FieldErrorKind {
+    InvalidAmount,
+    InvalidDate,
+    UnsupportedCurrency,
+}
+
+impl FieldErrorKind {
+    /// Código estable, el mismo que el del `DocumentError` equivalente.
+    pub fn code(self) -> &'static str {
+        match self {
+            Self::InvalidAmount => "invalid_amount",
+            Self::InvalidDate => "invalid_date",
+            Self::UnsupportedCurrency => "unsupported_currency",
+        }
+    }
+}
+
+impl FieldError {
+    pub fn code(&self) -> &'static str {
+        self.kind.code()
+    }
+
+    /// Convierte un error de interpretación de campo. Los demás errores no proceden de un
+    /// campo y se devuelven sin cambios.
+    fn from_error(
+        error: DocumentError,
+        evidence: Option<String>,
+    ) -> std::result::Result<Self, DocumentError> {
+        let (field, kind, literal) = match error {
+            DocumentError::InvalidAmount { field, literal } => {
+                (field, FieldErrorKind::InvalidAmount, literal)
+            }
+            DocumentError::InvalidDate { field, literal } => {
+                (field, FieldErrorKind::InvalidDate, literal)
+            }
+            DocumentError::UnsupportedCurrency { field, literal } => {
+                (field, FieldErrorKind::UnsupportedCurrency, literal)
+            }
+            other => return Err(other),
+        };
+        Ok(Self {
+            field: field.to_owned(),
+            kind,
+            literal,
+            evidence,
+        })
+    }
+}
+
+/// Normaliza una moneda explícita. Solo se admite el euro (`EUR`, `€`, `euro`, `euros`);
+/// otra moneda es un error, nunca una conversión.
+pub fn parse_currency(field: &'static str, literal: &str) -> Result<String> {
+    match literal.trim().to_lowercase().as_str() {
+        "eur" | "€" | "euro" | "euros" => Ok(EUR.to_owned()),
+        _ => Err(DocumentError::UnsupportedCurrency {
+            field,
+            literal: literal.to_owned(),
+        }),
+    }
+}
+
+/// Indica si el literal de un importe lleva el sufijo de euro.
+fn has_euro_suffix(literal: &str) -> bool {
+    let text = literal.trim();
+    text.ends_with("EUR") || text.ends_with('€')
+}
+
+/// Factura con valores normalizados. `None` significa que el valor no consta: o el
+/// documento no lo aporta, o es ilegible y entonces figura en `unreadable`.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Invoice {
     pub supplier: Option<Evidenced<String>>,
     pub invoice_number: Option<Evidenced<String>>,
     pub date: Option<Evidenced<IsoDate>>,
+    /// Moneda explícita del extractor o, en su defecto, el sufijo de un importe legible.
+    /// Nunca se supone sin indicio en el documento.
+    pub currency: Option<Evidenced<String>>,
     pub subtotal: Option<Evidenced<Decimal>>,
     pub tax: Option<Evidenced<Decimal>>,
     pub total: Option<Evidenced<Decimal>>,
+    /// Campos presentes pero ilegibles, en el orden en que se interpretan.
+    pub unreadable: Vec<FieldError>,
 }
 
 impl Invoice {
     /// Valida y normaliza los campos. Un texto vacío equivale a ausencia (como en el
-    /// evaluador); un importe o una fecha ilegibles devuelven error en lugar de un valor.
-    pub fn from_raw(raw: &RawInvoice) -> Result<Self> {
-        Ok(Self {
+    /// evaluador). Un importe, una fecha o una moneda ilegibles dejan ese campo en `None` y
+    /// se anotan en `unreadable`, sin perder el resto de campos ni sustituirlos por un cero.
+    pub fn from_raw(raw: &RawInvoice) -> Self {
+        let mut unreadable = Vec::new();
+        let date = parsed_field(&raw.date, &mut unreadable, |v| IsoDate::parse("date", v));
+        let explicit_currency = parsed_field(&raw.currency, &mut unreadable, |v| {
+            parse_currency("currency", v)
+        });
+        let subtotal = parsed_field(&raw.subtotal, &mut unreadable, |v| {
+            parse_amount("subtotal", v)
+        });
+        let tax = parsed_field(&raw.tax, &mut unreadable, |v| parse_amount("tax", v));
+        let total = parsed_field(&raw.total, &mut unreadable, |v| parse_amount("total", v));
+        // Sin moneda del extractor se toma el sufijo de un importe legible, con ese literal
+        // como evidencia. Una moneda explícita ilegible no se suple con otra fuente.
+        let currency_unreadable = unreadable.iter().any(|e| e.field == "currency");
+        let currency = explicit_currency.or_else(|| {
+            if currency_unreadable {
+                return None;
+            }
+            [
+                (&raw.subtotal, subtotal.is_some()),
+                (&raw.tax, tax.is_some()),
+                (&raw.total, total.is_some()),
+            ]
+            .into_iter()
+            .find_map(|(source, parsed)| {
+                let source = present(source)?;
+                (parsed && has_euro_suffix(&source.value)).then(|| {
+                    let evidence = source
+                        .evidence
+                        .clone()
+                        .unwrap_or_else(|| source.value.clone());
+                    Evidenced::with_evidence(EUR.to_owned(), evidence)
+                })
+            })
+        });
+        Self {
             supplier: text_field(&raw.supplier),
             invoice_number: text_field(&raw.invoice_number),
-            date: parsed_field(&raw.date, |v| IsoDate::parse("date", v))?,
-            subtotal: parsed_field(&raw.subtotal, |v| parse_amount("subtotal", v))?,
-            tax: parsed_field(&raw.tax, |v| parse_amount("tax", v))?,
-            total: parsed_field(&raw.total, |v| parse_amount("total", v))?,
-        })
+            date,
+            currency,
+            subtotal,
+            tax,
+            total,
+            unreadable,
+        }
     }
 
-    /// Campos en el formato del contrato del evaluador: cadenas normalizadas o `None`.
+    /// `true` si el campo estaba en el documento pero no se pudo interpretar.
+    pub fn is_unreadable(&self, field: &str) -> bool {
+        self.unreadable.iter().any(|e| e.field == field)
+    }
+
+    /// Campos en el formato del contrato del evaluador: cadenas normalizadas o `None`. La
+    /// moneda no forma parte de ese contrato y se consulta en `currency`.
     pub fn contract_fields(&self) -> [(&'static str, Option<String>); 6] {
         let amount = |f: &Option<Evidenced<Decimal>>| f.as_ref().map(|e| format!("{:.2}", e.value));
         [
@@ -185,18 +320,25 @@ fn text_field(field: &Option<Evidenced<String>>) -> Option<Evidenced<String>> {
     })
 }
 
+/// Interpreta un campo presente; si es ilegible lo anota en `unreadable` y devuelve `None`.
 fn parsed_field<T>(
     field: &Option<Evidenced<String>>,
+    unreadable: &mut Vec<FieldError>,
     parse: impl Fn(&str) -> Result<T>,
-) -> Result<Option<Evidenced<T>>> {
-    present(field)
-        .map(|e| {
-            Ok(Evidenced {
-                value: parse(&e.value)?,
-                evidence: e.evidence.clone(),
-            })
-        })
-        .transpose()
+) -> Option<Evidenced<T>> {
+    let e = present(field)?;
+    match parse(&e.value) {
+        Ok(value) => Some(Evidenced {
+            value,
+            evidence: e.evidence.clone(),
+        }),
+        Err(error) => {
+            let field_error = FieldError::from_error(error, e.evidence.clone())
+                .unwrap_or_else(|other| unreachable!("error ajeno a un campo: {}", other.code()));
+            unreadable.push(field_error);
+            None
+        }
+    }
 }
 
 #[cfg(test)]
