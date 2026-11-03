@@ -21,5 +21,7 @@ jobs:
           python-version: '3.12'
       - name: Check specifications
         run: python scripts/check.py
+      - name: Test specification checker
+        run: python -m unittest discover -s scripts/tests -v
       - name: Test evaluation harness
         run: python -m unittest discover -s evaluation/tests -v
