@@ -18,6 +18,7 @@ use nestadmin_ai::{CredentialStore, ProviderChoice, Secret};
 use nestadmin_app::{App, AppPaths, ProviderInfo};
 use nestadmin_core::{AuditEntry, Rule, Task};
 use nestadmin_extract::{Extractor, Tesseract};
+use nestadmin_setup::{Component, Progress, Setup, Status, Verification};
 use serde::Serialize;
 use serde_json::Value;
 use tauri::menu::{Menu, MenuItem};
@@ -28,6 +29,8 @@ use crate::settings::{credential_store, provider_for, Settings};
 
 /// Evento que indica a la ventana que vuelva a leer tareas e historial.
 const CHANGED: &str = "nestadmin://changed";
+/// Progreso y final de cada paso de preparación.
+const SETUP: &str = "nestadmin://setup";
 
 struct Shared {
     app: Mutex<App>,
@@ -36,6 +39,9 @@ struct Shared {
     data_dir: PathBuf,
     wake: Mutex<Sender<()>>,
     stopping: AtomicBool,
+    setup: Arc<Setup>,
+    /// Paso de preparación en curso; solo uno a la vez.
+    installing: Arc<Mutex<Option<Component>>>,
 }
 
 impl Shared {
@@ -262,6 +268,96 @@ fn delete_groq_key(shared: State<'_, SharedState>) -> CmdResult<()> {
     shared.credentials.delete(GROQ_API_KEY).map_err(text)
 }
 
+#[derive(Serialize)]
+struct SetupView {
+    components: Vec<Status>,
+    installing: Option<Component>,
+}
+
+/// Detección de lo instalado (R08). Puede tardar unos segundos si Ollama no responde, así
+/// que se ejecuta fuera del hilo de la ventana.
+#[tauri::command]
+async fn setup_status(shared: State<'_, SharedState>) -> CmdResult<SetupView> {
+    let setup = Arc::clone(&shared.setup);
+    let installing = *shared.installing.lock().map_err(text)?;
+    let components = tauri::async_runtime::spawn_blocking(move || setup.detect())
+        .await
+        .map_err(text)?;
+    Ok(SetupView {
+        components,
+        installing,
+    })
+}
+
+#[derive(Clone, Serialize)]
+struct SetupEvent {
+    component: Component,
+    progress: Option<Progress>,
+    finished: bool,
+    error: Option<String>,
+}
+
+/// Inicia la instalación de un componente en segundo plano. El progreso y el resultado
+/// llegan como eventos `nestadmin://setup`; un fallo deja el paso listo para reintentar.
+#[tauri::command]
+fn setup_install(
+    shared: State<'_, SharedState>,
+    handle: AppHandle,
+    component: Component,
+) -> CmdResult<()> {
+    {
+        let mut installing = shared.installing.lock().map_err(text)?;
+        if let Some(current) = *installing {
+            return Err(format!(
+                "ya se está preparando {}; espere a que termine",
+                current.as_str()
+            ));
+        }
+        *installing = Some(component);
+    }
+    let setup = Arc::clone(&shared.setup);
+    let installing = Arc::clone(&shared.installing);
+    let spawned = thread::Builder::new()
+        .name("nestadmin-preparacion".into())
+        .spawn(move || {
+            let emit = |event: SetupEvent| {
+                let _ = handle.emit(SETUP, event);
+            };
+            let result = setup.install(component, &mut |progress| {
+                emit(SetupEvent {
+                    component,
+                    progress: Some(progress),
+                    finished: false,
+                    error: None,
+                })
+            });
+            if let Ok(mut current) = installing.lock() {
+                *current = None;
+            }
+            emit(SetupEvent {
+                component,
+                progress: None,
+                finished: true,
+                error: result.err().map(|e| e.to_string()),
+            });
+        });
+    if let Err(error) = spawned {
+        *shared.installing.lock().map_err(text)? = None;
+        return Err(text(error));
+    }
+    Ok(())
+}
+
+/// Respuesta real del modelo local, para cerrar la preparación comprobándolo.
+#[tauri::command]
+async fn setup_verify(shared: State<'_, SharedState>) -> CmdResult<Verification> {
+    let setup = Arc::clone(&shared.setup);
+    tauri::async_runtime::spawn_blocking(move || setup.verify_model())
+        .await
+        .map_err(text)?
+        .map_err(text)
+}
+
 /// Procesa la cola sin bloquear la ventana: la llamada al modelo se hace sin el cerrojo.
 fn worker(shared: SharedState, handle: AppHandle, wake: Receiver<()>) {
     while !shared.stopping.load(Ordering::SeqCst) {
@@ -333,18 +429,26 @@ fn component_dir(variable: &str, installed: &str, vendor: &str) -> PathBuf {
     }
 }
 
+fn tesseract_exe() -> PathBuf {
+    std::env::var_os("NESTADMIN_TESSERACT")
+        .map(PathBuf::from)
+        .unwrap_or_else(Tesseract::default_executable)
+}
+
+fn pdfium_dir() -> PathBuf {
+    component_dir("NESTADMIN_PDFIUM_DIR", "pdfium", "pdfium/bin")
+}
+
+fn tessdata_dir() -> PathBuf {
+    component_dir("NESTADMIN_TESSDATA", "tessdata", "tessdata")
+}
+
 /// Extracción local: PDFium para PDF y Tesseract para páginas escaneadas. Si falta algún
 /// componente, las tareas afectadas fallan con el motivo; no se envía nada fuera.
 fn extractor() -> Extractor {
-    let tesseract = std::env::var_os("NESTADMIN_TESSERACT")
-        .map(PathBuf::from)
-        .unwrap_or_else(Tesseract::default_executable);
     Extractor::new(
-        component_dir("NESTADMIN_PDFIUM_DIR", "pdfium", "pdfium/bin"),
-        Box::new(Tesseract::new(
-            tesseract,
-            component_dir("NESTADMIN_TESSDATA", "tessdata", "tessdata"),
-        )),
+        pdfium_dir(),
+        Box::new(Tesseract::new(tesseract_exe(), tessdata_dir())),
     )
 }
 
@@ -356,7 +460,15 @@ fn setup(handle: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
     let provider = provider_for(&settings.provider, credentials.as_ref());
     let app = App::open(&AppPaths::new(&data_dir), provider, Arc::new(extractor()))?;
     let (sender, receiver) = mpsc::channel();
+    let setup = Setup::new(nestadmin_setup::Config::windows(
+        pdfium_dir(),
+        tessdata_dir(),
+        tesseract_exe(),
+        data_dir.join("descargas"),
+    ));
     let shared = Arc::new(Shared {
+        setup: Arc::new(setup),
+        installing: Arc::new(Mutex::new(None)),
         app: Mutex::new(app),
         settings: Mutex::new(settings),
         credentials,
@@ -438,6 +550,9 @@ fn main() {
             select_provider,
             save_groq_key,
             delete_groq_key,
+            setup_status,
+            setup_install,
+            setup_verify,
         ])
         .run(tauri::generate_context!())
         .expect("no se pudo iniciar NestAdmin");

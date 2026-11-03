@@ -2,7 +2,18 @@
 // navegador normal (vista previa de desarrollo) se usa un servidor simulado en memoria con
 // datos sintéticos, que nunca se incluye en el instalador.
 
-import type { AuditEntry, ProviderChoice, ProviderInfo, Rule, SettingsView, Task } from "./types";
+import type {
+  AuditEntry,
+  Preparation,
+  ProviderChoice,
+  ProviderInfo,
+  Rule,
+  SettingsView,
+  SetupComponent,
+  SetupEvent,
+  Task,
+  Verification,
+} from "./types";
 
 type InvokeOptions = { headers: Record<string, string> };
 type Invoke = <T>(command: string, args?: Record<string, unknown> | Uint8Array, options?: InvokeOptions) => Promise<T>;
@@ -12,24 +23,28 @@ const inTauri = "__TAURI_INTERNALS__" in window;
 
 let invoke: Invoke;
 let onChanged: Listen;
+let onSetup: (handler: (event: SetupEvent) => void) => void;
 
 if (inTauri) {
   const core = await import("@tauri-apps/api/core");
   const event = await import("@tauri-apps/api/event");
   invoke = core.invoke;
   onChanged = (handler) => void event.listen("nestadmin://changed", handler);
+  onSetup = (handler) => void event.listen<SetupEvent>("nestadmin://setup", (e) => handler(e.payload));
 } else if (import.meta.env.DEV) {
   // Solo en desarrollo: la compilación de producción elimina esta rama y el simulado.
   const mock = await import("./mock");
   invoke = mock.invoke;
   onChanged = mock.onChanged;
+  onSetup = mock.onSetup;
 } else {
   invoke = () => Promise.reject("NestAdmin debe abrirse como aplicación de escritorio");
   onChanged = () => {};
+  onSetup = () => {};
 }
 
 export const isPreview = !inTauri;
-export { onChanged };
+export { onChanged, onSetup };
 
 export const api = {
   tasks: () => invoke<Task[]>("tasks"),
@@ -51,4 +66,7 @@ export const api = {
   selectProvider: (choice: ProviderChoice) => invoke<ProviderInfo>("select_provider", { choice }),
   saveGroqKey: (key: string) => invoke<void>("save_groq_key", { key }),
   deleteGroqKey: () => invoke<void>("delete_groq_key"),
+  setupStatus: () => invoke<Preparation>("setup_status"),
+  setupInstall: (component: SetupComponent) => invoke<void>("setup_install", { component }),
+  setupVerify: () => invoke<Verification>("setup_verify"),
 };

@@ -1,6 +1,6 @@
 # NestAdmin
 
-Asistente administrativo local para Windows descrito en [PLAN.md](PLAN.md). Ya existen la cola durable, los proveedores de IA (Ollama local por defecto y Groq por elección explícita), la validación de facturas, los simuladores de correo y administración, las reglas con revisión predeterminada, la lectura de texto, PDF y PDF escaneado con OCR local y una primera aplicación de escritorio Tauri. **Faltan el instalador, los conectores reales y las mediciones en el equipo objetivo**; el estado de cada requisito está en la [matriz de trazabilidad](specs/v1/trazabilidad.md).
+Asistente administrativo local para Windows descrito en [PLAN.md](PLAN.md). Ya existen la cola durable, los proveedores de IA (Ollama local por defecto y Groq por elección explícita), la validación de facturas, los simuladores de correo y administración, las reglas con revisión predeterminada, la lectura de texto, PDF y PDF escaneado con OCR local, una aplicación de escritorio Tauri y su instalador NSIS con una vista de preparación que instala Ollama, el modelo y Tesseract. **Faltan los conectores reales y las mediciones en el equipo objetivo**; el estado de cada requisito está en la [matriz de trazabilidad](specs/v1/trazabilidad.md).
 
 ## Contenido
 
@@ -8,7 +8,7 @@ Asistente administrativo local para Windows descrito en [PLAN.md](PLAN.md). Ya e
 - [Instrucciones del proyecto](AGENTS.md): pautas para cambios y comprobaciones.
 - [Harness de evaluación](evaluation/README.md): 10 facturas y 20 correos sintéticos, expectativas separadas, evaluación sin red y pruebas del evaluador.
 - [Evidencias](evidence/): ejecuciones registradas de cada caso de prueba.
-- Código: `crates/core` (almacenamiento, cola y acciones idempotentes), `crates/ai` (proveedores), `crates/documents` (validación y duplicados), `crates/extract` (texto, PDF y OCR), `crates/simulators`, `crates/app` (flujos, revisión y reglas), `crates/desktop` (ventana Tauri) y `ui/` (interfaz).
+- Código: `crates/core` (almacenamiento, cola y acciones idempotentes), `crates/ai` (proveedores), `crates/documents` (validación y duplicados), `crates/extract` (texto, PDF y OCR), `crates/setup` (preparación del equipo), `crates/simulators`, `crates/app` (flujos, revisión y reglas), `crates/desktop` (ventana Tauri) y `ui/` (interfaz).
 - [Integración continua](.github/workflows/verify.yml): especificaciones, evaluador, interfaz y crates en Linux y Windows.
 
 ## Herramientas de desarrollo
@@ -45,6 +45,18 @@ La ventana usa los datos de `%LOCALAPPDATA%\NestAdmin`; para probar sin tocarlos
 
 Para ver solo la interfaz en un navegador, con datos sintéticos simulados: `npm run dev --prefix ui` y abrir `http://localhost:5173`.
 
+## Generar el instalador
+
+Con `vendor/` preparado por `scripts/setup-ocr.ps1`:
+
+```powershell
+npm ci --prefix ui
+cd crates/desktop
+..\..\ui\node_modules\.bin\tauri build --config tauri.installer.json
+```
+
+El instalador queda en `target/release/bundle/nsis/`. Se instala por usuario e incluye PDFium y los datos de idioma. Al abrir NestAdmin, la vista «Preparación» detecta lo que falta e instala Ollama, el modelo `qwen3:8b` y Tesseract desde sus fuentes oficiales, comprobando cada descarga por SHA-256 (D23–D25).
+
 ## Verificación local
 
 Desde la raíz del repositorio:
@@ -59,4 +71,4 @@ cargo test --workspace
 
 `cargo test --workspace` usa un proveedor de IA simulado. La prueba del flujo completo con el Ollama local se ejecuta aparte: `cargo test -p nestadmin-app --test ollama -- --ignored`. Estas comprobaciones no acreditan por sí solas los criterios de aceptación: cada requisito necesita la evidencia indicada en la matriz. El protocolo para puntuar predicciones está en [evaluation/README.md](evaluation/README.md); las predicciones y resultados locales se guardan fuera del contenido del usuario y están excluidos de Git.
 
-Quedan pendientes el empaquetado Windows, las pruebas de OCR, instalador, privacidad y hardware objetivo, y la comparación con Groq.
+Quedan pendientes la firma del instalador, su ensayo en un equipo limpio, las pruebas de privacidad y hardware objetivo, y la comparación con Groq.

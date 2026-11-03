@@ -503,3 +503,78 @@ h3 {
     width: 150px;
   }
 }
+
+.components {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.component {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 4px 16px;
+  align-items: center;
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface);
+}
+
+.component .name {
+  font-weight: 600;
+  display: flex;
+  gap: 10px;
+  align-items: center;
+}
+
+.component .detail-line {
+  color: var(--muted);
+  font-size: 0.88rem;
+}
+
+.component .side {
+  grid-row: span 2;
+}
+
+.component progress {
+  grid-column: 1 / -1;
+  width: 100%;
+  accent-color: var(--brand);
+}
+
+.component .step {
+  grid-column: 1 / -1;
+  font-size: 0.86rem;
+  color: var(--brand);
+}
+
+.component .error-text {
+  grid-column: 1 / -1;
+}
+
+.state-present {
+  background: color-mix(in srgb, var(--ok) 18%, transparent);
+  color: var(--ok);
+}
+
+.state-missing,
+.state-incompatible {
+  background: color-mix(in srgb, var(--error) 16%, transparent);
+  color: var(--error);
+}
+
+.state-stopped {
+  background: color-mix(in srgb, var(--accent) 22%, transparent);
+}
+
+.banner {
+  margin: 0 0 14px;
+  padding: 10px 14px;
+  border-radius: var(--radius);
+  background: color-mix(in srgb, var(--accent) 18%, var(--surface));
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  justify-content: space-between;
+}

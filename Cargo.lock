@@ -2315,6 +2315,7 @@ dependencies = [
  "nestadmin-app",
  "nestadmin-core",
  "nestadmin-extract",
+ "nestadmin-setup",
  "serde",
  "serde_json",
  "tauri",
@@ -2343,6 +2344,18 @@ dependencies = [
  "serde_json",
  "tempfile",
  "thiserror 2.0.21",
+]
+
+[[package]]
+name = "nestadmin-setup"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror 2.0.21",
+ "ureq",
 ]
 
 [[package]]
