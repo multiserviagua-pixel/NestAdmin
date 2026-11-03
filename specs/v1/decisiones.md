@@ -36,6 +36,12 @@ Registro fechado de decisiones que concretan [requisitos.md](requisitos.md). Una
 - **D21 Datos de idioma propios.** El instalador silencioso de UB Mannheim solo trae inglés, así que NestAdmin usa su propia carpeta `tessdata` (`spa` y `eng` de tesseract-ocr/tessdata 4.1.0, comprobados por SHA-256) mediante `--tessdata-dir`. En desarrollo, `scripts/setup-ocr.ps1` prepara PDFium y los datos en `vendor/`; la aplicación instalada los buscará junto al ejecutable (T08). `NESTADMIN_PDFIUM_DIR`, `NESTADMIN_TESSDATA` y `NESTADMIN_TESSERACT` los sustituyen.
 - **D22 Importación binaria.** La ventana envía el archivo como cuerpo binario de la llamada IPC, con el nombre en una cabecera, en lugar de un JSON con números. Se admiten `.txt` y `.pdf` de hasta 50 MB.
 
+## 2026-11-03 — Instalador y preparación (fase 7)
+
+- **D23 Reparto del instalador.** Concreta D11. El paquete NSIS de Tauri se instala por usuario, sin permisos de administrador, e incluye la aplicación, `pdfium.dll` (con su licencia) y los datos de idioma `spa` y `eng` en `pdfium\` y `tessdata\` junto al ejecutable; si falta WebView2, ejecuta en silencio el *bootstrapper* de Microsoft. Ollama, el modelo y Tesseract no van en el paquete (unos 7 GB en total): los instala la propia aplicación desde la vista «Preparación» (`crates/setup`). Los recursos se añaden solo al empaquetar (`tauri.installer.json`), para que CI y desarrollo no dependan de `vendor/`.
+- **D24 Descargas fijadas.** Los instaladores de Ollama 0.40.14 y Tesseract 5.4.0 se descargan de sus publicaciones oficiales en GitHub y solo se ejecutan si su SHA-256 coincide con el fijado en el código. Una descarga cortada se conserva como `.part` y el reintento pide solo lo que falta (`Range`); un hash distinto descarta el archivo. El modelo se descarga con `POST /api/pull` de Ollama, que reanuda capas y comprueba sus huellas. Todo lo ya presente y compatible se reutiliza: Ollama 0.9.0 o posterior (por `think` y la salida con esquema), Tesseract 5.x y el modelo configurado.
+- **D25 Intervención.** Ollama se instala por usuario en silencio (`/VERYSILENT`). Tesseract necesita permisos de administrador: Windows muestra su diálogo UAC en ese paso y, si el usuario lo rechaza, el paso queda fallido con «permiso denegado» y se puede reintentar. La preparación termina con una respuesta real del modelo local (`/api/chat`, temperatura 0, sin razonamiento). Desinstalar NestAdmin no quita Ollama, el modelo, Tesseract ni los datos de `%LOCALAPPDATA%\NestAdmin`, carpeta que el instalador por usuario de Tauri también usa para el programa: el desinstalador solo borra los archivos que instaló.
+
 ## Versiones de desarrollo fijadas
 
 | Componente | Versión | Licencia | Dónde se fija |
@@ -46,9 +52,9 @@ Registro fechado de decisiones que concretan [requisitos.md](requisitos.md). Una
 | Tauri / tauri-build / CLI | 2.12.5 / 2.7.4 / 2.12.4 | MIT/Apache-2.0 | `Cargo.lock`, `ui/package-lock.json` |
 | tauri-plugin-single-instance / `@tauri-apps/api` | 2.5.5 / 2.12.4 | MIT/Apache-2.0 | `Cargo.lock`, `ui/package-lock.json` |
 | Vite / TypeScript | 8.3.5 / 7.0.2 | MIT / Apache-2.0 | `ui/package-lock.json` |
-| Ollama | 0.40.14 | MIT | instalador |
+| Ollama | 0.40.14 (`OllamaSetup.exe`, SHA-256 fijado) | MIT | `crates/setup` |
 | Qwen3 8B | `qwen3:8b` (digest a registrar al descargar) | Apache-2.0 | instalador y evaluación |
-| Tesseract | 5.4.0 (build UB Mannheim) | Apache-2.0 | instalador, `scripts/setup-ocr.ps1` |
+| Tesseract | 5.4.0.20240606 (build UB Mannheim, SHA-256 fijado) | Apache-2.0 | `crates/setup`, `scripts/setup-ocr.ps1` |
 | Datos de idioma Tesseract | tessdata 4.1.0 (`spa`, `eng`) | Apache-2.0 | `scripts/setup-ocr.ps1` (SHA-256) |
 | PDFium / pdfium-render | `chromium/8125` / 0.9.5 | BSD-3/Apache-2.0 / MIT-Apache-2.0 | `scripts/setup-ocr.ps1` (SHA-256), `Cargo.lock` |
 
@@ -57,5 +63,5 @@ Las dependencias de Rust y npm quedan fijadas por sus archivos de bloqueo, que s
 ## Riesgos abiertos
 
 - El rendimiento de `qwen3:8b` en el equipo objetivo no está medido; puede ser necesario otro modelo o cuantización (R12).
-- La redistribución de PDFium y Tesseract debe revisarse antes de publicar el instalador.
+- La redistribución de PDFium y Tesseract debe revisarse antes de publicar el instalador, que además no está firmado (SmartScreen lo advertirá).
 - El umbral de detección de páginas escaneadas y la calidad del OCR en facturas reales están por medir.

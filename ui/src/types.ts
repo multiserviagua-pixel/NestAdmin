@@ -50,3 +50,40 @@ export interface SettingsView {
   groq_key_saved: boolean;
   data_dir: string;
 }
+
+export type SetupComponent = "webview2" | "pdfium" | "tessdata" | "tesseract" | "ollama" | "model";
+
+export interface ComponentStatus {
+  component: SetupComponent;
+  state: "present" | "stopped" | "missing" | "incompatible";
+  version?: string | null;
+  found?: string;
+  required?: string;
+  installable: boolean;
+  detail: string;
+}
+
+export interface Preparation {
+  components: ComponentStatus[];
+  installing: SetupComponent | null;
+}
+
+export interface SetupProgress {
+  component: string;
+  step: string;
+  done: number | null;
+  total: number | null;
+}
+
+export interface SetupEvent {
+  component: SetupComponent;
+  progress: SetupProgress | null;
+  finished: boolean;
+  error: string | null;
+}
+
+export interface Verification {
+  model: string;
+  answer: string;
+  latency_ms: number;
+}

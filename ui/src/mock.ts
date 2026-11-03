@@ -1,7 +1,7 @@
 // Servidor simulado para ver la interfaz en un navegador sin Tauri. Imita los comandos
 // reales con datos sintéticos (dominio .test); no decide nada que la capa Rust no decida.
 
-import type { AuditEntry, ProviderChoice, Rule, SettingsView, Task } from "./types";
+import type { AuditEntry, ComponentStatus, ProviderChoice, Rule, SettingsView, SetupComponent, SetupEvent, Task } from "./types";
 
 const now = () => Date.now();
 const listeners: Array<() => void> = [];
@@ -13,6 +13,34 @@ const rules: Rule[] = [];
 const audit: AuditEntry[] = [];
 let choice: ProviderChoice = { provider: "ollama", base_url: "http://127.0.0.1:11434", model: "qwen3:8b" };
 let groqKey = false;
+
+// Preparación simulada: falta Tesseract y el modelo; la instalación avanza por pasos.
+const setupListeners: Array<(event: SetupEvent) => void> = [];
+let installing: SetupComponent | null = null;
+const components: ComponentStatus[] = [
+  { component: "webview2", state: "present", version: "130.0.2849.80", installable: false, detail: "Motor de la ventana de Windows." },
+  { component: "pdfium", state: "present", version: null, installable: false, detail: "Incluido con NestAdmin." },
+  { component: "tessdata", state: "present", version: "spa, eng", installable: false, detail: "Datos de idioma del OCR, incluidos con NestAdmin." },
+  { component: "tesseract", state: "missing", installable: true, detail: "Necesario para PDF escaneados (unos 50 MB; pedirá permiso de administrador)." },
+  { component: "ollama", state: "present", version: "0.40.14", installable: true, detail: "Servicio de IA local en 127.0.0.1." },
+  { component: "model", state: "missing", installable: true, detail: "Modelo qwen3:8b (unos 5,2 GB)." },
+];
+
+function simulateInstall(component: SetupComponent) {
+  const total = component === "model" ? 5_200_000_000 : 50_000_000;
+  let done = 0;
+  const emit = (event: SetupEvent) => setupListeners.forEach((l) => l(event));
+  const tick = () => {
+    done = Math.min(total, done + total / 8);
+    emit({ component, progress: { component, step: "Descargando", done, total }, finished: false, error: null });
+    if (done < total) return void setTimeout(tick, 300);
+    const status = components.find((c) => c.component === component)!;
+    Object.assign(status, { state: "present", version: component === "model" ? "500a1f067a9f" : "5.4.0.20240606" });
+    installing = null;
+    emit({ component, progress: null, finished: true, error: null });
+  };
+  setTimeout(tick, 300);
+}
 
 function task(kind: string, input: object, state: Task["state"], result: Task["result"], error: Task["error"] = null) {
   const t: Task = {
@@ -178,6 +206,23 @@ const handlers: Record<string, (a: any, options?: any) => unknown> = {
   delete_groq_key: () => {
     groqKey = false;
   },
+  setup_status: () => ({ components: structuredClone(components), installing }),
+  setup_install: ({ component }) => {
+    if (installing) throw `ya se está preparando ${installing}; espere a que termine`;
+    const status = components.find((c) => c.component === component);
+    if (!status?.installable) throw "este componente se incluye con el instalador de NestAdmin; reinstálelo";
+    if (status.state === "present") {
+      // Como en Rust: lo ya presente termina enseguida sin tocarlo.
+      setTimeout(() => setupListeners.forEach((l) => l({ component, progress: null, finished: true, error: null })), 0);
+      return;
+    }
+    installing = component;
+    simulateInstall(component);
+  },
+  setup_verify: () => {
+    if (components.find((c) => c.component === "model")?.state !== "present") throw "IA local: model 'qwen3:8b' not found";
+    return { model: "qwen3:8b", answer: "listo", latency_ms: 2400 };
+  },
 };
 
 const mutating = new Set(["import_file", "approve", "edit_draft", "reject", "retry", "create_rule", "update_rule", "set_rule_active"]);
@@ -196,4 +241,8 @@ export async function invoke<T>(
 
 export function onChanged(handler: () => void) {
   listeners.push(handler);
+}
+
+export function onSetup(handler: (event: SetupEvent) => void) {
+  setupListeners.push(handler);
 }

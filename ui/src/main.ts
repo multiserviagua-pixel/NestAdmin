@@ -1,6 +1,17 @@
 import "./style.css";
-import { api, isPreview, onChanged } from "./api";
-import type { AuditEntry, ProviderChoice, Rule, SettingsView, Task } from "./types";
+import { api, isPreview, onChanged, onSetup } from "./api";
+import type {
+  AuditEntry,
+  ComponentStatus,
+  Preparation,
+  ProviderChoice,
+  Rule,
+  SettingsView,
+  SetupComponent,
+  SetupProgress,
+  Task,
+  Verification,
+} from "./types";
 
 // ---- Utilidades de DOM: todo el texto se inserta como texto, nunca como HTML. ----
 
@@ -62,7 +73,7 @@ const ACTION_LABEL: Record<string, string> = {
   rule: "Regla",
 };
 
-type View = "review" | "tasks" | "rules" | "history" | "settings";
+type View = "review" | "tasks" | "rules" | "history" | "settings" | "setup";
 
 const state = {
   view: "review" as View,
@@ -74,6 +85,13 @@ const state = {
   notice: null as { kind: "ok" | "error"; text: string } | null,
   // Borradores editados y aún no guardados, para no perderlos al refrescar.
   drafts: {} as Record<number, string>,
+  preparation: null as Preparation | null,
+  setupProgress: {} as Partial<Record<SetupComponent, SetupProgress>>,
+  setupErrors: {} as Partial<Record<SetupComponent, string>>,
+  // Pasos pendientes de «Instalar lo que falta», en orden.
+  setupQueue: [] as SetupComponent[],
+  verification: null as Verification | null,
+  verifying: false,
 };
 
 const root = document.getElementById("app")!;
@@ -194,6 +212,7 @@ function nav() {
     ["rules", "Reglas"],
     ["history", "Historial"],
     ["settings", "Configuración"],
+    ["setup", "Preparación", state.preparation?.components.filter((c) => c.state !== "present").length],
   ];
   return h(
     "nav",
@@ -607,6 +626,187 @@ function settingsView() {
   );
 }
 
+// ---- Preparación del equipo (R08) ----
+
+const COMPONENT_LABEL: Record<SetupComponent, string> = {
+  webview2: "WebView2 (ventana)",
+  pdfium: "PDFium (lectura de PDF)",
+  tessdata: "Datos de idioma del OCR",
+  tesseract: "Tesseract (OCR local)",
+  ollama: "Ollama (IA local)",
+  model: "Modelo de IA local",
+};
+
+const COMPONENT_STATE: Record<ComponentStatus["state"], string> = {
+  present: "Listo",
+  stopped: "Instalado, sin iniciar",
+  missing: "Falta",
+  incompatible: "Versión no compatible",
+};
+
+// Orden de instalación: el modelo necesita Ollama en marcha.
+const INSTALL_ORDER: SetupComponent[] = ["tesseract", "ollama", "model"];
+
+const ready = (c: ComponentStatus) => c.state === "present";
+
+function size(bytes: number) {
+  return bytes >= 1e9 ? `${(bytes / 1e9).toFixed(1).replace(".", ",")} GB` : `${Math.round(bytes / 1e6)} MB`;
+}
+
+function stepLabel(progress: SetupProgress) {
+  const step = progress.step;
+  if (step.startsWith("pulling ") && progress.total) return "Descargando";
+  const known: Record<string, string> = {
+    "pulling manifest": "Preparando la descarga",
+    "verifying sha256 digest": "Comprobando la integridad",
+    "writing manifest": "Guardando",
+    success: "Terminado",
+  };
+  return known[step] ?? step;
+}
+
+async function refreshSetup() {
+  try {
+    state.preparation = await api.setupStatus();
+  } catch (error) {
+    state.notice = { kind: "error", text: String(error) };
+  }
+  render(true);
+}
+
+async function startInstall(component: SetupComponent) {
+  delete state.setupErrors[component];
+  try {
+    await api.setupInstall(component);
+    if (state.preparation) state.preparation.installing = component;
+  } catch (error) {
+    state.setupErrors[component] = String(error);
+    state.setupQueue = [];
+  }
+  render();
+}
+
+function installMissing() {
+  const pending = state.preparation?.components.filter((c) => c.installable && !ready(c)).map((c) => c.component) ?? [];
+  state.setupQueue = INSTALL_ORDER.filter((c) => pending.includes(c));
+  state.verification = null;
+  const first = state.setupQueue[0];
+  if (first) void startInstall(first);
+}
+
+async function verifyModel() {
+  state.verifying = true;
+  state.verification = null;
+  render();
+  try {
+    state.verification = await api.setupVerify();
+  } catch (error) {
+    state.notice = { kind: "error", text: `La IA local no respondió: ${error}` };
+  }
+  state.verifying = false;
+  render();
+}
+
+let progressRender: number | null = null;
+
+onSetup((event) => {
+  if (!event.finished) {
+    if (event.progress) state.setupProgress[event.component] = event.progress;
+    // Ollama informa muchas veces por segundo: se agrupan los repintados.
+    progressRender ??= window.setTimeout(() => {
+      progressRender = null;
+      render(true);
+    }, 250);
+    return;
+  }
+  delete state.setupProgress[event.component];
+  if (state.preparation) state.preparation.installing = null;
+  if (event.error) {
+    state.setupErrors[event.component] = event.error;
+    state.setupQueue = [];
+  } else {
+    const wasQueued = state.setupQueue[0] === event.component;
+    if (wasQueued) state.setupQueue.shift();
+    const next = state.setupQueue[0];
+    if (next) void startInstall(next);
+    // La preparación termina con una respuesta real del modelo.
+    else if (wasQueued) void verifyModel();
+  }
+  void refreshSetup();
+});
+
+function componentRow(c: ComponentStatus) {
+  const installing = state.preparation?.installing === c.component;
+  const progress = state.setupProgress[c.component];
+  const error = state.setupErrors[c.component];
+  const busy = state.preparation?.installing != null || state.setupQueue.length > 0;
+  const action = c.state === "stopped" ? "Iniciar" : c.state === "incompatible" ? "Actualizar" : "Instalar";
+  const version = c.state === "incompatible" ? `encontrada ${c.found}; se necesita ${c.required}` : c.version;
+  return h(
+    "div",
+    { class: "component" },
+    h("span", { class: "name" }, COMPONENT_LABEL[c.component], h("span", { class: `badge state-${c.state}` }, COMPONENT_STATE[c.state])),
+    h(
+      "div",
+      { class: "side" },
+      c.installable && !ready(c)
+        ? h("button", { disabled: busy, onclick: () => void startInstall(c.component) }, error ? "Reintentar" : action)
+        : null,
+    ),
+    h("span", { class: "detail-line" }, version ? `${c.detail} · ${version}` : c.detail),
+    installing
+      ? h(
+          "span",
+          { class: "step" },
+          progress
+            ? progress.done != null && progress.total
+              ? `${stepLabel(progress)}: ${size(progress.done)} de ${size(progress.total)}`
+              : stepLabel(progress)
+            : "Iniciando…",
+        )
+      : null,
+    installing
+      ? progress?.total
+        ? h("progress", { max: String(progress.total), value: String(progress.done ?? 0) })
+        : h("progress", {})
+      : null,
+    error ? h("span", { class: "error-text", role: "alert" }, error) : null,
+  );
+}
+
+function setupView() {
+  const p = state.preparation;
+  if (!p) return h("section", { class: "page" }, h("h2", {}, "Preparación del equipo"), h("p", {}, "Comprobando el equipo…"));
+  const pending = p.components.filter((c) => !ready(c));
+  const installable = pending.filter((c) => c.installable);
+  const busy = p.installing != null || state.setupQueue.length > 0;
+  const v = state.verification;
+  return h(
+    "section",
+    { class: "page" },
+    h("h2", {}, "Preparación del equipo"),
+    h(
+      "p",
+      { class: "intro" },
+      "NestAdmin trabaja con componentes locales. Lo que falta se descarga de su fuente oficial, se comprueba su huella SHA-256 antes de instalarlo y lo ya instalado se reutiliza. Si se corta la conexión, el reintento continúa la descarga. Ningún documento sale del equipo durante la preparación.",
+    ),
+    pending.length === 0 ? h("p", { class: "ok-line" }, "Todos los componentes están listos.") : null,
+    h(
+      "div",
+      { class: "buttons" },
+      installable.length
+        ? h("button", { class: "primary", disabled: busy, onclick: installMissing }, "Instalar lo que falta")
+        : null,
+      h("button", { disabled: busy || state.verifying, onclick: () => void verifyModel() }, state.verifying ? "Comprobando…" : "Comprobar la IA local"),
+      h("button", { disabled: busy, onclick: () => void refreshSetup() }, "Volver a comprobar"),
+    ),
+    v
+      ? h("p", { class: "ok-line" }, `El modelo ${v.model} respondió «${v.answer}» en ${(v.latency_ms / 1000).toFixed(1).replace(".", ",")} s.`)
+      : null,
+    h("div", { class: "components" }, ...p.components.map(componentRow)),
+  );
+}
+
 function render(background = false) {
   const views: Record<View, () => HTMLElement> = {
     review: reviewView,
@@ -614,6 +814,7 @@ function render(background = false) {
     rules: rulesView,
     history: historyView,
     settings: settingsView,
+    setup: setupView,
   };
   const notice = state.notice
     ? h(
@@ -632,4 +833,10 @@ function render(background = false) {
 }
 
 onChanged(() => void refresh(true));
-void refresh();
+// En el primer arranque, si falta algo, se abre la preparación.
+void Promise.all([refresh(), refreshSetup()]).then(() => {
+  if (state.preparation?.components.some((c) => !ready(c)) && state.view === "review" && !state.tasks.length) {
+    state.view = "setup";
+    render();
+  }
+});
