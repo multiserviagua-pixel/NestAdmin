@@ -594,6 +594,7 @@ impl Setup {
     }
 }
 
+#[cfg_attr(not(windows), allow(unused_mut))]
 fn hidden(mut command: Command) -> Command {
     #[cfg(windows)]
     {
@@ -604,13 +605,19 @@ fn hidden(mut command: Command) -> Command {
     command
 }
 
+/// Código de Windows `ERROR_CANCELLED`: el usuario rechazó el diálogo UAC.
+const ERROR_CANCELLED: i32 = 1223;
+/// Código propio del guion cuando `Start-Process` falla por otro motivo.
+const LAUNCH_FAILED: i32 = 0x4E41;
+
 /// Ejecuta un instalador con elevación (UAC) y espera. Si el usuario deniega el permiso,
 /// devuelve `Cancelled` para que el paso se pueda reintentar.
 fn run_elevated(installer: &Path, args: &[&str]) -> Result<(), SetupError> {
     let quote = |s: &str| format!("'{}'", s.replace('\'', "''"));
     let arguments = args.iter().map(|a| quote(a)).collect::<Vec<_>>().join(",");
     let script = format!(
-        "try {{ $p = Start-Process -FilePath {} -ArgumentList {} -Verb RunAs -Wait -PassThru -ErrorAction Stop; exit $p.ExitCode }} catch {{ exit 1223 }}",
+        "try {{ $p = Start-Process -FilePath {} -ArgumentList {} -Verb RunAs -Wait -PassThru -ErrorAction Stop; exit $p.ExitCode }} \
+         catch {{ if ($_.Exception.NativeErrorCode -eq {ERROR_CANCELLED}) {{ exit {ERROR_CANCELLED} }} else {{ exit {LAUNCH_FAILED} }} }}",
         quote(&installer.to_string_lossy()),
         arguments
     );
@@ -620,7 +627,10 @@ fn run_elevated(installer: &Path, args: &[&str]) -> Result<(), SetupError> {
         .map_err(|e| SetupError::Install(format!("no se pudo pedir permisos ({})", e.kind())))?;
     match status.code() {
         Some(0) => Ok(()),
-        Some(1223) => Err(SetupError::Cancelled),
+        Some(ERROR_CANCELLED) => Err(SetupError::Cancelled),
+        Some(LAUNCH_FAILED) => Err(SetupError::Install(
+            "Windows no pudo iniciar el instalador con permisos de administrador".into(),
+        )),
         other => Err(SetupError::Install(format!(
             "el instalador terminó con el código {}",
             other.map_or("desconocido".into(), |c| c.to_string())

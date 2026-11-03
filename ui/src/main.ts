@@ -676,10 +676,13 @@ async function refreshSetup() {
 
 async function startInstall(component: SetupComponent) {
   delete state.setupErrors[component];
+  // Se marca antes de llamar: el evento final puede llegar antes que la respuesta.
+  if (state.preparation) state.preparation.installing = component;
+  render();
   try {
     await api.setupInstall(component);
-    if (state.preparation) state.preparation.installing = component;
   } catch (error) {
+    if (state.preparation) state.preparation.installing = null;
     state.setupErrors[component] = String(error);
     state.setupQueue = [];
   }
