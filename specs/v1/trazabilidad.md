@@ -7,7 +7,7 @@ Formato que comprueba `scripts/check.py`: cada requisito tiene al menos una fila
 | Requisito | Casos de verificación previstos | Estado |
 | --- | --- | --- |
 | R01 | T01: cerrar ventana con tarea en curso, restaurar y salir desde el área de notificación; comprobar que el proceso termina. | Pendiente |
-| R02 | T02: interrumpir en distintos estados, reiniciar, verificar persistencia y ausencia de efectos duplicados. | Pendiente |
+| R02 | T02: interrumpir en distintos estados, reiniciar, verificar persistencia y ausencia de efectos duplicados. | Parcial — núcleo sin interfaz, [evidencia](../../evidence/t02-nucleo.md) |
 | R03 | T03: verificar selección local inicial; provocar error local y observar que no hay peticiones a Groq; seleccionar externo explícitamente y comprobar adaptador. | Pendiente |
 | R04 | T04: procesar texto, PDF textual y escaneado; forzar fallo de OCR y verificar incidencia recuperable. | Pendiente |
 | R05 | T05: comprobar ausencias, operaciones decimales, importes incoherentes y duplicados con explicación. | Pendiente |

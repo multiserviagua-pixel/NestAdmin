@@ -23,6 +23,8 @@ class CheckTests(unittest.TestCase):
             target = self.root / name
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text('x', encoding='utf-8')
+        if (check.ROOT / 'evidence').is_dir():
+            shutil.copytree(check.ROOT / 'evidence', self.root / 'evidence')
         self.matrix = self.root / 'specs/v1/trazabilidad.md'
 
     def tearDown(self):
@@ -56,7 +58,7 @@ class CheckTests(unittest.TestCase):
         self.assertTrue(any('requiere un enlace' in e for e in check.check(self.root)))
         self.edit_matrix('| Cumplido |', '| Cumplido — [evidencia](../../evidence/t01.md) |')
         self.assertTrue(any('enlace roto' in e for e in check.check(self.root)))
-        (self.root / 'evidence').mkdir()
+        (self.root / 'evidence').mkdir(exist_ok=True)
         (self.root / 'evidence/t01.md').write_text('ok', encoding='utf-8')
         self.assertEqual(check.check(self.root), [])
 
