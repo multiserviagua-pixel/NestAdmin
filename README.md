@@ -1,6 +1,6 @@
 # NestAdmin
 
-Preparación del asistente administrativo local para Windows descrito en [PLAN.md](PLAN.md). El repositorio contiene el plan, especificaciones versionadas y herramientas de desarrollo y evaluación; **la aplicación, los conectores, el instalador y los modelos aún no están implementados**.
+Preparación del asistente administrativo local para Windows descrito en [PLAN.md](PLAN.md). El repositorio contiene el plan, especificaciones versionadas y herramientas de desarrollo y evaluación; **la aplicación, los conectores reales, el instalador y los modelos aún no están implementados**.
 
 ## Contenido
 
@@ -30,6 +30,6 @@ python -m unittest discover -s evaluation/tests -v
 cargo test
 ```
 
-`cargo test` prueba el núcleo de `crates/core` (almacenamiento, cola durable y acciones idempotentes); todavía no existe la aplicación de escritorio. Estas comprobaciones verifican la estructura y trazabilidad documental y el funcionamiento del evaluador; no acreditan los criterios de aceptación del producto. El protocolo para puntuar y comparar predicciones existentes se encuentra en [evaluation/README.md](evaluation/README.md). No se han medido todavía Ollama ni Groq; el evaluador no invoca modelos ni mide por sí mismo tiempo o memoria.
+`cargo test` prueba el núcleo de `crates/core` (almacenamiento, cola durable y acciones idempotentes) y los simuladores locales de correo y administración de `crates/simulators` (sin red ni cuentas reales, con estado opcional en JSON); todavía no existe la aplicación de escritorio. Estas comprobaciones verifican la estructura y trazabilidad documental y el funcionamiento del evaluador; no acreditan los criterios de aceptación del producto. El protocolo para puntuar y comparar predicciones existentes se encuentra en [evaluation/README.md](evaluation/README.md). No se han medido todavía Ollama ni Groq; el evaluador no invoca modelos ni mide por sí mismo tiempo o memoria.
 
 La construcción y el empaquetado de Windows quedan pendientes de implementar junto con la aplicación y de fijar versiones de sus herramientas y dependencias. También quedan pendientes las pruebas de interfaz, OCR, instalador, privacidad y hardware objetivo. Los resultados locales de evaluación se guardan fuera del contenido del usuario y están excluidos de Git.
