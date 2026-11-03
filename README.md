@@ -19,6 +19,12 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/setup-dev.ps1
 
 Puede requerir permisos de administrador. No instala Ollama, modelos ni OCR.
 
+Para la IA local, `scripts/setup-ai.ps1` instala Ollama y descarga `qwen3:8b` (unos 5,2 GB), reutilizando lo ya presente:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/setup-ai.ps1
+```
+
 ## Verificación local
 
 Con Python 3.9 o posterior, sin instalar dependencias adicionales, desde la raíz del repositorio:
