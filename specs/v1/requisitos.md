@@ -30,6 +30,8 @@ Procesar documentos y correo mediante una aplicación Windows propia que prioriz
 
 ## Decisiones técnicas y riesgos abiertos
 
+Las decisiones concretas, sus fechas y las versiones fijadas se registran en [decisiones.md](decisiones.md).
+
 - Tauri usa el WebView2 que proporciona Windows; no se presupone un Chromium empaquetado propio. Servicio local con cola y almacenamiento persistente; el mecanismo concreto debe impedir acceso no autorizado desde otras páginas o procesos.
 - Fechas e importes se almacenan de forma normalizada, conservando también la evidencia original. Los campos desconocidos son nulos, no valores inferidos. El motor de reglas opera sobre datos validados y una versión explícita de la regla.
 - Las credenciales se guardan mediante un almacén protegido del sistema operativo, nunca en texto plano ni registros. Los eventos de auditoría evitan guardar secretos.

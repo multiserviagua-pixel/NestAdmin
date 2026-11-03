@@ -2,6 +2,8 @@
 
 Estado inicial: **pendiente**, salvo que una ejecución reproducible aporte evidencia. Un caso descrito aquí es una especificación de prueba, no una prueba superada. Registrar plataforma, versiones, fecha, comandos, resultado y ubicación de evidencia. Las pruebas que dependan de Windows y hardware objetivo deben ejecutarse allí.
 
+Formato que comprueba `scripts/check.py`: cada requisito tiene al menos una fila; cada fila tiene un identificador de prueba único (`T05`, `T05b`…); el estado es `Pendiente`, `Parcial` o `Cumplido`, y los dos últimos deben enlazar a un archivo de evidencia existente, por ejemplo `Parcial — [evidencia](../../evidence/t05.md)`.
+
 | Requisito | Casos de verificación previstos | Estado |
 | --- | --- | --- |
 | R01 | T01: cerrar ventana con tarea en curso, restaurar y salir desde el área de notificación; comprobar que el proceso termina. | Pendiente |

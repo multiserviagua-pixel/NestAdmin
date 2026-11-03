@@ -3,6 +3,7 @@
 Estado: propuesta de implementación; no es evidencia de funcionamiento. Fuente de alcance: [PLAN.md](../../PLAN.md). Esta versión describe la primera entrega para Windows. Los conectores de correo y administración son simuladores; los productos reales y sus permisos siguen sin identificar.
 
 - [Requisitos, flujos y decisiones](requisitos.md)
+- [Registro de decisiones técnicas y versiones](decisiones.md)
 - [Contratos entre componentes](contratos.md)
 - [Matriz de requisitos y verificación](trazabilidad.md)
 - [Tareas y puertas de aceptación](tareas.md)

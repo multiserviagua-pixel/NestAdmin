@@ -25,6 +25,7 @@ Con Python 3.9 o posterior, sin instalar dependencias adicionales, desde la raí
 
 ```sh
 python scripts/check.py
+python -m unittest discover -s scripts/tests -v
 python -m unittest discover -s evaluation/tests -v
 ```
 
