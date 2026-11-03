@@ -24,6 +24,16 @@ Las facturas usan exactamente los campos `supplier`, `invoice_number`, `date`, `
 
 Los tiempos y memorias son valores comunicados por el proceso que obtiene las predicciones; el evaluador **no los mide ni verifica**. Documentar por separado el equipo, sistema, versión del modelo, configuración, concurrencia, calentamiento y método de medición. En local, indicar si la memoria incluye Ollama y sus procesos; para la API externa, la memoria del servidor remoto no es observable y no se debe presentar como si lo fuera. Sin medidas, omitir los campos: el informe devolverá `null`, nunca cero inventado.
 
+## Generar predicciones
+
+`nestadmin-predict` (crate `crates/ai`) produce el JSONL con el proveedor elegido. Solo lee `data/inputs/`, procesa las facturas en orden con un registro vacío y calcula las etiquetas con el código del producto, no con el modelo. Escribe junto a las predicciones un `.meta.json` con proveedor, modelo informado, errores y duración. No mide memoria.
+
+```sh
+cargo run --release -p nestadmin-ai --bin nestadmin-predict -- --provider ollama --out evaluation/predictions/ollama.jsonl
+```
+
+Groq solo se usa con `--provider groq --model <id>` y una clave guardada en el administrador de credenciales de Windows (servicio `NestAdmin`, nombre `groq_api_key`). Un fallo de un proveedor nunca se reintenta con el otro.
+
 ## Ejecución
 
 Requiere Python 3.9 o superior y solo biblioteca estándar:

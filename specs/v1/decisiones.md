@@ -16,6 +16,12 @@ Registro fechado de decisiones que concretan [requisitos.md](requisitos.md). Una
 - **D10 OCR.** Tesseract 5 con datos `spa` y `eng`, invocado como proceso local. Se considera escaneada la página cuyo texto extraído no alcanza un mínimo de caracteres; el umbral se fijará con pruebas (R04). *Alternativa descartada por ahora:* el OCR integrado de Windows, que depende de paquetes de idioma instalados por el usuario.
 - **D11 Instalador.** Paquete NSIS de Tauri, con un paso de arranque de la aplicación que detecta y descarga Ollama, el modelo y Tesseract (R08). WebView2 viene con Windows 11; el instalador usa el *bootstrapper* de Microsoft si falta.
 
+## 2026-11-03 — Integración de IA (fase 4)
+
+- **D12 Cliente HTTP.** `ureq` 3 síncrono con TLS `rustls` y **sin proxy**: las variables `HTTP_PROXY` del sistema no pueden desviar el contenido de un documento hacia otro equipo. Plazo de conexión propio, más corto que el total: un fallo al conectar se informa como `unavailable` y no como `timeout`. *Motivo:* el núcleo es síncrono y no necesita un runtime asíncrono.
+- **D13 Credenciales.** Se usa `keyring-core` con `windows-native-keyring-store` en lugar del crate `keyring`, que su propia documentación desaconseja para aplicaciones. Concreta D08 sin cambiarla.
+- **D14 Incidencias calculadas.** El modelo solo extrae campos; las etiquetas `missing_tax`, `missing_total`, `total_mismatch` y `possible_duplicate` las calcula el código de `crates/documents`. *Motivo:* comprobaciones programadas y reproducibles (R05); el modelo no decide sobre importes.
+
 ## Versiones de desarrollo fijadas
 
 | Componente | Versión | Licencia | Dónde se fija |
