@@ -43,4 +43,4 @@ cargo test -p nestadmin-app --test ollama -- --ignored --nocapture   # requiere 
 
 - Recorrer el mismo flujo desde la ventana (importar, revisar, editar, aprobar, reglas e historial) y registrarlo.
 - La moneda no forma parte de la extracción: se registra como ausente.
-- Importar PDF y documentos escaneados depende de T04.
+- La importación de PDF y documentos escaneados se prueba en [T04](t04-pdf-ocr.md).

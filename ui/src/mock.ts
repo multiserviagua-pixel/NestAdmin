@@ -46,6 +46,7 @@ const invoiceResult = (document: string, total: string, issues: string[]) => ({
   issues,
   duplicates: [],
   unreadable: [],
+  pages: [{ number: 1, method: issues.length ? "ocr" : "pdf_text", chars: 120 }],
   provider: "ollama",
   model: "qwen3:8b",
   latency_ms: 15200,
@@ -112,10 +113,12 @@ function addRule(rule: Rule) {
   return rule;
 }
 
-const handlers: Record<string, (a: any) => unknown> = {
+const handlers: Record<string, (a: any, options?: any) => unknown> = {
   tasks: () => structuredClone(tasks),
-  import_document: ({ name, textContent }) => {
-    if (!String(textContent).trim()) throw "el documento está vacío";
+  import_file: (bytes: Uint8Array, options?: { headers: Record<string, string> }) => {
+    const name = decodeURIComponent(options?.headers["x-nestadmin-name"] ?? "");
+    if (!/\.(txt|pdf)$/i.test(name)) throw `«${name}»: solo se admiten archivos .txt y .pdf`;
+    if (bytes.length === 0) throw `«${name}» está vacío`;
     return task("invoice", { document: name }, "queued", null);
   },
   fetch_mail: () => 0,
@@ -177,12 +180,16 @@ const handlers: Record<string, (a: any) => unknown> = {
   },
 };
 
-const mutating = new Set(["import_document", "approve", "edit_draft", "reject", "retry", "create_rule", "update_rule", "set_rule_active"]);
+const mutating = new Set(["import_file", "approve", "edit_draft", "reject", "retry", "create_rule", "update_rule", "set_rule_active"]);
 
-export async function invoke<T>(command: string, args: Record<string, unknown> = {}): Promise<T> {
+export async function invoke<T>(
+  command: string,
+  args: Record<string, unknown> | Uint8Array = {},
+  options?: { headers: Record<string, string> },
+): Promise<T> {
   const handler = handlers[command];
   if (!handler) throw `comando desconocido: ${command}`;
-  const value = handler(args) as T;
+  const value = handler(args, options) as T;
   if (mutating.has(command)) changed();
   return structuredClone(value);
 }

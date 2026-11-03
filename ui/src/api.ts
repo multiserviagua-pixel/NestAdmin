@@ -4,7 +4,8 @@
 
 import type { AuditEntry, ProviderChoice, ProviderInfo, Rule, SettingsView, Task } from "./types";
 
-type Invoke = <T>(command: string, args?: Record<string, unknown>) => Promise<T>;
+type InvokeOptions = { headers: Record<string, string> };
+type Invoke = <T>(command: string, args?: Record<string, unknown> | Uint8Array, options?: InvokeOptions) => Promise<T>;
 type Listen = (handler: () => void) => void;
 
 const inTauri = "__TAURI_INTERNALS__" in window;
@@ -32,7 +33,9 @@ export { onChanged };
 
 export const api = {
   tasks: () => invoke<Task[]>("tasks"),
-  importDocument: (name: string, textContent: string) => invoke<Task>("import_document", { name, textContent }),
+  // El archivo viaja como datos binarios; el nombre, en una cabecera.
+  importFile: (name: string, bytes: Uint8Array) =>
+    invoke<Task>("import_file", bytes, { headers: { "x-nestadmin-name": encodeURIComponent(name) } }),
   fetchMail: () => invoke<number>("fetch_mail"),
   approve: (id: number, version: number) => invoke<Task>("approve", { id, version }),
   editDraft: (id: number, body: string) => invoke<Task>("edit_draft", { id, body }),

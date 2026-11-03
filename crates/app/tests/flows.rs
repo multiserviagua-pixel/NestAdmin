@@ -2,6 +2,7 @@
 //! aprobación de la versión vista, reglas, duplicados, fallos y recuperación sin efectos
 //! duplicados.
 
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use nestadmin_ai::{
@@ -9,6 +10,7 @@ use nestadmin_ai::{
 };
 use nestadmin_app::{App, AppError, AppPaths, EMAIL, INVOICE};
 use nestadmin_core::TaskState;
+use nestadmin_extract::{ExtractError, Extractor, Ocr};
 use serde_json::{json, Value};
 
 /// Devuelve el JSON incluido en el documento (extracción) o una respuesta fija (correo).
@@ -71,8 +73,57 @@ fn invoice(supplier: &str, number: &str, total: &str) -> String {
     .to_string()
 }
 
+/// OCR que nunca se usa: estas pruebas solo importan texto (los PDF se prueban en
+/// `crates/extract` y en `tests/ollama.rs`).
+struct NoOcr;
+
+impl Ocr for NoOcr {
+    fn recognize(&self, _image: &Path, page: usize) -> Result<String, ExtractError> {
+        Err(ExtractError::OcrUnavailable(format!("página {page}")))
+    }
+}
+
 fn open(dir: &tempfile::TempDir, provider: Arc<FakeProvider>) -> App {
-    App::open(&AppPaths::new(dir.path()), provider).unwrap()
+    let extractor = Extractor::new(dir.path().join("sin-pdfium"), Box::new(NoOcr));
+    App::open(&AppPaths::new(dir.path()), provider, Arc::new(extractor)).unwrap()
+}
+
+#[test]
+fn only_text_and_pdf_files_are_imported_and_pdf_failures_are_visible() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = open(&dir, FakeProvider::new());
+    for (name, bytes) in [
+        ("hoja.xlsx", &b"PK"[..]),
+        ("sin-extension", b"texto"),
+        ("vacia.pdf", b""),
+    ] {
+        assert!(
+            matches!(app.import_file(name, bytes), Err(AppError::Invalid(_))),
+            "{name}"
+        );
+    }
+    assert!(app.tasks().unwrap().is_empty());
+
+    // Sin PDFium, el PDF falla con un motivo recuperable y sin resultado.
+    let task = app.import_file("Factura.PDF", b"%PDF-1.4").unwrap();
+    let failed = app.process_next().unwrap().unwrap();
+    assert_eq!(failed.id, task.id);
+    assert_eq!(failed.state, TaskState::Failed);
+    let error = failed.error.unwrap();
+    assert_eq!(
+        (error.code.as_str(), error.recoverable),
+        ("pdf_unavailable", true)
+    );
+    assert!(failed.result.is_none());
+
+    // Un .txt importado como archivo sigue el flujo normal y registra la página.
+    app.import_file("a.txt", invoice("Alfa SL", "F-1", "121.00").as_bytes())
+        .unwrap();
+    let result = app.process_next().unwrap().unwrap().result.unwrap();
+    assert_eq!(
+        result["pages"],
+        json!([{ "number": 1, "method": "plain_text", "chars": 115 }])
+    );
 }
 
 #[test]

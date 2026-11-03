@@ -21,6 +21,7 @@ use nestadmin_core::{
     TaskError, TaskState,
 };
 use nestadmin_documents::{process_invoice, DuplicateRegistry, Evidenced, Invoice, RawInvoice};
+use nestadmin_extract::Extractor;
 use nestadmin_simulators::{AdminSimulator, MailConnector, MailSimulator, Message, NewDraft};
 use serde::Serialize;
 use serde_json::{json, Value};
@@ -29,6 +30,8 @@ use crate::rules::{decide, RuleDecision, REGISTER_INVOICE, SEND_DRAFT};
 
 pub const INVOICE: &str = "invoice";
 pub const EMAIL: &str = "email";
+/// Límite de tamaño de un documento importado.
+const MAX_DOCUMENT_BYTES: usize = 50_000_000;
 
 #[derive(Debug, thiserror::Error)]
 pub enum AppError {
@@ -93,34 +96,63 @@ pub struct App {
     provider: Arc<dyn Provider>,
     documents: PathBuf,
     registry: DuplicateRegistry,
+    extractor: Arc<Extractor>,
 }
 
-/// Tarea tomada de la cola con su solicitud preparada.
+/// Trabajo de una tarea: una solicitud lista o un documento del que extraer el texto.
+enum Prepared {
+    Request(GenerateRequest),
+    Document(PathBuf),
+}
+
+/// Tarea tomada de la cola con su trabajo preparado.
 pub struct Job {
     pub task: Task,
     provider: Arc<dyn Provider>,
-    prepared: Result<GenerateRequest, TaskError>,
+    extractor: Arc<Extractor>,
+    prepared: Result<Prepared, TaskError>,
 }
 
 /// Respuesta del proveedor (o el motivo del fallo) lista para `finish`.
 pub struct Completed {
     task: Task,
     outcome: Result<GenerateResult, TaskError>,
+    /// Páginas del documento y método de cada una (texto, PDF u OCR).
+    pages: Option<Value>,
 }
 
 impl Job {
-    /// Llama al proveedor elegido. Un error se devuelve tal cual: no hay otro proveedor.
+    /// Extrae el texto si hace falta (PDF u OCR, localmente) y llama al proveedor elegido.
+    /// Un error se devuelve tal cual: no hay otro proveedor ni extracción parcial.
     pub fn run(self) -> Completed {
-        let outcome = self.prepared.and_then(|request| {
-            self.provider.generate(&request).map_err(|e| TaskError {
+        let Job {
+            task,
+            provider,
+            extractor,
+            prepared,
+        } = self;
+        let mut pages = None;
+        let outcome = prepared.and_then(|prepared| {
+            let request = match prepared {
+                Prepared::Request(request) => request,
+                Prepared::Document(path) => {
+                    let extraction = extractor
+                        .extract(&path)
+                        .map_err(|e| task_error(e.code(), e.to_string(), e.recoverable()))?;
+                    pages = serde_json::to_value(&extraction.pages).ok();
+                    extraction_request(&task.id.to_string(), &extraction.text)
+                }
+            };
+            provider.generate(&request).map_err(|e| TaskError {
                 code: e.code().to_owned(),
                 message: e.to_string(),
                 recoverable: true,
             })
         });
         Completed {
-            task: self.task,
+            task,
             outcome,
+            pages,
         }
     }
 }
@@ -136,7 +168,11 @@ fn task_error(code: &str, message: impl Into<String>, recoverable: bool) -> Task
 impl App {
     /// Abre los datos locales y recupera el trabajo interrumpido: las tareas en curso
     /// vuelven a la cola y las acciones pendientes se reconcilian con los simuladores.
-    pub fn open(paths: &AppPaths, provider: Arc<dyn Provider>) -> AppResult<Self> {
+    pub fn open(
+        paths: &AppPaths,
+        provider: Arc<dyn Provider>,
+        extractor: Arc<Extractor>,
+    ) -> AppResult<Self> {
         fs::create_dir_all(paths.documents())?;
         let mut app = Self {
             store: Store::open(&paths.db())?,
@@ -145,6 +181,7 @@ impl App {
             provider,
             documents: paths.documents(),
             registry: DuplicateRegistry::new(),
+            extractor,
         };
         app.store.recover()?;
         app.store.reconcile_actions(SEND_DRAFT, &app.mail)?;
@@ -178,17 +215,46 @@ impl App {
         self.provider = provider;
     }
 
-    /// Guarda una copia del documento en los datos locales y lo encola.
+    /// Encola un documento de texto.
     pub fn import_document(&mut self, name: &str, text: &str) -> AppResult<Task> {
         if text.trim().is_empty() {
             return Err(AppError::Invalid("el documento está vacío".into()));
         }
+        self.store_document(name, "txt", text.as_bytes())
+    }
+
+    /// Encola un archivo `.txt` o `.pdf`. Se guarda una copia en los datos locales; la
+    /// extracción (con OCR si hace falta) se hace al procesar la tarea.
+    pub fn import_file(&mut self, name: &str, bytes: &[u8]) -> AppResult<Task> {
+        let extension = Path::new(name)
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(str::to_ascii_lowercase)
+            .unwrap_or_default();
+        if extension != "txt" && extension != "pdf" {
+            return Err(AppError::Invalid(format!(
+                "«{name}»: solo se admiten archivos .txt y .pdf"
+            )));
+        }
+        if bytes.is_empty() {
+            return Err(AppError::Invalid(format!("«{name}» está vacío")));
+        }
+        if bytes.len() > MAX_DOCUMENT_BYTES {
+            return Err(AppError::Invalid(format!(
+                "«{name}» supera el tamaño máximo de {} MB",
+                MAX_DOCUMENT_BYTES / 1_000_000
+            )));
+        }
+        self.store_document(name, &extension, bytes)
+    }
+
+    fn store_document(&mut self, name: &str, extension: &str, bytes: &[u8]) -> AppResult<Task> {
         let stamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map(|d| d.as_nanos())
             .unwrap_or(0);
-        let path = self.documents.join(format!("{stamp}.txt"));
-        fs::write(&path, text)?;
+        let path = self.documents.join(format!("{stamp}.{extension}"));
+        fs::write(&path, bytes)?;
         let input = json!({ "document": name, "path": path });
         Ok(self.store.enqueue(INVOICE, &input.to_string())?)
     }
@@ -238,11 +304,11 @@ impl App {
         let input: Value = serde_json::from_str(&task.input_ref).unwrap_or(Value::Null);
         let id = task.id.to_string();
         let prepared = match task.kind.as_str() {
-            INVOICE => match input["path"].as_str().map(fs::read_to_string) {
-                Some(Ok(text)) => Ok(extraction_request(&id, &text)),
-                _ => Err(task_error(
+            INVOICE => match input["path"].as_str() {
+                Some(path) => Ok(Prepared::Document(PathBuf::from(path))),
+                None => Err(task_error(
                     "document_unreadable",
-                    "no se pudo leer el documento",
+                    "la tarea no indica el documento",
                     false,
                 )),
             },
@@ -256,7 +322,7 @@ impl App {
                         Some(subject) => format!("Asunto: {subject}\n\n{body}"),
                         None => body,
                     };
-                    Ok(email_request(&id, &text))
+                    Ok(Prepared::Request(email_request(&id, &text)))
                 }
                 Some(_) => Err(task_error(
                     "empty_message",
@@ -274,6 +340,7 @@ impl App {
         Ok(Some(Job {
             task,
             provider: Arc::clone(&self.provider),
+            extractor: Arc::clone(&self.extractor),
             prepared,
         }))
     }
@@ -286,7 +353,7 @@ impl App {
             Err(error) => return Ok(self.store.fail(task.id, &error)?),
         };
         let built = match task.kind.as_str() {
-            INVOICE => self.invoice_result(&task, &generated),
+            INVOICE => self.invoice_result(&task, &generated, completed.pages),
             _ => self.email_result(&task, &generated),
         };
         let mut result = match built {
@@ -325,6 +392,7 @@ impl App {
         &mut self,
         task: &Task,
         generated: &GenerateResult,
+        pages: Option<Value>,
     ) -> Result<Value, TaskError> {
         let raw = parse_extraction(&generated.output)
             .map_err(|e| task_error(e.code(), e.to_string(), true))?;
@@ -355,6 +423,7 @@ impl App {
             "type": INVOICE,
             "version": 1,
             "document": input["document"],
+            "pages": pages,
             "fields": fields,
             "issues": report.issues.iter().map(|i| i.as_str()).collect::<Vec<_>>(),
             "duplicates": report.duplicates,

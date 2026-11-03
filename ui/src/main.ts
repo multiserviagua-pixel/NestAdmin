@@ -138,13 +138,15 @@ function header() {
   const active = state.settings?.active;
   const fileInput = h("input", {
     type: "file",
-    accept: ".txt,text/plain",
+    accept: ".txt,.pdf,text/plain,application/pdf",
     multiple: true,
     hidden: true,
     onchange: (event) => {
-      const files = [...((event.target as HTMLInputElement).files ?? [])];
+      const input = event.target as HTMLInputElement;
+      const files = [...(input.files ?? [])];
+      input.value = "";
       void act(async () => {
-        for (const file of files) await api.importDocument(file.name, await file.text());
+        for (const file of files) await api.importFile(file.name, new Uint8Array(await file.arrayBuffer()));
       }, files.length === 1 ? `«${files[0]?.name}» añadido a la cola` : `${files.length} documentos añadidos a la cola`);
     },
   }) as HTMLInputElement;
@@ -263,11 +265,23 @@ function invoiceDetail(task: Task) {
   const fields: Record<string, string | null> = r.fields ?? {};
   const issues: string[] = r.issues ?? [];
   const unreadable: Array<{ field: string }> = r.unreadable ?? [];
+  const pages: Array<{ number: number; method: string }> = r.pages ?? [];
+  const ocrPages = pages.filter((p) => p.method === "ocr").map((p) => p.number);
   return h(
     "article",
     {},
     h("h2", {}, title(task)),
     provenance(r),
+    pages.length
+      ? h(
+          "p",
+          { class: "meta" },
+          `${pages.length} ${pages.length === 1 ? "página" : "páginas"}`,
+          ocrPages.length
+            ? ` · texto obtenido por OCR local en ${ocrPages.length === pages.length ? "todas" : `la(s) página(s) ${ocrPages.join(", ")}`}; compruebe los importes con el original`
+            : "",
+        )
+      : null,
     h("p", { class: "reason" }, `Motivo de la revisión: ${r.review_reason ?? "requiere aprobación"}`),
     issues.length
       ? h("ul", { class: "issues" }, ...issues.map((i) => h("li", {}, ISSUE_LABEL[i] ?? i)))

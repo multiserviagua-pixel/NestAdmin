@@ -1,6 +1,6 @@
 # NestAdmin
 
-Asistente administrativo local para Windows descrito en [PLAN.md](PLAN.md). Ya existen la cola durable, los proveedores de IA (Ollama local por defecto y Groq por elección explícita), la validación de facturas, los simuladores de correo y administración, las reglas con revisión predeterminada y una primera aplicación de escritorio Tauri. **Faltan PDF y OCR, el instalador, los conectores reales y las mediciones en el equipo objetivo**; el estado de cada requisito está en la [matriz de trazabilidad](specs/v1/trazabilidad.md).
+Asistente administrativo local para Windows descrito en [PLAN.md](PLAN.md). Ya existen la cola durable, los proveedores de IA (Ollama local por defecto y Groq por elección explícita), la validación de facturas, los simuladores de correo y administración, las reglas con revisión predeterminada, la lectura de texto, PDF y PDF escaneado con OCR local y una primera aplicación de escritorio Tauri. **Faltan el instalador, los conectores reales y las mediciones en el equipo objetivo**; el estado de cada requisito está en la [matriz de trazabilidad](specs/v1/trazabilidad.md).
 
 ## Contenido
 
@@ -8,7 +8,7 @@ Asistente administrativo local para Windows descrito en [PLAN.md](PLAN.md). Ya e
 - [Instrucciones del proyecto](AGENTS.md): pautas para cambios y comprobaciones.
 - [Harness de evaluación](evaluation/README.md): 10 facturas y 20 correos sintéticos, expectativas separadas, evaluación sin red y pruebas del evaluador.
 - [Evidencias](evidence/): ejecuciones registradas de cada caso de prueba.
-- Código: `crates/core` (almacenamiento, cola y acciones idempotentes), `crates/ai` (proveedores), `crates/documents` (validación y duplicados), `crates/simulators`, `crates/app` (flujos, revisión y reglas), `crates/desktop` (ventana Tauri) y `ui/` (interfaz).
+- Código: `crates/core` (almacenamiento, cola y acciones idempotentes), `crates/ai` (proveedores), `crates/documents` (validación y duplicados), `crates/extract` (texto, PDF y OCR), `crates/simulators`, `crates/app` (flujos, revisión y reglas), `crates/desktop` (ventana Tauri) y `ui/` (interfaz).
 - [Integración continua](.github/workflows/verify.yml): especificaciones, evaluador, interfaz y crates en Linux y Windows.
 
 ## Herramientas de desarrollo
@@ -27,6 +27,12 @@ Para la IA local, `scripts/setup-ai.ps1` instala Ollama y descarga `qwen3:8b` (u
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts/setup-ai.ps1
 ```
 
+Para PDF y OCR, `scripts/setup-ocr.ps1` descarga PDFium y los datos de idioma español e inglés en `vendor/` (comprobados por SHA-256, excluidos de Git) e instala Tesseract 5 con winget:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/setup-ocr.ps1
+```
+
 ## Abrir la aplicación en desarrollo
 
 ```powershell
@@ -35,7 +41,7 @@ cd crates/desktop
 ..\..\ui\node_modules\.bin\tauri dev
 ```
 
-La ventana usa los datos de `%LOCALAPPDATA%\NestAdmin`; para probar sin tocarlos, defina antes `$env:NESTADMIN_DATA_DIR` con otra carpeta. Cerrar la ventana la oculta: para salir, use «Salir de NestAdmin por completo» en el icono del área de notificación. Solo se importan documentos de texto hasta que se integren PDF y OCR.
+La ventana usa los datos de `%LOCALAPPDATA%\NestAdmin`; para probar sin tocarlos, defina antes `$env:NESTADMIN_DATA_DIR` con otra carpeta. Cerrar la ventana la oculta: para salir, use «Salir de NestAdmin por completo» en el icono del área de notificación. Se importan archivos `.txt` y `.pdf`; las páginas escaneadas pasan por OCR local, y la revisión indica en qué páginas se usó.
 
 Para ver solo la interfaz en un navegador, con datos sintéticos simulados: `npm run dev --prefix ui` y abrir `http://localhost:5173`.
 
