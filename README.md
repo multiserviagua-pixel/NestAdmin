@@ -8,7 +8,7 @@ Asistente administrativo local para Windows descrito en [PLAN.md](PLAN.md). Ya e
 - [Instrucciones del proyecto](AGENTS.md): pautas para cambios y comprobaciones.
 - [Harness de evaluación](evaluation/README.md): 10 facturas y 20 correos sintéticos, expectativas separadas, evaluación sin red y pruebas del evaluador.
 - [Evidencias](evidence/): ejecuciones registradas de cada caso de prueba.
-- Código: `crates/core` (almacenamiento, cola y acciones idempotentes), `crates/ai` (proveedores), `crates/documents` (validación y duplicados), `crates/extract` (texto, PDF y OCR), `crates/setup` (preparación del equipo), `crates/simulators`, `crates/app` (flujos, revisión y reglas), `crates/desktop` (ventana Tauri) y `ui/` (interfaz).
+- Código: `crates/core` (almacenamiento, cola y acciones idempotentes), `crates/ai` (proveedores), `crates/documents` (validación y duplicados), `crates/extract` (texto, PDF y OCR), `crates/setup` (preparación del equipo), `crates/mail` (conectores de Microsoft 365 y Gmail), `crates/simulators`, `crates/app` (flujos, revisión y reglas), `crates/desktop` (ventana Tauri) y `ui/` (interfaz).
 - [Integración continua](.github/workflows/verify.yml): especificaciones, evaluador, interfaz y crates en Linux y Windows.
 
 ## Herramientas de desarrollo
