@@ -9,6 +9,16 @@ Preparación del asistente administrativo local para Windows descrito en [PLAN.m
 - [Harness de evaluación](evaluation/README.md): 10 facturas y 20 correos sintéticos, expectativas separadas, evaluación sin red y pruebas del evaluador.
 - [Integración continua](.github/workflows/verify.yml): comprobaciones de especificaciones y del evaluador en Linux y Windows.
 
+## Herramientas de desarrollo
+
+En Windows, `scripts/setup-dev.ps1` instala mediante winget lo que falte de Python 3.12, Node.js LTS, rustup y MSVC Build Tools, y reutiliza lo ya instalado:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/setup-dev.ps1
+```
+
+Puede requerir permisos de administrador. No instala Ollama, modelos ni OCR.
+
 ## Verificación local
 
 Con Python 3.9 o posterior, sin instalar dependencias adicionales, desde la raíz del repositorio:
