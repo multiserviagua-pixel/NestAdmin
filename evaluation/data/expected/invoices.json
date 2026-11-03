@@ -1,0 +1,150 @@
+[
+  {
+    "id": "D01",
+    "expected": {
+      "fields": {
+        "supplier": "Alba Solar SL",
+        "invoice_number": "F-001",
+        "date": "2026-01-10",
+        "subtotal": "100.00",
+        "tax": "21.00",
+        "total": "121.00"
+      },
+      "issues": []
+    }
+  },
+  {
+    "id": "D02",
+    "expected": {
+      "fields": {
+        "supplier": "Río Azul SL",
+        "invoice_number": "F-002",
+        "date": "2026-01-11",
+        "subtotal": "200.00",
+        "tax": "42.00",
+        "total": "242.00"
+      },
+      "issues": []
+    }
+  },
+  {
+    "id": "D03",
+    "expected": {
+      "fields": {
+        "supplier": "Norte SL",
+        "invoice_number": "F-003",
+        "date": "2026-01-12",
+        "subtotal": "50.00",
+        "tax": "10.50",
+        "total": "60.50"
+      },
+      "issues": []
+    }
+  },
+  {
+    "id": "D04",
+    "expected": {
+      "fields": {
+        "supplier": "Sur SL",
+        "invoice_number": "F-004",
+        "date": "2026-01-13",
+        "subtotal": "80.00",
+        "tax": "16.80",
+        "total": "96.80"
+      },
+      "issues": []
+    }
+  },
+  {
+    "id": "D05",
+    "expected": {
+      "fields": {
+        "supplier": "Este SL",
+        "invoice_number": "F-005",
+        "date": "2026-01-14",
+        "subtotal": "300.00",
+        "tax": "63.00",
+        "total": "363.00"
+      },
+      "issues": []
+    }
+  },
+  {
+    "id": "D06",
+    "expected": {
+      "fields": {
+        "supplier": "Oeste SL",
+        "invoice_number": "F-006",
+        "date": "2026-01-15",
+        "subtotal": "10.00",
+        "tax": "2.10",
+        "total": "12.10"
+      },
+      "issues": []
+    }
+  },
+  {
+    "id": "D07",
+    "expected": {
+      "fields": {
+        "supplier": "Luna SL",
+        "invoice_number": "F-007",
+        "date": "2026-01-16",
+        "subtotal": "100.00",
+        "tax": null,
+        "total": "121.00"
+      },
+      "issues": [
+        "missing_tax"
+      ]
+    }
+  },
+  {
+    "id": "D08",
+    "expected": {
+      "fields": {
+        "supplier": "Sol SL",
+        "invoice_number": "F-008",
+        "date": "2026-01-17",
+        "subtotal": "100.00",
+        "tax": "21.00",
+        "total": "130.00"
+      },
+      "issues": [
+        "total_mismatch"
+      ]
+    }
+  },
+  {
+    "id": "D09",
+    "expected": {
+      "fields": {
+        "supplier": "Alba Solar SL",
+        "invoice_number": "F-001",
+        "date": "2026-01-10",
+        "subtotal": "100.00",
+        "tax": "21.00",
+        "total": "121.00"
+      },
+      "issues": [
+        "possible_duplicate"
+      ]
+    }
+  },
+  {
+    "id": "D10",
+    "expected": {
+      "fields": {
+        "supplier": "Mar SL",
+        "invoice_number": "F-010",
+        "date": "2026-01-19",
+        "subtotal": "75.00",
+        "tax": "15.75",
+        "total": null
+      },
+      "issues": [
+        "missing_total"
+      ]
+    }
+  }
+]

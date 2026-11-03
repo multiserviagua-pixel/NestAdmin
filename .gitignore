@@ -1,0 +1,23 @@
+# Resultados de evaluación y datos locales: no se versionan.
+evaluation/results/
+evaluation/predictions/
+
+# Credenciales y configuración local.
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+
+# Cachés y artefactos generados.
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+htmlcov/
+build/
+dist/
+node_modules/
+target/
+.DS_Store
+Thumbs.db

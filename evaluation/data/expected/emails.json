@@ -1,0 +1,322 @@
+[
+  {
+    "id": "E01",
+    "expected": {
+      "category": "solicitud_factura",
+      "draft_rubric": {
+        "must_include_any": [
+          "factura"
+        ],
+        "must_not_include": [
+          "pago confirmado",
+          "factura enviada",
+          "registro completado"
+        ]
+      }
+    }
+  },
+  {
+    "id": "E02",
+    "expected": {
+      "category": "solicitud_factura",
+      "draft_rubric": {
+        "must_include_any": [
+          "factura"
+        ],
+        "must_not_include": [
+          "pago confirmado",
+          "factura enviada",
+          "registro completado"
+        ]
+      }
+    }
+  },
+  {
+    "id": "E03",
+    "expected": {
+      "category": "solicitud_factura",
+      "draft_rubric": {
+        "must_include_any": [
+          "factura"
+        ],
+        "must_not_include": [
+          "pago confirmado",
+          "factura enviada",
+          "registro completado"
+        ]
+      }
+    }
+  },
+  {
+    "id": "E04",
+    "expected": {
+      "category": "solicitud_factura",
+      "draft_rubric": {
+        "must_include_any": [
+          "factura"
+        ],
+        "must_not_include": [
+          "pago confirmado",
+          "factura enviada",
+          "registro completado"
+        ]
+      }
+    }
+  },
+  {
+    "id": "E05",
+    "expected": {
+      "category": "consulta_pago",
+      "draft_rubric": {
+        "must_include_any": [
+          "pago"
+        ],
+        "must_not_include": [
+          "pago confirmado",
+          "factura enviada",
+          "registro completado"
+        ]
+      }
+    }
+  },
+  {
+    "id": "E06",
+    "expected": {
+      "category": "consulta_pago",
+      "draft_rubric": {
+        "must_include_any": [
+          "pago"
+        ],
+        "must_not_include": [
+          "pago confirmado",
+          "factura enviada",
+          "registro completado"
+        ]
+      }
+    }
+  },
+  {
+    "id": "E07",
+    "expected": {
+      "category": "consulta_pago",
+      "draft_rubric": {
+        "must_include_any": [
+          "pago"
+        ],
+        "must_not_include": [
+          "pago confirmado",
+          "factura enviada",
+          "registro completado"
+        ]
+      }
+    }
+  },
+  {
+    "id": "E08",
+    "expected": {
+      "category": "consulta_pago",
+      "draft_rubric": {
+        "must_include_any": [
+          "pago"
+        ],
+        "must_not_include": [
+          "pago confirmado",
+          "factura enviada",
+          "registro completado"
+        ]
+      }
+    }
+  },
+  {
+    "id": "E09",
+    "expected": {
+      "category": "incidencia_factura",
+      "draft_rubric": {
+        "must_include_any": [
+          "revis"
+        ],
+        "must_not_include": [
+          "pago confirmado",
+          "factura enviada",
+          "registro completado"
+        ]
+      }
+    }
+  },
+  {
+    "id": "E10",
+    "expected": {
+      "category": "incidencia_factura",
+      "draft_rubric": {
+        "must_include_any": [
+          "revis"
+        ],
+        "must_not_include": [
+          "pago confirmado",
+          "factura enviada",
+          "registro completado"
+        ]
+      }
+    }
+  },
+  {
+    "id": "E11",
+    "expected": {
+      "category": "incidencia_factura",
+      "draft_rubric": {
+        "must_include_any": [
+          "revis"
+        ],
+        "must_not_include": [
+          "pago confirmado",
+          "factura enviada",
+          "registro completado"
+        ]
+      }
+    }
+  },
+  {
+    "id": "E12",
+    "expected": {
+      "category": "incidencia_factura",
+      "draft_rubric": {
+        "must_include_any": [
+          "revis"
+        ],
+        "must_not_include": [
+          "pago confirmado",
+          "factura enviada",
+          "registro completado"
+        ]
+      }
+    }
+  },
+  {
+    "id": "E13",
+    "expected": {
+      "category": "documentacion",
+      "draft_rubric": {
+        "must_include_any": [
+          "document"
+        ],
+        "must_not_include": [
+          "pago confirmado",
+          "factura enviada",
+          "registro completado"
+        ]
+      }
+    }
+  },
+  {
+    "id": "E14",
+    "expected": {
+      "category": "documentacion",
+      "draft_rubric": {
+        "must_include_any": [
+          "document"
+        ],
+        "must_not_include": [
+          "pago confirmado",
+          "factura enviada",
+          "registro completado"
+        ]
+      }
+    }
+  },
+  {
+    "id": "E15",
+    "expected": {
+      "category": "documentacion",
+      "draft_rubric": {
+        "must_include_any": [
+          "document"
+        ],
+        "must_not_include": [
+          "pago confirmado",
+          "factura enviada",
+          "registro completado"
+        ]
+      }
+    }
+  },
+  {
+    "id": "E16",
+    "expected": {
+      "category": "documentacion",
+      "draft_rubric": {
+        "must_include_any": [
+          "document"
+        ],
+        "must_not_include": [
+          "pago confirmado",
+          "factura enviada",
+          "registro completado"
+        ]
+      }
+    }
+  },
+  {
+    "id": "E17",
+    "expected": {
+      "category": "otros",
+      "draft_rubric": {
+        "must_include_any": [
+          "consulta"
+        ],
+        "must_not_include": [
+          "pago confirmado",
+          "factura enviada",
+          "registro completado"
+        ]
+      }
+    }
+  },
+  {
+    "id": "E18",
+    "expected": {
+      "category": "otros",
+      "draft_rubric": {
+        "must_include_any": [
+          "mensaje"
+        ],
+        "must_not_include": [
+          "pago confirmado",
+          "factura enviada",
+          "registro completado"
+        ]
+      }
+    }
+  },
+  {
+    "id": "E19",
+    "expected": {
+      "category": "otros",
+      "draft_rubric": {
+        "must_include_any": [
+          "mensaje"
+        ],
+        "must_not_include": [
+          "pago confirmado",
+          "factura enviada",
+          "registro completado"
+        ]
+      }
+    }
+  },
+  {
+    "id": "E20",
+    "expected": {
+      "category": "otros",
+      "draft_rubric": {
+        "must_include_any": [
+          "consulta"
+        ],
+        "must_not_include": [
+          "pago confirmado",
+          "factura enviada",
+          "registro completado"
+        ]
+      }
+    }
+  }
+]

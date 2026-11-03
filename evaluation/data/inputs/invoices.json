@@ -1,0 +1,72 @@
+[
+  {
+    "id": "D01",
+    "kind": "invoice",
+    "input": {
+      "text": "Factura F-001. Proveedor: Alba Solar SL. Fecha: 2026-01-10. Base: 100.00 EUR. IVA: 21.00 EUR. Total: 121.00 EUR."
+    }
+  },
+  {
+    "id": "D02",
+    "kind": "invoice",
+    "input": {
+      "text": "Factura F-002. Proveedor: Río Azul SL. Fecha: 2026-01-11. Base: 200.00 EUR. IVA: 42.00 EUR. Total: 242.00 EUR."
+    }
+  },
+  {
+    "id": "D03",
+    "kind": "invoice",
+    "input": {
+      "text": "Factura F-003. Proveedor: Norte SL. Fecha: 2026-01-12. Base: 50.00 EUR. IVA: 10.50 EUR. Total: 60.50 EUR."
+    }
+  },
+  {
+    "id": "D04",
+    "kind": "invoice",
+    "input": {
+      "text": "Factura F-004. Proveedor: Sur SL. Fecha: 2026-01-13. Base: 80.00 EUR. IVA: 16.80 EUR. Total: 96.80 EUR."
+    }
+  },
+  {
+    "id": "D05",
+    "kind": "invoice",
+    "input": {
+      "text": "Factura F-005. Proveedor: Este SL. Fecha: 2026-01-14. Base: 300.00 EUR. IVA: 63.00 EUR. Total: 363.00 EUR."
+    }
+  },
+  {
+    "id": "D06",
+    "kind": "invoice",
+    "input": {
+      "text": "Factura F-006. Proveedor: Oeste SL. Fecha: 2026-01-15. Base: 10.00 EUR. IVA: 2.10 EUR. Total: 12.10 EUR."
+    }
+  },
+  {
+    "id": "D07",
+    "kind": "invoice",
+    "input": {
+      "text": "Factura F-007. Proveedor: Luna SL. Fecha: 2026-01-16. Base: 100.00 EUR. Total: 121.00 EUR. No consta el IVA."
+    }
+  },
+  {
+    "id": "D08",
+    "kind": "invoice",
+    "input": {
+      "text": "Factura F-008. Proveedor: Sol SL. Fecha: 2026-01-17. Base: 100.00 EUR. IVA: 21.00 EUR. Total: 130.00 EUR."
+    }
+  },
+  {
+    "id": "D09",
+    "kind": "invoice",
+    "input": {
+      "text": "Factura F-001. Proveedor: Alba Solar SL. Fecha: 2026-01-10. Base: 100.00 EUR. IVA: 21.00 EUR. Total: 121.00 EUR."
+    }
+  },
+  {
+    "id": "D10",
+    "kind": "invoice",
+    "input": {
+      "text": "Factura F-010. Proveedor: Mar SL. Fecha: 2026-01-19. Base: 75.00 EUR. IVA: 15.75 EUR. No consta el total."
+    }
+  }
+]

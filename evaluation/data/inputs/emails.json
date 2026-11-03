@@ -1,0 +1,162 @@
+[
+  {
+    "id": "E01",
+    "kind": "email",
+    "input": {
+      "subject": "Mensaje de prueba 01",
+      "body": "Hola, ¿podéis enviarme una copia de la factura F-101?"
+    }
+  },
+  {
+    "id": "E02",
+    "kind": "email",
+    "input": {
+      "subject": "Mensaje de prueba 02",
+      "body": "Necesito copia de la factura F-102, gracias."
+    }
+  },
+  {
+    "id": "E03",
+    "kind": "email",
+    "input": {
+      "subject": "Mensaje de prueba 03",
+      "body": "Por favor, mandadme la factura F-103."
+    }
+  },
+  {
+    "id": "E04",
+    "kind": "email",
+    "input": {
+      "subject": "Mensaje de prueba 04",
+      "body": "Solicito la factura F-104 correspondiente al servicio."
+    }
+  },
+  {
+    "id": "E05",
+    "kind": "email",
+    "input": {
+      "subject": "Mensaje de prueba 05",
+      "body": "¿Habéis recibido el pago de la factura F-105?"
+    }
+  },
+  {
+    "id": "E06",
+    "kind": "email",
+    "input": {
+      "subject": "Mensaje de prueba 06",
+      "body": "Quisiera consultar el estado del pago F-106."
+    }
+  },
+  {
+    "id": "E07",
+    "kind": "email",
+    "input": {
+      "subject": "Mensaje de prueba 07",
+      "body": "¿Podéis confirmar si está pagada la F-107?"
+    }
+  },
+  {
+    "id": "E08",
+    "kind": "email",
+    "input": {
+      "subject": "Mensaje de prueba 08",
+      "body": "Consulto el pago pendiente de F-108."
+    }
+  },
+  {
+    "id": "E09",
+    "kind": "email",
+    "input": {
+      "subject": "Mensaje de prueba 09",
+      "body": "La factura F-109 contiene un importe incorrecto."
+    }
+  },
+  {
+    "id": "E10",
+    "kind": "email",
+    "input": {
+      "subject": "Mensaje de prueba 10",
+      "body": "Hay un error en la factura F-110; revisadlo."
+    }
+  },
+  {
+    "id": "E11",
+    "kind": "email",
+    "input": {
+      "subject": "Mensaje de prueba 11",
+      "body": "El número de factura F-111 no coincide."
+    }
+  },
+  {
+    "id": "E12",
+    "kind": "email",
+    "input": {
+      "subject": "Mensaje de prueba 12",
+      "body": "La factura F-112 aparece duplicada."
+    }
+  },
+  {
+    "id": "E13",
+    "kind": "email",
+    "input": {
+      "subject": "Mensaje de prueba 13",
+      "body": "Adjunto la documentación solicitada para el expediente."
+    }
+  },
+  {
+    "id": "E14",
+    "kind": "email",
+    "input": {
+      "subject": "Mensaje de prueba 14",
+      "body": "Os envío los documentos del expediente."
+    }
+  },
+  {
+    "id": "E15",
+    "kind": "email",
+    "input": {
+      "subject": "Mensaje de prueba 15",
+      "body": "Incluyo el documento que me pedisteis."
+    }
+  },
+  {
+    "id": "E16",
+    "kind": "email",
+    "input": {
+      "subject": "Mensaje de prueba 16",
+      "body": "Adjunto los documentos para vuestra revisión."
+    }
+  },
+  {
+    "id": "E17",
+    "kind": "email",
+    "input": {
+      "subject": "Mensaje de prueba 17",
+      "body": "¿Podemos hablar el lunes sobre el proyecto?"
+    }
+  },
+  {
+    "id": "E18",
+    "kind": "email",
+    "input": {
+      "subject": "Mensaje de prueba 18",
+      "body": "Confirmo mi asistencia a la reunión."
+    }
+  },
+  {
+    "id": "E19",
+    "kind": "email",
+    "input": {
+      "subject": "Mensaje de prueba 19",
+      "body": "Gracias por vuestra ayuda."
+    }
+  },
+  {
+    "id": "E20",
+    "kind": "email",
+    "input": {
+      "subject": "Mensaje de prueba 20",
+      "body": "Querría información general de vuestros servicios."
+    }
+  }
+]
