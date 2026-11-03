@@ -8,7 +8,9 @@ use std::path::{Path, PathBuf};
 use nestadmin_core::{
     ActionOutcome, ActionRequest, Authorization, Connector, ConnectorError, CoreError, Store,
 };
-use nestadmin_simulators::{codes, AdminSimulator, FailureMode, Invoice, MailSimulator, NewDraft};
+use nestadmin_simulators::{
+    codes, AdminSimulator, FailureMode, Invoice, MailConnector, MailSimulator, NewDraft,
+};
 use serde_json::{json, Value};
 
 /// Envoltorio que interrumpe el proceso justo antes o justo después del efecto externo.
@@ -206,6 +208,50 @@ fn register_interrupted_after_effect_is_confirmed_by_reconcile_actions() {
         .map(|e| e.status)
         .collect();
     assert_eq!(statuses, ["pending", "reconciled"]);
+}
+
+#[test]
+fn reconcile_with_failing_lookup_keeps_action_pending_until_connector_answers() {
+    let p = paths();
+    let request = {
+        let mut store = Store::open(&p.db).unwrap();
+        register_request(&mut store)
+    };
+    {
+        let admin = AdminSimulator::open(&p.admin).unwrap();
+        crash(&p.db, &request, &admin, true);
+    }
+
+    let key = request.idempotency_key();
+    let admin = AdminSimulator::open(&p.admin).unwrap();
+    let mut store = Store::open(&p.db).unwrap();
+    for mode in [FailureMode::Unavailable, FailureMode::Unauthorized] {
+        admin.set_failure(Some(mode));
+        // Sin respuesta del conector no se afirma nada: ni confirmada ni fallida.
+        assert_eq!(
+            store.reconcile_actions("register_invoice", &admin).unwrap(),
+            vec![(key.clone(), false)]
+        );
+        assert_eq!(
+            store.action_status(&key).unwrap().as_deref(),
+            Some("pending")
+        );
+    }
+
+    admin.set_failure(None);
+    assert_eq!(
+        store.reconcile_actions("register_invoice", &admin).unwrap(),
+        vec![(key.clone(), true)]
+    );
+    assert_eq!(
+        store.action_status(&key).unwrap().as_deref(),
+        Some("confirmed")
+    );
+    assert!(matches!(
+        store.perform_action(&request, &admin).unwrap(),
+        ActionOutcome::AlreadyConfirmed(_)
+    ));
+    assert_eq!(admin.record_count().unwrap(), 3, "sin registro duplicado");
 }
 
 #[test]

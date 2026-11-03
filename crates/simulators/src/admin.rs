@@ -7,6 +7,7 @@ use nestadmin_core::{Connector, ConnectorError};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::contracts::AdminConnector;
 use crate::state::SimState;
 use crate::{check_key, codes, error, FailureMode, SimResult};
 
@@ -25,7 +26,7 @@ pub struct Invoice {
     pub total: Option<String>,
 }
 
-/// Criterios de búsqueda; los campos `None` no filtran. Sin criterios se devuelven todas.
+/// Criterios de búsqueda; los campos `None` no se comparan. Sin criterios se devuelven todas.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InvoiceCriteria {
     pub supplier: Option<String>,
@@ -34,12 +35,15 @@ pub struct InvoiceCriteria {
     pub total: Option<String>,
 }
 
-/// Candidato encontrado y motivos de la coincidencia; no es una decisión de duplicado.
+/// Candidato encontrado; no es una decisión de duplicado.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InvoiceMatch {
     pub record_id: String,
     pub invoice: Invoice,
+    /// Criterios que coinciden ("mismo proveedor", "mismo número"...).
     pub reasons: Vec<String>,
+    /// Criterios que no coinciden: valor distinto o ausente en el registro.
+    pub differences: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -90,56 +94,98 @@ impl AdminSimulator {
         self.state.set_failure(failure);
     }
 
-    /// Facturas registradas que cumplen todos los criterios presentes. Un registro sin el
-    /// campo pedido no coincide: la ausencia no se interpreta como igualdad.
-    pub fn find_invoices(&self, criteria: &InvoiceCriteria) -> SimResult<Vec<InvoiceMatch>> {
+    /// Número de facturas registradas, incluidas las de ejemplo.
+    pub fn record_count(&self) -> SimResult<usize> {
+        self.state.read(|s| Ok(s.records.len()))
+    }
+}
+
+impl AdminConnector for AdminSimulator {
+    /// Facturas registradas que coinciden en al menos un criterio, primero las que coinciden
+    /// en más. Cada candidato explica qué coincide y qué difiere, para que un mismo proveedor
+    /// y número con otro total aparezca como posible duplicado. Un registro sin el campo
+    /// pedido no coincide en él: la ausencia se indica, no se interpreta como igualdad.
+    fn find_invoices(&self, criteria: &InvoiceCriteria) -> SimResult<Vec<InvoiceMatch>> {
         if let Some(date) = &criteria.date {
             check_date(date)?;
         }
         let total = criteria.total.as_deref().map(parse_decimal).transpose()?;
+        let any_criteria = *criteria != InvoiceCriteria::default();
         self.state.read(|s| {
             let mut matches = Vec::new();
             for record in &s.records {
                 let inv = &record.invoice;
                 let mut reasons = Vec::new();
-                let mut ok = true;
+                let mut differences = Vec::new();
+                let mut note = |outcome: Comparison, labels: [&str; 3]| {
+                    match outcome {
+                        Comparison::Same => reasons.push(labels[0].to_owned()),
+                        Comparison::Different => differences.push(labels[1].to_owned()),
+                        Comparison::Missing => differences.push(labels[2].to_owned()),
+                    };
+                };
                 if let Some(wanted) = &criteria.supplier {
-                    ok &= same(&inv.supplier, wanted, |a, b| {
-                        a.trim().to_lowercase() == b.trim().to_lowercase()
-                    });
-                    reasons.push("mismo proveedor".to_owned());
+                    note(
+                        compare(inv.supplier.as_deref(), |v| {
+                            v.trim().to_lowercase() == wanted.trim().to_lowercase()
+                        }),
+                        [
+                            "mismo proveedor",
+                            "proveedor distinto",
+                            "proveedor ausente en el registro",
+                        ],
+                    );
                 }
                 if let Some(wanted) = &criteria.number {
-                    ok &= same(&inv.number, wanted, |a, b| a.trim() == b.trim());
-                    reasons.push("mismo número".to_owned());
+                    note(
+                        compare(inv.number.as_deref(), |v| v.trim() == wanted.trim()),
+                        [
+                            "mismo número",
+                            "número distinto",
+                            "número ausente en el registro",
+                        ],
+                    );
                 }
                 if let Some(wanted) = &criteria.date {
-                    ok &= same(&inv.date, wanted, |a, b| a == b);
-                    reasons.push("misma fecha".to_owned());
+                    note(
+                        compare(inv.date.as_deref(), |v| v == wanted),
+                        [
+                            "misma fecha",
+                            "fecha distinta",
+                            "fecha ausente en el registro",
+                        ],
+                    );
                 }
                 if let Some(wanted) = &total {
-                    ok &= inv
-                        .total
-                        .as_deref()
-                        .and_then(|t| parse_decimal(t).ok())
-                        .is_some_and(|t| t == *wanted);
-                    reasons.push("mismo total".to_owned());
+                    note(
+                        compare(inv.total.as_deref(), |v| {
+                            parse_decimal(v).is_ok_and(|t| t == *wanted)
+                        }),
+                        [
+                            "mismo total",
+                            "total distinto",
+                            "total ausente en el registro",
+                        ],
+                    );
                 }
-                if ok {
+                if !any_criteria || !reasons.is_empty() {
                     matches.push(InvoiceMatch {
                         record_id: record.id.clone(),
                         invoice: inv.clone(),
                         reasons,
+                        differences,
                     });
                 }
             }
+            // Orden estable: a igual número de coincidencias se conserva el de registro.
+            matches.sort_by_key(|m| std::cmp::Reverse(m.reasons.len()));
             Ok(matches)
         })
     }
 
     /// Registra una factura una sola vez por clave. Repetir la clave con la misma factura
     /// devuelve el recibo original; con otra factura, `conflict`.
-    pub fn register_invoice(
+    fn register_invoice(
         &self,
         invoice: &Invoice,
         idempotency_key: &str,
@@ -153,7 +199,7 @@ impl AdminSimulator {
                 .find(|r| r.idempotency_key.as_deref() == Some(idempotency_key))
             {
                 if record.invoice == *invoice {
-                    return Ok((record.receipt(), false));
+                    return Ok((record.receipt(idempotency_key), false));
                 }
                 return Err(error(
                     codes::CONFLICT,
@@ -165,15 +211,10 @@ impl AdminSimulator {
                 invoice: invoice.clone(),
                 idempotency_key: Some(idempotency_key.to_owned()),
             };
-            let receipt = record.receipt();
+            let receipt = record.receipt(idempotency_key);
             s.records.push(record);
             Ok((receipt, true))
         })
-    }
-
-    /// Número de facturas registradas, incluidas las de ejemplo.
-    pub fn record_count(&self) -> SimResult<usize> {
-        self.state.read(|s| Ok(s.records.len()))
     }
 }
 
@@ -184,7 +225,7 @@ impl Connector for AdminSimulator {
             s.records
                 .iter()
                 .find(|r| r.idempotency_key.as_deref() == Some(key))
-                .map(|r| to_value(&r.receipt()))
+                .map(|r| to_value(&r.receipt(key)))
                 .transpose()
         })
     }
@@ -212,18 +253,30 @@ impl AdminState {
 }
 
 impl Record {
-    /// Solo se llama para registros creados por una acción, que siempre tienen clave.
-    fn receipt(&self) -> InvoiceReceipt {
+    /// Recibo de la acción identificada por `key`, con la que se encontró el registro; así
+    /// un registro de ejemplo, que no tiene clave, nunca muestra una clave inventada.
+    fn receipt(&self, key: &str) -> InvoiceReceipt {
         InvoiceReceipt {
             record_id: self.id.clone(),
-            idempotency_key: self.idempotency_key.clone().unwrap_or_default(),
+            idempotency_key: key.to_owned(),
             invoice: self.invoice.clone(),
         }
     }
 }
 
-fn same(field: &Option<String>, wanted: &str, eq: impl Fn(&str, &str) -> bool) -> bool {
-    field.as_deref().is_some_and(|value| eq(value, wanted))
+/// Resultado de comparar un campo del registro con un criterio.
+enum Comparison {
+    Same,
+    Different,
+    Missing,
+}
+
+fn compare(field: Option<&str>, eq: impl Fn(&str) -> bool) -> Comparison {
+    match field {
+        None => Comparison::Missing,
+        Some(value) if eq(value) => Comparison::Same,
+        Some(_) => Comparison::Different,
+    }
 }
 
 fn validate_invoice(invoice: &Invoice) -> SimResult<()> {
@@ -257,13 +310,27 @@ fn validate_invoice(invoice: &Invoice) -> SimResult<()> {
     Ok(())
 }
 
+/// Exige una fecha `AAAA-MM-DD` existente: el día se comprueba contra la longitud del mes,
+/// con años bisiestos.
 fn check_date(date: &str) -> SimResult<()> {
     let parts: Vec<&str> = date.split('-').collect();
-    let valid = matches!(parts.as_slice(), [y, m, d]
-        if y.len() == 4 && m.len() == 2 && d.len() == 2
-            && date.bytes().all(|b| b.is_ascii_digit() || b == b'-')
-            && (1..=12).contains(&m.parse::<u8>().unwrap_or(0))
-            && (1..=31).contains(&d.parse::<u8>().unwrap_or(0)));
+    let fields = match parts.as_slice() {
+        [y, m, d]
+            if y.len() == 4
+                && m.len() == 2
+                && d.len() == 2
+                && date.bytes().all(|b| b.is_ascii_digit() || b == b'-') =>
+        {
+            y.parse::<u32>()
+                .ok()
+                .zip(m.parse::<u32>().ok())
+                .zip(d.parse::<u32>().ok())
+        }
+        _ => None,
+    };
+    let valid = fields.is_some_and(|((year, month), day)| {
+        (1..=12).contains(&month) && (1..=days_in_month(year, month)).contains(&day)
+    });
     if valid {
         Ok(())
     } else {
@@ -271,6 +338,16 @@ fn check_date(date: &str) -> SimResult<()> {
             codes::INVALID_INPUT,
             format!("fecha no válida (AAAA-MM-DD): {date}"),
         ))
+    }
+}
+
+fn days_in_month(year: u32, month: u32) -> u32 {
+    let leap = (year.is_multiple_of(4) && !year.is_multiple_of(100)) || year.is_multiple_of(400);
+    match month {
+        4 | 6 | 9 | 11 => 30,
+        2 if leap => 29,
+        2 => 28,
+        _ => 31,
     }
 }
 

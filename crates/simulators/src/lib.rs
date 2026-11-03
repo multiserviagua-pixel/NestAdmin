@@ -1,13 +1,15 @@
 //! Simuladores locales de correo y administración (R06). Implementan los contratos de
-//! contratos.md y el trait `Connector` del núcleo sin ningún cliente de red: el estado vive
-//! en memoria y, opcionalmente, en un archivo JSON local para sobrevivir a un reinicio.
-//! Todos los datos de ejemplo son sintéticos.
+//! contratos.md (traits `MailConnector` y `AdminConnector`, que extienden el `Connector` del
+//! núcleo) sin ningún cliente de red: el estado vive en memoria y, opcionalmente, en un
+//! archivo JSON local para sobrevivir a un reinicio. Todos los datos de ejemplo son sintéticos.
 
 pub mod admin;
+pub mod contracts;
 pub mod mail;
 mod state;
 
 pub use admin::{AdminSimulator, Invoice, InvoiceCriteria, InvoiceMatch, InvoiceReceipt};
+pub use contracts::{AdminConnector, MailConnector};
 pub use mail::{Draft, MailSimulator, Message, MessagePage, NewDraft, SendReceipt};
 pub use nestadmin_core::ConnectorError;
 
