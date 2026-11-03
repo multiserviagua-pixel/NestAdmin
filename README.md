@@ -27,8 +27,9 @@ Con Python 3.9 o posterior, sin instalar dependencias adicionales, desde la raí
 python scripts/check.py
 python -m unittest discover -s scripts/tests -v
 python -m unittest discover -s evaluation/tests -v
+cargo test
 ```
 
-Estas comprobaciones verifican la estructura y trazabilidad documental y el funcionamiento del evaluador; no acreditan los criterios de aceptación del producto. El protocolo para puntuar y comparar predicciones existentes se encuentra en [evaluation/README.md](evaluation/README.md). No se han medido todavía Ollama ni Groq; el evaluador no invoca modelos ni mide por sí mismo tiempo o memoria.
+`cargo test` prueba el núcleo de `crates/core` (almacenamiento, cola durable y acciones idempotentes); todavía no existe la aplicación de escritorio. Estas comprobaciones verifican la estructura y trazabilidad documental y el funcionamiento del evaluador; no acreditan los criterios de aceptación del producto. El protocolo para puntuar y comparar predicciones existentes se encuentra en [evaluation/README.md](evaluation/README.md). No se han medido todavía Ollama ni Groq; el evaluador no invoca modelos ni mide por sí mismo tiempo o memoria.
 
 La construcción y el empaquetado de Windows quedan pendientes de implementar junto con la aplicación y de fijar versiones de sus herramientas y dependencias. También quedan pendientes las pruebas de interfaz, OCR, instalador, privacidad y hardware objetivo. Los resultados locales de evaluación se guardan fuera del contenido del usuario y están excluidos de Git.
