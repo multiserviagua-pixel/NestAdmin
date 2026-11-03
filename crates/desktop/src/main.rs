@@ -17,6 +17,7 @@ use nestadmin_ai::credentials::GROQ_API_KEY;
 use nestadmin_ai::{CredentialStore, ProviderChoice, Secret};
 use nestadmin_app::{App, AppPaths, ProviderInfo};
 use nestadmin_core::{AuditEntry, Rule, Task};
+use nestadmin_extract::{Extractor, Tesseract};
 use serde::Serialize;
 use serde_json::Value;
 use tauri::menu::{Menu, MenuItem};
@@ -67,20 +68,42 @@ fn tasks(shared: State<'_, SharedState>) -> CmdResult<Vec<Task>> {
     shared.app()?.tasks().map_err(text)
 }
 
+/// Recibe el archivo como cuerpo binario de la llamada y su nombre, codificado con
+/// `encodeURIComponent`, en la cabecera `x-nestadmin-name`.
 #[tauri::command]
-fn import_document(
+fn import_file(
     shared: State<'_, SharedState>,
     handle: AppHandle,
-    name: String,
-    text_content: String,
+    request: tauri::ipc::Request<'_>,
 ) -> CmdResult<Task> {
-    let task = shared
-        .app()?
-        .import_document(&name, &text_content)
-        .map_err(text)?;
+    let tauri::ipc::InvokeBody::Raw(bytes) = request.body() else {
+        return Err("el archivo debe enviarse como datos binarios".into());
+    };
+    let name = request
+        .headers()
+        .get("x-nestadmin-name")
+        .and_then(|v| v.to_str().ok())
+        .and_then(percent_decode)
+        .ok_or("falta el nombre del archivo")?;
+    let task = shared.app()?.import_file(&name, bytes).map_err(text)?;
     shared.wake();
     changed(&handle);
     Ok(task)
+}
+
+/// Decodifica `%XX` (UTF-8); `None` si la secuencia no es válida.
+fn percent_decode(text: &str) -> Option<String> {
+    let mut bytes = Vec::with_capacity(text.len());
+    let mut input = text.bytes();
+    while let Some(byte) = input.next() {
+        if byte == b'%' {
+            let hex = [input.next()?, input.next()?];
+            bytes.push(u8::from_str_radix(std::str::from_utf8(&hex).ok()?, 16).ok()?);
+        } else {
+            bytes.push(byte);
+        }
+    }
+    String::from_utf8(bytes).ok()
 }
 
 #[tauri::command]
@@ -293,13 +316,45 @@ fn data_dir(handle: &AppHandle) -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("NestAdmin"))
 }
 
+/// Ubica un componente local: la variable de entorno, junto al ejecutable (instalación) o,
+/// en compilaciones de desarrollo, `vendor/` del repositorio (`scripts/setup-ocr.ps1`).
+fn component_dir(variable: &str, installed: &str, vendor: &str) -> PathBuf {
+    if let Some(dir) = std::env::var_os(variable) {
+        return PathBuf::from(dir);
+    }
+    let beside_exe = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(|dir| dir.join(installed)));
+    match beside_exe {
+        Some(dir) if dir.exists() || !cfg!(debug_assertions) => dir,
+        _ => PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../vendor")
+            .join(vendor),
+    }
+}
+
+/// Extracción local: PDFium para PDF y Tesseract para páginas escaneadas. Si falta algún
+/// componente, las tareas afectadas fallan con el motivo; no se envía nada fuera.
+fn extractor() -> Extractor {
+    let tesseract = std::env::var_os("NESTADMIN_TESSERACT")
+        .map(PathBuf::from)
+        .unwrap_or_else(Tesseract::default_executable);
+    Extractor::new(
+        component_dir("NESTADMIN_PDFIUM_DIR", "pdfium", "pdfium/bin"),
+        Box::new(Tesseract::new(
+            tesseract,
+            component_dir("NESTADMIN_TESSDATA", "tessdata", "tessdata"),
+        )),
+    )
+}
+
 fn setup(handle: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
     let data_dir = data_dir(handle);
     std::fs::create_dir_all(&data_dir)?;
     let credentials = credential_store();
     let settings = Settings::load(&data_dir);
     let provider = provider_for(&settings.provider, credentials.as_ref());
-    let app = App::open(&AppPaths::new(&data_dir), provider)?;
+    let app = App::open(&AppPaths::new(&data_dir), provider, Arc::new(extractor()))?;
     let (sender, receiver) = mpsc::channel();
     let shared = Arc::new(Shared {
         app: Mutex::new(app),
@@ -368,7 +423,7 @@ fn main() {
         })
         .invoke_handler(tauri::generate_handler![
             tasks,
-            import_document,
+            import_file,
             fetch_mail,
             approve,
             edit_draft,

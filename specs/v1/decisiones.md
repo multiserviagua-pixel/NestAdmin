@@ -30,6 +30,12 @@ Registro fechado de decisiones que concretan [requisitos.md](requisitos.md). Una
 - **D18 Datos y configuración.** Datos en `%LOCALAPPDATA%\NestAdmin` (`NESTADMIN_DATA_DIR` lo sustituye para pruebas). La elección de proveedor se guarda en `configuracion.json`; la clave de Groq solo en el almacén de credenciales (D13). Una elección guardada que no se puede preparar no se sustituye por otra al arrancar (flujo 4).
 - **D19 CI.** La aplicación de escritorio se compila y analiza solo en Windows; en Linux se excluye `nestadmin-desktop`, que necesita WebKitGTK y no es un objetivo de la v1.
 
+## 2026-11-03 — PDF y OCR (resto de la fase 5)
+
+- **D20 Extracción.** `crates/extract` concreta D09 y D10: PDFium `chromium/8125` (bblanchon/pdfium-binaries) con `pdfium-render` 0.9.5; umbral inicial de 20 caracteres visibles por página; rasterizado a 300 ppp en escala de grises; Tesseract con `spa+eng` y `--psm 3`, sin ventana de consola. Un fallo en cualquier página hace fallar el documento entero.
+- **D21 Datos de idioma propios.** El instalador silencioso de UB Mannheim solo trae inglés, así que NestAdmin usa su propia carpeta `tessdata` (`spa` y `eng` de tesseract-ocr/tessdata 4.1.0, comprobados por SHA-256) mediante `--tessdata-dir`. En desarrollo, `scripts/setup-ocr.ps1` prepara PDFium y los datos en `vendor/`; la aplicación instalada los buscará junto al ejecutable (T08). `NESTADMIN_PDFIUM_DIR`, `NESTADMIN_TESSDATA` y `NESTADMIN_TESSERACT` los sustituyen.
+- **D22 Importación binaria.** La ventana envía el archivo como cuerpo binario de la llamada IPC, con el nombre en una cabecera, en lugar de un JSON con números. Se admiten `.txt` y `.pdf` de hasta 50 MB.
+
 ## Versiones de desarrollo fijadas
 
 | Componente | Versión | Licencia | Dónde se fija |
@@ -42,8 +48,9 @@ Registro fechado de decisiones que concretan [requisitos.md](requisitos.md). Una
 | Vite / TypeScript | 8.3.5 / 7.0.2 | MIT / Apache-2.0 | `ui/package-lock.json` |
 | Ollama | 0.40.14 | MIT | instalador |
 | Qwen3 8B | `qwen3:8b` (digest a registrar al descargar) | Apache-2.0 | instalador y evaluación |
-| Tesseract | 5.4.0 (build UB Mannheim) | Apache-2.0 | instalador |
-| PDFium | por fijar al integrar D09 | BSD-3/Apache-2.0 | instalador |
+| Tesseract | 5.4.0 (build UB Mannheim) | Apache-2.0 | instalador, `scripts/setup-ocr.ps1` |
+| Datos de idioma Tesseract | tessdata 4.1.0 (`spa`, `eng`) | Apache-2.0 | `scripts/setup-ocr.ps1` (SHA-256) |
+| PDFium / pdfium-render | `chromium/8125` / 0.9.5 | BSD-3/Apache-2.0 / MIT-Apache-2.0 | `scripts/setup-ocr.ps1` (SHA-256), `Cargo.lock` |
 
 Las dependencias de Rust y npm quedan fijadas por sus archivos de bloqueo, que se versionan. Cambiar una versión de esta tabla requiere una entrada nueva en este registro.
 

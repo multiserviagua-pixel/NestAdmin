@@ -53,8 +53,13 @@ class CheckTests(unittest.TestCase):
         self.edit_matrix('| R02 | T02:', '| R02 | T01:')
         self.assertIn('Los identificadores de prueba deben ser únicos.', check.check(self.root))
 
+    def add_pending_row(self):
+        # Fila propia de la prueba, para no depender del estado real de la matriz.
+        self.edit_matrix('| R03 |', '| R03 | T99: caso de la prueba. | Pendiente |\n| R03 |')
+
     def test_fulfilled_status_requires_existing_evidence(self):
-        self.edit_matrix('verificar incidencia recuperable. | Pendiente |', 'verificar incidencia recuperable. | Cumplido |')
+        self.add_pending_row()
+        self.edit_matrix('caso de la prueba. | Pendiente |', 'caso de la prueba. | Cumplido |')
         self.assertTrue(any('requiere un enlace' in e for e in check.check(self.root)))
         self.edit_matrix('| Cumplido |', '| Cumplido — [evidencia](../../evidence/t01.md) |')
         self.assertTrue(any('enlace roto' in e for e in check.check(self.root)))
@@ -63,7 +68,8 @@ class CheckTests(unittest.TestCase):
         self.assertEqual(check.check(self.root), [])
 
     def test_unknown_status_and_missing_file_fail(self):
-        self.edit_matrix('recuperable. | Pendiente |', 'recuperable. | Hecho |')
+        self.add_pending_row()
+        self.edit_matrix('caso de la prueba. | Pendiente |', 'caso de la prueba. | Hecho |')
         (self.root / 'specs/v1/decisiones.md').unlink()
         errors = check.check(self.root)
         self.assertTrue(any("estado desconocido 'Hecho'" in e for e in errors))
