@@ -1,12 +1,13 @@
 [package]
 name = "nestadmin-setup"
 version = "0.1.0"
-description = "Preparación de NestAdmin en el primer arranque: detecta, descarga e instala Ollama, el modelo y Tesseract, y verifica la IA local."
+description = "Preparación de componentes locales: OCR del paquete, Ollama, servicio, modelo y verificación real de la IA local (R08, D36–D40)."
 edition.workspace = true
 license.workspace = true
 publish.workspace = true
 
 [dependencies]
+nestadmin-ai = { path = "../ai" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"

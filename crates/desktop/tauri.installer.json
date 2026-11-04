@@ -5,14 +5,16 @@
       "../../vendor/pdfium/bin/pdfium.dll": "pdfium/pdfium.dll",
       "../../vendor/pdfium/LICENSE": "pdfium/LICENSE",
       "../../vendor/tessdata/spa.traineddata": "tessdata/spa.traineddata",
-      "../../vendor/tessdata/eng.traineddata": "tessdata/eng.traineddata"
+      "../../vendor/tessdata/eng.traineddata": "tessdata/eng.traineddata",
+      "../../vendor/tesseract/*": "tesseract/"
     },
     "windows": {
       "webviewInstallMode": { "type": "downloadBootstrapper", "silent": true },
       "nsis": {
         "installMode": "currentUser",
         "languages": ["Spanish"],
-        "displayLanguageSelector": false
+        "displayLanguageSelector": false,
+        "installerHooks": "./installer-hooks.nsh"
       }
     }
   }

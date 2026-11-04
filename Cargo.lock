@@ -2350,6 +2350,7 @@ dependencies = [
 name = "nestadmin-setup"
 version = "0.1.0"
 dependencies = [
+ "nestadmin-ai",
  "serde",
  "serde_json",
  "sha2",

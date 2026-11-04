@@ -1,7 +1,7 @@
 // Servidor simulado para ver la interfaz en un navegador sin Tauri. Imita los comandos
 // reales con datos sintéticos (dominio .test); no decide nada que la capa Rust no decida.
 
-import type { AuditEntry, ComponentStatus, ProviderChoice, Rule, SettingsView, SetupComponent, SetupEvent, Task } from "./types";
+import type { AuditEntry, ProviderChoice, Rule, SettingsView, SetupDone, SetupEvent, SetupStep, Startup, StepState, Task } from "./types";
 
 const now = () => Date.now();
 const listeners: Array<() => void> = [];
@@ -14,32 +14,67 @@ const audit: AuditEntry[] = [];
 let choice: ProviderChoice = { provider: "ollama", base_url: "http://127.0.0.1:11434", model: "qwen3:8b" };
 let groqKey = false;
 
-// Preparación simulada: falta Tesseract y el modelo; la instalación avanza por pasos.
+// Preparación simulada: Ollama está instalado y en marcha, falta el modelo. La primera
+// descarga del modelo se corta una vez para mostrar el reintento. `?preparar` en la URL
+// imita el modo del instalador.
 const setupListeners: Array<(event: SetupEvent) => void> = [];
-let installing: SetupComponent | null = null;
-const components: ComponentStatus[] = [
-  { component: "webview2", state: "present", version: "130.0.2849.80", installable: false, detail: "Motor de la ventana de Windows." },
-  { component: "pdfium", state: "present", version: null, installable: false, detail: "Incluido con NestAdmin." },
-  { component: "tessdata", state: "present", version: "spa, eng", installable: false, detail: "Datos de idioma del OCR, incluidos con NestAdmin." },
-  { component: "tesseract", state: "missing", installable: true, detail: "Necesario para PDF escaneados (unos 50 MB; pedirá permiso de administrador)." },
-  { component: "ollama", state: "present", version: "0.40.14", installable: true, detail: "Servicio de IA local en 127.0.0.1." },
-  { component: "model", state: "missing", installable: true, detail: "Modelo qwen3:8b (unos 5,2 GB)." },
-];
+const doneListeners: Array<(done: SetupDone) => void> = [];
+const startupListeners: Array<(startup: Startup) => void> = [];
+const prepareOnly = new URLSearchParams(location.search).has("preparar");
+let modelPresent = false;
+let preparing: { cancelled: boolean } | null = null;
 
-function simulateInstall(component: SetupComponent) {
-  const total = component === "model" ? 5_200_000_000 : 50_000_000;
-  let done = 0;
-  const emit = (event: SetupEvent) => setupListeners.forEach((l) => l(event));
-  const tick = () => {
-    done = Math.min(total, done + total / 8);
-    emit({ component, progress: { component, step: "Descargando", done, total }, finished: false, error: null });
-    if (done < total) return void setTimeout(tick, 300);
-    const status = components.find((c) => c.component === component)!;
-    Object.assign(status, { state: "present", version: component === "model" ? "500a1f067a9f" : "5.4.0.20240606" });
-    installing = null;
-    emit({ component, progress: null, finished: true, error: null });
+function simulatePreparation(run: { cancelled: boolean }) {
+  let last: SetupStep = "ocr";
+  const emit = (step: SetupStep, state: StepState, message: string, done: number | null = null, total: number | null = null) => {
+    last = step;
+    setupListeners.forEach((l) => l({ step, state, message, done, total }));
   };
-  setTimeout(tick, 300);
+  const finish = (result: SetupDone) => {
+    preparing = null;
+    doneListeners.forEach((l) => l(result));
+  };
+  const plan: Array<() => void> = [
+    () => emit("ocr", "running", "Comprobando el OCR incluido"),
+    () => emit("ocr", "done", "Tesseract 5.4.0.20240606 con spa y eng"),
+    () => emit("ollama", "skipped", "Ollama 0.40.14 ya instalado"),
+    () => emit("service", "skipped", "Ollama ya está en marcha"),
+  ];
+  const total = 5_200_000_000;
+  if (!modelPresent) {
+    for (let i = 1; i <= 4; i++) plan.push(() => emit("model", "running", "Descargando qwen3:8b", (total / 8) * i, total));
+    plan.push(() => emit("model", "running", "Reintento 2 de 3: la conexión se cortó"));
+    for (let i = 5; i <= 8; i++) plan.push(() => emit("model", "running", "Descargando qwen3:8b", (total / 8) * i, total));
+    plan.push(() => ((modelPresent = true), emit("model", "done", "Modelo qwen3:8b descargado")));
+  } else {
+    plan.push(() => emit("model", "skipped", "El modelo qwen3:8b ya está descargado"));
+  }
+  plan.push(() => emit("verify", "running", "Pidiendo una respuesta al modelo local"));
+  plan.push(() => emit("verify", "done", "El modelo respondió en 2,4 s"));
+  let step = 0;
+  const tick = () => {
+    if (run.cancelled) {
+      emit(last, "failed", "Preparación cancelada");
+      return finish({ report: null, error: { code: "cancelled", message: "Preparación cancelada" } });
+    }
+    const next = plan[step++];
+    if (next) {
+      next();
+      return void setTimeout(tick, 350);
+    }
+    finish({
+      report: {
+        ollama_version: "0.40.14",
+        ollama_installed: false,
+        model: "qwen3:8b",
+        model_digest: "500a1f067a9f",
+        answer: "listo",
+        latency_ms: 2400,
+      },
+      error: null,
+    });
+  };
+  setTimeout(tick, 200);
 }
 
 function task(kind: string, input: object, state: Task["state"], result: Task["result"], error: Task["error"] = null) {
@@ -206,24 +241,29 @@ const handlers: Record<string, (a: any, options?: any) => unknown> = {
   delete_groq_key: () => {
     groqKey = false;
   },
-  setup_status: () => ({ components: structuredClone(components), installing }),
-  setup_install: ({ component }) => {
-    if (installing) throw `ya se está preparando ${installing}; espere a que termine`;
-    const status = components.find((c) => c.component === component);
-    if (!status?.installable) throw "este componente se incluye con el instalador de NestAdmin; reinstálelo";
-    if (status.state === "present") {
-      // Como en Rust: lo ya presente termina enseguida sin tocarlo.
-      setTimeout(() => setupListeners.forEach((l) => l({ component, progress: null, finished: true, error: null })), 0);
-      return;
-    }
-    installing = component;
-    simulateInstall(component);
+  launch_mode: () => ({
+    prepare_only: prepareOnly,
+    preparing: preparing !== null,
+    startup: prepareOnly ? null : startup(),
+  }),
+  setup_check: () => (modelPresent ? { status: "ready" } : { status: "missing", component: "model" }),
+  setup_prepare: () => {
+    if (preparing) throw "la preparación ya está en curso";
+    preparing = { cancelled: false };
+    simulatePreparation(preparing);
   },
-  setup_verify: () => {
-    if (components.find((c) => c.component === "model")?.state !== "present") throw "IA local: model 'qwen3:8b' not found";
-    return { model: "qwen3:8b", answer: "listo", latency_ms: 2400 };
+  setup_cancel: () => {
+    if (preparing) preparing.cancelled = true;
+  },
+  setup_abandon: () => {
+    if (preparing) preparing.cancelled = true;
   },
 };
+
+function startup(): Startup {
+  if (choice.provider !== "ollama") return { outcome: "not_local" };
+  return modelPresent ? { outcome: "ready" } : { outcome: "needs_preparation", check: { status: "missing", component: "model" } };
+}
 
 const mutating = new Set(["import_file", "approve", "edit_draft", "reject", "retry", "create_rule", "update_rule", "set_rule_active"]);
 
@@ -245,4 +285,12 @@ export function onChanged(handler: () => void) {
 
 export function onSetup(handler: (event: SetupEvent) => void) {
   setupListeners.push(handler);
+}
+
+export function onSetupDone(handler: (done: SetupDone) => void) {
+  doneListeners.push(handler);
+}
+
+export function onStartup(handler: (startup: Startup) => void) {
+  startupListeners.push(handler);
 }

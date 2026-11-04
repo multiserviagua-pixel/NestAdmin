@@ -11,6 +11,15 @@ Estos contratos son independientes del transporte y no afirman que existan imple
 - Errores: proveedor no disponible (`unavailable`), credenciales inválidas (`unauthorized`), límite de tiempo (`timeout`), respuesta que no cumple el formato esperado (`invalid_response`). Ninguno autoriza cambiar a otro proveedor. El adaptador local solo envía contenido a la instancia local configurada; el externo solo se invoca tras su selección explícita.
 - Selección inicial: Ollama / Qwen3 8B. El identificador y versión concretos del modelo deberán registrarse en cada evaluación. Groq es el primer adaptador externo.
 
+## Preparación de componentes locales
+
+`check() -> status`, `prepare(events) -> report | error` (D36–D39).
+
+- `check` es rápida y no descarga nada: devuelve `ready` (servicio, modelo y OCR disponibles), `stopped` (Ollama instalado pero sin responder) o `missing` con el componente que falta (`ollama`, `ollama_outdated`, `model` u `ocr`).
+- `prepare` recorre los pasos `ocr`, `ollama`, `service`, `model` y `verify` en ese orden; reutiliza lo que ya está y solo actúa sobre lo que falta. Emite eventos con el paso, su estado (`running`, `done`, `skipped`, `failed`), bytes descargados y totales cuando se conocen y un mensaje legible. Repetirla tras un fallo o una interrupción no duplica instalaciones ni descargas completas.
+- El informe indica la versión de Ollama, si se instaló o se reutilizó, el modelo y su digest cuando Ollama lo informa, y la respuesta de verificación.
+- Errores: `network` (descarga o conexión fallida, reintentable), `signature` (instalador sin firma válida del editor esperado; no se ejecuta), `install_failed` (el instalador de Ollama terminó con error), `unavailable` (el servicio no responde tras arrancarlo), `model_failed` (Ollama rechazó la descarga del modelo, por ejemplo por espacio), `verify_failed` (el modelo no dio una respuesta válida), `ocr_missing` (faltan o no responden los componentes de OCR del paquete; reinstalar lo corrige) y `cancelled`. Ningún error activa un proveedor externo.
+
 ## Correo
 
 `list_messages(cursor) -> page`, `create_draft(message_id, draft, idempotency_key) -> draft_id`, `send_draft(draft_id, idempotency_key) -> receipt`. Los mensajes y borradores tienen ID estable, asunto, remitente/destinatarios, cuerpo y fecha cuando estén disponibles. El envío es una acción sujeta a revisión o regla. El simulador conserva y expone sus acciones sin conexión a cuentas reales.

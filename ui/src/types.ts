@@ -51,39 +51,62 @@ export interface SettingsView {
   data_dir: string;
 }
 
-export type SetupComponent = "webview2" | "pdfium" | "tessdata" | "tesseract" | "ollama" | "model";
+// Preparación de componentes locales (R08, contrato «Preparación de componentes locales»).
 
-export interface ComponentStatus {
-  component: SetupComponent;
-  state: "present" | "stopped" | "missing" | "incompatible";
-  version?: string | null;
-  found?: string;
-  required?: string;
-  installable: boolean;
-  detail: string;
+export type SetupStep = "ocr" | "ollama" | "service" | "model" | "verify";
+export type StepState = "running" | "done" | "skipped" | "failed";
+export type SetupErrorCode =
+  | "network"
+  | "signature"
+  | "install_failed"
+  | "unavailable"
+  | "model_failed"
+  | "verify_failed"
+  | "ocr_missing"
+  | "cancelled";
+
+export interface SetupError {
+  code: SetupErrorCode;
+  message: string;
 }
 
-export interface Preparation {
-  components: ComponentStatus[];
-  installing: SetupComponent | null;
-}
-
-export interface SetupProgress {
-  component: string;
-  step: string;
-  done: number | null;
-  total: number | null;
-}
+export type SetupCheck =
+  | { status: "ready" }
+  | { status: "stopped" }
+  | { status: "missing"; component: "ollama" | "ollama_outdated" | "model" | "ocr" };
 
 export interface SetupEvent {
-  component: SetupComponent;
-  progress: SetupProgress | null;
-  finished: boolean;
-  error: string | null;
+  step: SetupStep;
+  state: StepState;
+  done: number | null;
+  total: number | null;
+  message: string;
 }
 
-export interface Verification {
+export interface SetupReport {
+  ollama_version: string;
+  ollama_installed: boolean;
   model: string;
+  model_digest: string | null;
   answer: string;
   latency_ms: number;
 }
+
+export interface SetupDone {
+  report: SetupReport | null;
+  error: SetupError | null;
+}
+
+export type Startup =
+  | { outcome: "not_local" }
+  | { outcome: "ready" }
+  | { outcome: "started" }
+  | { outcome: "needs_preparation"; check: SetupCheck }
+  | { outcome: "failed"; error: SetupError };
+
+export interface LaunchView {
+  prepare_only: boolean;
+  preparing: boolean;
+  startup: Startup | null;
+}
+
