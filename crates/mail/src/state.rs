@@ -19,6 +19,19 @@ pub(crate) struct DraftRecord {
     pub draft_id: String,
     /// ID del mensaje del borrador cuando difiere del ID del borrador (Gmail).
     pub provider_message_id: Option<String>,
+    /// `Message-ID` propio del borrador (Gmail). Falta en registros anteriores a D41.
+    #[serde(default)]
+    pub rfc822_id: Option<String>,
+}
+
+impl DraftRecord {
+    pub(crate) fn created(&self) -> crate::mailbox::CreatedDraft {
+        crate::mailbox::CreatedDraft {
+            draft_id: self.draft_id.clone(),
+            message_id: self.provider_message_id.clone(),
+            rfc822_id: self.rfc822_id.clone(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

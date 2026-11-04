@@ -1,6 +1,6 @@
 //! Lógica común a todos los proveedores: borradores idempotentes por clave, envío único y
-//! reconciliación por el ID del borrador (D33). Cada proveedor solo implementa
-//! [`MailProvider`].
+//! reconciliación por el ID del borrador (D33; en Gmail, también por `Message-ID`, D41). Cada
+//! proveedor solo implementa [`MailProvider`].
 
 use std::path::Path;
 
@@ -17,6 +17,9 @@ pub struct CreatedDraft {
     pub draft_id: String,
     /// ID del mensaje del borrador cuando no coincide con el del borrador (Gmail).
     pub message_id: Option<String>,
+    /// Cabecera `Message-ID` que NestAdmin puso al borrador, para encontrarlo una vez enviado
+    /// aunque el proveedor le haya dado otro ID (Gmail).
+    pub rfc822_id: Option<String>,
 }
 
 /// Estado de un borrador en el proveedor.
@@ -36,7 +39,7 @@ pub trait MailProvider {
     /// Envía el borrador y devuelve el ID del mensaje enviado.
     fn send(&self, draft_id: &str) -> MailResult<String>;
     /// Si el borrador ya no existe ni consta como enviado, `not_found`: no se reenvía.
-    fn status(&self, draft_id: &str, message_id: Option<&str>) -> MailResult<DraftStatus>;
+    fn status(&self, draft: &CreatedDraft) -> MailResult<DraftStatus>;
 }
 
 /// Una cuenta de correo con su proveedor y su registro local.
@@ -100,10 +103,7 @@ impl<P: MailProvider> Mailbox<P> {
     /// Pregunta al proveedor por un envío pendiente. `None` si el borrador sigue sin enviar.
     fn reconcile(&self, send: &SendRecord) -> MailResult<Option<SendReceipt>> {
         let record = self.draft(&send.draft_id)?;
-        match self
-            .provider
-            .status(&record.draft_id, record.provider_message_id.as_deref())?
-        {
+        match self.provider.status(&record.created())? {
             DraftStatus::Draft => Ok(None),
             DraftStatus::Sent(sent_id) => {
                 let receipt = Self::receipt(&record, &send.key, sent_id);
@@ -181,6 +181,7 @@ impl<P: MailProvider> MailConnector for Mailbox<P> {
             content: draft.clone(),
             draft_id: created.draft_id.clone(),
             provider_message_id: created.message_id,
+            rfc822_id: created.rfc822_id,
         };
         self.state.mutate(|d| d.drafts.push(record))?;
         Ok(created.draft_id)
