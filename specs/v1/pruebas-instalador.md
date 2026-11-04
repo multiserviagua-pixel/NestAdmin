@@ -1,6 +1,6 @@
 # Casos de prueba del instalador v1
 
-Especificación de las pruebas de R08 (decisiones D36–D41, contrato «Preparación de componentes locales»). Un caso descrito aquí no es una prueba superada: la [matriz](trazabilidad.md) recoge el estado y la evidencia.
+Especificación de las pruebas de R08 (decisiones D36–D40 y D46, contrato «Preparación de componentes locales»). Un caso descrito aquí no es una prueba superada: la [matriz](trazabilidad.md) recoge el estado y la evidencia.
 
 Reglas comunes:
 

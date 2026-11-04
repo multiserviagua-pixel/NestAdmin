@@ -765,7 +765,7 @@ function stepRow(step: SetupStep) {
   );
 }
 
-// Aviso de memoria (D41): informa y deja seguir; Groq solo se elige a mano.
+// Aviso de memoria (D46): informa y deja seguir; Groq solo se elige a mano.
 function memoryNotice() {
   const m = state.memory;
   if (!m?.warning) return null;

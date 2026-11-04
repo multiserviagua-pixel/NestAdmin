@@ -1,6 +1,6 @@
 //! Casos T08b y T08c de specs/v1/pruebas-instalador.md. Ollama y el servidor de descargas
 //! se simulan en 127.0.0.1 y el sistema (buscar, verificar, instalar y arrancar Ollama,
-//! probar Tesseract, leer la memoria) es un doble que registra las llamadas (D40, D41). Nada se instala en el
+//! probar Tesseract, leer la memoria) es un doble que registra las llamadas (D40, D46). Nada se instala en el
 //! equipo ni sale a la red; solo datos sintéticos.
 
 use std::io::{BufRead, BufReader, Read, Write};
@@ -12,8 +12,8 @@ use std::time::Duration;
 
 use nestadmin_ai::{AiError, GenerateRequest, GenerateResult, Provider, ProviderKind, Task};
 use nestadmin_setup::{
-    explain_timeouts, parse_version, Cancel, Check, Config, ErrorCode, Event, Memory,
-    MemoryLevel, Missing, Pinned, Setup, SetupError, Startup, Status, Step, StepState, System,
+    explain_timeouts, parse_version, Cancel, Check, Config, ErrorCode, Event, Memory, MemoryLevel,
+    Missing, Pinned, Setup, SetupError, Startup, Status, Step, StepState, System,
 };
 use sha2::{Digest, Sha256};
 
@@ -757,24 +757,41 @@ fn t08b_14_memory_is_classified_against_16_and_8_gb() {
 
     let twelve = Memory::assess(Some((gib(12.0), gib(8.0))));
     let warning = twelve.warning.clone().unwrap();
-    assert!(warning.contains("12,0 GB") && warning.contains("16 GB"), "{warning}");
-    assert!(warning.contains("Groq") && !warning.contains("probablemente no"), "{warning}");
+    assert!(
+        warning.contains("12,0 GB") && warning.contains("16 GB"),
+        "{warning}"
+    );
+    assert!(
+        warning.contains("Groq") && !warning.contains("probablemente no"),
+        "{warning}"
+    );
 
     let eight = Memory::assess(Some((gib(7.7), gib(3.0))));
     let warning = eight.warning.clone().unwrap();
     assert!(warning.contains("7,7 GB"), "{warning}");
-    assert!(warning.contains("probablemente no responderá a tiempo"), "{warning}");
+    assert!(
+        warning.contains("probablemente no responderá a tiempo"),
+        "{warning}"
+    );
     assert!(warning.contains("3,0 GB libres"), "{warning}");
 
     // Con 16 GB pero casi todo ocupado solo se sugiere cerrar programas.
     let busy = Memory::assess(Some((gib(16.0), gib(2.0))));
     assert_eq!(busy.level, MemoryLevel::Recommended);
-    assert!(busy.warning.clone().unwrap().contains("cierre otros programas"));
+    assert!(busy
+        .warning
+        .clone()
+        .unwrap()
+        .contains("cierre otros programas"));
     assert_eq!(busy.timeout_cause(), None);
 
     let unknown = Memory::assess(None);
     assert_eq!(
-        (unknown.level, unknown.warning.clone(), unknown.timeout_cause()),
+        (
+            unknown.level,
+            unknown.warning.clone(),
+            unknown.timeout_cause()
+        ),
         (MemoryLevel::Unknown, None, None)
     );
 }
@@ -857,7 +874,10 @@ fn t08b_17_task_timeouts_on_low_memory_keep_the_code_and_explain_the_cause() {
     assert_eq!(error.code(), "timeout");
     let text = error.to_string();
     assert!(text.contains("no respondió a tiempo"), "{text}");
-    assert!(text.contains("falta de memoria") && text.contains("8,0 GB"), "{text}");
+    assert!(
+        text.contains("falta de memoria") && text.contains("8,0 GB"),
+        "{text}"
+    );
 
     // Con 16 GB, o con Groq elegido, el error no cambia.
     let sixteen = Memory::assess(Some((gib(16.0), gib(10.0))));
@@ -943,7 +963,10 @@ fn this_machine_is_ready_and_the_local_model_answers() {
         ),
         Box::new(nestadmin_setup::WindowsSystem),
     );
-    println!("status: {}", serde_json::to_string(&setup.status()).unwrap());
+    println!(
+        "status: {}",
+        serde_json::to_string(&setup.status()).unwrap()
+    );
     let mut events = Vec::new();
     let report = setup.prepare(&mut |e| events.push(e), &Cancel::default());
     for event in &events {
@@ -957,7 +980,9 @@ fn this_machine_is_ready_and_the_local_model_answers() {
 #[test]
 #[cfg(windows)]
 fn this_machine_memory_is_read() {
-    let total = nestadmin_setup::WindowsSystem.memory().map(|(total, _)| total);
+    let total = nestadmin_setup::WindowsSystem
+        .memory()
+        .map(|(total, _)| total);
     assert!(total.is_some_and(|t| t > GIB), "{total:?}");
     let memory = Memory::assess(nestadmin_setup::WindowsSystem.memory());
     assert_ne!(memory.level, MemoryLevel::Unknown);

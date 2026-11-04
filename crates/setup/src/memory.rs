@@ -1,4 +1,4 @@
-//! Memoria del equipo frente a la IA local (D41). Qwen3 8B ocupa unos 5,2 GB y, con
+//! Memoria del equipo frente a la IA local (D46). Qwen3 8B ocupa unos 5,2 GB y, con
 //! Windows y la aplicación, necesita 16 GB para responder dentro del plazo. Con menos se
 //! avisa sin bloquear; con 8 GB o menos, el aviso dice que probablemente no responderá a
 //! tiempo. Nunca se elige Groq por el usuario: solo se le indica que puede elegirlo.

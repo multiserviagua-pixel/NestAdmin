@@ -299,7 +299,7 @@ fn launch_mode(preparation: State<'_, Arc<Preparation>>) -> CmdResult<LaunchView
     })
 }
 
-/// Comprobación rápida (R08), sin descargas, con la memoria del equipo (D41). Puede tardar
+/// Comprobación rápida (R08), sin descargas, con la memoria del equipo (D46). Puede tardar
 /// unos segundos si Ollama no responde, así que se ejecuta fuera del hilo de la ventana.
 #[tauri::command]
 async fn setup_check(preparation: State<'_, Arc<Preparation>>) -> CmdResult<Status> {

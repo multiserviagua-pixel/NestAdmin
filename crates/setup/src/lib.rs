@@ -5,7 +5,7 @@
 //! respuesta real con el mismo adaptador que usa la aplicación. Repetirla no duplica
 //! instalaciones ni descargas completas. Ningún error activa un proveedor externo.
 //! También lee la memoria del equipo y avisa, sin bloquear, si es menor que la recomendada
-//! para la IA local (D41).
+//! para la IA local (D46).
 
 mod download;
 mod memory;
@@ -125,7 +125,7 @@ pub enum Check {
     Missing(Missing),
 }
 
-/// `check` con la memoria del equipo, para el asistente (D41).
+/// `check` con la memoria del equipo, para el asistente (D46).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Status {
     #[serde(flatten)]
@@ -180,7 +180,7 @@ pub struct Report {
     pub model_digest: Option<String>,
     pub answer: String,
     pub latency_ms: u64,
-    /// Memoria leída al preparar; su aviso no impide terminar (D41).
+    /// Memoria leída al preparar; su aviso no impide terminar (D46).
     pub memory: Memory,
 }
 
@@ -377,7 +377,7 @@ impl Setup {
         }
     }
 
-    /// Memoria física del equipo y su aviso (D41). Instantánea; no bloquea nada.
+    /// Memoria física del equipo y su aviso (D46). Instantánea; no bloquea nada.
     pub fn memory(&self) -> Memory {
         Memory::assess(self.system.memory())
     }
@@ -435,7 +435,7 @@ impl Setup {
         cancel: &Cancel,
         current: &mut Step,
     ) -> Result<Report, SetupError> {
-        // Memoria (D41): solo informa; con poca, la verificación explica un tiempo agotado.
+        // Memoria (D46): solo informa; con poca, la verificación explica un tiempo agotado.
         let memory = self.memory();
 
         // OCR del paquete (D38): solo se comprueba.
@@ -747,10 +747,12 @@ impl Setup {
                 "required": ["respuesta"],
             })),
         };
-        let result = provider.generate(&request).map_err(|error| match memory.explain(error) {
-            AiError::Unavailable(reason) => SetupError::new(ErrorCode::Unavailable, reason),
-            other => SetupError::new(ErrorCode::VerifyFailed, other.to_string()),
-        })?;
+        let result = provider
+            .generate(&request)
+            .map_err(|error| match memory.explain(error) {
+                AiError::Unavailable(reason) => SetupError::new(ErrorCode::Unavailable, reason),
+                other => SetupError::new(ErrorCode::VerifyFailed, other.to_string()),
+            })?;
         let answer = result.output["respuesta"]
             .as_str()
             .unwrap_or("")

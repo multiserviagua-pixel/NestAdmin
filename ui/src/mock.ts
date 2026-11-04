@@ -16,7 +16,7 @@ let groqKey = false;
 
 // Preparación simulada: Ollama está instalado y en marcha, falta el modelo. La primera
 // descarga del modelo se corta una vez para mostrar el reintento. `?preparar` en la URL
-// imita el modo del instalador y `?ram=12` u `?ram=8` un equipo con poca memoria (D41): con
+// imita el modo del instalador y `?ram=12` u `?ram=8` un equipo con poca memoria (D46): con
 // 8 GB la primera verificación agota el tiempo y la siguiente responde despacio.
 const setupListeners: Array<(event: SetupEvent) => void> = [];
 const doneListeners: Array<(done: SetupDone) => void> = [];

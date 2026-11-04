@@ -67,7 +67,7 @@ pub enum AiError {
     #[error("timeout: el proveedor no respondió a tiempo")]
     Timeout,
     /// Mismo código que `Timeout`, con la causa probable que conoce quien llama (por
-    /// ejemplo, poca memoria para el modelo local, D41). No cambia de proveedor.
+    /// ejemplo, poca memoria para el modelo local, D46). No cambia de proveedor.
     #[error("timeout: el proveedor no respondió a tiempo, {0}")]
     TimeoutCause(String),
     #[error("invalid_response: {0}")]

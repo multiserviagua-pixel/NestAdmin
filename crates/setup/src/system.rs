@@ -1,5 +1,5 @@
 //! Acceso al sistema que la preparación necesita (D40): buscar, verificar, instalar y
-//! arrancar Ollama, probar Tesseract y leer la memoria del equipo (D41). Las pruebas lo
+//! arrancar Ollama, probar Tesseract y leer la memoria del equipo (D46). Las pruebas lo
 //! sustituyen por un doble.
 
 use std::path::{Path, PathBuf};

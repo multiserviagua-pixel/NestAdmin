@@ -8,12 +8,12 @@ Estos contratos son independientes del transporte y no afirman que existan imple
 
 - Solicitud: `request_id`, `task` (extracción, clasificación o borrador), contenido mínimo necesario, formato esperado y configuración explícita del proveedor.
 - Resultado: `request_id`, proveedor y modelo realmente utilizados, salida estructurada o texto, y metadatos disponibles de tiempo/uso. Los campos no encontrados se devuelven como `null`, sin inventar datos.
-- Errores: proveedor no disponible (`unavailable`), credenciales inválidas (`unauthorized`), límite de tiempo (`timeout`, que puede añadir una causa probable al mensaje, como la memoria insuficiente de D41), respuesta que no cumple el formato esperado (`invalid_response`). Ninguno autoriza cambiar a otro proveedor. El adaptador local solo envía contenido a la instancia local configurada; el externo solo se invoca tras su selección explícita.
+- Errores: proveedor no disponible (`unavailable`), credenciales inválidas (`unauthorized`), límite de tiempo (`timeout`, que puede añadir una causa probable al mensaje, como la memoria insuficiente de D46), respuesta que no cumple el formato esperado (`invalid_response`). Ninguno autoriza cambiar a otro proveedor. El adaptador local solo envía contenido a la instancia local configurada; el externo solo se invoca tras su selección explícita.
 - Selección inicial: Ollama / Qwen3 8B. El identificador y versión concretos del modelo deberán registrarse en cada evaluación. Groq es el primer adaptador externo.
 
 ## Preparación de componentes locales
 
-`check() -> status`, `prepare(events) -> report | error` (D36–D39, D41).
+`check() -> status`, `prepare(events) -> report | error` (D36–D39, D46).
 
 - `check` es rápida y no descarga nada: devuelve `ready` (servicio, modelo y OCR disponibles), `stopped` (Ollama instalado pero sin responder) o `missing` con el componente que falta (`ollama`, `ollama_outdated`, `model` u `ocr`). Junto al estado se informa la memoria del equipo (`memory`): total y libre en bytes cuando se pueden leer, nivel (`recommended`, `below_recommended`, `insufficient` o `unknown`) y un aviso legible opcional. La memoria nunca cambia el estado ni bloquea la preparación.
 - `prepare` recorre los pasos `ocr`, `ollama`, `service`, `model` y `verify` en ese orden; reutiliza lo que ya está y solo actúa sobre lo que falta. Emite eventos con el paso, su estado (`running`, `done`, `skipped`, `failed`), bytes descargados y totales cuando se conocen y un mensaje legible. Repetirla tras un fallo o una interrupción no duplica instalaciones ni descargas completas.

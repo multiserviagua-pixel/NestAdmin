@@ -75,7 +75,7 @@ export type SetupCheck =
   | { status: "stopped" }
   | { status: "missing"; component: "ollama" | "ollama_outdated" | "model" | "ocr" };
 
-// Memoria del equipo frente a la IA local (D41): solo avisa, nunca bloquea.
+// Memoria del equipo frente a la IA local (D46): solo avisa, nunca bloquea.
 export type MemoryLevel = "recommended" | "below_recommended" | "insufficient" | "unknown";
 
 export interface Memory {

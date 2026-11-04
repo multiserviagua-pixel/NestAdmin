@@ -42,7 +42,7 @@ impl Settings {
 }
 
 /// Con Ollama en un equipo con poca memoria, un tiempo agotado indica esa causa probable
-/// (D41); el código sigue siendo `timeout` y no se cambia de proveedor.
+/// (D46); el código sigue siendo `timeout` y no se cambia de proveedor.
 pub fn build(
     choice: &ProviderChoice,
     credentials: &dyn CredentialStore,

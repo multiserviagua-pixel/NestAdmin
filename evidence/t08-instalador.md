@@ -1,6 +1,6 @@
 # Evidencia T08 (parcial): instalador de una sola ejecución
 
-Cubre R08 según D36–D41; D36–D40 revisan D23–D25. El paquete NSIS de Tauri se instala por usuario e incluye la aplicación, `pdfium.dll`, Tesseract portátil y los datos de idioma `spa` y `eng`. Al terminar de copiar, el gancho `NSIS_HOOK_POSTINSTALL` ejecuta `nestadmin.exe --preparar` y espera. Ese modo muestra solo el asistente y prepara Ollama y el modelo si faltan. Termina con código 0 únicamente cuando el modelo local responde. Los casos están en [pruebas del instalador](../specs/v1/pruebas-instalador.md).
+Cubre R08 según D36–D40 y D46; D36–D40 revisan D23–D25. El paquete NSIS de Tauri se instala por usuario e incluye la aplicación, `pdfium.dll`, Tesseract portátil y los datos de idioma `spa` y `eng`. Al terminar de copiar, el gancho `NSIS_HOOK_POSTINSTALL` ejecuta `nestadmin.exe --preparar` y espera. Ese modo muestra solo el asistente y prepara Ollama y el modelo si faltan. Termina con código 0 únicamente cuando el modelo local responde. Los casos están en [pruebas del instalador](../specs/v1/pruebas-instalador.md).
 
 ## Cómo reproducir
 
@@ -56,7 +56,7 @@ En estas pruebas, Ollama y el servidor de descargas se simulan en 127.0.0.1 y un
 
 | Paso | Resultado |
 | --- | --- |
-| `this_machine_memory_is_read` (2026-11-04, D41) | `GlobalMemoryStatusEx` da 16 664 707 072 bytes (15,5 GiB) en este equipo de 16 GB: el margen de 1 GiB lo clasifica como `recommended`. Con 3,7 GiB libres en ese momento, el aviso solo sugiere cerrar programas. |
+| `this_machine_memory_is_read` (2026-11-04, D46) | `GlobalMemoryStatusEx` da 16 664 707 072 bytes (15,5 GiB) en este equipo de 16 GB: el margen de 1 GiB lo clasifica como `recommended`. Con 3,7 GiB libres en ese momento, el aviso solo sugiere cerrar programas. |
 | `this_machine_is_ready_and_the_local_model_answers` | Usa el Tesseract de `vendor/tesseract`. `ocr` en `done`; `ollama`, `service` y `model` en `skipped`. `qwen3:8b` (digest `500a1f06…`) respondió «listo» en 42,3 s con el modelo sin cargar. Es una sola medida, no de rendimiento (T12). |
 | `tauri build --config tauri.installer.json` | `NestAdmin_0.1.0_x64-setup.exe`, 47 929 663 bytes, SHA-256 `7F55C011…D76AF0`. Unos 24 MB más que el paquete sin Tesseract. Sin firmar. |
 | T08-08 / T08-02: instalación silenciosa (`/S`) | Código 0 en 116 s, de los que la mayor parte es la verificación del modelo. No descargó Ollama ni el modelo y no pidió permisos. Deja `nestadmin.exe`, `uninstall.exe`, `pdfium\`, `tessdata\` y `tesseract\`, con 29 archivos: el ejecutable, 26 DLL, `LICENSE` y `AUTHORS`. El Tesseract instalado lista `eng` y `spa` con `--tessdata-dir`. |
@@ -69,13 +69,13 @@ El asistente se ha comprobado en el navegador con el servidor simulado, con dato
 
 - **Modo normal.** La comprobación al abrir detecta que falta el modelo y abre «Preparación». La preparación muestra el progreso por pasos y bytes, el aviso «Reintento 2 de 3» y el resultado final.
 - **Modo instalador (`?preparar`).** Muestra solo el asistente y empieza solo. «Cancelar» deja el paso en «Falló» y ofrece «Reintentar» y «Cerrar sin terminar».
-- **Memoria (D41), 2026-11-04.** Con `?preparar&ram=8`, el aviso fuerte aparece en rojo desde el principio y la preparación sigue; la verificación simulada agota el tiempo y el error dice «probablemente por falta de memoria: el equipo tiene 8,0 GB y la IA local necesita 16 GB», con «Reintentar» disponible. Con `?ram=12` en la ventana normal, el aviso es ámbar y ofrece «Ir a Configuración»; con 16 GB no hay aviso. Groq no se activa en ningún caso.
+- **Memoria (D46), 2026-11-04.** Con `?preparar&ram=8`, el aviso fuerte aparece en rojo desde el principio y la preparación sigue; la verificación simulada agota el tiempo y el error dice «probablemente por falta de memoria: el equipo tiene 8,0 GB y la IA local necesita 16 GB», con «Reintentar» disponible. Con `?ram=12` en la ventana normal, el aviso es ámbar y ofrece «Ir a Configuración»; con 16 GB no hay aviso. Groq no se activa en ningún caso.
 
 No se ha recorrido a mano en la ventana instalada.
 
 ## Pendiente
 
-- Ensayo de D41 en un equipo real de 8 GB: ver el aviso del asistente y el mensaje de tiempo agotado de una tarea con Ollama.
+- Ensayo de D46 en un equipo real de 8 GB: ver el aviso del asistente y el mensaje de tiempo agotado de una tarea con Ollama.
 - T08-01, T08-03 a T08-07 en un Windows limpio (máquina virtual con instantánea): descarga real del instalador de Ollama (comprobación real de firma Authenticode de `OllamaSetup.exe`) y del modelo (unos 5,2 GB), cortes reales de red, cancelación y reapertura, reinicio del equipo e instalación encima de una versión anterior.
 - Instalación con interfaz (no silenciosa): ver el asistente lanzado por el instalador y sus mensajes.
 - Firma del instalador de NestAdmin y revisión de la redistribución de PDFium, Tesseract y sus DLL (riesgo abierto).
