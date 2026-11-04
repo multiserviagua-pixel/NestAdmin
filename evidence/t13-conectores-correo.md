@@ -1,6 +1,6 @@
 # Evidencia T13 (parcial): conectores de correo Graph y Gmail
 
-Cubre los conectores de `crates/mail` y su integración con varias cuentas en `crates/app`, `crates/desktop` y `ui/`. Graph, Gmail y el servicio de tokens se simulan en 127.0.0.1 con datos sintéticos (dominio `.test`); ninguna prueba sale a la red ni usa credenciales reales.
+Cubre los conectores de `crates/mail` y su integración con varias cuentas en `crates/app`, `crates/desktop` y `ui/`. Graph, Gmail y el servicio de tokens se simulan en 127.0.0.1 con datos sintéticos (dominio `.test`); ninguna prueba automática sale a la red ni usa credenciales reales. La prueba manual con Gmail real se describe aparte.
 
 ## Cómo reproducir
 
