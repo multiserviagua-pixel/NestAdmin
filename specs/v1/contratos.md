@@ -17,6 +17,7 @@ Estos contratos son independientes del transporte y no afirman que existan imple
 
 - Errores: `not_found` (mensaje o borrador inexistente), `conflict` (clave de idempotencia reutilizada con contenido distinto), `unavailable` (conector no accesible), `unauthorized` (credenciales inválidas o ausentes) y `invalid_input`. Un error nunca se registra como envío realizado.
 - `send_draft` con una clave ya usada para el mismo borrador devuelve el recibo original sin volver a enviar.
+- Conectores reales (R13, D30–D35): los IDs de mensaje y borrador son los del proveedor y el cursor es opaco. Cada cuenta es un conector independiente; quien agrupe varias cuentas debe anteponer el identificador de cuenta a los IDs y a las claves para que no choquen. El recibo de envío lleva como `receipt_id` el ID del mensaje enviado en el proveedor. La reconciliación consulta el estado del borrador en el proveedor (D33).
 
 ## Administración
 

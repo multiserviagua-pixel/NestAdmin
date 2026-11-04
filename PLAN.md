@@ -32,6 +32,7 @@ La primera entrega incluirá el programa con sistemas simulados, para comprobar 
 ## Supuestos
 
 - La primera entrega funciona con simuladores; la conexión a cuentas y sistemas reales se concretará cuando se conozcan sus proveedores.
+- **Cambio de alcance (2026-11-03):** el correo real entra en la v1 con conectores directos para Microsoft 365 y Gmail, varias cuentas y el mismo contrato que el simulador (R13, D30–D35). El sistema administrativo real sigue fuera.
 - El procesamiento de IA y OCR es local por defecto. Las futuras conexiones a correo o servicios externos requerirán comunicación con esos servicios.
 - La instalación inicial necesita Internet para descargar los componentes ausentes. Qwen3 8B supone una descarga aproximada de **5,2 GB**.
 - La automatización se activa mediante reglas concretas; sin una regla activa, las acciones de envío y registro pasan por revisión.
