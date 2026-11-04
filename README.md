@@ -43,7 +43,16 @@ cd crates/desktop
 
 La ventana usa los datos de `%LOCALAPPDATA%\NestAdmin`; para probar sin tocarlos, defina antes `$env:NESTADMIN_DATA_DIR` con otra carpeta. Cerrar la ventana la oculta: para salir, use «Salir de NestAdmin por completo» en el icono del área de notificación. Se importan archivos `.txt` y `.pdf`; las páginas escaneadas pasan por OCR local, y la revisión indica en qué páginas se usó.
 
-Para ver solo la interfaz en un navegador, con datos sintéticos simulados: `npm run dev --prefix ui` y abrir `http://localhost:5173`.
+Para ver solo la interfaz en un navegador, con datos sintéticos simulados: `npm run dev --prefix ui` y abrir `http://localhost:5173`. `?preparar` imita el modo del instalador y `?ram=12` u `?ram=8`, un equipo con poca memoria.
+
+## Requisitos del equipo
+
+- Windows de 64 bits; solo se ha probado en Windows 11.
+- **Memoria: 16 GB recomendados** para la IA local (Ollama con `qwen3:8b`, unos 5,2 GB), el equipo objetivo de [PLAN.md](PLAN.md) con Intel Core Ultra 5. Con menos de 16 GB funciona más despacio; **con 8 GB o menos, la IA local probablemente no responderá a tiempo**. La instalación no se bloquea: el asistente lo advierte y, si una petición agota el tiempo, el mensaje indica la memoria como causa probable. Groq puede elegirse a mano en Configuración; NestAdmin nunca lo activa por su cuenta (D46).
+- Espacio en disco para Ollama y el modelo (este, unos 5,2 GB), además de la aplicación.
+- Internet durante la instalación, si faltan Ollama o el modelo.
+
+Los umbrales son provisionales hasta medir en el equipo objetivo (R12).
 
 ## Generar el instalador
 
@@ -55,7 +64,7 @@ cd crates/desktop
 ..\..\ui\node_modules\.bin\tauri build --config tauri.installer.json
 ```
 
-El instalador queda en `target/release/bundle/nsis/`. Se instala por usuario e incluye PDFium, Tesseract portátil y los datos de idioma. Antes de terminar, ejecuta `nestadmin.exe --preparar`, que instala o arranca Ollama y descarga el modelo `qwen3:8b` si faltan, comprueba la huella SHA-256 y la firma de Ollama Inc. del instalador y solo da la instalación por buena cuando el modelo responde (D36–D38). Al abrir NestAdmin, un Ollama detenido se arranca solo; si falta algo, la ventana muestra el mismo asistente (D39).
+El instalador queda en `target/release/bundle/nsis/`. Se instala por usuario e incluye PDFium, Tesseract portátil y los datos de idioma. Antes de terminar, ejecuta `nestadmin.exe --preparar`, que instala o arranca Ollama y descarga el modelo `qwen3:8b` si faltan, comprueba la huella SHA-256 y la firma de Ollama Inc. del instalador y solo da la instalación por buena cuando el modelo responde (D36–D38). Al abrir NestAdmin, un Ollama detenido se arranca solo; si falta algo, la ventana muestra el mismo asistente (D39). El asistente avisa si la memoria es menor que la recomendada (D46).
 
 ## Verificación local
 

@@ -78,6 +78,10 @@ Numeración desde D30 para no chocar con las ramas abiertas del instalador. *Mot
 - **D44 Límite de mensajes por consulta.** Cada consulta lee como mucho N mensajes recientes por cuenta (25 por defecto, de 1 a 500), guardado en `configuracion.json`. Las páginas piden como mucho N mensajes (máximo 100 por página, el de los proveedores), así que con el límite por defecto basta una petición por cuenta.
 - **D45 Inicio de sesión desde la ventana.** Añadir cuenta abre el navegador predeterminado con `rundll32 url.dll,FileProtocolHandler` (sin intérprete de órdenes) y muestra también la dirección por si no se abre; la espera en 127.0.0.1 dura 5 minutos y solo hay un inicio de sesión a la vez. Cancelar envía a esa espera una redirección sin `state` válido, que termina sin canjear ningún código. «Volver a iniciar sesión» sustituye los tokens de una cuenta existente. Desconectar borra los tokens del almacén, la cuenta de la lista y su registro local; si el almacén no permite borrarlos, la cuenta se mantiene y se informa. Las tareas ya creadas de una cuenta desconectada siguen visibles y enviar desde ellas falla con `not_found`. El envío sigue exigiendo aprobación o regla activa (R07, sin cambios).
 
+## 2026-11-04 — Memoria mínima para la IA local (amplía D37)
+
+- **D46 Memoria mínima para la IA local.** En un equipo de prueba con 8 GB, Ollama con Qwen3 8B (unos 5,2 GB) no respondió dentro del plazo y la aplicación solo dijo que el proveedor no respondió a tiempo. La preparación lee la memoria física con `GlobalMemoryStatusEx` a través de `System` y la clasifica: 16 GB o más, recomendada (el equipo objetivo de PLAN.md); más de 8 GB y menos de 16, aviso de que irá más lento; **8 GB o menos, aviso fuerte de que la IA local probablemente no responderá a tiempo**. Como Windows no cuenta la memoria que reservan el firmware y los gráficos integrados, se admite 1 GiB de margen: 15 GiB informados cuentan como 16 GB y menos de 9 GiB, como 8 GB o menos. Si la memoria libre baja de 6 GiB se sugiere cerrar programas. El aviso nunca bloquea la preparación ni la verificación, no cambia de proveedor y solo indica que Groq puede elegirse a mano en Configuración. Un tiempo agotado de Ollama en un equipo por debajo de 16 GB conserva el código `timeout` y añade la memoria como causa probable, tanto en la verificación de la preparación como en las tareas. Si no se puede leer la memoria, no se avisa ni se supone nada. Los umbrales son una decisión provisional hasta medir en el equipo objetivo (R12).
+
 ## Versiones de desarrollo fijadas
 
 | Componente | Versión | Licencia | Dónde se fija |
@@ -98,6 +102,6 @@ Las dependencias de Rust y npm quedan fijadas por sus archivos de bloqueo, que s
 
 ## Riesgos abiertos
 
-- El rendimiento de `qwen3:8b` en el equipo objetivo no está medido; puede ser necesario otro modelo o cuantización (R12).
+- El rendimiento de `qwen3:8b` en el equipo objetivo no está medido; puede ser necesario otro modelo o cuantización (R12). Con 8 GB de memoria no respondió a tiempo en un equipo de prueba (D46); no hay modelo alternativo para esos equipos.
 - La redistribución de PDFium y Tesseract debe revisarse antes de publicar el instalador, que además no está firmado (SmartScreen lo advertirá).
 - El umbral de detección de páginas escaneadas y la calidad del OCR en facturas reales están por medir.

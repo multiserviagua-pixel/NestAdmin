@@ -8,6 +8,7 @@ import type {
   MailAccount,
   MailProviderKind,
   MailView,
+  Memory,
   ProviderChoice,
   Rule,
   SettingsView,
@@ -131,13 +132,36 @@ function fetchMail(): FetchReport {
 
 // Preparación simulada: Ollama está instalado y en marcha, falta el modelo. La primera
 // descarga del modelo se corta una vez para mostrar el reintento. `?preparar` en la URL
-// imita el modo del instalador.
+// imita el modo del instalador y `?ram=12` u `?ram=8` un equipo con poca memoria (D46): con
+// 8 GB la primera verificación agota el tiempo y la siguiente responde despacio.
 const setupListeners: Array<(event: SetupEvent) => void> = [];
 const doneListeners: Array<(done: SetupDone) => void> = [];
 const startupListeners: Array<(startup: Startup) => void> = [];
 const prepareOnly = new URLSearchParams(location.search).has("preparar");
 let modelPresent = false;
 let preparing: { cancelled: boolean } | null = null;
+const GIB = 2 ** 30;
+const ramGb = Number(new URLSearchParams(location.search).get("ram") ?? "16") || 16;
+let verifyAttempts = 0;
+
+// Mismos umbrales y textos que `crates/setup/src/memory.rs`; aquí solo se imitan.
+function memory(): Memory {
+  const total = ramGb * GIB;
+  const available = Math.min(total * 0.4, 10 * GIB);
+  const gb = (bytes: number) => (bytes / GIB).toFixed(1).replace(".", ",");
+  const level = total + GIB >= 16 * GIB ? "recommended" : total < 9 * GIB ? "insufficient" : "below_recommended";
+  let warning =
+    level === "insufficient"
+      ? `Este equipo tiene ${gb(total)} GB de memoria. Con 8 GB o menos, la IA local (Qwen3 8B) probablemente no responderá a tiempo. Puede intentarlo igualmente o elegir Groq en Configuración; NestAdmin no lo cambiará por su cuenta.`
+      : level === "below_recommended"
+        ? `Este equipo tiene ${gb(total)} GB de memoria; se recomiendan 16 GB para la IA local. Puede seguir, pero las respuestas serán más lentas y alguna podría no llegar a tiempo; si ocurre, puede elegir Groq en Configuración.`
+        : null;
+  if (available < 6 * GIB) {
+    const free = `Ahora hay ${gb(available)} GB libres: cierre otros programas antes de usar la IA local.`;
+    warning = warning ? `${warning} ${free}` : free;
+  }
+  return { total_bytes: total, available_bytes: available, level, warning };
+}
 
 function simulatePreparation(run: { cancelled: boolean }) {
   let last: SetupStep = "ocr";
@@ -165,7 +189,8 @@ function simulatePreparation(run: { cancelled: boolean }) {
     plan.push(() => emit("model", "skipped", "El modelo qwen3:8b ya está descargado"));
   }
   plan.push(() => emit("verify", "running", "Pidiendo una respuesta al modelo local"));
-  plan.push(() => emit("verify", "done", "El modelo respondió en 2,4 s"));
+  const timesOut = memory().level === "insufficient" && verifyAttempts++ === 0;
+  if (!timesOut) plan.push(() => emit("verify", "done", "El modelo respondió «listo»"));
   let step = 0;
   const tick = () => {
     if (run.cancelled) {
@@ -177,6 +202,11 @@ function simulatePreparation(run: { cancelled: boolean }) {
       next();
       return void setTimeout(tick, 350);
     }
+    if (timesOut) {
+      const message = `timeout: el proveedor no respondió a tiempo, probablemente por falta de memoria: el equipo tiene ${ramGb.toFixed(1).replace(".", ",")} GB y la IA local necesita 16 GB; puede elegir Groq en Configuración`;
+      emit("verify", "failed", message);
+      return finish({ report: null, error: { code: "verify_failed", message } });
+    }
     finish({
       report: {
         ollama_version: "0.40.14",
@@ -184,7 +214,8 @@ function simulatePreparation(run: { cancelled: boolean }) {
         model: "qwen3:8b",
         model_digest: "500a1f067a9f",
         answer: "listo",
-        latency_ms: 2400,
+        latency_ms: memory().level === "recommended" ? 2400 : 94_000,
+        memory: memory(),
       },
       error: null,
     });
@@ -390,7 +421,7 @@ const handlers: Record<string, (a: any, options?: any) => unknown> = {
     preparing: preparing !== null,
     startup: prepareOnly ? null : startup(),
   }),
-  setup_check: () => (modelPresent ? { status: "ready" } : { status: "missing", component: "model" }),
+  setup_check: () => ({ ...(modelPresent ? { status: "ready" } : { status: "missing", component: "model" }), memory: memory() }),
   setup_prepare: () => {
     if (preparing) throw "la preparación ya está en curso";
     preparing = { cancelled: false };

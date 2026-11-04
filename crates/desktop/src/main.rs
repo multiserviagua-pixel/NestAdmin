@@ -23,7 +23,7 @@ use nestadmin_app::{App, AppPaths, ProviderInfo};
 use nestadmin_core::{AuditEntry, Rule, Task};
 use nestadmin_extract::{Extractor, Tesseract};
 use nestadmin_mail::PendingAuthorization;
-use nestadmin_setup::{Cancel, Check, Report, Setup, SetupError, Startup, WindowsSystem};
+use nestadmin_setup::{Cancel, Report, Setup, SetupError, Startup, Status, WindowsSystem};
 use serde::Serialize;
 use serde_json::Value;
 use tauri::menu::{Menu, MenuItem};
@@ -481,12 +481,12 @@ fn launch_mode(preparation: State<'_, Arc<Preparation>>) -> CmdResult<LaunchView
     })
 }
 
-/// Comprobación rápida (R08), sin descargas. Puede tardar unos segundos si Ollama no
-/// responde, así que se ejecuta fuera del hilo de la ventana.
+/// Comprobación rápida (R08), sin descargas, con la memoria del equipo (D46). Puede tardar
+/// unos segundos si Ollama no responde, así que se ejecuta fuera del hilo de la ventana.
 #[tauri::command]
-async fn setup_check(preparation: State<'_, Arc<Preparation>>) -> CmdResult<Check> {
+async fn setup_check(preparation: State<'_, Arc<Preparation>>) -> CmdResult<Status> {
     let setup = Arc::clone(&preparation.setup);
-    tauri::async_runtime::spawn_blocking(move || setup.check())
+    tauri::async_runtime::spawn_blocking(move || setup.status())
         .await
         .map_err(text)
 }
