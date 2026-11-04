@@ -11,6 +11,7 @@ use nestadmin_ai::{
     build_provider, AiError, CredentialStore, GenerateRequest, GenerateResult, Provider,
     ProviderChoice, ProviderKind,
 };
+use nestadmin_setup::{explain_timeouts, Memory, System, WindowsSystem};
 use serde::{Deserialize, Serialize};
 
 const FILE: &str = "configuracion.json";
@@ -40,11 +41,17 @@ impl Settings {
     }
 }
 
+/// Con Ollama en un equipo con poca memoria, un tiempo agotado indica esa causa probable
+/// (D41); el código sigue siendo `timeout` y no se cambia de proveedor.
 pub fn build(
     choice: &ProviderChoice,
     credentials: &dyn CredentialStore,
 ) -> Result<Arc<dyn Provider>, AiError> {
-    build_provider(choice, credentials, TIMEOUT).map(Arc::from)
+    let provider: Arc<dyn Provider> = build_provider(choice, credentials, TIMEOUT)?.into();
+    Ok(explain_timeouts(
+        provider,
+        &Memory::assess(WindowsSystem.memory()),
+    ))
 }
 
 /// Al arrancar se respeta la selección guardada aunque no se pueda preparar: las tareas

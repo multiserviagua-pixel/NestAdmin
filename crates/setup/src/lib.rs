@@ -4,8 +4,11 @@
 //! paquete, instala o reutiliza Ollama, lo arranca, descarga el modelo y verifica una
 //! respuesta real con el mismo adaptador que usa la aplicación. Repetirla no duplica
 //! instalaciones ni descargas completas. Ningún error activa un proveedor externo.
+//! También lee la memoria del equipo y avisa, sin bloquear, si es menor que la recomendada
+//! para la IA local (D41).
 
 mod download;
+mod memory;
 mod system;
 
 use std::fmt;
@@ -21,6 +24,7 @@ use serde::Serialize;
 use serde_json::{json, Value};
 
 pub use download::{agent, download, Pinned};
+pub use memory::{explain_timeouts, Memory, MemoryLevel, LOW_RAM_GB, RECOMMENDED_RAM_GB};
 pub use system::{System, WindowsSystem};
 
 /// Versión mínima de Ollama: `think` y `format` con esquema (D06, D37).
@@ -121,6 +125,14 @@ pub enum Check {
     Missing(Missing),
 }
 
+/// `check` con la memoria del equipo, para el asistente (D41).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Status {
+    #[serde(flatten)]
+    pub check: Check,
+    pub memory: Memory,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Step {
@@ -168,6 +180,8 @@ pub struct Report {
     pub model_digest: Option<String>,
     pub answer: String,
     pub latency_ms: u64,
+    /// Memoria leída al preparar; su aviso no impide terminar (D41).
+    pub memory: Memory,
 }
 
 /// Resultado de la comprobación al abrir (D39).
@@ -363,6 +377,19 @@ impl Setup {
         }
     }
 
+    /// Memoria física del equipo y su aviso (D41). Instantánea; no bloquea nada.
+    pub fn memory(&self) -> Memory {
+        Memory::assess(self.system.memory())
+    }
+
+    /// `check` y la memoria del equipo.
+    pub fn status(&self) -> Status {
+        Status {
+            check: self.check(),
+            memory: self.memory(),
+        }
+    }
+
     /// Comprobación al abrir la aplicación (D39): arranca un Ollama detenido; si falta
     /// algo no descarga nada y pide el asistente.
     pub fn startup(&self, local_provider: bool) -> Startup {
@@ -408,6 +435,9 @@ impl Setup {
         cancel: &Cancel,
         current: &mut Step,
     ) -> Result<Report, SetupError> {
+        // Memoria (D41): solo informa; con poca, la verificación explica un tiempo agotado.
+        let memory = self.memory();
+
         // OCR del paquete (D38): solo se comprueba.
         *current = Step::Ocr;
         emit.send(Step::Ocr, StepState::Running, "Comprobando el OCR incluido");
@@ -544,7 +574,7 @@ impl Setup {
             StepState::Running,
             "Pidiendo una respuesta al modelo local",
         );
-        let (answer, latency_ms) = self.verify()?;
+        let (answer, latency_ms) = self.verify(&memory)?;
         emit.send(
             Step::Verify,
             StepState::Done,
@@ -557,6 +587,7 @@ impl Setup {
             model_digest: digest,
             answer,
             latency_ms,
+            memory,
         })
     }
 
@@ -698,7 +729,7 @@ impl Setup {
         Err(network("la descarga del modelo terminó sin confirmación"))
     }
 
-    fn verify(&self) -> Result<(String, u64), SetupError> {
+    fn verify(&self, memory: &Memory) -> Result<(String, u64), SetupError> {
         let provider = OllamaProvider::new(
             &self.config.ollama_url,
             &self.config.model,
@@ -716,7 +747,7 @@ impl Setup {
                 "required": ["respuesta"],
             })),
         };
-        let result = provider.generate(&request).map_err(|error| match error {
+        let result = provider.generate(&request).map_err(|error| match memory.explain(error) {
             AiError::Unavailable(reason) => SetupError::new(ErrorCode::Unavailable, reason),
             other => SetupError::new(ErrorCode::VerifyFailed, other.to_string()),
         })?;

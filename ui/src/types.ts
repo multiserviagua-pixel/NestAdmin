@@ -75,6 +75,18 @@ export type SetupCheck =
   | { status: "stopped" }
   | { status: "missing"; component: "ollama" | "ollama_outdated" | "model" | "ocr" };
 
+// Memoria del equipo frente a la IA local (D41): solo avisa, nunca bloquea.
+export type MemoryLevel = "recommended" | "below_recommended" | "insufficient" | "unknown";
+
+export interface Memory {
+  total_bytes: number | null;
+  available_bytes: number | null;
+  level: MemoryLevel;
+  warning: string | null;
+}
+
+export type SetupStatus = SetupCheck & { memory: Memory };
+
 export interface SetupEvent {
   step: SetupStep;
   state: StepState;
@@ -90,6 +102,7 @@ export interface SetupReport {
   model_digest: string | null;
   answer: string;
   latency_ms: number;
+  memory: Memory;
 }
 
 export interface SetupDone {

@@ -2,6 +2,7 @@ import "./style.css";
 import { api, isPreview, onChanged, onSetup, onSetupDone, onStartup } from "./api";
 import type {
   AuditEntry,
+  Memory,
   ProviderChoice,
   Rule,
   SettingsView,
@@ -89,6 +90,7 @@ const state = {
   // Preparación (R08): modo instalador, última comprobación y la ejecución en curso.
   prepareOnly: false,
   check: null as SetupCheck | null,
+  memory: null as Memory | null,
   startup: null as Startup | null,
   preparing: false,
   steps: {} as Partial<Record<SetupStep, SetupEvent>>,
@@ -213,7 +215,7 @@ function nav() {
     ["rules", "Reglas"],
     ["history", "Historial"],
     ["settings", "Configuración"],
-    ["setup", "Preparación", state.check && state.check.status !== "ready" ? 1 : undefined],
+    ["setup", "Preparación", (state.check && state.check.status !== "ready") || state.memory?.level === "insufficient" ? 1 : undefined],
   ];
   return h(
     "nav",
@@ -663,6 +665,9 @@ const ERROR_HINT: Record<SetupErrorCode, string> = {
   cancelled: "La preparación se canceló. Puede reanudarla cuando quiera; lo ya hecho no se repite.",
 };
 
+// Un tiempo agotado no es una respuesta inválida: cargar el modelo es lo más lento.
+const TIMEOUT_HINT = "Pulse Reintentar: con el modelo ya cargado en memoria suele responder antes.";
+
 function size(bytes: number) {
   return bytes >= 1e9 ? `${(bytes / 1e9).toFixed(1).replace(".", ",")} GB` : `${Math.round(bytes / 1e6)} MB`;
 }
@@ -673,7 +678,9 @@ function seconds(ms: number) {
 
 async function refreshCheck() {
   try {
-    state.check = await api.setupCheck();
+    const status = await api.setupCheck();
+    state.check = status;
+    state.memory = status.memory;
   } catch (error) {
     state.notice = { kind: "error", text: String(error) };
   }
@@ -709,7 +716,10 @@ onSetup((event) => {
 onSetupDone((done) => {
   state.preparing = false;
   state.setupDone = done;
-  if (done.report) state.check = { status: "ready" };
+  if (done.report) {
+    state.check = { status: "ready" };
+    state.memory = done.report.memory;
+  }
   else void refreshCheck();
   render();
 });
@@ -755,6 +765,21 @@ function stepRow(step: SetupStep) {
   );
 }
 
+// Aviso de memoria (D41): informa y deja seguir; Groq solo se elige a mano.
+function memoryNotice() {
+  const m = state.memory;
+  if (!m?.warning) return null;
+  const strong = m.level === "insufficient";
+  return h(
+    "div",
+    { class: strong ? "notice error" : "notice warn", role: strong ? "alert" : "status" },
+    h("span", {}, m.warning),
+    state.prepareOnly || state.preparing || m.level === "recommended"
+      ? null
+      : h("button", { onclick: () => ((state.view = "settings"), render()) }, "Ir a Configuración"),
+  );
+}
+
 function setupView() {
   const done = state.setupDone;
   const error = done?.error;
@@ -790,6 +815,7 @@ function setupView() {
       : null,
     !state.preparing && !done && check?.status === "ready" ? h("p", { class: "ok-line" }, "La IA local está lista.") : null,
     startupFailed && !done ? h("p", { class: "error-text", role: "alert" }, `Ollama no arrancó: ${startupFailed.message}`) : null,
+    memoryNotice(),
     h("div", { class: "components" }, ...(["ocr", "ollama", "service", "model", "verify"] as SetupStep[]).map(stepRow)),
     report
       ? h(
@@ -803,7 +829,7 @@ function setupView() {
       ? h(
           "div",
           { class: "notice error", role: "alert" },
-          h("span", {}, error.code === "cancelled" ? ERROR_HINT.cancelled : `${error.message}. ${ERROR_HINT[error.code] ?? ""}`),
+          h("span", {}, error.code === "cancelled" ? ERROR_HINT.cancelled : `${error.message}. ${error.message.startsWith("timeout:") ? TIMEOUT_HINT : (ERROR_HINT[error.code] ?? "")}`),
         )
       : null,
     h("div", { class: "buttons" }, ...buttons),
@@ -854,6 +880,8 @@ void (async () => {
     state.view = "setup";
     if (state.preparing) render();
     else void startPreparation();
+    // La comprobación solo lee: aporta el aviso de memoria mientras se prepara.
+    void refreshCheck();
     return;
   }
   onChanged(() => void refresh(true));

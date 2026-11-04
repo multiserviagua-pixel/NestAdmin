@@ -1,6 +1,6 @@
 # Casos de prueba del instalador v1
 
-Especificación de las pruebas de R08 (decisiones D36–D40, contrato «Preparación de componentes locales»). Un caso descrito aquí no es una prueba superada: la [matriz](trazabilidad.md) recoge el estado y la evidencia.
+Especificación de las pruebas de R08 (decisiones D36–D41, contrato «Preparación de componentes locales»). Un caso descrito aquí no es una prueba superada: la [matriz](trazabilidad.md) recoge el estado y la evidencia.
 
 Reglas comunes:
 
@@ -25,6 +25,10 @@ Reglas comunes:
 | T08b-11 | El usuario cancela durante una descarga. | Error `cancelled` antes de instalar nada; último evento `failed`. |
 | T08b-12 | Faltan los componentes de OCR del paquete o no responden. | `check` → `missing: ocr`; `prepare` falla con `ocr_missing` sin descargar nada. |
 | T08b-13 | Errores y estados serializados. | Códigos y formas exactos del contrato, sin secretos ni rutas de usuario. |
+| T08b-14 | El doble informa 16, 15,6, 12, 9, 8 y 7,7 GiB, o no informa memoria. | Niveles `recommended` (16 y 15,6), `below_recommended` (12 y 9), `insufficient` (8 y 7,7) y `unknown`. Sin aviso con 16 GB; aviso que recomienda 16 GB con 12; aviso de que probablemente no responderá a tiempo con 8. Con menos de 6 GiB libres se sugiere cerrar programas. Sin memoria leída no se avisa. |
+| T08b-15 | Todo listo, con 16, 12 y 8 GB. | `status` da `ready` con el nivel que corresponde y `prepare` termina bien en los tres casos: el aviso no bloquea, no instala ni arranca nada más y no cambia de proveedor. |
+| T08b-16 | El modelo tarda más que el plazo de verificación, con 8, 12 y 16 GB. | Error `verify_failed` con mensaje `timeout:`; con 8 y 12 GB el mensaje cita la falta de memoria como causa probable y con 16 GB no. |
+| T08b-17 | Una tarea con Ollama agota el tiempo en un equipo de 8 GB. | El error conserva el código `timeout` y su mensaje cita la memoria del equipo. Con 16 GB, o con Groq elegido, el error no cambia. |
 
 ## T08c — Comprobación al abrir la aplicación (D39)
 
