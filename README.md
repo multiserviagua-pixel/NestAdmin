@@ -8,7 +8,7 @@ Asistente administrativo local para Windows descrito en [PLAN.md](PLAN.md). Ya e
 - [Instrucciones del proyecto](AGENTS.md): pautas para cambios y comprobaciones.
 - [Harness de evaluación](evaluation/README.md): 10 facturas y 20 correos sintéticos, expectativas separadas, evaluación sin red y pruebas del evaluador.
 - [Evidencias](evidence/): ejecuciones registradas de cada caso de prueba.
-- Código: `crates/core` (almacenamiento, cola y acciones idempotentes), `crates/ai` (proveedores), `crates/documents` (validación y duplicados), `crates/extract` (texto, PDF y OCR), `crates/setup` (preparación del equipo), `crates/simulators`, `crates/app` (flujos, revisión y reglas), `crates/desktop` (ventana Tauri) y `ui/` (interfaz).
+- Código: `crates/core` (almacenamiento, cola y acciones idempotentes), `crates/ai` (proveedores), `crates/documents` (validación y duplicados), `crates/extract` (texto, PDF y OCR), `crates/setup` (preparación del equipo), `crates/mail` (conectores de Microsoft 365 y Gmail), `crates/simulators`, `crates/app` (flujos, revisión y reglas), `crates/desktop` (ventana Tauri) y `ui/` (interfaz).
 - [Integración continua](.github/workflows/verify.yml): especificaciones, evaluador, interfaz y crates en Linux y Windows.
 
 ## Herramientas de desarrollo
@@ -67,6 +67,12 @@ python -m unittest discover -s scripts/tests -v
 python -m unittest discover -s evaluation/tests -v
 npm run build --prefix ui
 cargo test --workspace
+```
+
+Para comprobar que todo esto funciona desde cero, `scripts/build-clean.ps1` clona el repositorio en una carpeta nueva y ejecuta allí todos los pasos, incluido el instalador. Termina comprobando que lo generado queda ignorado por Git y que las pruebas no tocan los datos del usuario (T11):
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-clean.ps1
 ```
 
 `cargo test --workspace` usa un proveedor de IA simulado. La prueba del flujo completo con el Ollama local se ejecuta aparte: `cargo test -p nestadmin-app --test ollama -- --ignored`. Estas comprobaciones no acreditan por sí solas los criterios de aceptación: cada requisito necesita la evidencia indicada en la matriz. El protocolo para puntuar predicciones está en [evaluation/README.md](evaluation/README.md); las predicciones y resultados locales se guardan fuera del contenido del usuario y están excluidos de Git.

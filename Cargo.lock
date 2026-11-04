@@ -2347,6 +2347,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "nestadmin-mail"
+version = "0.1.0"
+dependencies = [
+ "base64 0.23.1",
+ "getrandom 0.3.4",
+ "nestadmin-ai",
+ "nestadmin-core",
+ "nestadmin-simulators",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "ureq",
+ "url",
+]
+
+[[package]]
 name = "nestadmin-setup"
 version = "0.1.0"
 dependencies = [
