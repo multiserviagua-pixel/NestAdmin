@@ -123,3 +123,43 @@ export interface LaunchView {
   startup: Startup | null;
 }
 
+
+// Cuentas de correo (R13, D41–D44).
+
+export type MailProviderKind = "simulator" | "google" | "microsoft";
+export type AccountStatus = "connected" | "signed_out" | "not_configured" | "credentials_unavailable";
+
+export interface MailIssue {
+  code: "unauthorized" | "unavailable" | "not_found" | "conflict" | "invalid_input" | string;
+  message: string;
+}
+
+export interface AccountFetch {
+  account: string;
+  read: number;
+  added: number;
+  error: MailIssue | null;
+}
+
+export interface FetchReport {
+  added: number;
+  limit: number;
+  accounts: AccountFetch[];
+}
+
+export interface MailAccount {
+  id: string;
+  provider: MailProviderKind;
+  label: string;
+  status: AccountStatus;
+  last_fetch: AccountFetch | null;
+}
+
+export interface MailView {
+  accounts: MailAccount[];
+  limit: number;
+  google_configured: boolean;
+  microsoft_configured: boolean;
+  clients_error: string | null;
+  signing_in: boolean;
+}

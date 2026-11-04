@@ -7,8 +7,10 @@
 //! prepara la solicitud, `Job::run` llama al proveedor sin acceso a `App`, y `finish` valida,
 //! aplica reglas y deja la tarea completada, en revisión o fallida.
 
+pub mod accounts;
 pub mod rules;
 
+use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -22,10 +24,15 @@ use nestadmin_core::{
 };
 use nestadmin_documents::{process_invoice, DuplicateRegistry, Evidenced, Invoice, RawInvoice};
 use nestadmin_extract::Extractor;
-use nestadmin_simulators::{AdminSimulator, MailConnector, MailSimulator, Message, NewDraft};
+use nestadmin_mail::{OAuthConfig, Tokens};
+use nestadmin_simulators::{AdminSimulator, MailSimulator, Message, NewDraft};
 use serde::Serialize;
 use serde_json::{json, Value};
 
+use crate::accounts::{
+    split_id, AccountFetch, AccountView, Accounts, FetchReport, MailAccountsView, MailEnv,
+    MailIssue, MailProviderKind,
+};
 use crate::rules::{decide, RuleDecision, REGISTER_INVOICE, SEND_DRAFT};
 
 pub const INVOICE: &str = "invoice";
@@ -74,6 +81,10 @@ impl AppPaths {
     fn mail(&self) -> PathBuf {
         self.data_dir.join("simulador-correo.json")
     }
+    /// Lista de cuentas y registro local de borradores de cada cuenta real.
+    fn mail_accounts(&self) -> PathBuf {
+        self.data_dir.join("correo")
+    }
     fn admin(&self) -> PathBuf {
         self.data_dir.join("simulador-administracion.json")
     }
@@ -91,7 +102,7 @@ pub struct ProviderInfo {
 
 pub struct App {
     store: Store,
-    mail: MailSimulator,
+    mail: Accounts,
     admin: AdminSimulator,
     provider: Arc<dyn Provider>,
     documents: PathBuf,
@@ -166,17 +177,29 @@ fn task_error(code: &str, message: impl Into<String>, recoverable: bool) -> Task
 }
 
 impl App {
-    /// Abre los datos locales y recupera el trabajo interrumpido: las tareas en curso
-    /// vuelven a la cola y las acciones pendientes se reconcilian con los simuladores.
+    /// Abre los datos locales solo con el correo simulado y sin proveedores reales.
     pub fn open(
         paths: &AppPaths,
         provider: Arc<dyn Provider>,
         extractor: Arc<Extractor>,
     ) -> AppResult<Self> {
+        Self::open_with_mail(paths, provider, extractor, MailEnv::simulator_only())
+    }
+
+    /// Abre los datos locales y recupera el trabajo interrumpido: las tareas en curso
+    /// vuelven a la cola y las acciones pendientes se reconcilian con los conectores (cada
+    /// envío, con la cuenta que lo hizo).
+    pub fn open_with_mail(
+        paths: &AppPaths,
+        provider: Arc<dyn Provider>,
+        extractor: Arc<Extractor>,
+        mail: MailEnv,
+    ) -> AppResult<Self> {
         fs::create_dir_all(paths.documents())?;
+        let simulator = MailSimulator::open(&paths.mail())?;
         let mut app = Self {
             store: Store::open(&paths.db())?,
-            mail: MailSimulator::open(&paths.mail())?,
+            mail: Accounts::open(&paths.mail_accounts(), simulator, mail)?,
             admin: AdminSimulator::open(&paths.admin())?,
             provider,
             documents: paths.documents(),
@@ -259,41 +282,73 @@ impl App {
         Ok(self.store.enqueue(INVOICE, &input.to_string())?)
     }
 
-    /// Consulta el simulador de correo y encola los mensajes que aún no tienen tarea.
-    pub fn fetch_mail(&mut self) -> AppResult<usize> {
-        let known: Vec<String> = self
+    /// Consulta cada cuenta (como mucho el límite de mensajes por cuenta) y encola los
+    /// mensajes que aún no tienen tarea. El mensaje se guarda en la tarea para no volver a
+    /// pedirlo al proveedor. El fallo de una cuenta queda en el informe y no detiene a las
+    /// demás.
+    pub fn fetch_mail(&mut self) -> AppResult<FetchReport> {
+        let mut known: HashSet<String> = HashSet::new();
+        for task in self
             .store
             .all_tasks()?
             .into_iter()
             .filter(|t| t.kind == EMAIL)
-            .map(|t| t.input_ref)
-            .collect();
-        let mut added = 0;
-        for message in self.messages()? {
-            let input = json!({ "message_id": message.id }).to_string();
-            if !known.contains(&input) {
-                self.store.enqueue(EMAIL, &input)?;
-                added += 1;
+        {
+            let input: Value = serde_json::from_str(&task.input_ref).unwrap_or(Value::Null);
+            if let Some(id) = input["message_id"].as_str() {
+                let (account, inner) = split_id(id);
+                known.insert(accounts::join_id(account, inner));
             }
         }
-        Ok(added)
-    }
-
-    fn messages(&self) -> AppResult<Vec<Message>> {
-        let mut all = Vec::new();
-        let mut cursor: Option<String> = None;
-        loop {
-            let page = self.mail.list_messages(cursor.as_deref())?;
-            all.extend(page.messages);
-            match page.next_cursor {
-                Some(next) => cursor = Some(next),
-                None => return Ok(all),
-            }
+        let mut report = FetchReport {
+            added: 0,
+            limit: self.mail.limit(),
+            accounts: Vec::new(),
+        };
+        for (account, outcome) in self.mail.read_all() {
+            let fetch = match outcome {
+                Ok(messages) => {
+                    let mut added = 0;
+                    for message in &messages {
+                        if known.insert(message.id.clone()) {
+                            let input = json!({
+                                "message_id": message.id,
+                                "account": account,
+                                "message": message,
+                            });
+                            self.store.enqueue(EMAIL, &input.to_string())?;
+                            added += 1;
+                        }
+                    }
+                    AccountFetch {
+                        account,
+                        read: messages.len(),
+                        added,
+                        error: None,
+                    }
+                }
+                Err(error) => AccountFetch {
+                    account,
+                    read: 0,
+                    added: 0,
+                    error: Some(MailIssue::from(&error)),
+                },
+            };
+            report.added += fetch.added;
+            self.mail.record_fetch(fetch.clone());
+            report.accounts.push(fetch);
         }
+        Ok(report)
     }
 
-    fn message(&self, id: &str) -> AppResult<Option<Message>> {
-        Ok(self.messages()?.into_iter().find(|m| m.id == id))
+    /// Mensaje de una tarea de correo: el guardado al encolarla o, en tareas anteriores a las
+    /// cuentas, el que devuelva su cuenta.
+    fn task_message(&self, input: &Value) -> Result<Option<Message>, ConnectorError> {
+        if let Ok(message) = serde_json::from_value::<Message>(input["message"].clone()) {
+            return Ok(Some(message));
+        }
+        self.mail
+            .find_message(input["message_id"].as_str().unwrap_or(""))
     }
 
     /// Toma la siguiente tarea y prepara su solicitud. `None` si la cola está vacía.
@@ -312,24 +367,27 @@ impl App {
                     false,
                 )),
             },
-            EMAIL => match self.message(input["message_id"].as_str().unwrap_or(""))? {
-                Some(Message {
-                    body: Some(body),
-                    subject,
-                    ..
-                }) => {
-                    let text = match subject {
-                        Some(subject) => format!("Asunto: {subject}\n\n{body}"),
-                        None => body,
-                    };
-                    Ok(Prepared::Request(email_request(&id, &text)))
-                }
-                Some(_) => Err(task_error(
-                    "empty_message",
-                    "el mensaje no tiene cuerpo",
-                    false,
-                )),
-                None => Err(task_error("not_found", "el mensaje ya no existe", false)),
+            EMAIL => match self.task_message(&input) {
+                Err(e) => Err(task_error(&e.code, e.message, true)),
+                Ok(found) => match found {
+                    Some(Message {
+                        body: Some(body),
+                        subject,
+                        ..
+                    }) => {
+                        let text = match subject {
+                            Some(subject) => format!("Asunto: {subject}\n\n{body}"),
+                            None => body,
+                        };
+                        Ok(Prepared::Request(email_request(&id, &text)))
+                    }
+                    Some(_) => Err(task_error(
+                        "empty_message",
+                        "el mensaje no tiene cuerpo",
+                        false,
+                    )),
+                    None => Err(task_error("not_found", "el mensaje ya no existe", false)),
+                },
             },
             other => Err(task_error(
                 "invalid_input",
@@ -444,8 +502,8 @@ impl App {
             .map_err(|e| task_error(e.code(), e.to_string(), true))?;
         let input: Value = serde_json::from_str(&task.input_ref).unwrap_or(Value::Null);
         let message = self
-            .message(input["message_id"].as_str().unwrap_or(""))
-            .map_err(|e| task_error("unavailable", e.to_string(), true))?
+            .task_message(&input)
+            .map_err(|e| task_error(&e.code, e.message, true))?
             .ok_or_else(|| task_error("not_found", "el mensaje ya no existe", false))?;
         // Sin remitente no hay a quién responder: el borrador se muestra, pero no se puede enviar.
         let to: Vec<String> = message.from.iter().cloned().collect();
@@ -614,7 +672,48 @@ impl App {
 
     /// Para pruebas y demostraciones: efectos registrados en los simuladores.
     pub fn simulators(&self) -> (&MailSimulator, &AdminSimulator) {
-        (&self.mail, &self.admin)
+        (self.mail.simulator(), &self.admin)
+    }
+
+    /// Cuentas de correo, su estado y el límite de mensajes por consulta.
+    pub fn mail_accounts(&self) -> MailAccountsView {
+        self.mail.view()
+    }
+
+    /// Mensajes leídos como mucho por cuenta en cada consulta (1 a 500).
+    pub fn set_mail_limit(&mut self, limit: usize) -> AppResult<()> {
+        self.mail.set_limit(limit).map_err(AppError::Invalid)
+    }
+
+    /// Cliente OAuth para iniciar sesión; error si esta instalación no lo tiene configurado.
+    pub fn mail_oauth(&self, provider: MailProviderKind) -> AppResult<OAuthConfig> {
+        Ok(self.mail.oauth(provider)?)
+    }
+
+    /// Añade una cuenta con los tokens obtenidos al iniciar sesión.
+    pub fn add_mail_account(
+        &mut self,
+        provider: MailProviderKind,
+        label: &str,
+        tokens: &Tokens,
+    ) -> AppResult<AccountView> {
+        Ok(self.mail.add(provider, label, tokens)?)
+    }
+
+    /// Guarda tokens nuevos para una cuenta existente.
+    pub fn reconnect_mail_account(&mut self, id: &str, tokens: &Tokens) -> AppResult<AccountView> {
+        Ok(self.mail.reconnect(id, tokens)?)
+    }
+
+    /// Vuelve a añadir la cuenta simulada si se había quitado.
+    pub fn add_simulated_mail_account(&mut self) -> AppResult<AccountView> {
+        Ok(self.mail.add_simulator()?)
+    }
+
+    /// Desconecta una cuenta: borra sus tokens y la quita de la lista. Las tareas ya
+    /// encoladas de esa cuenta siguen visibles; enviar desde ellas falla con el motivo.
+    pub fn remove_mail_account(&mut self, id: &str) -> AppResult<()> {
+        Ok(self.mail.remove(id)?)
     }
 }
 

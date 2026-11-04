@@ -2284,16 +2284,19 @@ dependencies = [
 name = "nestadmin-app"
 version = "0.1.0"
 dependencies = [
+ "base64 0.23.1",
  "nestadmin-ai",
  "nestadmin-core",
  "nestadmin-documents",
  "nestadmin-extract",
+ "nestadmin-mail",
  "nestadmin-simulators",
  "pdfium-render",
  "serde",
  "serde_json",
  "tempfile",
  "thiserror 2.0.21",
+ "url",
 ]
 
 [[package]]
@@ -2315,12 +2318,14 @@ dependencies = [
  "nestadmin-app",
  "nestadmin-core",
  "nestadmin-extract",
+ "nestadmin-mail",
  "nestadmin-setup",
  "serde",
  "serde_json",
  "tauri",
  "tauri-build",
  "tauri-plugin-single-instance",
+ "tempfile",
 ]
 
 [[package]]

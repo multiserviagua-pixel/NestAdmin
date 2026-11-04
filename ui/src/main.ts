@@ -1,7 +1,11 @@
 import "./style.css";
-import { api, isPreview, onChanged, onSetup, onSetupDone, onStartup } from "./api";
+import { api, isPreview, onChanged, onMailSignIn, onSetup, onSetupDone, onStartup } from "./api";
 import type {
   AuditEntry,
+  FetchReport,
+  MailAccount,
+  MailProviderKind,
+  MailView,
   Memory,
   ProviderChoice,
   Rule,
@@ -75,7 +79,29 @@ const ACTION_LABEL: Record<string, string> = {
   rule: "Regla",
 };
 
-type View = "review" | "tasks" | "rules" | "history" | "settings" | "setup";
+type View = "review" | "tasks" | "rules" | "history" | "mail" | "settings" | "setup";
+
+const PROVIDER_LABEL: Record<MailProviderKind, string> = {
+  simulator: "Simulador",
+  google: "Google (Gmail)",
+  microsoft: "Microsoft 365 / Outlook",
+};
+
+const ACCOUNT_STATUS: Record<string, [string, string]> = {
+  connected: ["Conectada", "state-completed"],
+  signed_out: ["Sin sesión", "state-failed"],
+  not_configured: ["Proveedor no configurado", "state-failed"],
+  credentials_unavailable: ["Credenciales no disponibles", "state-failed"],
+};
+
+// Errores del contrato de correo, en palabras del usuario.
+const MAIL_ERROR: Record<string, string> = {
+  unauthorized: "Sesión no válida",
+  unavailable: "Proveedor o red no disponibles",
+  not_found: "No encontrado",
+  conflict: "Conflicto",
+  invalid_input: "Datos no válidos",
+};
 
 const state = {
   view: "review" as View,
@@ -84,6 +110,9 @@ const state = {
   rules: [] as Rule[],
   audit: [] as AuditEntry[],
   settings: null as SettingsView | null,
+  mail: null as MailView | null,
+  // Dirección del inicio de sesión en curso, por si el navegador no se abrió solo.
+  signInUrl: null as string | null,
   notice: null as { kind: "ok" | "error"; text: string } | null,
   // Borradores editados y aún no guardados, para no perderlos al refrescar.
   drafts: {} as Record<number, string>,
@@ -116,13 +145,14 @@ async function act(work: () => Promise<unknown>, success?: string) {
 
 async function refresh(background = false) {
   try {
-    const [tasks, rules, audit, settings] = await Promise.all([
+    const [tasks, rules, audit, settings, mail] = await Promise.all([
       api.tasks(),
       api.rules(),
       api.auditLog(),
       api.settings(),
+      api.mailAccounts(),
     ]);
-    Object.assign(state, { tasks, rules, audit, settings });
+    Object.assign(state, { tasks, rules, audit, settings, mail });
   } catch (error) {
     state.notice = { kind: "error", text: String(error) };
   }
@@ -198,8 +228,7 @@ function header() {
         {
           onclick: () =>
             void act(async () => {
-              const added = await api.fetchMail();
-              state.notice = { kind: "ok", text: added ? `${added} mensajes nuevos en cola` : "No hay mensajes nuevos" };
+              state.notice = fetchNotice(await api.fetchMail());
             }),
         },
         "Consultar correo",
@@ -214,6 +243,7 @@ function nav() {
     ["tasks", "Tareas"],
     ["rules", "Reglas"],
     ["history", "Historial"],
+    ["mail", "Correo", state.mail?.accounts.some(needsAttention) ? 1 : undefined],
     ["settings", "Configuración"],
     ["setup", "Preparación", (state.check && state.check.status !== "ready") || state.memory?.level === "insufficient" ? 1 : undefined],
   ];
@@ -368,6 +398,7 @@ function emailDetail(task: Task) {
     h("h2", {}, message.subject ?? h("span", { class: "missing" }, "(sin asunto)")),
     provenance(r),
     h("p", { class: "reason" }, `Motivo de la revisión: ${r.review_reason ?? "requiere aprobación"}`),
+    h("p", { class: "meta" }, "Cuenta: ", accountName(message.id)),
     h(
       "div",
       { class: "message" },
@@ -392,7 +423,7 @@ function emailDetail(task: Task) {
               // Si se ha editado, se guarda primero como versión nueva y se aprueba esa.
               if (body.value !== (draft.body ?? "")) version = (await api.editDraft(task.id, body.value)).result?.version;
               await api.approve(task.id, version);
-            }, "Respuesta enviada mediante el simulador"),
+            }, `Respuesta enviada desde ${accountName(message.id)}`),
         },
         "Aprobar y enviar",
       ),
@@ -552,7 +583,7 @@ function historyView() {
     "section",
     { class: "page" },
     h("h2", {}, "Historial"),
-    h("p", { class: "intro" }, "Acciones ejecutadas en los simuladores y cambios de reglas, con su autorización."),
+    h("p", { class: "intro" }, "Acciones ejecutadas en las cuentas de correo y el simulador de administración, y cambios de reglas, con su autorización."),
     state.audit.length
       ? h(
           "table",
@@ -575,6 +606,192 @@ function historyView() {
           ),
         )
       : h("p", { class: "empty" }, "Aún no hay acciones registradas."),
+  );
+}
+
+// ---- Cuentas de correo (R13) ----
+
+function accountOf(messageId: string | undefined): MailAccount | undefined {
+  const prefix = messageId?.includes(":") ? messageId.split(":")[0] : "simulador";
+  return state.mail?.accounts.find((a) => a.id === prefix);
+}
+
+function accountName(messageId: string | undefined): string {
+  const account = accountOf(messageId);
+  if (account) return `${account.label} (${PROVIDER_LABEL[account.provider]})`;
+  const prefix = messageId?.includes(":") ? messageId.split(":")[0] : "simulador";
+  return `${prefix} (desconectada)`;
+}
+
+function needsAttention(account: MailAccount) {
+  return account.status !== "connected" || account.last_fetch?.error != null;
+}
+
+function issueText(error: { code: string; message: string }) {
+  return `${MAIL_ERROR[error.code] ?? error.code}: ${error.message}`;
+}
+
+function fetchNotice(report: FetchReport): { kind: "ok" | "error"; text: string } {
+  if (report.accounts.length === 0) return { kind: "error", text: "No hay cuentas de correo. Añada una en la sección Correo." };
+  const failed = report.accounts.filter((a) => a.error);
+  const added = report.added ? `${report.added} mensajes nuevos en cola` : "No hay mensajes nuevos";
+  if (!failed.length) return { kind: "ok", text: added };
+  const names = failed.map((a) => `${state.mail?.accounts.find((m) => m.id === a.account)?.label ?? a.account} — ${issueText(a.error!)}`);
+  return { kind: "error", text: `${added}. No se pudo consultar: ${names.join("; ")}` };
+}
+
+function lastFetch(account: MailAccount) {
+  const f = account.last_fetch;
+  if (!f) return h("span", { class: "missing" }, "Sin consultar en esta sesión");
+  if (f.error) return h("span", { class: "error-text" }, issueText(f.error));
+  return `${f.read} leídos, ${f.added} nuevos`;
+}
+
+function signIn(provider: MailProviderKind, label: string, account?: MailAccount) {
+  state.signInUrl = null;
+  if (state.mail) state.mail.signing_in = true;
+  state.notice = { kind: "ok", text: "Complete el inicio de sesión en el navegador que se ha abierto." };
+  render();
+  void act(async () => {
+    try {
+      const done = await api.mailSignIn(provider, label, account?.id);
+      state.notice = { kind: "ok", text: account ? `Sesión renovada en «${done.label}»` : `Cuenta «${done.label}» conectada` };
+    } finally {
+      state.signInUrl = null;
+    }
+  });
+}
+
+function mailView() {
+  const m = state.mail;
+  if (!m) return h("section", { class: "page" }, h("p", {}, "Cargando…"));
+  const label = h("input", { name: "label", maxlength: "60", placeholder: "p. ej. Facturación" }) as HTMLInputElement;
+  const limit = h("input", { type: "number", min: "1", max: "500", step: "1", value: String(m.limit) }) as HTMLInputElement;
+  const busy = m.signing_in;
+  const providerButton = (provider: "google" | "microsoft", configured: boolean) =>
+    h(
+      "button",
+      {
+        class: "primary",
+        disabled: busy || !configured,
+        title: configured ? undefined : "El editor no ha configurado este proveedor en esta instalación",
+        onclick: () => signIn(provider, label.value),
+      },
+      `Conectar ${PROVIDER_LABEL[provider]}`,
+    );
+  const unconfigured = [
+    !m.google_configured ? "Google" : null,
+    !m.microsoft_configured ? "Microsoft" : null,
+  ].filter(Boolean);
+  return h(
+    "section",
+    { class: "page" },
+    h("h2", {}, "Cuentas de correo"),
+    h(
+      "p",
+      { class: "intro" },
+      "Cada cuenta inicia sesión en el navegador del sistema y sus tokens se guardan en el Administrador de credenciales de Windows. El correo solo viaja entre este equipo y el proveedor de la cuenta. Ninguna respuesta se envía sin su aprobación o una regla activa.",
+    ),
+    m.clients_error ? h("div", { class: "notice error", role: "alert" }, h("span", {}, m.clients_error)) : null,
+    m.accounts.length
+      ? h(
+          "table",
+          { class: "grid" },
+          h("thead", {}, h("tr", {}, ...["Cuenta", "Proveedor", "Estado", "Última consulta", ""].map((c) => h("th", {}, c)))),
+          h(
+            "tbody",
+            {},
+            ...m.accounts.map((a) => {
+              const [statusText, statusClass] = ACCOUNT_STATUS[a.status] ?? [a.status, "state-failed"];
+              const real = a.provider !== "simulator";
+              const configured = a.provider === "google" ? m.google_configured : m.microsoft_configured;
+              const renew = real && configured && (a.status !== "connected" || a.last_fetch?.error?.code === "unauthorized");
+              return h(
+                "tr",
+                {},
+                h("td", {}, h("strong", {}, a.label), h("div", { class: "meta mono" }, a.id)),
+                h("td", {}, PROVIDER_LABEL[a.provider]),
+                h("td", {}, h("span", { class: `badge ${statusClass}` }, statusText)),
+                h("td", { class: "detail-cell" }, lastFetch(a)),
+                h(
+                  "td",
+                  {},
+                  renew
+                    ? h("button", { disabled: busy, onclick: () => signIn(a.provider, a.label, a) }, "Volver a iniciar sesión")
+                    : null,
+                  h(
+                    "button",
+                    {
+                      class: "danger",
+                      onclick: () => {
+                        const what = real
+                          ? `Se borrarán los tokens de «${a.label}» de este equipo y NestAdmin dejará de leer esa cuenta. Las tareas ya creadas seguirán visibles, pero no podrán enviar respuestas.`
+                          : "NestAdmin dejará de leer el correo simulado. Puede volver a añadirlo.";
+                        if (confirm(`${what} ¿Desconectar?`)) void act(() => api.removeMailAccount(a.id), `Cuenta «${a.label}» desconectada`);
+                      },
+                    },
+                    "Desconectar",
+                  ),
+                ),
+              );
+            }),
+          ),
+        )
+      : h("p", { class: "empty" }, "No hay cuentas de correo. Conecte una cuenta de Google o Microsoft para consultar su bandeja de entrada."),
+    h(
+      "div",
+      { class: "card" },
+      h("h3", {}, "Añadir cuenta"),
+      h(
+        "p",
+        { class: "intro" },
+        "Se abrirá el navegador para que inicie sesión y conceda permiso de lectura, borradores y envío. NestAdmin espera la respuesta en este equipo (127.0.0.1) durante 5 minutos.",
+      ),
+      h("div", { class: "row" }, h("label", {}, "Nombre de la cuenta (opcional)", label)),
+      h(
+        "div",
+        { class: "buttons" },
+        providerButton("google", m.google_configured),
+        providerButton("microsoft", m.microsoft_configured),
+        m.accounts.some((a) => a.provider === "simulator")
+          ? null
+          : h("button", { disabled: busy, onclick: () => void act(() => api.addSimulatedMailAccount(), "Correo simulado añadido") }, "Añadir correo simulado"),
+      ),
+      busy
+        ? h(
+            "div",
+            { class: "notice ok", role: "status" },
+            h(
+              "span",
+              {},
+              "Esperando al navegador… ",
+              state.signInUrl ? h("span", {}, "Si no se abrió, copie esta dirección en su navegador: ", h("span", { class: "mono" }, state.signInUrl)) : null,
+            ),
+            h("button", { onclick: () => void act(() => api.mailSignInCancel()) }, "Cancelar"),
+          )
+        : null,
+      unconfigured.length
+        ? h(
+            "p",
+            { class: "meta" },
+            `${unconfigured.join(" y ")}: esta instalación no incluye el cliente OAuth del editor (archivo correo-oauth.json), así que no se puede iniciar sesión.`,
+          )
+        : null,
+    ),
+    h(
+      "div",
+      { class: "card" },
+      h("h3", {}, "Mensajes por consulta"),
+      h("p", { class: "intro" }, "Cada vez que pulse «Consultar correo», NestAdmin lee como mucho este número de mensajes recientes de cada cuenta (de 1 a 500)."),
+      h("div", { class: "row" }, h("label", {}, "Límite por cuenta", limit)),
+      h(
+        "button",
+        {
+          onclick: () => void act(() => api.setMailLimit(Number(limit.value)), `Límite guardado: ${limit.value} mensajes por cuenta`),
+        },
+        "Guardar límite",
+      ),
+    ),
   );
 }
 
@@ -847,6 +1064,7 @@ function render(background = false) {
     tasks: tasksView,
     rules: rulesView,
     history: historyView,
+    mail: mailView,
     settings: settingsView,
     setup: setupView,
   };
@@ -885,6 +1103,10 @@ void (async () => {
     return;
   }
   onChanged(() => void refresh(true));
+  onMailSignIn((url) => {
+    state.signInUrl = url;
+    render(true);
+  });
   await refresh();
   applyStartup();
   void refreshCheck();

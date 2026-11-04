@@ -4,6 +4,7 @@
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod mail_clients;
 mod settings;
 
 use std::path::PathBuf;
@@ -15,9 +16,13 @@ use std::time::Duration;
 
 use nestadmin_ai::credentials::GROQ_API_KEY;
 use nestadmin_ai::{CredentialStore, ProviderChoice, Secret};
+use nestadmin_app::accounts::{
+    AccountView, FetchReport, MailAccountsView, MailEnv, MailProviderKind,
+};
 use nestadmin_app::{App, AppPaths, ProviderInfo};
 use nestadmin_core::{AuditEntry, Rule, Task};
 use nestadmin_extract::{Extractor, Tesseract};
+use nestadmin_mail::PendingAuthorization;
 use nestadmin_setup::{Cancel, Report, Setup, SetupError, Startup, Status, WindowsSystem};
 use serde::Serialize;
 use serde_json::Value;
@@ -35,14 +40,22 @@ const SETUP: &str = "nestadmin://setup";
 const SETUP_DONE: &str = "nestadmin://setup-done";
 /// Resultado de la comprobación al abrir (D39).
 const STARTUP: &str = "nestadmin://startup";
+/// Dirección de inicio de sesión de correo, por si el navegador no se abrió solo.
+const MAIL_SIGN_IN: &str = "nestadmin://mail-sign-in";
+/// Tiempo máximo para completar el inicio de sesión en el navegador.
+const SIGN_IN_TIMEOUT: Duration = Duration::from_secs(300);
 /// Argumento con el que el instalador lanza solo la preparación (D36).
 const PREPARE_ARG: &str = "--preparar";
 
 struct Shared {
     app: Mutex<App>,
     settings: Mutex<Settings>,
-    credentials: Box<dyn CredentialStore>,
+    credentials: Arc<dyn CredentialStore>,
     data_dir: PathBuf,
+    /// Inicio de sesión de correo en curso; solo uno a la vez.
+    sign_in: Mutex<Option<SignIn>>,
+    /// Motivo por el que no se pudo leer `correo-oauth.json`, si lo hay.
+    mail_clients_error: Option<String>,
     wake: Mutex<Sender<()>>,
     stopping: AtomicBool,
 }
@@ -70,6 +83,11 @@ impl Shared {
             let _ = sender.send(());
         }
     }
+}
+
+struct SignIn {
+    redirect_uri: String,
+    cancelled: bool,
 }
 
 type SharedState = Arc<Shared>;
@@ -126,12 +144,173 @@ fn percent_decode(text: &str) -> Option<String> {
     String::from_utf8(bytes).ok()
 }
 
+/// Consulta las cuentas. Puede tardar si un proveedor responde despacio, así que se hace
+/// fuera del hilo de la ventana. El informe dice qué cuenta falló y por qué.
 #[tauri::command]
-fn fetch_mail(shared: State<'_, SharedState>, handle: AppHandle) -> CmdResult<usize> {
-    let added = shared.app()?.fetch_mail().map_err(text)?;
+async fn fetch_mail(shared: State<'_, SharedState>, handle: AppHandle) -> CmdResult<FetchReport> {
+    let shared = Arc::clone(shared.inner());
+    let worker = Arc::clone(&shared);
+    let report =
+        tauri::async_runtime::spawn_blocking(move || worker.app()?.fetch_mail().map_err(text))
+            .await
+            .map_err(text)??;
     shared.wake();
     changed(&handle);
-    Ok(added)
+    Ok(report)
+}
+
+#[derive(Serialize)]
+struct MailView {
+    #[serde(flatten)]
+    accounts: MailAccountsView,
+    /// `correo-oauth.json` existe pero no se pudo leer.
+    clients_error: Option<String>,
+    signing_in: bool,
+}
+
+#[tauri::command]
+fn mail_accounts(shared: State<'_, SharedState>) -> CmdResult<MailView> {
+    Ok(MailView {
+        accounts: shared.app()?.mail_accounts(),
+        clients_error: shared.mail_clients_error.clone(),
+        signing_in: shared.sign_in.lock().map_err(text)?.is_some(),
+    })
+}
+
+#[tauri::command]
+fn set_mail_limit(shared: State<'_, SharedState>, limit: usize) -> CmdResult<()> {
+    shared.app()?.set_mail_limit(limit).map_err(text)?;
+    let mut settings = shared.settings.lock().map_err(text)?;
+    let updated = Settings {
+        mail_limit: limit,
+        ..settings.clone()
+    };
+    updated.save(&shared.data_dir).map_err(text)?;
+    *settings = updated;
+    Ok(())
+}
+
+/// Inicia sesión en Google o Microsoft con OAuth y PKCE (D31): abre el navegador del sistema
+/// y espera la redirección en 127.0.0.1. Con `account`, renueva la sesión de esa cuenta; sin
+/// ella, añade una cuenta nueva. Los tokens van directos al almacén de credenciales.
+#[tauri::command]
+async fn mail_sign_in(
+    shared: State<'_, SharedState>,
+    handle: AppHandle,
+    provider: MailProviderKind,
+    label: String,
+    account: Option<String>,
+) -> CmdResult<AccountView> {
+    let shared = Arc::clone(shared.inner());
+    let emitter = handle.clone();
+    let view = tauri::async_runtime::spawn_blocking(move || {
+        sign_in(&shared, &emitter, provider, &label, account.as_deref())
+    })
+    .await
+    .map_err(text)??;
+    changed(&handle);
+    Ok(view)
+}
+
+fn sign_in(
+    shared: &Shared,
+    handle: &AppHandle,
+    provider: MailProviderKind,
+    label: &str,
+    account: Option<&str>,
+) -> CmdResult<AccountView> {
+    let config = shared.app()?.mail_oauth(provider).map_err(text)?;
+    let pending = {
+        let mut running = shared.sign_in.lock().map_err(text)?;
+        if running.is_some() {
+            return Err("ya hay un inicio de sesión en curso".into());
+        }
+        let pending = PendingAuthorization::begin(&config).map_err(text)?;
+        *running = Some(SignIn {
+            redirect_uri: pending.redirect_uri().to_owned(),
+            cancelled: false,
+        });
+        pending
+    };
+    let _ = handle.emit(MAIL_SIGN_IN, pending.url());
+    open_browser(pending.url());
+    let result = pending.finish(&config, SIGN_IN_TIMEOUT);
+    let cancelled = shared
+        .sign_in
+        .lock()
+        .map_err(text)?
+        .take()
+        .is_some_and(|s| s.cancelled);
+    let tokens = match result {
+        Ok(tokens) => tokens,
+        Err(_) if cancelled => return Err("inicio de sesión cancelado".into()),
+        Err(error) => return Err(text(error)),
+    };
+    let mut app = shared.app()?;
+    match account {
+        Some(id) => app.reconnect_mail_account(id, &tokens),
+        None => app.add_mail_account(provider, label, &tokens),
+    }
+    .map_err(text)
+}
+
+/// Cancela el inicio de sesión en curso: la espera local recibe una redirección que no
+/// corresponde a la solicitud y termina sin canjear ningún código.
+#[tauri::command]
+fn mail_sign_in_cancel(shared: State<'_, SharedState>) -> CmdResult<()> {
+    let redirect = {
+        let mut running = shared.sign_in.lock().map_err(text)?;
+        match running.as_mut() {
+            Some(sign_in) => {
+                sign_in.cancelled = true;
+                sign_in.redirect_uri.clone()
+            }
+            None => return Ok(()),
+        }
+    };
+    let address = redirect
+        .trim_start_matches("http://")
+        .trim_end_matches('/')
+        .to_owned();
+    if let Ok(mut stream) = std::net::TcpStream::connect(address) {
+        use std::io::Write;
+        let _ = stream.write_all(b"GET /?error=cancelled HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n");
+    }
+    Ok(())
+}
+
+/// Abre la dirección en el navegador predeterminado sin pasar por un intérprete de órdenes.
+fn open_browser(url: &str) {
+    #[cfg(windows)]
+    {
+        let _ = std::process::Command::new("rundll32")
+            .args(["url.dll,FileProtocolHandler", url])
+            .spawn();
+    }
+    #[cfg(not(windows))]
+    let _ = url;
+}
+
+/// Desconecta una cuenta: borra sus tokens del almacén y la quita de la lista.
+#[tauri::command]
+fn remove_mail_account(
+    shared: State<'_, SharedState>,
+    handle: AppHandle,
+    id: String,
+) -> CmdResult<()> {
+    shared.app()?.remove_mail_account(&id).map_err(text)?;
+    changed(&handle);
+    Ok(())
+}
+
+#[tauri::command]
+fn add_simulated_mail_account(
+    shared: State<'_, SharedState>,
+    handle: AppHandle,
+) -> CmdResult<AccountView> {
+    let view = shared.app()?.add_simulated_mail_account().map_err(text)?;
+    changed(&handle);
+    Ok(view)
 }
 
 #[tauri::command]
@@ -256,7 +435,10 @@ fn select_provider(
 ) -> CmdResult<ProviderInfo> {
     let provider = settings::build(&choice, shared.credentials.as_ref()).map_err(text)?;
     let mut current = shared.settings.lock().map_err(text)?;
-    let updated = Settings { provider: choice };
+    let updated = Settings {
+        provider: choice,
+        ..current.clone()
+    };
     updated.save(&shared.data_dir).map_err(text)?;
     *current = updated;
     let mut app = shared.app()?;
@@ -551,7 +733,20 @@ fn setup(handle: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
     let settings = Settings::load(&data_dir);
     let local_provider = matches!(settings.provider, ProviderChoice::Ollama { .. });
     let provider = provider_for(&settings.provider, credentials.as_ref());
-    let app = App::open(&AppPaths::new(&data_dir), provider, Arc::new(extractor()))?;
+    let (profiles, mail_clients_error) = mail_clients::load(&data_dir);
+    let mail = MailEnv {
+        credentials: Arc::clone(&credentials),
+        profiles,
+    };
+    let mut app = App::open_with_mail(
+        &AppPaths::new(&data_dir),
+        provider,
+        Arc::new(extractor()),
+        mail,
+    )?;
+    if let Err(error) = app.set_mail_limit(settings.mail_limit) {
+        eprintln!("límite de correo no válido en la configuración: {error}");
+    }
     let (sender, receiver) = mpsc::channel();
     let preparation = preparation(&data_dir, false);
     handle.manage(Arc::clone(&preparation));
@@ -561,6 +756,8 @@ fn setup(handle: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
         settings: Mutex::new(settings),
         credentials,
         data_dir,
+        sign_in: Mutex::new(None),
+        mail_clients_error,
         wake: Mutex::new(sender),
         stopping: AtomicBool::new(false),
     });
@@ -645,6 +842,12 @@ fn main() {
             tasks,
             import_file,
             fetch_mail,
+            mail_accounts,
+            set_mail_limit,
+            mail_sign_in,
+            mail_sign_in_cancel,
+            remove_mail_account,
+            add_simulated_mail_account,
             approve,
             edit_draft,
             reject,
