@@ -71,9 +71,9 @@ Numeración desde D30 para no chocar con las ramas abiertas del instalador. *Mot
 
 ## 2026-11-04 — Sitio web para la verificación OAuth (fuera de la aplicación)
 
-Numeración desde D46: D42–D45 están en una rama abierta.
+Numeración desde D47: D42–D46 están en ramas abiertas (correo en la aplicación y aviso de memoria).
 
-- **D46 Sitio estático del editor.** La carpeta [`sitio/`](../../sitio/README.md) contiene la web pública de NestAdmin para `https://nestadmin.humannaia.com` (inicio, política de privacidad, condiciones y soporte, en español e inglés) y el material de la solicitud a Google (justificación de `gmail.modify` y guion del vídeo). *Motivo:* Google exige, para que cuentas de Gmail ajenas usen el ámbito restringido `gmail.modify` sin el aviso de aplicación no verificada, una página principal y una política de privacidad en un dominio verificado; Microsoft pide lo mismo para la verificación de editor. Es HTML y CSS sin JavaScript, cookies ni analítica, y no se publica desde el repositorio. Los datos legales del editor quedan como marcadores. No cambia ningún requisito: el texto describe R03, R07, R09 y R13 tal como están, y debe actualizarse si la aplicación cambia lo que hace con el correo.
+- **D47 Sitio estático del editor.** La carpeta [`sitio/`](../../sitio/README.md) contiene la web pública de NestAdmin para `https://nestadmin.humannaia.com` (inicio, política de privacidad, condiciones y soporte, en español e inglés) y el material de la solicitud a Google (justificación de `gmail.modify` y guion del vídeo). *Motivo:* Google exige, para que cuentas de Gmail ajenas usen el ámbito restringido `gmail.modify` sin el aviso de aplicación no verificada, una página principal y una política de privacidad en un dominio verificado; Microsoft pide lo mismo para la verificación de editor. Es HTML y CSS sin JavaScript, cookies ni analítica, y no se publica desde el repositorio. Los datos legales del editor quedan como marcadores. No cambia ningún requisito: el texto describe R03, R07, R09 y R13 tal como están, y debe actualizarse si la aplicación cambia lo que hace con el correo.
 
 ## Versiones de desarrollo fijadas
 

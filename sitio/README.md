@@ -1,6 +1,6 @@
 # Sitio web de NestAdmin
 
-Sitio estático para `https://nestadmin.humannaia.com` (dominio con doble «n»). Existe para la verificación de marca y de ámbitos restringidos de Google OAuth (Gmail API) y la verificación de editor de Microsoft (D46 en [decisiones.md](../specs/v1/decisiones.md)). No forma parte de la aplicación ni cambia sus requisitos.
+Sitio estático para `https://nestadmin.humannaia.com` (dominio con doble «n»). Existe para la verificación de marca y de ámbitos restringidos de Google OAuth (Gmail API) y la verificación de editor de Microsoft (D47 en [decisiones.md](../specs/v1/decisiones.md)). No forma parte de la aplicación ni cambia sus requisitos.
 
 - Solo HTML y CSS: sin JavaScript, cookies, analítica, fuentes externas ni formularios. Se lee sin iniciar sesión y se adapta al móvil; respeta el modo oscuro del sistema.
 - Rutas relativas: funciona en cualquier alojamiento estático y abriendo los archivos en local.
