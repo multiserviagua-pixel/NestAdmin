@@ -543,29 +543,30 @@ h3 {
   accent-color: var(--brand);
 }
 
-.component .step {
-  grid-column: 1 / -1;
-  font-size: 0.86rem;
-  color: var(--brand);
-}
-
 .component .error-text {
   grid-column: 1 / -1;
 }
 
-.state-present {
+.step-done,
+.step-skipped {
   background: color-mix(in srgb, var(--ok) 18%, transparent);
   color: var(--ok);
 }
 
-.state-missing,
-.state-incompatible {
+.step-failed {
   background: color-mix(in srgb, var(--error) 16%, transparent);
   color: var(--error);
 }
 
-.state-stopped {
+.step-running {
   background: color-mix(in srgb, var(--accent) 22%, transparent);
+}
+
+/* Modo instalador (`--preparar`): el asistente ocupa la ventana. */
+.wizard-only {
+  padding: 24px;
+  max-width: 720px;
+  margin: 0 auto;
 }
 
 .banner {

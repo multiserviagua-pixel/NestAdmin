@@ -1,6 +1,6 @@
 # NestAdmin
 
-Asistente administrativo local para Windows descrito en [PLAN.md](PLAN.md). Ya existen la cola durable, los proveedores de IA (Ollama local por defecto y Groq por elección explícita), la validación de facturas, los simuladores de correo y administración, las reglas con revisión predeterminada, la lectura de texto, PDF y PDF escaneado con OCR local, una aplicación de escritorio Tauri y su instalador NSIS con una vista de preparación que instala Ollama, el modelo y Tesseract. **Faltan los conectores reales y las mediciones en el equipo objetivo**; el estado de cada requisito está en la [matriz de trazabilidad](specs/v1/trazabilidad.md).
+Asistente administrativo local para Windows descrito en [PLAN.md](PLAN.md). Ya existen la cola durable, los proveedores de IA (Ollama local por defecto y Groq por elección explícita), la validación de facturas, los simuladores de correo y administración, las reglas con revisión predeterminada, la lectura de texto, PDF y PDF escaneado con OCR local, una aplicación de escritorio Tauri y su instalador NSIS de una sola ejecución, que incluye el OCR y termina cuando la IA local responde. **Faltan los conectores reales y las mediciones en el equipo objetivo**; el estado de cada requisito está en la [matriz de trazabilidad](specs/v1/trazabilidad.md).
 
 ## Contenido
 
@@ -27,7 +27,7 @@ Para la IA local, `scripts/setup-ai.ps1` instala Ollama y descarga `qwen3:8b` (u
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts/setup-ai.ps1
 ```
 
-Para PDF y OCR, `scripts/setup-ocr.ps1` descarga PDFium y los datos de idioma español e inglés en `vendor/` (comprobados por SHA-256, excluidos de Git) e instala Tesseract 5 con winget:
+Para PDF y OCR, `scripts/setup-ocr.ps1` descarga PDFium y los datos de idioma español e inglés en `vendor/` (comprobados por SHA-256, excluidos de Git), instala Tesseract 5.4.0 con winget y copia su versión portátil a `vendor/tesseract` para el paquete:
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts/setup-ocr.ps1
@@ -55,7 +55,7 @@ cd crates/desktop
 ..\..\ui\node_modules\.bin\tauri build --config tauri.installer.json
 ```
 
-El instalador queda en `target/release/bundle/nsis/`. Se instala por usuario e incluye PDFium y los datos de idioma. Al abrir NestAdmin, la vista «Preparación» detecta lo que falta e instala Ollama, el modelo `qwen3:8b` y Tesseract desde sus fuentes oficiales, comprobando cada descarga por SHA-256 (D23–D25).
+El instalador queda en `target/release/bundle/nsis/`. Se instala por usuario e incluye PDFium, Tesseract portátil y los datos de idioma. Antes de terminar, ejecuta `nestadmin.exe --preparar`, que instala o arranca Ollama y descarga el modelo `qwen3:8b` si faltan, comprueba la huella SHA-256 y la firma de Ollama Inc. del instalador y solo da la instalación por buena cuando el modelo responde (D36–D38). Al abrir NestAdmin, un Ollama detenido se arranca solo; si falta algo, la ventana muestra el mismo asistente (D39).
 
 ## Verificación local
 

@@ -1,9 +1,10 @@
 ﻿# Prepara PDF y OCR locales para desarrollo (D09, D10): descarga PDFium fijado y comprobado
 # por SHA-256 en vendor/pdfium e instala Tesseract 5 mediante winget. Se puede repetir:
-# reutiliza lo ya presente. El instalador final de la aplicación (R08) tendrá su propio flujo.
+# reutiliza lo ya presente. Además copia Tesseract portátil a vendor/tesseract para el paquete (D38).
 $ErrorActionPreference = 'Stop'
 
 $PdfiumRelease = 'chromium/8125'
+$TesseractVersion = '5.4.0.20240606'
 $PdfiumSha256 = '9a964261760cff52570aabf038ab346d3a5034dd8b30d0d5fe8861235d356b8b'
 $Root = Split-Path -Parent $PSScriptRoot
 $Vendor = Join-Path $Root 'vendor\pdfium'
@@ -38,7 +39,7 @@ if ($tesseract) {
     Write-Host '==> Tesseract ya instalado'
 } else {
     Write-Host '==> Instalando Tesseract 5 (UB Mannheim)'
-    winget install --id UB-Mannheim.TesseractOCR --exact --source winget --silent --accept-package-agreements --accept-source-agreements
+    winget install --id UB-Mannheim.TesseractOCR --exact --version $TesseractVersion --source winget --silent --accept-package-agreements --accept-source-agreements
     # 0 = instalado; -1978335189 = ya instalado y sin actualización aplicable.
     if ($LASTEXITCODE -ne 0 -and $LASTEXITCODE -ne -1978335189) {
         throw "winget falló al instalar Tesseract (código $LASTEXITCODE)"
@@ -64,7 +65,28 @@ foreach ($lang in $Languages.Keys) {
     Move-Item $partial $file
 }
 
+# Tesseract viaja en el paquete de NestAdmin (D38): se copian el ejecutable, las DLL de las
+# que depende (cerradura calculada con dumpbin /dependents) y su licencia a vendor/tesseract.
+$Installed = 'C:\Program Files\Tesseract-OCR'
+$Portable = Join-Path $Root 'vendor\tesseract'
+$Files = @(
+    'tesseract.exe', 'libtesseract-5.dll', 'libleptonica-6.dll', 'libarchive-13.dll', 'libb2-1.dll',
+    'libbz2-1.dll', 'libcrypto-3-x64.dll', 'libdeflate.dll', 'libexpat-1.dll', 'libgcc_s_seh-1.dll',
+    'libgif-7.dll', 'libiconv-2.dll', 'libjbig-0.dll', 'libjpeg-8.dll', 'liblerc.dll', 'liblz4.dll',
+    'liblzma-5.dll', 'libopenjp2-7.dll', 'libpng16-16.dll', 'libsharpyuv-0.dll', 'libstdc++-6.dll',
+    'libtiff-6.dll', 'libwebp-7.dll', 'libwebpmux-3.dll', 'libwinpthread-1.dll', 'libzstd.dll', 'zlib1.dll'
+)
+$version = (& (Join-Path $Installed 'tesseract.exe') --version 2>&1 | Select-Object -First 1).ToString().Trim()
+if ($version -ne "tesseract v$TesseractVersion") { throw "Se esperaba Tesseract $TesseractVersion y está instalado «$version»" }
+Write-Host "==> Copiando Tesseract portátil en $Portable"
+New-Item -ItemType Directory -Force $Portable | Out-Null
+foreach ($file in $Files) { Copy-Item (Join-Path $Installed $file) $Portable -Force }
+Copy-Item (Join-Path $Installed 'doc\LICENSE') (Join-Path $Portable 'LICENSE') -Force
+Copy-Item (Join-Path $Installed 'doc\AUTHORS') (Join-Path $Portable 'AUTHORS') -Force
+
 Write-Host '==> Comprobación'
 Get-Content (Join-Path $Vendor 'VERSION')
-$exe = 'C:\Program Files\Tesseract-OCR\tesseract.exe'
-if (Test-Path $exe) { & $exe --version | Select-Object -First 1; & $exe --tessdata-dir $Tessdata --list-langs }
+$exe = Join-Path $Portable 'tesseract.exe'
+& $exe --version | Select-Object -First 1
+& $exe --tessdata-dir $Tessdata --list-langs
+if ($LASTEXITCODE -ne 0) { throw 'El Tesseract portátil no responde' }

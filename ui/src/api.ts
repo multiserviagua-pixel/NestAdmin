@@ -4,47 +4,61 @@
 
 import type {
   AuditEntry,
-  Preparation,
+  LaunchView,
   ProviderChoice,
   ProviderInfo,
   Rule,
   SettingsView,
-  SetupComponent,
+  SetupCheck,
+  SetupDone,
   SetupEvent,
+  Startup,
   Task,
-  Verification,
 } from "./types";
 
 type InvokeOptions = { headers: Record<string, string> };
 type Invoke = <T>(command: string, args?: Record<string, unknown> | Uint8Array, options?: InvokeOptions) => Promise<T>;
 type Listen = (handler: () => void) => void;
+type ListenTo<T> = (handler: (payload: T) => void) => void;
 
 const inTauri = "__TAURI_INTERNALS__" in window;
 
 let invoke: Invoke;
 let onChanged: Listen;
-let onSetup: (handler: (event: SetupEvent) => void) => void;
+let onSetup: ListenTo<SetupEvent>;
+let onSetupDone: ListenTo<SetupDone>;
+let onStartup: ListenTo<Startup>;
 
 if (inTauri) {
   const core = await import("@tauri-apps/api/core");
   const event = await import("@tauri-apps/api/event");
+  const listenTo =
+    <T>(name: string): ListenTo<T> =>
+    (handler) =>
+      void event.listen<T>(name, (e) => handler(e.payload));
   invoke = core.invoke;
   onChanged = (handler) => void event.listen("nestadmin://changed", handler);
-  onSetup = (handler) => void event.listen<SetupEvent>("nestadmin://setup", (e) => handler(e.payload));
+  onSetup = listenTo("nestadmin://setup");
+  onSetupDone = listenTo("nestadmin://setup-done");
+  onStartup = listenTo("nestadmin://startup");
 } else if (import.meta.env.DEV) {
   // Solo en desarrollo: la compilación de producción elimina esta rama y el simulado.
   const mock = await import("./mock");
   invoke = mock.invoke;
   onChanged = mock.onChanged;
   onSetup = mock.onSetup;
+  onSetupDone = mock.onSetupDone;
+  onStartup = mock.onStartup;
 } else {
   invoke = () => Promise.reject("NestAdmin debe abrirse como aplicación de escritorio");
   onChanged = () => {};
   onSetup = () => {};
+  onSetupDone = () => {};
+  onStartup = () => {};
 }
 
 export const isPreview = !inTauri;
-export { onChanged, onSetup };
+export { onChanged, onSetup, onSetupDone, onStartup };
 
 export const api = {
   tasks: () => invoke<Task[]>("tasks"),
@@ -66,7 +80,9 @@ export const api = {
   selectProvider: (choice: ProviderChoice) => invoke<ProviderInfo>("select_provider", { choice }),
   saveGroqKey: (key: string) => invoke<void>("save_groq_key", { key }),
   deleteGroqKey: () => invoke<void>("delete_groq_key"),
-  setupStatus: () => invoke<Preparation>("setup_status"),
-  setupInstall: (component: SetupComponent) => invoke<void>("setup_install", { component }),
-  setupVerify: () => invoke<Verification>("setup_verify"),
+  launchMode: () => invoke<LaunchView>("launch_mode"),
+  setupCheck: () => invoke<SetupCheck>("setup_check"),
+  setupPrepare: () => invoke<void>("setup_prepare"),
+  setupCancel: () => invoke<void>("setup_cancel"),
+  setupAbandon: () => invoke<void>("setup_abandon"),
 };

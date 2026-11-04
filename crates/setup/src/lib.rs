@@ -1,193 +1,240 @@
-//! Preparación del equipo (R08, flujo 6, D11). El instalador NSIS de Tauri copia la
-//! aplicación con PDFium y los datos de idioma, e instala WebView2 si falta; este módulo
-//! completa el resto desde la propia aplicación: detecta Ollama, el modelo y Tesseract,
-//! reutiliza lo compatible, descarga e instala solo lo que falta con progreso y reintentos
-//! y verifica una respuesta real del modelo. Cada paso que necesita permisos (UAC) los
-//! pide en ese momento; si el usuario los deniega, el paso queda fallido y reintentable.
+//! Preparación de componentes locales (R08, flujo 6, D36–D40; contrato «Preparación de
+//! componentes locales»). El instalador NSIS copia la aplicación con PDFium, Tesseract y
+//! los datos de idioma y, antes de terminar, ejecuta `prepare`: comprueba el OCR del
+//! paquete, instala o reutiliza Ollama, lo arranca, descarga el modelo y verifica una
+//! respuesta real con el mismo adaptador que usa la aplicación. Repetirla no duplica
+//! instalaciones ni descargas completas. Ningún error activa un proveedor externo.
 
 mod download;
+mod system;
 
-use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::fmt;
+use std::io::{BufRead, BufReader};
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use serde::{Deserialize, Serialize};
+use nestadmin_ai::ollama::OllamaProvider;
+use nestadmin_ai::{AiError, GenerateRequest, Provider, Task};
+use serde::Serialize;
 use serde_json::{json, Value};
 
 pub use download::{agent, download, Pinned};
+pub use system::{System, WindowsSystem};
 
-/// Versiones mínimas compatibles. Ollama necesita `think` y `format` con esquema.
+/// Versión mínima de Ollama: `think` y `format` con esquema (D06, D37).
 pub const MIN_OLLAMA: (u32, u32, u32) = (0, 9, 0);
-pub const TESSERACT_MAJOR: u32 = 5;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum Component {
-    Webview2,
-    Ollama,
-    Model,
-    Tesseract,
-    Pdfium,
-    Tessdata,
+pub enum ErrorCode {
+    Network,
+    Signature,
+    InstallFailed,
+    Unavailable,
+    ModelFailed,
+    VerifyFailed,
+    OcrMissing,
+    Cancelled,
 }
 
-impl Component {
-    pub const ALL: [Component; 6] = [
-        Self::Webview2,
-        Self::Pdfium,
-        Self::Tessdata,
-        Self::Tesseract,
-        Self::Ollama,
-        Self::Model,
-    ];
-
+impl ErrorCode {
     pub fn as_str(self) -> &'static str {
         match self {
-            Self::Webview2 => "webview2",
-            Self::Ollama => "ollama",
-            Self::Model => "model",
-            Self::Tesseract => "tesseract",
-            Self::Pdfium => "pdfium",
-            Self::Tessdata => "tessdata",
+            Self::Network => "network",
+            Self::Signature => "signature",
+            Self::InstallFailed => "install_failed",
+            Self::Unavailable => "unavailable",
+            Self::ModelFailed => "model_failed",
+            Self::VerifyFailed => "verify_failed",
+            Self::OcrMissing => "ocr_missing",
+            Self::Cancelled => "cancelled",
         }
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "state", rename_all = "snake_case")]
-pub enum State {
-    Present {
-        version: Option<String>,
-    },
-    /// Instalado pero no en marcha (Ollama sin servicio).
-    Stopped {
-        version: Option<String>,
-    },
-    Missing,
-    Incompatible {
-        found: String,
-        required: String,
-    },
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Status {
-    pub component: Component,
-    #[serde(flatten)]
-    pub state: State,
-    /// Si NestAdmin puede instalarlo o arrancarlo; los componentes incluidos en el
-    /// instalador solo se reparan reinstalando la aplicación.
-    pub installable: bool,
-    pub detail: String,
-}
-
-impl Status {
-    pub fn ready(&self) -> bool {
-        matches!(self.state, State::Present { .. })
+impl fmt::Display for ErrorCode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
-pub struct Progress {
-    pub component: String,
-    pub step: String,
-    pub done: Option<u64>,
-    pub total: Option<u64>,
-}
-
-impl Progress {
-    pub fn step(component: &str, step: &str) -> Self {
-        Self {
-            component: component.to_owned(),
-            step: step.to_owned(),
-            done: None,
-            total: None,
-        }
-    }
-    pub fn bytes(component: &str, step: &str, done: u64, total: Option<u64>) -> Self {
-        Self {
-            component: component.to_owned(),
-            step: step.to_owned(),
-            done: Some(done),
-            total,
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-pub enum SetupError {
-    #[error("red: {0}")]
-    Network(String),
-    #[error("integridad: {0}")]
-    Integrity(String),
-    #[error("archivo: {0}")]
-    Io(String),
-    #[error("instalación: {0}")]
-    Install(String),
-    #[error("permiso denegado o instalación cancelada por el usuario")]
-    Cancelled,
-    #[error("IA local: {0}")]
-    Model(String),
-    #[error("{0}")]
-    NotInstallable(String),
+/// Error del contrato: código estable y mensaje legible, sin secretos ni rutas de usuario.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, thiserror::Error)]
+#[error("{code}: {message}")]
+pub struct SetupError {
+    pub code: ErrorCode,
+    pub message: String,
 }
 
 impl SetupError {
-    pub(crate) fn io(error: std::io::Error) -> Self {
-        Self::Io(error.kind().to_string())
+    pub fn new(code: ErrorCode, message: impl Into<String>) -> Self {
+        Self {
+            code,
+            message: message.into(),
+        }
+    }
+
+    pub fn cancelled() -> Self {
+        Self::new(ErrorCode::Cancelled, "preparación cancelada por el usuario")
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
-pub struct Verification {
+/// Señal de cancelación compartida entre la ventana y la preparación.
+#[derive(Debug, Clone, Default)]
+pub struct Cancel(Arc<AtomicBool>);
+
+impl Cancel {
+    pub fn cancel(&self) {
+        self.0.store(true, Ordering::SeqCst);
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        self.0.load(Ordering::SeqCst)
+    }
+
+    fn check(&self) -> Result<(), SetupError> {
+        if self.is_cancelled() {
+            Err(SetupError::cancelled())
+        } else {
+            Ok(())
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Missing {
+    Ollama,
+    OllamaOutdated,
+    Model,
+    Ocr,
+}
+
+/// Resultado de `check`: rápido y sin descargas.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(tag = "status", content = "component", rename_all = "snake_case")]
+pub enum Check {
+    Ready,
+    Stopped,
+    Missing(Missing),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Step {
+    Ocr,
+    Ollama,
+    Service,
+    Model,
+    Verify,
+}
+
+impl Step {
+    pub const ALL: [Step; 5] = [
+        Self::Ocr,
+        Self::Ollama,
+        Self::Service,
+        Self::Model,
+        Self::Verify,
+    ];
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StepState {
+    Running,
+    Done,
+    Skipped,
+    Failed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Event {
+    pub step: Step,
+    pub state: StepState,
+    pub done: Option<u64>,
+    pub total: Option<u64>,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Report {
+    pub ollama_version: String,
+    /// `true` si se instaló o actualizó Ollama en esta preparación.
+    pub ollama_installed: bool,
     pub model: String,
+    pub model_digest: Option<String>,
     pub answer: String,
     pub latency_ms: u64,
 }
 
-/// Rutas y fuentes; `Config::windows` da los valores de producción.
+/// Resultado de la comprobación al abrir (D39).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "outcome", rename_all = "snake_case")]
+pub enum Startup {
+    /// Groq elegido: no se comprueba nada local.
+    NotLocal,
+    Ready,
+    /// Ollama estaba detenido y se arrancó.
+    Started,
+    /// Falta algo: la ventana debe mostrar el asistente.
+    NeedsPreparation {
+        check: Check,
+    },
+    Failed {
+        error: SetupError,
+    },
+}
+
 #[derive(Debug, Clone)]
 pub struct Config {
     pub ollama_url: String,
     pub model: String,
-    pub ollama_exe: PathBuf,
     pub tesseract_exe: PathBuf,
-    pub pdfium_dir: PathBuf,
     pub tessdata_dir: PathBuf,
+    pub pdfium_dir: PathBuf,
     pub downloads_dir: PathBuf,
     pub ollama_installer: Pinned,
-    pub tesseract_installer: Pinned,
+    /// Organización que debe firmar el instalador de Ollama.
+    pub publisher: String,
+    /// Intentos ante fallos de red (D37: 3).
+    pub attempts: u32,
+    /// Espera antes del segundo intento; crece con cada intento.
+    pub retry_delay: Duration,
+    /// Plazo para que Ollama responda tras arrancarlo.
+    pub start_timeout: Duration,
+    /// Plazo de la petición de verificación (incluye cargar el modelo en memoria).
+    pub verify_timeout: Duration,
 }
 
 impl Config {
-    /// Componentes fijados en decisiones.md (Ollama 0.40.14, Tesseract 5.4.0).
+    /// Valores de producción (D37, D38).
     pub fn windows(
-        pdfium_dir: PathBuf,
-        tessdata_dir: PathBuf,
         tesseract_exe: PathBuf,
+        tessdata_dir: PathBuf,
+        pdfium_dir: PathBuf,
         downloads_dir: PathBuf,
     ) -> Self {
-        let local = std::env::var_os("LOCALAPPDATA")
-            .map(PathBuf::from)
-            .unwrap_or_default();
         Self {
-            ollama_url: "http://127.0.0.1:11434".into(),
-            model: "qwen3:8b".into(),
-            ollama_exe: local.join(r"Programs\Ollama\ollama.exe"),
+            ollama_url: nestadmin_ai::ollama::DEFAULT_URL.into(),
+            model: nestadmin_ai::ollama::DEFAULT_MODEL.into(),
             tesseract_exe,
-            pdfium_dir,
             tessdata_dir,
+            pdfium_dir,
             downloads_dir,
             ollama_installer: Pinned {
-                url: "https://github.com/ollama/ollama/releases/download/v0.40.14/OllamaSetup.exe".into(),
+                url: "https://github.com/ollama/ollama/releases/download/v0.40.14/OllamaSetup.exe"
+                    .into(),
                 file_name: "OllamaSetup-0.40.14.exe".into(),
                 sha256: "e069c7cc7d4808f77684e81efa0b1f853a5190b4b8f070bc8fd63041180e3eba".into(),
             },
-            tesseract_installer: Pinned {
-                url: "https://github.com/UB-Mannheim/tesseract/releases/download/v5.4.0.20240606/tesseract-ocr-w64-setup-5.4.0.20240606.exe".into(),
-                file_name: "tesseract-ocr-w64-setup-5.4.0.20240606.exe".into(),
-                sha256: "c885fff6998e0608ba4bb8ab51436e1c6775c2bafc2559a19b423e18678b60c9".into(),
-            },
+            publisher: "Ollama Inc.".into(),
+            attempts: 3,
+            retry_delay: Duration::from_secs(3),
+            start_timeout: Duration::from_secs(60),
+            verify_timeout: Duration::from_secs(300),
         }
     }
 }
@@ -207,15 +254,48 @@ pub fn parse_version(text: &str) -> Option<(u32, u32, u32)> {
     ))
 }
 
+fn compatible(version: &str) -> bool {
+    parse_version(version).is_some_and(|v| v >= MIN_OLLAMA)
+}
+
+/// Emisor de eventos de un paso.
+struct Emit<'a> {
+    sink: &'a mut dyn FnMut(Event),
+}
+
+impl Emit<'_> {
+    fn send(&mut self, step: Step, state: StepState, message: impl Into<String>) {
+        (self.sink)(Event {
+            step,
+            state,
+            done: None,
+            total: None,
+            message: message.into(),
+        });
+    }
+
+    fn bytes(&mut self, step: Step, message: &str, done: u64, total: Option<u64>) {
+        (self.sink)(Event {
+            step,
+            state: StepState::Running,
+            done: Some(done),
+            total,
+            message: message.to_owned(),
+        });
+    }
+}
+
 pub struct Setup {
     config: Config,
+    system: Box<dyn System>,
     agent: ureq::Agent,
 }
 
 impl Setup {
-    pub fn new(config: Config) -> Self {
+    pub fn new(config: Config, system: Box<dyn System>) -> Self {
         Self {
             config,
+            system,
             agent: download::agent(),
         }
     }
@@ -240,440 +320,417 @@ impl Setup {
             .ok()
     }
 
-    pub fn detect(&self) -> Vec<Status> {
-        Component::ALL.iter().map(|c| self.detect_one(*c)).collect()
+    /// Versión del Ollama en marcha, si responde.
+    fn running_version(&self) -> Option<String> {
+        self.get_json("/api/version", Duration::from_secs(3))
+            .and_then(|v| v["version"].as_str().map(str::to_owned))
     }
 
-    pub fn detect_one(&self, component: Component) -> Status {
-        let status = |state: State, installable: bool, detail: &str| Status {
-            component,
-            state,
-            installable,
-            detail: detail.to_owned(),
-        };
-        match component {
-            Component::Webview2 => match webview2_version() {
-                Some(version) => status(
-                    State::Present {
-                        version: Some(version),
-                    },
-                    false,
-                    "Motor de la ventana de Windows.",
-                ),
-                None => status(
-                    State::Missing,
-                    false,
-                    "El instalador de NestAdmin lo instala si falta.",
-                ),
+    /// Digest del modelo configurado si Ollama lo tiene; `None` si no lo tiene.
+    fn model_digest(&self) -> Option<Option<String>> {
+        let tags = self.get_json("/api/tags", Duration::from_secs(5))?;
+        let model = tags["models"].as_array()?.iter().find(|m| {
+            m["name"].as_str() == Some(&self.config.model)
+                || m["model"].as_str() == Some(&self.config.model)
+        })?;
+        Some(model["digest"].as_str().map(str::to_owned))
+    }
+
+    fn ocr_files_present(&self) -> bool {
+        self.config.pdfium_dir.join("pdfium.dll").is_file()
+            && self.config.tesseract_exe.is_file()
+            && ["spa", "eng"].iter().all(|l| {
+                self.config
+                    .tessdata_dir
+                    .join(format!("{l}.traineddata"))
+                    .is_file()
+            })
+    }
+
+    /// Comprobación rápida, sin descargas ni instalaciones.
+    pub fn check(&self) -> Check {
+        if !self.ocr_files_present() {
+            return Check::Missing(Missing::Ocr);
+        }
+        match self.running_version() {
+            Some(version) if !compatible(&version) => Check::Missing(Missing::OllamaOutdated),
+            Some(_) => match self.model_digest() {
+                Some(_) => Check::Ready,
+                None => Check::Missing(Missing::Model),
             },
-            Component::Pdfium => {
-                let dll = self.config.pdfium_dir.join("pdfium.dll");
-                if dll.is_file() {
-                    status(
-                        State::Present { version: None },
-                        false,
-                        "Incluido con NestAdmin.",
-                    )
-                } else {
-                    status(
-                        State::Missing,
-                        false,
-                        "Reinstale NestAdmin para recuperarlo.",
-                    )
-                }
-            }
-            Component::Tessdata => {
-                let missing: Vec<&str> = ["spa", "eng"]
-                    .into_iter()
-                    .filter(|l| {
-                        !self
-                            .config
-                            .tessdata_dir
-                            .join(format!("{l}.traineddata"))
-                            .is_file()
-                    })
-                    .collect();
-                if missing.is_empty() {
-                    status(
-                        State::Present {
-                            version: Some("spa, eng".into()),
-                        },
-                        false,
-                        "Datos de idioma del OCR, incluidos con NestAdmin.",
-                    )
-                } else {
-                    status(
-                        State::Missing,
-                        false,
-                        &format!("Faltan {}; reinstale NestAdmin.", missing.join(", ")),
-                    )
-                }
-            }
-            Component::Tesseract => match tesseract_version(&self.config.tesseract_exe) {
-                Some(version) => match parse_version(&version) {
-                    Some((major, ..)) if major == TESSERACT_MAJOR => status(
-                        State::Present {
-                            version: Some(version),
-                        },
-                        true,
-                        "OCR local para documentos escaneados.",
-                    ),
-                    _ => status(
-                        State::Incompatible {
-                            found: version,
-                            required: format!("{TESSERACT_MAJOR}.x"),
-                        },
-                        true,
-                        "Se instalará la versión 5.4.0.",
-                    ),
-                },
-                None => status(
-                    State::Missing,
-                    true,
-                    "Necesario para PDF escaneados (unos 50 MB; pedirá permiso de administrador).",
-                ),
-            },
-            Component::Ollama => {
-                let running = self
-                    .get_json("/api/version", Duration::from_secs(3))
-                    .and_then(|v| v["version"].as_str().map(str::to_owned));
-                match running {
-                    Some(version) => match parse_version(&version) {
-                        Some(found) if found >= MIN_OLLAMA => status(
-                            State::Present {
-                                version: Some(version),
-                            },
-                            true,
-                            "Servicio de IA local en 127.0.0.1.",
-                        ),
-                        _ => status(
-                            State::Incompatible {
-                                found: version,
-                                required: format!(
-                                    "{}.{}.{} o posterior",
-                                    MIN_OLLAMA.0, MIN_OLLAMA.1, MIN_OLLAMA.2
-                                ),
-                            },
-                            true,
-                            "Se instalará la versión 0.40.14.",
-                        ),
-                    },
-                    None if self.config.ollama_exe.is_file() => status(
-                        State::Stopped { version: None },
-                        true,
-                        "Instalado pero sin iniciar; NestAdmin puede arrancarlo.",
-                    ),
-                    None => status(State::Missing, true, "Servicio de IA local (unos 1,7 GB)."),
-                }
-            }
-            Component::Model => {
-                let Some(tags) = self.get_json("/api/tags", Duration::from_secs(5)) else {
-                    return status(State::Missing, true, "Requiere Ollama en marcha.");
-                };
-                let found = tags["models"].as_array().and_then(|models| {
-                    models.iter().find(|m| {
-                        m["name"].as_str() == Some(&self.config.model)
-                            || m["model"].as_str() == Some(&self.config.model)
-                    })
-                });
-                match found {
-                    Some(model) => status(
-                        State::Present {
-                            version: model["digest"]
-                                .as_str()
-                                .map(|d| d.chars().take(12).collect()),
-                        },
-                        true,
-                        &format!("Modelo {}.", self.config.model),
-                    ),
-                    None => status(
-                        State::Missing,
-                        true,
-                        &format!("Modelo {} (unos 5,2 GB).", self.config.model),
-                    ),
-                }
-            }
+            None if self.system.ollama_executable().is_some() => Check::Stopped,
+            None => Check::Missing(Missing::Ollama),
         }
     }
 
-    /// Instala o arranca un componente. Es seguro repetirlo: lo ya presente no se toca y
-    /// las descargas se reanudan.
-    pub fn install(
+    /// Comprobación al abrir la aplicación (D39): arranca un Ollama detenido; si falta
+    /// algo no descarga nada y pide el asistente.
+    pub fn startup(&self, local_provider: bool) -> Startup {
+        if !local_provider {
+            return Startup::NotLocal;
+        }
+        match self.check() {
+            Check::Ready => Startup::Ready,
+            Check::Stopped => match self.start_and_wait(&Cancel::default()) {
+                Ok(version) if compatible(&version) => match self.model_digest() {
+                    Some(_) => Startup::Started,
+                    None => Startup::NeedsPreparation {
+                        check: Check::Missing(Missing::Model),
+                    },
+                },
+                Ok(_) => Startup::NeedsPreparation {
+                    check: Check::Missing(Missing::OllamaOutdated),
+                },
+                Err(error) => Startup::Failed { error },
+            },
+            check => Startup::NeedsPreparation { check },
+        }
+    }
+
+    /// Prepara lo que falte, en orden, y verifica el modelo.
+    pub fn prepare(
         &self,
-        component: Component,
-        progress: &mut dyn FnMut(Progress),
-    ) -> Result<(), SetupError> {
-        let name = component.as_str();
-        match component {
-            Component::Webview2 | Component::Pdfium | Component::Tessdata => {
-                Err(SetupError::NotInstallable(
-                    "este componente se incluye con el instalador de NestAdmin; reinstálelo".into(),
-                ))
+        events: &mut dyn FnMut(Event),
+        cancel: &Cancel,
+    ) -> Result<Report, SetupError> {
+        let mut emit = Emit { sink: events };
+        let mut current = Step::Ocr;
+        let result = self.run(&mut emit, cancel, &mut current);
+        if let Err(error) = &result {
+            emit.send(current, StepState::Failed, error.message.clone());
+        }
+        result
+    }
+
+    fn run(
+        &self,
+        emit: &mut Emit<'_>,
+        cancel: &Cancel,
+        current: &mut Step,
+    ) -> Result<Report, SetupError> {
+        // OCR del paquete (D38): solo se comprueba.
+        *current = Step::Ocr;
+        emit.send(Step::Ocr, StepState::Running, "Comprobando el OCR incluido");
+        if !self.ocr_files_present() {
+            return Err(SetupError::new(
+                ErrorCode::OcrMissing,
+                "faltan componentes de OCR del paquete; reinstale NestAdmin",
+            ));
+        }
+        let tesseract = self
+            .system
+            .tesseract_version(&self.config.tesseract_exe, &self.config.tessdata_dir)
+            .map_err(|reason| {
+                SetupError::new(
+                    ErrorCode::OcrMissing,
+                    format!("{reason}; reinstale NestAdmin"),
+                )
+            })?;
+        emit.send(
+            Step::Ocr,
+            StepState::Done,
+            format!("Tesseract {tesseract} y PDFium listos"),
+        );
+        cancel.check()?;
+
+        // Ollama: reutilizar, o instalar si falta o es anterior a la mínima.
+        *current = Step::Ollama;
+        let mut installed = false;
+        match self.running_version() {
+            Some(version) if compatible(&version) => emit.send(
+                Step::Ollama,
+                StepState::Skipped,
+                format!("Ollama {version} ya instalado"),
+            ),
+            Some(version) => {
+                emit.send(
+                    Step::Ollama,
+                    StepState::Running,
+                    format!("Ollama {version} es anterior a la mínima; se actualizará"),
+                );
+                self.install_ollama(emit, cancel)?;
+                installed = true;
             }
-            Component::Tesseract => {
-                if self.detect_one(component).ready() {
-                    return Ok(());
-                }
-                let installer = download(
-                    &self.agent,
-                    &self.config.tesseract_installer,
-                    &self.config.downloads_dir,
-                    name,
-                    progress,
-                )?;
-                progress(Progress::step(name, "Instalando (Windows pedirá permiso)"));
-                run_elevated(&installer, &["/S"])?;
-                if self.detect_one(component).ready() {
-                    Ok(())
-                } else {
-                    Err(SetupError::Install(
-                        "el instalador terminó, pero Tesseract no responde".into(),
-                    ))
-                }
+            None if self.system.ollama_executable().is_some() => emit.send(
+                Step::Ollama,
+                StepState::Skipped,
+                "Ollama instalado y detenido",
+            ),
+            None => {
+                emit.send(Step::Ollama, StepState::Running, "Ollama no está instalado");
+                self.install_ollama(emit, cancel)?;
+                installed = true;
             }
-            Component::Ollama => {
-                match self.detect_one(component).state {
-                    State::Present { .. } => return Ok(()),
-                    State::Stopped { .. } => {}
-                    State::Missing | State::Incompatible { .. } => {
-                        let installer = download(
-                            &self.agent,
-                            &self.config.ollama_installer,
-                            &self.config.downloads_dir,
-                            name,
-                            progress,
-                        )?;
-                        progress(Progress::step(name, "Instalando"));
-                        // Instalación por usuario: no necesita permisos de administrador.
-                        let code = hidden(Command::new(&installer))
-                            .args(["/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/SP-"])
-                            .status()
-                            .map_err(|e| {
-                                SetupError::Install(format!(
-                                    "no se pudo ejecutar el instalador ({})",
-                                    e.kind()
-                                ))
-                            })?;
-                        if !code.success() {
-                            return Err(SetupError::Install(format!(
-                                "el instalador de Ollama terminó con {code}"
-                            )));
-                        }
+        }
+        cancel.check()?;
+
+        // Servicio: arrancar si no responde; una versión anterior descubierta al arrancar
+        // se actualiza y se vuelve a arrancar.
+        *current = Step::Service;
+        let version = match self.running_version() {
+            Some(version) if compatible(&version) && !installed => {
+                emit.send(
+                    Step::Service,
+                    StepState::Skipped,
+                    "Ollama ya está en marcha",
+                );
+                version
+            }
+            Some(version) if compatible(&version) => {
+                emit.send(Step::Service, StepState::Done, "Ollama en marcha");
+                version
+            }
+            _ => {
+                emit.send(Step::Service, StepState::Running, "Iniciando Ollama");
+                let mut version = self.start_and_wait(cancel)?;
+                if !compatible(&version) && !installed {
+                    *current = Step::Ollama;
+                    emit.send(
+                        Step::Ollama,
+                        StepState::Running,
+                        format!("Ollama {version} es anterior a la mínima; se actualizará"),
+                    );
+                    self.install_ollama(emit, cancel)?;
+                    installed = true;
+                    *current = Step::Service;
+                    emit.send(Step::Service, StepState::Running, "Reiniciando Ollama");
+                    version = self.start_and_wait(cancel)?;
+                }
+                if !compatible(&version) {
+                    return Err(SetupError::new(
+                        ErrorCode::InstallFailed,
+                        format!("Ollama sigue en la versión {version} tras actualizarlo"),
+                    ));
+                }
+                emit.send(
+                    Step::Service,
+                    StepState::Done,
+                    format!("Ollama {version} en marcha"),
+                );
+                version
+            }
+        };
+        cancel.check()?;
+
+        // Modelo.
+        *current = Step::Model;
+        let digest = match self.model_digest() {
+            Some(digest) => {
+                emit.send(
+                    Step::Model,
+                    StepState::Skipped,
+                    format!("Modelo {} ya descargado", self.config.model),
+                );
+                digest
+            }
+            None => {
+                self.retrying(emit, Step::Model, cancel, |emit| {
+                    self.pull_model(emit, cancel)
+                })?;
+                emit.send(
+                    Step::Model,
+                    StepState::Done,
+                    format!("Modelo {} descargado", self.config.model),
+                );
+                self.model_digest().flatten()
+            }
+        };
+        cancel.check()?;
+
+        // Verificación con el adaptador de la aplicación.
+        *current = Step::Verify;
+        emit.send(
+            Step::Verify,
+            StepState::Running,
+            "Pidiendo una respuesta al modelo local",
+        );
+        let (answer, latency_ms) = self.verify()?;
+        emit.send(
+            Step::Verify,
+            StepState::Done,
+            format!("El modelo respondió «{answer}»"),
+        );
+        Ok(Report {
+            ollama_version: version,
+            ollama_installed: installed,
+            model: self.config.model.clone(),
+            model_digest: digest,
+            answer,
+            latency_ms,
+        })
+    }
+
+    /// Repite `work` ante fallos de red, hasta `attempts` veces con espera creciente.
+    fn retrying<T>(
+        &self,
+        emit: &mut Emit<'_>,
+        step: Step,
+        cancel: &Cancel,
+        mut work: impl FnMut(&mut Emit<'_>) -> Result<T, SetupError>,
+    ) -> Result<T, SetupError> {
+        let attempts = self.config.attempts.max(1);
+        let mut attempt = 1;
+        loop {
+            match work(emit) {
+                Err(error) if error.code == ErrorCode::Network && attempt < attempts => {
+                    attempt += 1;
+                    emit.send(
+                        step,
+                        StepState::Running,
+                        format!("Reintento {attempt} de {attempts}: {}", error.message),
+                    );
+                    let deadline = Instant::now() + self.config.retry_delay * (attempt - 1);
+                    while Instant::now() < deadline {
+                        cancel.check()?;
+                        std::thread::sleep(Duration::from_millis(50));
                     }
                 }
-                progress(Progress::step(name, "Iniciando el servicio"));
-                self.start_ollama()
-            }
-            Component::Model => {
-                if self.detect_one(component).ready() {
-                    return Ok(());
-                }
-                self.pull_model(progress)
+                other => return other,
             }
         }
     }
 
-    fn start_ollama(&self) -> Result<(), SetupError> {
-        let deadline = Instant::now() + Duration::from_secs(60);
-        let mut launched = false;
-        while Instant::now() < deadline {
-            if self.detect_one(Component::Ollama).ready() {
-                return Ok(());
-            }
-            if !launched && self.config.ollama_exe.is_file() {
-                hidden(Command::new(&self.config.ollama_exe))
-                    .arg("serve")
-                    .spawn()
-                    .map_err(|e| {
-                        SetupError::Install(format!("no se pudo iniciar Ollama ({})", e.kind()))
-                    })?;
-                launched = true;
-            }
-            std::thread::sleep(Duration::from_secs(2));
+    fn install_ollama(&self, emit: &mut Emit<'_>, cancel: &Cancel) -> Result<(), SetupError> {
+        let installer = self.retrying(emit, Step::Ollama, cancel, |emit| {
+            download(
+                &self.agent,
+                &self.config.ollama_installer,
+                &self.config.downloads_dir,
+                cancel,
+                &mut |done, total| emit.bytes(Step::Ollama, "Descargando Ollama", done, total),
+            )
+        })?;
+        if let Err(reason) = self
+            .system
+            .verify_signature(&installer, &self.config.publisher)
+        {
+            let _ = std::fs::remove_file(&installer);
+            return Err(SetupError::new(
+                ErrorCode::Signature,
+                format!("el instalador de Ollama no tiene una firma válida: {reason}"),
+            ));
         }
-        Err(SetupError::Install(
-            "Ollama no respondió en 60 s tras iniciarlo".into(),
+        cancel.check()?;
+        emit.send(Step::Ollama, StepState::Running, "Instalando Ollama");
+        let result = self
+            .system
+            .install_ollama(&installer)
+            .map_err(|reason| SetupError::new(ErrorCode::InstallFailed, reason));
+        let _ = std::fs::remove_file(&installer);
+        result?;
+        emit.send(Step::Ollama, StepState::Done, "Ollama instalado");
+        Ok(())
+    }
+
+    /// Arranca Ollama y espera a que responda; devuelve su versión.
+    fn start_and_wait(&self, cancel: &Cancel) -> Result<String, SetupError> {
+        if let Some(version) = self.running_version() {
+            return Ok(version);
+        }
+        let executable = self.system.ollama_executable().ok_or_else(|| {
+            SetupError::new(
+                ErrorCode::Unavailable,
+                "no se encuentra el ejecutable de Ollama",
+            )
+        })?;
+        self.system
+            .start_ollama(&executable)
+            .map_err(|reason| SetupError::new(ErrorCode::Unavailable, reason))?;
+        let deadline = Instant::now() + self.config.start_timeout;
+        while Instant::now() < deadline {
+            cancel.check()?;
+            if let Some(version) = self.running_version() {
+                return Ok(version);
+            }
+            std::thread::sleep(Duration::from_millis(250));
+        }
+        Err(SetupError::new(
+            ErrorCode::Unavailable,
+            format!(
+                "Ollama no respondió en {} s tras iniciarlo",
+                self.config.start_timeout.as_secs()
+            ),
         ))
     }
 
-    /// Descarga el modelo mediante la API de Ollama, que reanuda las capas ya descargadas.
-    fn pull_model(&self, progress: &mut dyn FnMut(Progress)) -> Result<(), SetupError> {
-        let name = Component::Model.as_str();
+    /// Descarga el modelo con la API de Ollama, que reanuda las capas ya descargadas.
+    fn pull_model(&self, emit: &mut Emit<'_>, cancel: &Cancel) -> Result<(), SetupError> {
+        let network = |message: &str| SetupError::new(ErrorCode::Network, message);
         let response = self
             .agent
             .post(&format!("{}/api/pull", self.config.ollama_url))
             .send_json(json!({ "model": self.config.model, "stream": true }))
-            .map_err(|_| {
-                SetupError::Network("Ollama no responde; instálelo o inícielo primero".into())
-            })?;
+            .map_err(|_| network("Ollama no responde a la descarga del modelo"))?;
         if !response.status().is_success() {
-            return Err(SetupError::Network(format!(
-                "Ollama devolvió el estado {}",
-                response.status().as_u16()
-            )));
+            return Err(SetupError::new(
+                ErrorCode::ModelFailed,
+                format!(
+                    "Ollama respondió {} al descargar el modelo",
+                    response.status().as_u16()
+                ),
+            ));
         }
-        let reader = std::io::BufReader::new(response.into_body().into_reader());
-        let mut finished = false;
-        for line in std::io::BufRead::lines(reader) {
-            let line = line.map_err(|e| {
-                SetupError::Network(format!(
-                    "descarga del modelo interrumpida ({}); se reanudará al reintentar",
-                    e.kind()
-                ))
-            })?;
+        let reader = BufReader::new(response.into_body().into_reader());
+        for line in reader.lines() {
+            cancel.check()?;
+            let line = line.map_err(|_| network("la descarga del modelo se interrumpió"))?;
             let Ok(event) = serde_json::from_str::<Value>(&line) else {
                 continue;
             };
             if let Some(error) = event["error"].as_str() {
-                return Err(SetupError::Network(format!("Ollama: {error}")));
+                return Err(SetupError::new(
+                    ErrorCode::ModelFailed,
+                    format!("Ollama rechazó la descarga del modelo: {error}"),
+                ));
             }
-            let step = event["status"].as_str().unwrap_or("");
-            if step == "success" {
-                finished = true;
+            match event["status"].as_str() {
+                Some("success") => return Ok(()),
+                Some(_) if event["total"].is_u64() => emit.bytes(
+                    Step::Model,
+                    "Descargando el modelo",
+                    event["completed"].as_u64().unwrap_or(0),
+                    event["total"].as_u64(),
+                ),
+                Some(status) => emit.send(Step::Model, StepState::Running, status),
+                None => {}
             }
-            progress(Progress {
-                component: name.into(),
-                step: step.to_owned(),
-                done: event["completed"].as_u64(),
-                total: event["total"].as_u64(),
-            });
         }
-        if finished {
-            Ok(())
-        } else {
-            Err(SetupError::Network(
-                "la descarga del modelo terminó sin confirmación; se reanudará al reintentar"
-                    .into(),
-            ))
-        }
+        Err(network("la descarga del modelo terminó sin confirmación"))
     }
 
-    /// Pide una respuesta real al modelo local (R08: la instalación termina comprobándolo).
-    pub fn verify_model(&self) -> Result<Verification, SetupError> {
-        let agent: ureq::Agent = ureq::Agent::config_builder()
-            .timeout_global(Some(Duration::from_secs(300)))
-            .timeout_connect(Some(Duration::from_secs(2)))
-            .http_status_as_error(false)
-            .proxy(None)
-            .build()
-            .into();
-        let started = Instant::now();
-        let mut response = agent
-            .post(&format!("{}/api/chat", self.config.ollama_url))
-            .send_json(json!({
-                "model": self.config.model,
-                "messages": [{ "role": "user", "content": "Responde únicamente con la palabra: listo" }],
-                "stream": false,
-                "think": false,
-                "options": { "temperature": 0 },
-            }))
-            .map_err(|_| SetupError::Model("Ollama no responde".into()))?;
-        let status = response.status().as_u16();
-        let body: Value = response
-            .body_mut()
-            .read_json()
-            .map_err(|_| SetupError::Model(format!("respuesta no válida (HTTP {status})")))?;
-        if let Some(error) = body["error"].as_str() {
-            return Err(SetupError::Model(error.to_owned()));
-        }
-        let answer = body["message"]["content"]
+    fn verify(&self) -> Result<(String, u64), SetupError> {
+        let provider = OllamaProvider::new(
+            &self.config.ollama_url,
+            &self.config.model,
+            self.config.verify_timeout,
+        )
+        .map_err(|e| SetupError::new(ErrorCode::Unavailable, e.to_string()))?;
+        let request = GenerateRequest {
+            request_id: "verificacion-instalacion".into(),
+            task: Task::Classification,
+            instructions: "Comprobación de instalación. Responde con la palabra listo.".into(),
+            content: "Responde con la palabra listo.".into(),
+            schema: Some(json!({
+                "type": "object",
+                "properties": { "respuesta": { "type": "string" } },
+                "required": ["respuesta"],
+            })),
+        };
+        let result = provider.generate(&request).map_err(|error| match error {
+            AiError::Unavailable(reason) => SetupError::new(ErrorCode::Unavailable, reason),
+            other => SetupError::new(ErrorCode::VerifyFailed, other.to_string()),
+        })?;
+        let answer = result.output["respuesta"]
             .as_str()
             .unwrap_or("")
             .trim()
             .to_owned();
         if answer.is_empty() {
-            return Err(SetupError::Model(
-                "el modelo devolvió una respuesta vacía".into(),
+            return Err(SetupError::new(
+                ErrorCode::VerifyFailed,
+                "el modelo devolvió una respuesta vacía",
             ));
         }
-        Ok(Verification {
-            model: self.config.model.clone(),
-            answer,
-            latency_ms: started.elapsed().as_millis() as u64,
-        })
+        Ok((answer, result.latency_ms))
     }
-}
-
-#[cfg_attr(not(windows), allow(unused_mut))]
-fn hidden(mut command: Command) -> Command {
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        command.creation_flags(CREATE_NO_WINDOW);
-    }
-    command
-}
-
-/// Código de Windows `ERROR_CANCELLED`: el usuario rechazó el diálogo UAC.
-const ERROR_CANCELLED: i32 = 1223;
-/// Código propio del guion cuando `Start-Process` falla por otro motivo.
-const LAUNCH_FAILED: i32 = 0x4E41;
-
-/// Ejecuta un instalador con elevación (UAC) y espera. Si el usuario deniega el permiso,
-/// devuelve `Cancelled` para que el paso se pueda reintentar.
-fn run_elevated(installer: &Path, args: &[&str]) -> Result<(), SetupError> {
-    let quote = |s: &str| format!("'{}'", s.replace('\'', "''"));
-    let arguments = args.iter().map(|a| quote(a)).collect::<Vec<_>>().join(",");
-    let script = format!(
-        "try {{ $p = Start-Process -FilePath {} -ArgumentList {} -Verb RunAs -Wait -PassThru -ErrorAction Stop; exit $p.ExitCode }} \
-         catch {{ if ($_.Exception.NativeErrorCode -eq {ERROR_CANCELLED}) {{ exit {ERROR_CANCELLED} }} else {{ exit {LAUNCH_FAILED} }} }}",
-        quote(&installer.to_string_lossy()),
-        arguments
-    );
-    let status = hidden(Command::new("powershell"))
-        .args(["-NoProfile", "-NonInteractive", "-Command", &script])
-        .status()
-        .map_err(|e| SetupError::Install(format!("no se pudo pedir permisos ({})", e.kind())))?;
-    match status.code() {
-        Some(0) => Ok(()),
-        Some(ERROR_CANCELLED) => Err(SetupError::Cancelled),
-        Some(LAUNCH_FAILED) => Err(SetupError::Install(
-            "Windows no pudo iniciar el instalador con permisos de administrador".into(),
-        )),
-        other => Err(SetupError::Install(format!(
-            "el instalador terminó con el código {}",
-            other.map_or("desconocido".into(), |c| c.to_string())
-        ))),
-    }
-}
-
-fn tesseract_version(exe: &Path) -> Option<String> {
-    if !exe.is_file() {
-        return None;
-    }
-    let output = hidden(Command::new(exe)).arg("--version").output().ok()?;
-    let text = String::from_utf8_lossy(&output.stdout).to_string()
-        + &String::from_utf8_lossy(&output.stderr);
-    text.lines()
-        .find_map(|l| l.trim().strip_prefix("tesseract "))
-        .map(|v| v.trim().trim_start_matches('v').to_owned())
-}
-
-/// Versión de WebView2 registrada por Windows, si existe.
-fn webview2_version() -> Option<String> {
-    const CLIENT: &str = r"\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}";
-    for key in [
-        format!(r"HKLM\SOFTWARE\WOW6432Node{CLIENT}"),
-        format!(r"HKCU\Software{CLIENT}"),
-        format!(r"HKLM\SOFTWARE{CLIENT}"),
-    ] {
-        let output = hidden(Command::new("reg"))
-            .args(["query", &key, "/v", "pv"])
-            .output()
-            .ok()?;
-        if !output.status.success() {
-            continue;
-        }
-        let text = String::from_utf8_lossy(&output.stdout).to_string();
-        if let Some(version) = text
-            .lines()
-            .find(|l| l.trim_start().starts_with("pv"))
-            .and_then(|l| l.split_whitespace().last())
-            .filter(|v| *v != "0.0.0.0")
-        {
-            return Some(version.to_owned());
-        }
-    }
-    None
 }

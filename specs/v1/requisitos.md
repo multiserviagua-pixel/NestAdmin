@@ -13,7 +13,7 @@ Procesar documentos y correo mediante una aplicación Windows propia que prioriz
 - **R05** Se extraen campos de factura con ausencia explícita, se comprueban importes mediante aritmética decimal y se señalan posibles duplicados sin descartarlos silenciosamente.
 - **R06** Los simuladores permiten consultar mensajes, crear borradores y registrar facturas mediante interfaces reemplazables; no acceden a cuentas reales.
 - **R07** Enviar y registrar requieren revisión por defecto. Solo una regla concreta, activa y aplicable permite automatizar; cada decisión y acción queda en historial visible.
-- **R08** El instalador Windows identifica y reutiliza componentes compatibles, instala o descarga lo que falta, informa de progreso, permite reintentos e intervención cuando sea necesaria y verifica la respuesta de la IA local.
+- **R08** El instalador Windows deja la aplicación lista en una sola ejecución: identifica y reutiliza componentes compatibles, instala o descarga lo que falta, informa de progreso, permite reintentos e intervención cuando sea necesaria y no termina con éxito hasta verificar una respuesta real de la IA local. Al abrir la aplicación, un componente detenido se arranca sin intervención y uno ausente se ofrece reparar desde la propia ventana; nunca se pasa a un proveedor externo.
 - **R09** Las credenciales se protegen en el equipo y nunca se incluyen en registros, evaluaciones ni artefactos del usuario.
 - **R10** El conjunto de evaluación contiene 10 documentos y 20 correos sintéticos con expectativas, ausencias, duplicados y errores; mide extracción, errores, invenciones, clasificación, borradores, tiempo y memoria sin presentar una precisión predeterminada.
 - **R11** El desarrollo dispone de instrucciones, verificaciones y pasos reproducibles de construcción y empaquetado; las evidencias de evaluación quedan separadas de los resultados del usuario.
@@ -27,7 +27,7 @@ Procesar documentos y correo mediante una aplicación Windows propia que prioriz
 3. **Fallo y recuperación:** registrar error y estado recuperable → reintento explícito o política delimitada → reanudar tareas. Una acción confirmada se identifica de forma estable y no se duplica en recuperación.
 4. **Proveedor:** local por defecto; el usuario elige expresamente el externo y configura credenciales. Un fallo informa y mantiene la selección; nunca hace transferencia de respaldo. Volver a local es una selección explícita.
 5. **Ventana:** cerrar oculta; un control accesible en el área de notificación permite restaurar o salir por completo. Al salir, persistir el trabajo en curso y permitir recuperación posterior.
-6. **Instalación:** detectar versión compatible de aplicación, WebView2, Ollama, modelo y OCR → instalar únicamente lo faltante → mostrar progreso, errores y reintentos → verificar una respuesta real del modelo. Los pasos que necesiten elevación, aceptación o interacción la solicitan cuando corresponda.
+6. **Instalación:** un único instalador copia la aplicación e instala WebView2 si falta → antes de terminar, el asistente de preparación detecta versión compatible de Ollama, servicio y modelo → instala o descarga únicamente lo faltante → muestra progreso, errores y reintentos → verifica una respuesta real del modelo → el instalador termina. Los pasos que necesiten elevación, aceptación o interacción la solicitan cuando corresponda. Al abrir la aplicación se repite una comprobación rápida: si Ollama está detenido se arranca; si falta algo, la ventana muestra el mismo asistente.
 
 ## Decisiones técnicas y riesgos abiertos
 

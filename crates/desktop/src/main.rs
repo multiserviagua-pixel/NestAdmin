@@ -18,7 +18,7 @@ use nestadmin_ai::{CredentialStore, ProviderChoice, Secret};
 use nestadmin_app::{App, AppPaths, ProviderInfo};
 use nestadmin_core::{AuditEntry, Rule, Task};
 use nestadmin_extract::{Extractor, Tesseract};
-use nestadmin_setup::{Component, Progress, Setup, Status, Verification};
+use nestadmin_setup::{Cancel, Check, Report, Setup, SetupError, Startup, WindowsSystem};
 use serde::Serialize;
 use serde_json::Value;
 use tauri::menu::{Menu, MenuItem};
@@ -29,8 +29,14 @@ use crate::settings::{credential_store, provider_for, Settings};
 
 /// Evento que indica a la ventana que vuelva a leer tareas e historial.
 const CHANGED: &str = "nestadmin://changed";
-/// Progreso y final de cada paso de preparación.
+/// Progreso de cada paso de preparación.
 const SETUP: &str = "nestadmin://setup";
+/// Final de una preparación, con su informe o su error.
+const SETUP_DONE: &str = "nestadmin://setup-done";
+/// Resultado de la comprobación al abrir (D39).
+const STARTUP: &str = "nestadmin://startup";
+/// Argumento con el que el instalador lanza solo la preparación (D36).
+const PREPARE_ARG: &str = "--preparar";
 
 struct Shared {
     app: Mutex<App>,
@@ -39,9 +45,17 @@ struct Shared {
     data_dir: PathBuf,
     wake: Mutex<Sender<()>>,
     stopping: AtomicBool,
+}
+
+/// Preparación de componentes locales; existe en los dos modos de arranque.
+struct Preparation {
     setup: Arc<Setup>,
-    /// Paso de preparación en curso; solo uno a la vez.
-    installing: Arc<Mutex<Option<Component>>>,
+    /// Modo `--preparar`: sin base de datos ni bandeja; el código de salida informa al instalador.
+    prepare_only: bool,
+    /// Cancelación de la preparación en curso; solo una a la vez.
+    running: Mutex<Option<Cancel>>,
+    /// Último resultado de la comprobación al abrir, por si la ventana aún no escuchaba.
+    startup: Mutex<Option<Startup>>,
 }
 
 impl Shared {
@@ -269,93 +283,133 @@ fn delete_groq_key(shared: State<'_, SharedState>) -> CmdResult<()> {
 }
 
 #[derive(Serialize)]
-struct SetupView {
-    components: Vec<Status>,
-    installing: Option<Component>,
+struct LaunchView {
+    prepare_only: bool,
+    preparing: bool,
+    startup: Option<Startup>,
 }
 
-/// Detección de lo instalado (R08). Puede tardar unos segundos si Ollama no responde, así
-/// que se ejecuta fuera del hilo de la ventana.
+/// Modo de arranque y estado de la preparación, para que la ventana sepa qué mostrar.
 #[tauri::command]
-async fn setup_status(shared: State<'_, SharedState>) -> CmdResult<SetupView> {
-    let setup = Arc::clone(&shared.setup);
-    let installing = *shared.installing.lock().map_err(text)?;
-    let components = tauri::async_runtime::spawn_blocking(move || setup.detect())
-        .await
-        .map_err(text)?;
-    Ok(SetupView {
-        components,
-        installing,
+fn launch_mode(preparation: State<'_, Arc<Preparation>>) -> CmdResult<LaunchView> {
+    Ok(LaunchView {
+        prepare_only: preparation.prepare_only,
+        preparing: preparation.running.lock().map_err(text)?.is_some(),
+        startup: preparation.startup.lock().map_err(text)?.clone(),
     })
 }
 
-#[derive(Clone, Serialize)]
-struct SetupEvent {
-    component: Component,
-    progress: Option<Progress>,
-    finished: bool,
-    error: Option<String>,
+/// Comprobación rápida (R08), sin descargas. Puede tardar unos segundos si Ollama no
+/// responde, así que se ejecuta fuera del hilo de la ventana.
+#[tauri::command]
+async fn setup_check(preparation: State<'_, Arc<Preparation>>) -> CmdResult<Check> {
+    let setup = Arc::clone(&preparation.setup);
+    tauri::async_runtime::spawn_blocking(move || setup.check())
+        .await
+        .map_err(text)
 }
 
-/// Inicia la instalación de un componente en segundo plano. El progreso y el resultado
-/// llegan como eventos `nestadmin://setup`; un fallo deja el paso listo para reintentar.
+#[derive(Clone, Serialize)]
+struct SetupDone {
+    report: Option<Report>,
+    error: Option<SetupError>,
+}
+
+/// Inicia la preparación en segundo plano (D37). El progreso llega como `nestadmin://setup`
+/// y el final como `nestadmin://setup-done`; un fallo deja la preparación lista para
+/// reintentar y los pasos ya hechos se saltan.
 #[tauri::command]
-fn setup_install(
-    shared: State<'_, SharedState>,
-    handle: AppHandle,
-    component: Component,
-) -> CmdResult<()> {
-    {
-        let mut installing = shared.installing.lock().map_err(text)?;
-        if let Some(current) = *installing {
-            return Err(format!(
-                "ya se está preparando {}; espere a que termine",
-                current.as_str()
-            ));
-        }
-        *installing = Some(component);
+fn setup_prepare(preparation: State<'_, Arc<Preparation>>, handle: AppHandle) -> CmdResult<()> {
+    start_preparation(&preparation, handle)
+}
+
+/// Cancela la preparación en curso; termina con `cancelled` en el paso activo.
+#[tauri::command]
+fn setup_cancel(preparation: State<'_, Arc<Preparation>>) -> CmdResult<()> {
+    if let Some(cancel) = preparation.running.lock().map_err(text)?.as_ref() {
+        cancel.cancel();
     }
-    let setup = Arc::clone(&shared.setup);
-    let installing = Arc::clone(&shared.installing);
+    Ok(())
+}
+
+/// Cierra el modo `--preparar` sin éxito: el instalador lo indica y la aplicación ofrecerá
+/// el asistente al abrirse.
+#[tauri::command]
+fn setup_abandon(preparation: State<'_, Arc<Preparation>>, handle: AppHandle) {
+    if let Ok(running) = preparation.running.lock() {
+        if let Some(cancel) = running.as_ref() {
+            cancel.cancel();
+        }
+    }
+    if preparation.prepare_only {
+        handle.exit(1);
+    }
+}
+
+fn start_preparation(preparation: &Arc<Preparation>, handle: AppHandle) -> CmdResult<()> {
+    let cancel = {
+        let mut running = preparation.running.lock().map_err(text)?;
+        if running.is_some() {
+            return Err("la preparación ya está en curso".into());
+        }
+        let cancel = Cancel::default();
+        *running = Some(cancel.clone());
+        cancel
+    };
+    let preparation_ref = Arc::clone(preparation);
     let spawned = thread::Builder::new()
         .name("nestadmin-preparacion".into())
         .spawn(move || {
-            let emit = |event: SetupEvent| {
-                let _ = handle.emit(SETUP, event);
-            };
-            let result = setup.install(component, &mut |progress| {
-                emit(SetupEvent {
-                    component,
-                    progress: Some(progress),
-                    finished: false,
-                    error: None,
-                })
-            });
-            if let Ok(mut current) = installing.lock() {
-                *current = None;
+            let preparation = preparation_ref;
+            let result = preparation.setup.prepare(
+                &mut |event| {
+                    let _ = handle.emit(SETUP, event);
+                },
+                &cancel,
+            );
+            if let Ok(mut running) = preparation.running.lock() {
+                *running = None;
             }
-            emit(SetupEvent {
-                component,
-                progress: None,
-                finished: true,
-                error: result.err().map(|e| e.to_string()),
-            });
+            let ok = result.is_ok();
+            let (report, error) = match result {
+                Ok(report) => (Some(report), None),
+                Err(error) => (None, Some(error)),
+            };
+            if ok {
+                if let Ok(mut startup) = preparation.startup.lock() {
+                    *startup = Some(Startup::Ready);
+                }
+            }
+            let _ = handle.emit(SETUP_DONE, SetupDone { report, error });
+            // Modo instalador: tras mostrar el éxito un momento, termina con código 0.
+            if ok && preparation.prepare_only {
+                thread::sleep(Duration::from_secs(3));
+                handle.exit(0);
+            }
         });
     if let Err(error) = spawned {
-        *shared.installing.lock().map_err(text)? = None;
+        *preparation.running.lock().map_err(text)? = None;
         return Err(text(error));
     }
     Ok(())
 }
 
-/// Respuesta real del modelo local, para cerrar la preparación comprobándolo.
-#[tauri::command]
-async fn setup_verify(shared: State<'_, SharedState>) -> CmdResult<Verification> {
-    let setup = Arc::clone(&shared.setup);
-    tauri::async_runtime::spawn_blocking(move || setup.verify_model())
-        .await
-        .map_err(text)?
-        .map_err(text)
+/// Comprobación al abrir (D39), en un hilo aparte: arranca un Ollama detenido y, si falta
+/// algo, avisa a la ventana para que muestre el asistente. Nunca descarga ni cambia de
+/// proveedor.
+fn startup_check(preparation: Arc<Preparation>, handle: AppHandle, local_provider: bool) {
+    let spawned = thread::Builder::new()
+        .name("nestadmin-comprobacion".into())
+        .spawn(move || {
+            let outcome = preparation.setup.startup(local_provider);
+            if let Ok(mut startup) = preparation.startup.lock() {
+                *startup = Some(outcome.clone());
+            }
+            let _ = handle.emit(STARTUP, outcome);
+        });
+    if let Err(error) = spawned {
+        eprintln!("no se pudo iniciar la comprobación al abrir: {error}");
+    }
 }
 
 /// Procesa la cola sin bloquear la ventana: la llamada al modelo se hace sin el cerrojo.
@@ -429,10 +483,19 @@ fn component_dir(variable: &str, installed: &str, vendor: &str) -> PathBuf {
     }
 }
 
+/// Tesseract viaja en el paquete (D38); en desarrollo sin `vendor/tesseract`, se usa el
+/// instalado en Program Files.
 fn tesseract_exe() -> PathBuf {
-    std::env::var_os("NESTADMIN_TESSERACT")
-        .map(PathBuf::from)
-        .unwrap_or_else(Tesseract::default_executable)
+    if let Some(exe) = std::env::var_os("NESTADMIN_TESSERACT") {
+        return PathBuf::from(exe);
+    }
+    let packaged =
+        component_dir("NESTADMIN_TESSERACT_DIR", "tesseract", "tesseract").join("tesseract.exe");
+    if packaged.is_file() || !cfg!(debug_assertions) {
+        packaged
+    } else {
+        Tesseract::default_executable()
+    }
 }
 
 fn pdfium_dir() -> PathBuf {
@@ -452,23 +515,48 @@ fn extractor() -> Extractor {
     )
 }
 
+fn preparation(data_dir: &std::path::Path, prepare_only: bool) -> Arc<Preparation> {
+    let config = nestadmin_setup::Config::windows(
+        tesseract_exe(),
+        tessdata_dir(),
+        pdfium_dir(),
+        data_dir.join("descargas"),
+    );
+    Arc::new(Preparation {
+        setup: Arc::new(Setup::new(config, Box::new(WindowsSystem))),
+        prepare_only,
+        running: Mutex::new(None),
+        startup: Mutex::new(None),
+    })
+}
+
+/// Modo `--preparar` (D36): solo el asistente. Sin base de datos, cola ni bandeja; cerrar la
+/// ventana sin terminar devuelve 1 al instalador.
+fn setup_prepare_only(handle: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
+    let data_dir = data_dir(handle);
+    std::fs::create_dir_all(&data_dir)?;
+    handle.manage(preparation(&data_dir, true));
+    if let Some(window) = handle.get_webview_window("main") {
+        let _ = window.set_title("Preparación de NestAdmin");
+        let _ = window.set_size(tauri::LogicalSize::new(720.0, 600.0));
+        let _ = window.center();
+    }
+    Ok(())
+}
+
 fn setup(handle: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
     let data_dir = data_dir(handle);
     std::fs::create_dir_all(&data_dir)?;
     let credentials = credential_store();
     let settings = Settings::load(&data_dir);
+    let local_provider = matches!(settings.provider, ProviderChoice::Ollama { .. });
     let provider = provider_for(&settings.provider, credentials.as_ref());
     let app = App::open(&AppPaths::new(&data_dir), provider, Arc::new(extractor()))?;
     let (sender, receiver) = mpsc::channel();
-    let setup = Setup::new(nestadmin_setup::Config::windows(
-        pdfium_dir(),
-        tessdata_dir(),
-        tesseract_exe(),
-        data_dir.join("descargas"),
-    ));
+    let preparation = preparation(&data_dir, false);
+    handle.manage(Arc::clone(&preparation));
+    startup_check(preparation, handle.clone(), local_provider);
     let shared = Arc::new(Shared {
-        setup: Arc::new(setup),
-        installing: Arc::new(Mutex::new(None)),
         app: Mutex::new(app),
         settings: Mutex::new(settings),
         credentials,
@@ -518,19 +606,39 @@ fn setup(handle: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn main() {
-    tauri::Builder::default()
+    let prepare_only = std::env::args().skip(1).any(|arg| arg == PREPARE_ARG);
+    let mut builder = tauri::Builder::default();
+    if !prepare_only {
         // Primero: una segunda ejecución solo muestra la ventana existente.
-        .plugin(tauri_plugin_single_instance::init(|handle, _args, _cwd| {
+        builder = builder.plugin(tauri_plugin_single_instance::init(|handle, _args, _cwd| {
             show_main(handle)
-        }))
-        .setup(|app| {
-            setup(app.handle())?;
+        }));
+    }
+    builder
+        .setup(move |app| {
+            if prepare_only {
+                setup_prepare_only(app.handle())?;
+            } else {
+                setup(app.handle())?;
+            }
             Ok(())
         })
-        .on_window_event(|window, event| {
+        .on_window_event(move |window, event| {
             if let WindowEvent::CloseRequested { api, .. } = event {
-                api.prevent_close();
-                let _ = window.hide();
+                if prepare_only {
+                    // Cerrar el asistente del instalador equivale a cancelarlo.
+                    if let Some(preparation) = window.try_state::<Arc<Preparation>>() {
+                        if let Ok(running) = preparation.running.lock() {
+                            if let Some(cancel) = running.as_ref() {
+                                cancel.cancel();
+                            }
+                        }
+                    }
+                    window.app_handle().exit(1);
+                } else {
+                    api.prevent_close();
+                    let _ = window.hide();
+                }
             }
         })
         .invoke_handler(tauri::generate_handler![
@@ -550,9 +658,11 @@ fn main() {
             select_provider,
             save_groq_key,
             delete_groq_key,
-            setup_status,
-            setup_install,
-            setup_verify,
+            launch_mode,
+            setup_check,
+            setup_prepare,
+            setup_cancel,
+            setup_abandon,
         ])
         .run(tauri::generate_context!())
         .expect("no se pudo iniciar NestAdmin");
