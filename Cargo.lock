@@ -2288,6 +2288,7 @@ dependencies = [
  "nestadmin-core",
  "nestadmin-documents",
  "nestadmin-extract",
+ "nestadmin-mail",
  "nestadmin-simulators",
  "pdfium-render",
  "serde",

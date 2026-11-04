@@ -29,6 +29,25 @@ pub(crate) fn error(code: &str, message: impl Into<String>) -> ConnectorError {
     }
 }
 
+/// Código de error que devuelve el proveedor, apto para un mensaje: solo un identificador
+/// corto (`invalid_grant`, `InvalidAuthenticationToken`…). Un texto libre, o uno que cite
+/// alguna de las credenciales de la petición, se sustituye entero: filtrar caracteres
+/// dejaría fragmentos del secreto (R09, D35).
+pub(crate) fn provider_code(raw: Option<&str>, secrets: &[&str]) -> String {
+    match raw {
+        Some(code)
+            if (1..=40).contains(&code.len())
+                && code.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+                && !secrets
+                    .iter()
+                    .any(|s| !s.is_empty() && (code.contains(s) || s.contains(code))) =>
+        {
+            code.to_owned()
+        }
+        _ => "sin detalle".to_owned(),
+    }
+}
+
 /// `http://` solo se admite en bucle local (servidores simulados de las pruebas); todo lo
 /// demás debe ser HTTPS para que tokens y correo viajen cifrados (D32).
 pub(crate) fn checked_url(text: &str) -> MailResult<Url> {
@@ -47,7 +66,27 @@ pub(crate) fn checked_url(text: &str) -> MailResult<Url> {
 
 #[cfg(test)]
 mod tests {
-    use super::checked_url;
+    use super::{checked_url, provider_code};
+
+    #[test]
+    fn provider_codes_never_carry_secrets_or_free_text() {
+        let secret = "ya29_PRUEBA_SINTETICA";
+        assert_eq!(
+            provider_code(Some("invalid_grant"), &[secret]),
+            "invalid_grant"
+        );
+        assert_eq!(provider_code(None, &[]), "sin detalle");
+        for raw in [
+            "ya29_PRUEBA_SINTETICA",
+            "token_ya29_PRUEBA_SINTETICA_caducado",
+            "PRUEBA",
+            "Bearer ya29.PRUEBA",
+            "texto libre con espacios",
+            "",
+        ] {
+            assert_eq!(provider_code(Some(raw), &[secret]), "sin detalle", "{raw}");
+        }
+    }
 
     #[test]
     fn only_https_or_loopback_http_is_accepted() {
