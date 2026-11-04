@@ -19,7 +19,7 @@ use sha2::{Digest, Sha256};
 use ureq::Agent;
 use url::Url;
 
-use crate::{checked_url, error, MailResult};
+use crate::{checked_url, error, provider_code, MailResult};
 
 /// Margen antes de la caducidad en el que el token ya se renueva.
 const EXPIRY_MARGIN_SECS: u64 = 60;
@@ -260,7 +260,10 @@ impl PendingAuthorization {
             );
             return Some(Err(error(
                 codes::UNAUTHORIZED,
-                format!("inicio de sesión rechazado: {denied}"),
+                format!(
+                    "inicio de sesión rechazado: {}",
+                    provider_code(Some(&denied), &[])
+                ),
             )));
         }
         reply(
@@ -334,10 +337,19 @@ fn token_request(
     match status {
         200..=299 => {}
         400 | 401 => {
-            let reason = body
-                .get("error")
-                .and_then(Value::as_str)
-                .unwrap_or("rechazado");
+            // Ningún valor del formulario (código, verificador, token de renovación ni
+            // secreto de cliente) puede volver en el mensaje aunque el servicio lo cite.
+            let secrets: Vec<&str> = form
+                .iter()
+                .filter(|(key, _)| {
+                    matches!(
+                        *key,
+                        "code" | "code_verifier" | "refresh_token" | "client_secret"
+                    )
+                })
+                .map(|(_, value)| *value)
+                .collect();
+            let reason = provider_code(body.get("error").and_then(Value::as_str), &secrets);
             return Err(error(
                 codes::UNAUTHORIZED,
                 format!("el servicio de inicio de sesión rechazó la solicitud ({reason}); vuelva a iniciar sesión"),
