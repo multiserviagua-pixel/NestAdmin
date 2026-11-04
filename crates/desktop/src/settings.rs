@@ -117,3 +117,55 @@ impl CredentialStore for Failing {
         Err(self.0.clone())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    //! T09: la configuración guardada no contiene la clave, y una clave ausente al arrancar
+    //! da un error explícito sin pasar a Ollama.
+
+    use super::*;
+    use nestadmin_ai::credentials::GROQ_API_KEY;
+    use nestadmin_ai::{MemoryCredentialStore, Secret, Task};
+
+    const KEY: &str = "gsk_PRUEBA_SINTETICA_T09_ajustes";
+
+    fn request() -> GenerateRequest {
+        GenerateRequest {
+            request_id: "t09".into(),
+            task: Task::Classification,
+            instructions: "clasifica".into(),
+            content: "texto sintético".into(),
+            schema: None,
+        }
+    }
+
+    #[test]
+    fn saved_settings_never_contain_the_key() {
+        let dir = std::env::temp_dir().join(format!("nestadmin-t09-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let store = MemoryCredentialStore::default();
+        store.set(GROQ_API_KEY, &Secret::new(KEY)).unwrap();
+        let settings = Settings {
+            provider: ProviderChoice::Groq {
+                model: "modelo-t09".into(),
+            },
+        };
+        settings.save(&dir).unwrap();
+        let text = fs::read_to_string(dir.join(FILE)).unwrap();
+        assert!(!text.contains("PRUEBA_SINTETICA"), "{text}");
+        assert_eq!(Settings::load(&dir).provider, settings.provider);
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn missing_key_at_startup_fails_explicitly_and_keeps_groq() {
+        let store = MemoryCredentialStore::default();
+        let choice = ProviderChoice::Groq {
+            model: "modelo-t09".into(),
+        };
+        let provider = provider_for(&choice, &store);
+        assert_eq!(provider.kind(), ProviderKind::Groq, "sin respaldo a Ollama");
+        assert_eq!(provider.generate(&request()), Err(AiError::Unauthorized));
+        assert!(build(&choice, &store).is_err());
+    }
+}

@@ -8,7 +8,7 @@ use ureq::Agent;
 use url::Url;
 
 use crate::oauth::TokenSource;
-use crate::{checked_url, error, MailResult};
+use crate::{checked_url, error, provider_code, MailResult};
 
 pub(crate) enum Method {
     Get,
@@ -152,7 +152,7 @@ impl Api {
                 codes::UNAUTHORIZED,
                 format!(
                     "el proveedor rechazó el acceso ({}); vuelva a iniciar sesión",
-                    reason(&json)
+                    reason(&json, token.expose())
                 ),
             )),
             404 => Err(error(
@@ -161,7 +161,10 @@ impl Api {
             )),
             400 | 422 => Err(error(
                 codes::INVALID_INPUT,
-                format!("el proveedor rechazó la petición ({})", reason(&json)),
+                format!(
+                    "el proveedor rechazó la petición ({})",
+                    reason(&json, token.expose())
+                ),
             )),
             409 => Err(error(
                 codes::CONFLICT,
@@ -179,17 +182,12 @@ impl Api {
     }
 }
 
-/// Código de error del proveedor, sin el texto completo, que podría citar contenido.
-fn reason(json: &Value) -> String {
+/// Código de error del proveedor, sin el texto completo, que podría citar contenido o el
+/// propio token.
+fn reason(json: &Value, token: &str) -> String {
     let code = json
         .pointer("/error/code")
         .or_else(|| json.pointer("/error/status"))
         .and_then(Value::as_str);
-    code.map(|c| {
-        c.chars()
-            .filter(|c| c.is_ascii_alphanumeric() || *c == '_')
-            .take(60)
-            .collect()
-    })
-    .unwrap_or_else(|| "sin detalle".to_owned())
+    provider_code(code, &[token])
 }
