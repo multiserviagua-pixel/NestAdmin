@@ -30,6 +30,7 @@ fn handler(req: &Req, w: &mut World) -> Resp {
     let path = req.url.path().trim_start_matches(BASE);
     let segments: Vec<&str> = path.split('/').collect();
     match (req.method.as_str(), segments.as_slice()) {
+        ("GET", ["messages"]) if req.query("q").is_some() => search_sent(req, w),
         ("GET", ["messages"]) => {
             assert_eq!(req.query("labelIds").as_deref(), Some("INBOX"));
             if req.query("pageToken").as_deref() == Some("p2") {
@@ -73,13 +74,29 @@ fn handler(req: &Req, w: &mut World) -> Resp {
             let Some(index) = w.drafts.iter().position(|d| d.0 == id) else {
                 return not_found();
             };
-            // Como Gmail, el borrador desaparece y su mensaje queda con la etiqueta SENT.
-            let (_, message_id, _) = w.drafts.remove(index);
-            w.sent.push(message_id.clone());
+            // Como Gmail, el borrador desaparece y queda un mensaje con la etiqueta SENT, la
+            // misma cabecera Message-ID y, salvo `keep_sent_id`, otro ID.
+            let (_, draft_message_id, stored) = w.drafts.remove(index);
+            let sent_id = if w.keep_sent_id {
+                draft_message_id
+            } else {
+                format!("s-{}", w.sent.len() + 1)
+            };
+            let mut headers = Vec::new();
+            if let Some(own) = raw_header(&stored, "Message-ID") {
+                headers.push(json!({ "name": "Message-ID", "value": own }));
+            }
+            w.messages.push(json!({
+                "id": sent_id,
+                "threadId": stored["threadId"],
+                "labelIds": ["SENT"],
+                "payload": { "mimeType": "text/plain", "headers": headers },
+            }));
+            w.sent.push(sent_id.clone());
             if w.drop_send_response {
                 Resp::Drop
             } else {
-                Resp::Json(200, json!({ "id": message_id, "labelIds": ["SENT"] }))
+                Resp::Json(200, json!({ "id": sent_id, "labelIds": ["SENT"] }))
             }
         }
         ("GET", ["drafts", id]) => match w.drafts.iter().find(|d| d.0 == *id) {
@@ -87,6 +104,49 @@ fn handler(req: &Req, w: &mut World) -> Resp {
             None => not_found(),
         },
         _ => not_found(),
+    }
+}
+
+/// Cabecera del mensaje MIME guardado en un borrador.
+fn raw_header(stored: &Value, name: &str) -> Option<String> {
+    let raw = URL_SAFE.decode(stored["raw"].as_str()?).ok()?;
+    let text = String::from_utf8(raw).ok()?;
+    let head = text.split("\r\n\r\n").next()?;
+    head.split("\r\n").find_map(|line| {
+        let (n, v) = line.split_once(':')?;
+        n.eq_ignore_ascii_case(name).then(|| v.trim().to_owned())
+    })
+}
+
+/// `messages.list` con `q=rfc822msgid:...`: solo mensajes enviados con esa cabecera.
+fn search_sent(req: &Req, w: &mut World) -> Resp {
+    assert_eq!(req.query("labelIds").as_deref(), Some("SENT"));
+    assert_eq!(req.query("includeSpamTrash").as_deref(), Some("true"));
+    let q = req.query("q").unwrap();
+    let wanted = q
+        .strip_prefix("rfc822msgid:")
+        .expect("búsqueda por Message-ID");
+    let found: Vec<Value> = w
+        .messages
+        .iter()
+        .filter(|m| {
+            m["labelIds"]
+                .as_array()
+                .is_some_and(|l| l.contains(&json!("SENT")))
+        })
+        .filter(|m| {
+            m.pointer("/payload/headers")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .any(|h| h["name"] == "Message-ID" && h["value"] == format!("<{wanted}>"))
+        })
+        .map(|m| json!({ "id": m["id"], "threadId": m["threadId"] }))
+        .collect();
+    if found.is_empty() {
+        Resp::Json(200, json!({ "resultSizeEstimate": 0 }))
+    } else {
+        Resp::Json(200, json!({ "messages": found }))
     }
 }
 
@@ -118,12 +178,15 @@ fn sample_messages() -> Vec<Value> {
     ]
 }
 
+fn gmail(base: &str) -> Gmail {
+    let (source, _) = tokens(base, now() + 3600);
+    Gmail::new(&format!("{base}{BASE}"), source, 10).unwrap()
+}
+
 fn mailbox() -> (Mailbox<Gmail>, common::Shared) {
     let (base, world) = serve(handler);
     world.lock().unwrap().messages = sample_messages();
-    let (source, _) = tokens(&base, now() + 3600);
-    let gmail = Gmail::new(&format!("{base}{BASE}"), source, 10).unwrap();
-    (Mailbox::in_memory(gmail), world)
+    (Mailbox::in_memory(gmail(&base)), world)
 }
 
 fn draft() -> NewDraft {
@@ -193,6 +256,8 @@ fn reply_is_created_in_the_original_thread() {
     assert!(raw.contains("To: compras@beta.test\r\n"));
     assert!(raw.contains("Subject: Re: Pedido 2026-77\r\n"));
     assert!(raw.contains("In-Reply-To: <pedido-77@beta.test>\r\n"));
+    let own = raw_header(stored, "Message-ID").unwrap();
+    assert!(own.starts_with("<nestadmin.") && own.ends_with("@nestadmin.invalid>"));
     let body = raw.split("\r\n\r\n").nth(1).unwrap().replace("\r\n", "");
     assert_eq!(
         String::from_utf8(STANDARD.decode(body).unwrap()).unwrap(),
@@ -210,16 +275,97 @@ fn draft_is_sent_once_even_if_the_response_is_lost() {
         "unavailable"
     );
 
-    // El borrador ya no existe y su mensaje tiene la etiqueta SENT: enviado, sin repetir.
+    // El borrador ya no existe y el mensaje enviado tiene otro ID, pero conserva el
+    // Message-ID propio y la etiqueta SENT: enviado, sin repetir, con el ID real.
     let receipt = mailbox.lookup("k-send").unwrap().unwrap();
-    assert_eq!(receipt["receipt_id"], "dm-1");
+    assert_eq!(receipt["receipt_id"], "s-1");
     assert_eq!(receipt["message_id"], "g-1");
+    assert_eq!(mailbox.send_draft(&id, "k-send").unwrap().receipt_id, "s-1");
+    assert_eq!(world.lock().unwrap().sent, ["s-1"]);
+    assert_eq!(count(&world, "POST", "/drafts/send"), 1);
     assert_eq!(
-        mailbox.send_draft(&id, "k-send").unwrap().receipt_id,
+        count(&world, "GET", "/messages/dm-1"),
+        1,
+        "el ID del mensaje del borrador ya no sirve"
+    );
+}
+
+#[test]
+fn lost_send_is_confirmed_by_the_draft_message_id_if_gmail_keeps_it() {
+    let (mailbox, world) = mailbox();
+    let id = mailbox.create_draft("g-1", &draft(), "k-draft").unwrap();
+    {
+        let mut w = world.lock().unwrap();
+        w.keep_sent_id = true;
+        w.drop_send_response = true;
+    }
+    let _ = mailbox.send_draft(&id, "k-send");
+    assert_eq!(
+        mailbox.lookup("k-send").unwrap().unwrap()["receipt_id"],
         "dm-1"
     );
-    assert_eq!(world.lock().unwrap().sent, ["dm-1"]);
     assert_eq!(count(&world, "POST", "/drafts/send"), 1);
+}
+
+#[test]
+fn lost_send_is_confirmed_after_reopening_the_connector() {
+    let (base, world) = serve(handler);
+    world.lock().unwrap().messages = sample_messages();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("cuenta-gmail.json");
+    let id = {
+        let mailbox = Mailbox::open(gmail(&base), &path).unwrap();
+        let id = mailbox.create_draft("g-1", &draft(), "k-draft").unwrap();
+        world.lock().unwrap().drop_send_response = true;
+        assert!(mailbox.send_draft(&id, "k-send").is_err());
+        id
+    };
+    let saved = std::fs::read_to_string(&path).unwrap();
+    assert!(
+        saved.contains("@nestadmin.invalid>"),
+        "el Message-ID propio se guarda"
+    );
+
+    // Proceso nuevo: solo el registro local recuerda el Message-ID del borrador.
+    let mailbox = Mailbox::open(gmail(&base), &path).unwrap();
+    let receipt = mailbox.lookup("k-send").unwrap().unwrap();
+    assert_eq!(receipt["receipt_id"], "s-1");
+    assert_eq!(mailbox.send_draft(&id, "k-send").unwrap().receipt_id, "s-1");
+    drop(mailbox);
+    let reopened = Mailbox::open(gmail(&base), &path).unwrap();
+    assert_eq!(
+        reopened.lookup("k-send").unwrap().unwrap()["receipt_id"],
+        "s-1"
+    );
+    assert_eq!(count(&world, "POST", "/drafts/send"), 1);
+    assert_eq!(world.lock().unwrap().sent, ["s-1"]);
+}
+
+#[test]
+fn another_sent_message_in_the_thread_is_not_taken_as_ours() {
+    let (mailbox, world) = mailbox();
+    let id = mailbox.create_draft("g-1", &draft(), "k-draft").unwrap();
+    world.lock().unwrap().send_status = Some(503);
+    let _ = mailbox.send_draft(&id, "k-send");
+    {
+        // El usuario borra el borrador y responde por su cuenta en el mismo hilo.
+        let mut w = world.lock().unwrap();
+        w.send_status = None;
+        w.drafts.clear();
+        w.messages.push(json!({
+            "id": "s-otro",
+            "threadId": "t-1",
+            "labelIds": ["SENT"],
+            "payload": { "headers": [{ "name": "Message-ID", "value": "<otro@empresa.test>" }] },
+        }));
+    }
+    assert_eq!(mailbox.lookup("k-send").unwrap_err().code, "not_found");
+    assert!(world.lock().unwrap().sent.is_empty());
+    assert_eq!(
+        count(&world, "POST", "/drafts/send"),
+        1,
+        "solo el intento fallido"
+    );
 }
 
 #[test]
@@ -229,7 +375,7 @@ fn normal_send_returns_the_sent_message_id() {
     let receipt = mailbox
         .execute("k-send", &json!({ "draft_id": id }))
         .unwrap();
-    assert_eq!(receipt["receipt_id"], "dm-1");
+    assert_eq!(receipt["receipt_id"], "s-1");
     assert_eq!(mailbox.lookup("k-send").unwrap(), Some(receipt));
     assert_eq!(world.lock().unwrap().sent.len(), 1);
 }
@@ -251,6 +397,20 @@ fn draft_deleted_by_the_user_is_not_resent() {
         "not_found"
     );
     assert!(world.lock().unwrap().sent.is_empty());
+    let searches = world
+        .lock()
+        .unwrap()
+        .requests
+        .iter()
+        .filter(|r| {
+            r.query("q")
+                .is_some_and(|q| q.starts_with("rfc822msgid:nestadmin."))
+        })
+        .count();
+    assert_eq!(
+        searches, 2,
+        "se buscó el envío por su Message-ID antes de rendirse"
+    );
 }
 
 /// Hace de navegador: sigue la redirección al puerto local con la query indicada.

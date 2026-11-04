@@ -41,7 +41,7 @@ Reglas comunes:
 
 ## T08 — Instalación real en Windows
 
-Requiere Windows 11 limpio (máquina virtual con instantánea) y, para tiempos, el equipo objetivo. Registrar versión del instalador, fecha, red, duración y capturas del asistente.
+Requiere Windows 11 limpio (máquina virtual con instantánea) y, para tiempos, el equipo objetivo. Registrar versión del instalador, fecha, red, duración y capturas del asistente. `scripts/t08-registro.ps1`, ejecutado dentro de la máquina virtual, instala o desinstala y anota en un archivo de texto el estado antes y después: versión de Windows, WebView2, Ollama y modelo, huella del instalador, código de salida, duración y archivos instalados, sin nombres de equipo ni de usuario. Una ejecución en Windows 10 22H2 se registra aparte como compatibilidad adicional; no sustituye a la de Windows 11.
 
 | Caso | Situación inicial | Resultado esperado |
 | --- | --- | --- |
