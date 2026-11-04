@@ -82,6 +82,12 @@ Numeración desde D30 para no chocar con las ramas abiertas del instalador. *Mot
 
 - **D46 Memoria mínima para la IA local.** En un equipo de prueba con 8 GB, Ollama con Qwen3 8B (unos 5,2 GB) no respondió dentro del plazo y la aplicación solo dijo que el proveedor no respondió a tiempo. La preparación lee la memoria física con `GlobalMemoryStatusEx` a través de `System` y la clasifica: 16 GB o más, recomendada (el equipo objetivo de PLAN.md); más de 8 GB y menos de 16, aviso de que irá más lento; **8 GB o menos, aviso fuerte de que la IA local probablemente no responderá a tiempo**. Como Windows no cuenta la memoria que reservan el firmware y los gráficos integrados, se admite 1 GiB de margen: 15 GiB informados cuentan como 16 GB y menos de 9 GiB, como 8 GB o menos. Si la memoria libre baja de 6 GiB se sugiere cerrar programas. El aviso nunca bloquea la preparación ni la verificación, no cambia de proveedor y solo indica que Groq puede elegirse a mano en Configuración. Un tiempo agotado de Ollama en un equipo por debajo de 16 GB conserva el código `timeout` y añade la memoria como causa probable, tanto en la verificación de la preparación como en las tareas. Si no se puede leer la memoria, no se avisa ni se supone nada. Los umbrales son una decisión provisional hasta medir en el equipo objetivo (R12).
 
+## 2026-11-04 — Sitio web para la verificación OAuth (fuera de la aplicación)
+
+Numeración desde D47: D42–D46 son el correo en la aplicación y el aviso de memoria.
+
+- **D47 Sitio estático del editor.** La carpeta [`sitio/`](../../sitio/README.md) contiene la web pública de NestAdmin para `https://nestadmin.humannaia.com` (inicio, política de privacidad, condiciones y soporte, en español e inglés) y el material de la solicitud a Google (justificación de `gmail.modify` y guion del vídeo). *Motivo:* Google exige, para que cuentas de Gmail ajenas usen el ámbito restringido `gmail.modify` sin el aviso de aplicación no verificada, una página principal y una política de privacidad en un dominio verificado; Microsoft pide lo mismo para la verificación de editor. Es HTML y CSS sin JavaScript, cookies ni analítica, y no se publica desde el repositorio. Los datos legales del editor quedan como marcadores. No cambia ningún requisito: el texto describe R03, R07, R09 y R13 tal como están, y debe actualizarse si la aplicación cambia lo que hace con el correo.
+
 ## Versiones de desarrollo fijadas
 
 | Componente | Versión | Licencia | Dónde se fija |

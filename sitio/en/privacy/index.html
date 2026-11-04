@@ -1,0 +1,167 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Privacy policy — NestAdmin</title>
+<meta name="description" content="NestAdmin privacy policy: what data the app uses, where it is stored, who it is shared with and how to revoke access.">
+<link rel="canonical" href="https://nestadmin.humannaia.com/en/privacy/">
+<link rel="alternate" hreflang="es" href="https://nestadmin.humannaia.com/privacidad/">
+<link rel="alternate" hreflang="en" href="https://nestadmin.humannaia.com/en/privacy/">
+<link rel="stylesheet" href="../../estilo.css">
+</head>
+<body>
+<a class="salto" href="#content">Skip to content</a>
+<header>
+  <a class="marca" href="../">NestAdmin</a>
+  <nav aria-label="Main">
+    <ul>
+      <li><a href="../">Home</a></li>
+      <li><a href="./" aria-current="page">Privacy</a></li>
+      <li><a href="../terms/">Terms</a></li>
+      <li><a href="../support/">Support</a></li>
+      <li><a href="../../privacidad/" hreflang="es" lang="es">Español</a></li>
+    </ul>
+  </nav>
+</header>
+
+<main id="content">
+<h1>NestAdmin privacy policy</h1>
+<p class="fecha">Effective date: [FECHA DE VIGENCIA]</p>
+
+<p>This policy explains what information the NestAdmin desktop app uses, what for, where it is stored and what control you have over it. It applies to the NestAdmin app for Windows and to this website.</p>
+
+<div class="caja">
+<p><strong>In short:</strong> NestAdmin runs on your computer. The publisher has no servers that receive, store or process your email or documents, and no one at the publisher reads them. By default the AI runs on your computer. Your Gmail data is not used for advertising, is not sold and is not used to train AI models.</p>
+</div>
+
+<h2 id="controller">1. Who is responsible</h2>
+<p>NestAdmin is an application by [RAZÓN SOCIAL] ("the publisher"), located at [PAÍS Y DIRECCIÓN]. Contact for any privacy matter: <a href="mailto:[CORREO]@humannaia.com">[CORREO]@humannaia.com</a>.</p>
+<p>Because the app processes your email and documents on your own computer, the publisher does not receive that information. You, or the business using NestAdmin, decide which accounts and documents are processed.</p>
+
+<h2 id="data">2. What data NestAdmin uses</h2>
+<h3>Email from the accounts you connect</h3>
+<p>Only if you connect a Gmail or Microsoft 365 account, NestAdmin accesses, through that provider's official API:</p>
+<ul>
+  <li>the messages in your inbox: sender, recipients, subject, date, message and thread identifiers, labels or status, and the body text;</li>
+  <li>the reply drafts that the app itself creates, and their sending status.</li>
+</ul>
+<p>The current version does not download message attachments. NestAdmin does not delete messages.</p>
+
+<h3>Documents you import</h3>
+<p>The text and PDF files (including scanned ones) you add to the app, and the data extracted from them, such as supplier, dates, amounts and taxes.</p>
+
+<h3>Credentials</h3>
+<p>The access and refresh tokens that Google or Microsoft issue when you sign in with OAuth 2.0 and, if you choose Groq, your Groq API key. NestAdmin never sees or stores your email account password: you type it on the provider's own page.</p>
+
+<h3>This website</h3>
+<p>This site uses no cookies, analytics, pixels or tracking, and has no forms. The hosting service may log technical data for each visit (such as the IP address) to deliver the pages and protect against abuse.</p>
+
+<h2 id="scopes">3. Permissions requested and why</h2>
+<div class="tabla">
+<table>
+  <thead><tr><th>Provider</th><th>Permission</th><th>Use</th></tr></thead>
+  <tbody>
+    <tr><td>Google (Gmail API)</td><td><code>https://www.googleapis.com/auth/gmail.modify</code></td><td>Read inbox messages, create reply drafts in the original thread and send a draft only when you approve it or a rule you enabled covers it. It is not used to delete email.</td></tr>
+    <tr><td>Microsoft (Graph)</td><td><code>Mail.ReadWrite</code></td><td>Read messages and create reply drafts.</td></tr>
+    <tr><td>Microsoft (Graph)</td><td><code>Mail.Send</code></td><td>Send a draft only when you approve it or a rule you enabled covers it.</td></tr>
+    <tr><td>Microsoft (Graph)</td><td><code>offline_access</code></td><td>Stay connected without asking you to sign in every time.</td></tr>
+  </tbody>
+</table>
+</div>
+
+<h2 id="use">4. How data is used</h2>
+<p>NestAdmin uses this data only to provide the features you see in the app:</p>
+<ul>
+  <li>showing and classifying your messages and documents;</li>
+  <li>extracting and checking invoice data;</li>
+  <li>preparing reply drafts for you to review;</li>
+  <li>sending a draft when you approve it, or when a specific rule you created and enabled covers it;</li>
+  <li>showing you the history of decisions and actions.</li>
+</ul>
+<p>By default, AI analysis is done by a local language model (Qwen3 8B, via Ollama) running on your computer. Models are only used to process what you ask for; NestAdmin does not train or fine-tune them with your data.</p>
+
+<h2 id="google">5. Google user data</h2>
+<div class="caja">
+<p>NestAdmin's use and transfer to any other app of information received from Google APIs will adhere to the <a href="https://developers.google.com/terms/api-services-user-data-policy">Google API Services User Data Policy</a>, including the Limited Use requirements.</p>
+</div>
+<p>Specifically, regarding Gmail data:</p>
+<ul>
+  <li>It is used only to provide the user-facing features of the app described in this policy.</li>
+  <li>It is not used for advertising, personalized or otherwise.</li>
+  <li>It is not sold or transferred to third parties, including data brokers or information resellers.</li>
+  <li>No one at the publisher reads it: the publisher does not receive it, because it is processed on your computer.</li>
+  <li>It is not used to train or improve AI or machine learning models, whether the publisher's or anyone else's.</li>
+  <li>It is not used to determine creditworthiness or for lending purposes.</li>
+</ul>
+<p>It only leaves your computer in the cases described in section 7, and always to provide a feature you asked for.</p>
+
+<h2 id="storage">6. Where data is stored</h2>
+<p>Everything is stored on your computer, not on the publisher's servers:</p>
+<ul>
+  <li><strong>Working data</strong> (tasks, processed messages and documents, extracted data, drafts, rules and history): in a local database inside the <code>%LOCALAPPDATA%\NestAdmin</code> folder of your Windows user, together with one file per email account that records which drafts the app created and whether they were sent, so nothing is sent twice.</li>
+  <li><strong>Credentials</strong> (Google and Microsoft tokens, Groq key): in Windows Credential Manager. They are never written to the database or to logs.</li>
+</ul>
+<p>The original messages remain in your Gmail or Microsoft 365 account; NestAdmin does not move or delete them.</p>
+
+<h2 id="sharing">7. Who data is shared with</h2>
+<p>The publisher neither receives nor shares your data. The app only communicates with:</p>
+<ul>
+  <li><strong>Google or Microsoft</strong>, to read email and create and send drafts in the account you connected. Content travels directly between your computer and that account's provider, with no intermediaries.</li>
+  <li><strong>Groq, only if you explicitly choose it</strong> as the AI provider and supply your own key. In that case, the processed text (including that of emails and documents) is sent to Groq to generate the response. NestAdmin never enables Groq on its own or falls back to it if the local AI fails. Groq's processing is governed by its <a href="https://groq.com/privacy-policy/">privacy policy</a>.</li>
+  <li><strong>Installation downloads</strong>: during installation, components (Ollama and the language model) are downloaded from their official sources. These downloads do not include your data.</li>
+</ul>
+<p>The publisher would only disclose information if it held it and a law or competent authority required it; by design, it does not hold your email or documents.</p>
+
+<h2 id="security">8. How data is protected</h2>
+<ul>
+  <li>Sign-in uses OAuth 2.0 with PKCE: the app never learns your password.</li>
+  <li>Credentials are kept in the protected Windows store and never appear in logs.</li>
+  <li>Communications with Google, Microsoft and Groq use HTTPS. The app refuses to send your token to any server other than the provider's and uses no implicit proxies.</li>
+  <li>The app opens no network ports for incoming connections; during sign-in it briefly listens only on the computer itself (<code>127.0.0.1</code>) to receive the provider's response.</li>
+  <li>Protection of stored data also depends on your computer. We recommend protecting your Windows user with a password and encrypting the disk (for example, with BitLocker).</li>
+</ul>
+
+<h2 id="retention">9. Retention and deletion</h2>
+<ul>
+  <li>Working data is kept on your computer until you delete it. Uninstalling NestAdmin does not delete the <code>%LOCALAPPDATA%\NestAdmin</code> folder, so you don't lose your work; you can delete it yourself after uninstalling.</li>
+  <li>When you disconnect an account in the app, its tokens are removed from Windows Credential Manager. You can also remove them from Credential Manager.</li>
+  <li>Drafts created in your email account remain there until you send or delete them from your email.</li>
+  <li>If you use Groq, retention of the text sent depends on Groq.</li>
+</ul>
+
+<h2 id="revoke">10. How to revoke access</h2>
+<ul>
+  <li><strong>In the app:</strong> disconnect the email account.</li>
+  <li><strong>Google:</strong> revoke NestAdmin's access at <a href="https://myaccount.google.com/permissions">myaccount.google.com/permissions</a>.</li>
+  <li><strong>Microsoft, personal account:</strong> at <a href="https://account.live.com/consent/Manage">account.live.com/consent/Manage</a>.</li>
+  <li><strong>Microsoft, work or school account:</strong> at <a href="https://myapps.microsoft.com">myapps.microsoft.com</a> or by asking your organization's administrator.</li>
+</ul>
+<p>After access is revoked, NestAdmin can no longer read or send email from that account.</p>
+
+<h2 id="rights">11. Your rights</h2>
+<p>Because your data is on your computer, you can view, correct, export or delete it directly. If your law grants you rights of access, rectification, erasure, objection, restriction or portability, you can exercise them by writing to <a href="mailto:[CORREO]@humannaia.com">[CORREO]@humannaia.com</a>; the publisher will answer regarding any data it holds, which is normally limited to what you send when you contact it. You may also lodge a complaint with the relevant data protection authority.</p>
+<p>If you write to support, the publisher will use what you send only to handle your request and keep it only as long as needed for that. Please do not attach real emails or documents containing personal data unless strictly necessary.</p>
+
+<h2 id="children">12. Children</h2>
+<p>NestAdmin is a management tool for businesses and professionals. It is not directed at minors and the publisher does not knowingly collect data from minors.</p>
+
+<h2 id="changes">13. Changes to this policy</h2>
+<p>If the way NestAdmin uses data changes, we will publish the new version on this page with its effective date before the change applies. If a change means using Google data in a new way, your consent will be requested first.</p>
+
+<h2 id="contact">14. Contact</h2>
+<p>[RAZÓN SOCIAL], [PAÍS Y DIRECCIÓN]. Email: <a href="mailto:[CORREO]@humannaia.com">[CORREO]@humannaia.com</a>.</p>
+<p>The Spanish version of this policy is available at <a href="../../privacidad/">/privacidad/</a>.</p>
+</main>
+
+<footer>
+  <ul>
+    <li><a href="./">Privacy policy</a></li>
+    <li><a href="../terms/">Terms of service</a></li>
+    <li><a href="../support/">Support</a></li>
+  </ul>
+  <p>NestAdmin is an application by [RAZÓN SOCIAL], [PAÍS Y DIRECCIÓN]. Contact: <a href="mailto:[CORREO]@humannaia.com">[CORREO]@humannaia.com</a></p>
+  <p>This site uses no cookies, analytics or tracking.</p>
+</footer>
+</body>
+</html>

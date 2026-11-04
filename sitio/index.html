@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>NestAdmin — asistente administrativo de escritorio para Windows</title>
+<meta name="description" content="NestAdmin es una aplicación de escritorio para Windows que ayuda a pequeñas empresas a leer correo y documentos, extraer y validar datos de facturas y preparar borradores de respuesta, con IA local.">
+<link rel="canonical" href="https://nestadmin.humannaia.com/">
+<link rel="alternate" hreflang="es" href="https://nestadmin.humannaia.com/">
+<link rel="alternate" hreflang="en" href="https://nestadmin.humannaia.com/en/">
+<link rel="stylesheet" href="estilo.css">
+</head>
+<body>
+<a class="salto" href="#contenido">Saltar al contenido</a>
+<header>
+  <a class="marca" href="./">NestAdmin</a>
+  <nav aria-label="Principal">
+    <ul>
+      <li><a href="./" aria-current="page">Inicio</a></li>
+      <li><a href="privacidad/">Privacidad</a></li>
+      <li><a href="condiciones/">Condiciones</a></li>
+      <li><a href="soporte/">Soporte</a></li>
+      <li><a href="en/" hreflang="en" lang="en">English</a></li>
+    </ul>
+  </nav>
+</header>
+
+<main id="contenido">
+<h1>NestAdmin</h1>
+<p><strong>Asistente administrativo de escritorio para Windows, pensado para pequeñas empresas.</strong></p>
+
+<p>NestAdmin lee el correo y los documentos que llegan a la empresa —facturas, PDF y documentos escaneados—, extrae y valida sus datos y prepara borradores de respuesta para que una persona los revise. Se instala en el propio equipo y, por defecto, todo el procesamiento ocurre en él.</p>
+
+<h2>Qué hace</h2>
+<ul>
+  <li><strong>Lee documentos:</strong> texto, PDF con texto y PDF escaneados. El reconocimiento de texto (OCR) se hace en el equipo.</li>
+  <li><strong>Extrae y comprueba datos de facturas:</strong> proveedor, fechas, importes e impuestos. Comprueba la aritmética de los importes, señala datos que faltan y posibles duplicados, sin inventar valores.</li>
+  <li><strong>Trabaja con tu correo:</strong> si conectas una cuenta de Gmail o de Microsoft 365, lee los mensajes de la bandeja de entrada y prepara un borrador de respuesta dentro del mismo hilo.</li>
+  <li><strong>Tú decides qué se envía:</strong> un borrador solo se envía cuando lo revisas y apruebas, o cuando lo cubre una regla concreta que tú mismo has creado y activado. NestAdmin no borra correo.</li>
+  <li><strong>Historial visible:</strong> cada decisión y cada acción queda registrada en la aplicación.</li>
+</ul>
+
+<h2>Privacidad desde el diseño</h2>
+<ul>
+  <li><strong>Se ejecuta en tu equipo.</strong> El editor de NestAdmin no tiene servidores que reciban, guarden o procesen tu correo ni tus documentos.</li>
+  <li><strong>IA local por defecto.</strong> El modelo de lenguaje (Qwen3 8B, mediante Ollama) se ejecuta en el propio equipo.</li>
+  <li><strong>IA externa solo si la eliges.</strong> Puedes elegir expresamente Groq como proveedor, con tu propia clave. Solo entonces el texto que se procesa se envía a Groq. NestAdmin nunca cambia de proveedor por su cuenta.</li>
+  <li><strong>Credenciales protegidas.</strong> Las autorizaciones de Google y Microsoft se obtienen con OAuth 2.0 desde la aplicación y se guardan en el Administrador de credenciales de Windows.</li>
+</ul>
+<p>Los detalles están en la <a href="privacidad/">política de privacidad</a>.</p>
+
+<h2>Acceso a Gmail</h2>
+<p>Al conectar una cuenta de Gmail, NestAdmin solicita el permiso <code>https://www.googleapis.com/auth/gmail.modify</code>, que usa únicamente para leer tus mensajes, crear borradores de respuesta en el hilo y enviar un borrador cuando tú lo apruebas o lo cubre una regla que has activado. No borra correo. Puedes desconectar la cuenta en la aplicación o revocar el acceso en <a href="https://myaccount.google.com/permissions">myaccount.google.com/permissions</a> en cualquier momento.</p>
+
+<h2>Requisitos</h2>
+<ul>
+  <li>Windows 10 u 11 de 64 bits.</li>
+  <li>16 GB de RAM recomendados para la IA local.</li>
+  <li>Conexión a Internet para la instalación inicial y para trabajar con cuentas de correo.</li>
+</ul>
+</main>
+
+<footer>
+  <ul>
+    <li><a href="privacidad/">Política de privacidad</a></li>
+    <li><a href="condiciones/">Condiciones del servicio</a></li>
+    <li><a href="soporte/">Soporte</a></li>
+  </ul>
+  <p>NestAdmin es una aplicación de [RAZÓN SOCIAL], [PAÍS Y DIRECCIÓN]. Contacto: <a href="mailto:[CORREO]@humannaia.com">[CORREO]@humannaia.com</a></p>
+  <p>Este sitio no usa cookies, analítica ni seguimiento.</p>
+</footer>
+</body>
+</html>

@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>NestAdmin — desktop admin assistant for Windows</title>
+<meta name="description" content="NestAdmin is a Windows desktop app that helps small businesses read email and documents, extract and validate invoice data and prepare reply drafts, with local AI.">
+<link rel="canonical" href="https://nestadmin.humannaia.com/en/">
+<link rel="alternate" hreflang="es" href="https://nestadmin.humannaia.com/">
+<link rel="alternate" hreflang="en" href="https://nestadmin.humannaia.com/en/">
+<link rel="stylesheet" href="../estilo.css">
+</head>
+<body>
+<a class="salto" href="#content">Skip to content</a>
+<header>
+  <a class="marca" href="./">NestAdmin</a>
+  <nav aria-label="Main">
+    <ul>
+      <li><a href="./" aria-current="page">Home</a></li>
+      <li><a href="privacy/">Privacy</a></li>
+      <li><a href="terms/">Terms</a></li>
+      <li><a href="support/">Support</a></li>
+      <li><a href="../" hreflang="es" lang="es">Español</a></li>
+    </ul>
+  </nav>
+</header>
+
+<main id="content">
+<h1>NestAdmin</h1>
+<p><strong>A desktop administrative assistant for Windows, built for small businesses.</strong></p>
+
+<p>NestAdmin reads the email and documents your business receives (invoices, PDFs and scanned documents), extracts and validates their data and prepares reply drafts for a person to review. It is installed on your own computer and, by default, all processing happens there.</p>
+
+<h2>What it does</h2>
+<ul>
+  <li><strong>Reads documents:</strong> plain text, PDFs with text and scanned PDFs. Text recognition (OCR) runs on your computer.</li>
+  <li><strong>Extracts and checks invoice data:</strong> supplier, dates, amounts and taxes. It checks the arithmetic, flags missing data and possible duplicates, and never makes values up.</li>
+  <li><strong>Works with your email:</strong> if you connect a Gmail or Microsoft 365 account, it reads the messages in your inbox and prepares a reply draft in the same thread.</li>
+  <li><strong>You decide what gets sent:</strong> a draft is only sent after you review and approve it, or when a specific rule that you created and enabled covers it. NestAdmin does not delete email.</li>
+  <li><strong>Visible history:</strong> every decision and action is recorded in the app.</li>
+</ul>
+
+<h2>Privacy by design</h2>
+<ul>
+  <li><strong>Runs on your computer.</strong> The publisher of NestAdmin has no servers that receive, store or process your email or documents.</li>
+  <li><strong>Local AI by default.</strong> The language model (Qwen3 8B, via Ollama) runs on your own computer.</li>
+  <li><strong>External AI only if you choose it.</strong> You can explicitly choose Groq as the provider, with your own key. Only then is the processed text sent to Groq. NestAdmin never switches providers on its own.</li>
+  <li><strong>Protected credentials.</strong> Google and Microsoft authorizations are obtained with OAuth 2.0 from the app and stored in Windows Credential Manager.</li>
+</ul>
+<p>Details are in the <a href="privacy/">privacy policy</a>.</p>
+
+<h2>Gmail access</h2>
+<p>When you connect a Gmail account, NestAdmin requests the <code>https://www.googleapis.com/auth/gmail.modify</code> scope, which it uses only to read your messages, create reply drafts in the thread and send a draft when you approve it or a rule you enabled covers it. It does not delete email. You can disconnect the account in the app or revoke access at <a href="https://myaccount.google.com/permissions">myaccount.google.com/permissions</a> at any time.</p>
+
+<h2>Requirements</h2>
+<ul>
+  <li>Windows 10 or 11, 64-bit.</li>
+  <li>16 GB of RAM recommended for local AI.</li>
+  <li>Internet connection for the initial installation and to work with email accounts.</li>
+</ul>
+</main>
+
+<footer>
+  <ul>
+    <li><a href="privacy/">Privacy policy</a></li>
+    <li><a href="terms/">Terms of service</a></li>
+    <li><a href="support/">Support</a></li>
+  </ul>
+  <p>NestAdmin is an application by [RAZÓN SOCIAL], [PAÍS Y DIRECCIÓN]. Contact: <a href="mailto:[CORREO]@humannaia.com">[CORREO]@humannaia.com</a></p>
+  <p>This site uses no cookies, analytics or tracking.</p>
+</footer>
+</body>
+</html>
