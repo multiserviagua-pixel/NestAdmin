@@ -134,6 +134,7 @@ impl MailProvider for Graph {
         Ok(CreatedDraft {
             draft_id: draft_id.to_owned(),
             message_id: None,
+            rfc822_id: None,
         })
     }
 
@@ -144,7 +145,8 @@ impl MailProvider for Graph {
         Ok(draft_id.to_owned())
     }
 
-    fn status(&self, draft_id: &str, _message_id: Option<&str>) -> MailResult<DraftStatus> {
+    fn status(&self, draft: &CreatedDraft) -> MailResult<DraftStatus> {
+        let draft_id = draft.draft_id.as_str();
         let url = self
             .api
             .url(&["me", "messages", draft_id], &[("$select", "id,isDraft")]);

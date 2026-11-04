@@ -45,7 +45,7 @@ Cada afirmación sobre la aplicación se apoya en la especificación o el códig
 - Credenciales en el Administrador de credenciales de Windows y fuera de los registros: R09, D08, D13.
 - OAuth con PKCE, bucle local `127.0.0.1`, ámbitos `gmail.modify` y Graph `offline_access Mail.ReadWrite Mail.Send`, solo HTTPS y sin proxy: D31, D32, D12.
 - Lectura de la bandeja de entrada, cuerpo en texto, adjuntos ignorados, borrador en el hilo: D34 y `crates/mail/src/gmail.rs`.
-- Envío solo con revisión o regla activa: R07, D17. Un envío por clave: D33.
+- Envío solo con revisión o regla activa: R07, D17. Un envío por clave: D33, D41.
 - Datos en `%LOCALAPPDATA%\NestAdmin`, que el desinstalador conserva: D18, D36.
 - Desconectar una cuenta desde la ventana borra sus tokens: D45, en el PR de correo real en la aplicación (pendiente de fusionar cuando se escribió esto). **No publique el sitio ni grabe el vídeo hasta que esa función esté en la versión que se distribuye.**
 - Requisitos de Windows 10/11 de 64 bits y 16 GB de RAM recomendados: R12 y el brief del editor.

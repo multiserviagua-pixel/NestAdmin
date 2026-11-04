@@ -4,7 +4,7 @@ Textos en inglés para la consola de Google Cloud («Verification Center» / pan
 
 ## Justificación del ámbito `gmail.modify`
 
-Llamadas que hace hoy el conector (`crates/mail/src/gmail.rs`): `users.messages.list` (bandeja de entrada), `users.messages.get`, `users.drafts.create` (respuesta en el hilo), `users.drafts.send` y `users.drafts.get` (reconciliación de envíos, D33). Ninguna borra, archiva ni cambia etiquetas.
+Llamadas que hace hoy el conector (`crates/mail/src/gmail.rs`): `users.messages.list` (bandeja de entrada y, para reconciliar un envío cortado, búsqueda `rfc822msgid:` en enviados), `users.messages.get`, `users.drafts.create` (respuesta en el hilo), `users.drafts.send` y `users.drafts.get` (D33, D41). Ninguna borra, archiva ni cambia etiquetas.
 
 Texto para pegar (≈ 900 caracteres):
 
