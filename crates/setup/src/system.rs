@@ -1,5 +1,6 @@
 //! Acceso al sistema que la preparación necesita (D40): buscar, verificar, instalar y
-//! arrancar Ollama, y probar Tesseract. Las pruebas lo sustituyen por un doble.
+//! arrancar Ollama, probar Tesseract y leer la memoria del equipo (D46). Las pruebas lo
+//! sustituyen por un doble.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -15,6 +16,8 @@ pub trait System: Send + Sync {
     fn start_ollama(&self, executable: &Path) -> Result<(), String>;
     /// Versión de Tesseract si responde con esos datos de idioma.
     fn tesseract_version(&self, executable: &Path, tessdata: &Path) -> Result<String, String>;
+    /// Memoria física `(total, libre)` en bytes; `None` si no se puede leer.
+    fn memory(&self) -> Option<(u64, u64)>;
 }
 
 #[cfg_attr(not(windows), allow(unused_mut))]
@@ -107,4 +110,49 @@ impl System for WindowsSystem {
             .map(|v| v.trim().trim_start_matches('v').to_owned())
             .unwrap_or_else(|| "desconocida".into()))
     }
+
+    fn memory(&self) -> Option<(u64, u64)> {
+        physical_memory()
+    }
+}
+
+/// `GlobalMemoryStatusEx` de kernel32: instantáneo y sin procesos auxiliares.
+#[cfg(windows)]
+fn physical_memory() -> Option<(u64, u64)> {
+    #[repr(C)]
+    struct MemoryStatusEx {
+        length: u32,
+        memory_load: u32,
+        total_phys: u64,
+        avail_phys: u64,
+        total_page_file: u64,
+        avail_page_file: u64,
+        total_virtual: u64,
+        avail_virtual: u64,
+        avail_extended_virtual: u64,
+    }
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn GlobalMemoryStatusEx(buffer: *mut MemoryStatusEx) -> i32;
+    }
+    let mut status = MemoryStatusEx {
+        length: std::mem::size_of::<MemoryStatusEx>() as u32,
+        memory_load: 0,
+        total_phys: 0,
+        avail_phys: 0,
+        total_page_file: 0,
+        avail_page_file: 0,
+        total_virtual: 0,
+        avail_virtual: 0,
+        avail_extended_virtual: 0,
+    };
+    // SAFETY: la estructura tiene la disposición de MEMORYSTATUSEX, `length` indica su
+    // tamaño como exige la API y el puntero es válido durante la llamada.
+    let ok = unsafe { GlobalMemoryStatusEx(&mut status) };
+    (ok != 0 && status.total_phys > 0).then_some((status.total_phys, status.avail_phys))
+}
+
+#[cfg(not(windows))]
+fn physical_memory() -> Option<(u64, u64)> {
+    None
 }

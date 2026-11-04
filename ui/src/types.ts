@@ -75,6 +75,18 @@ export type SetupCheck =
   | { status: "stopped" }
   | { status: "missing"; component: "ollama" | "ollama_outdated" | "model" | "ocr" };
 
+// Memoria del equipo frente a la IA local (D46): solo avisa, nunca bloquea.
+export type MemoryLevel = "recommended" | "below_recommended" | "insufficient" | "unknown";
+
+export interface Memory {
+  total_bytes: number | null;
+  available_bytes: number | null;
+  level: MemoryLevel;
+  warning: string | null;
+}
+
+export type SetupStatus = SetupCheck & { memory: Memory };
+
 export interface SetupEvent {
   step: SetupStep;
   state: StepState;
@@ -90,6 +102,7 @@ export interface SetupReport {
   model_digest: string | null;
   answer: string;
   latency_ms: number;
+  memory: Memory;
 }
 
 export interface SetupDone {
@@ -110,3 +123,43 @@ export interface LaunchView {
   startup: Startup | null;
 }
 
+
+// Cuentas de correo (R13, D41–D44).
+
+export type MailProviderKind = "simulator" | "google" | "microsoft";
+export type AccountStatus = "connected" | "signed_out" | "not_configured" | "credentials_unavailable";
+
+export interface MailIssue {
+  code: "unauthorized" | "unavailable" | "not_found" | "conflict" | "invalid_input" | string;
+  message: string;
+}
+
+export interface AccountFetch {
+  account: string;
+  read: number;
+  added: number;
+  error: MailIssue | null;
+}
+
+export interface FetchReport {
+  added: number;
+  limit: number;
+  accounts: AccountFetch[];
+}
+
+export interface MailAccount {
+  id: string;
+  provider: MailProviderKind;
+  label: string;
+  status: AccountStatus;
+  last_fetch: AccountFetch | null;
+}
+
+export interface MailView {
+  accounts: MailAccount[];
+  limit: number;
+  google_configured: boolean;
+  microsoft_configured: boolean;
+  clients_error: string | null;
+  signing_in: boolean;
+}

@@ -1,0 +1,9 @@
+{
+  "google": {
+    "client_id": "PONER-AQUI.apps.googleusercontent.com",
+    "client_secret": "PONER-AQUI"
+  },
+  "microsoft": {
+    "client_id": "PONER-AQUI"
+  }
+}

@@ -1,6 +1,6 @@
 //! Casos T08b y T08c de specs/v1/pruebas-instalador.md. Ollama y el servidor de descargas
 //! se simulan en 127.0.0.1 y el sistema (buscar, verificar, instalar y arrancar Ollama,
-//! probar Tesseract) es un doble que registra las llamadas (D40). Nada se instala en el
+//! probar Tesseract, leer la memoria) es un doble que registra las llamadas (D40, D46). Nada se instala en el
 //! equipo ni sale a la red; solo datos sintéticos.
 
 use std::io::{BufRead, BufReader, Read, Write};
@@ -10,9 +10,10 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
+use nestadmin_ai::{AiError, GenerateRequest, GenerateResult, Provider, ProviderKind, Task};
 use nestadmin_setup::{
-    parse_version, Cancel, Check, Config, ErrorCode, Event, Missing, Pinned, Setup, SetupError,
-    Startup, Step, StepState, System,
+    explain_timeouts, parse_version, Cancel, Check, Config, ErrorCode, Event, Memory, MemoryLevel,
+    Missing, Pinned, Setup, SetupError, Startup, Status, Step, StepState, System,
 };
 use sha2::{Digest, Sha256};
 
@@ -126,6 +127,8 @@ struct Ollama {
     pull: Pull,
     pulls: u32,
     answer: &'static str,
+    /// Tiempo que tarda el modelo en responder (cargarlo con poca memoria es lento).
+    chat_delay: Duration,
     requests: u32,
 }
 
@@ -166,6 +169,12 @@ fn fake_ollama(state: SharedOllama) -> String {
                 )
             }
             ("POST", "/api/chat") => {
+                let delay = s.chat_delay;
+                if !delay.is_zero() {
+                    drop(s);
+                    thread::sleep(delay);
+                    s = state.lock().unwrap();
+                }
                 let content = serde_json::to_string(&serde_json::json!({ "respuesta": s.answer })).unwrap();
                 let body = serde_json::json!({ "model": "qwen3:8b", "message": { "role": "assistant", "content": content } });
                 json("200 OK", &body.to_string())
@@ -239,6 +248,8 @@ struct SystemState {
     /// Versión que deja instalada el instalador de Ollama.
     installs: &'static str,
     start_delay: Duration,
+    /// Memoria `(total, libre)` que informa el equipo.
+    memory: Option<(u64, u64)>,
     calls: Vec<String>,
 }
 
@@ -301,6 +312,17 @@ impl System for Double {
             Err("Tesseract no encuentra los datos de idioma spa y eng".into())
         }
     }
+
+    fn memory(&self) -> Option<(u64, u64)> {
+        self.state.lock().unwrap().memory
+    }
+}
+
+const GIB: u64 = 1 << 30;
+
+/// `n` GiB (admite fracciones, como los 15,6 GiB de un equipo de 16 GB).
+fn gib(n: f64) -> u64 {
+    (n * GIB as f64) as u64
 }
 
 // ---- Escenario ----
@@ -333,6 +355,7 @@ fn scenario(running: bool, exe: bool, version: &str, has_model: bool) -> Scenari
         pull: Pull::Success,
         pulls: 0,
         answer: "listo",
+        chat_delay: Duration::ZERO,
         requests: 0,
     }));
     let downloads = Arc::new(Mutex::new(Downloads {
@@ -345,6 +368,7 @@ fn scenario(running: bool, exe: bool, version: &str, has_model: bool) -> Scenari
         tesseract_ok: true,
         installs: "0.40.14",
         start_delay: Duration::from_millis(50),
+        memory: Some((gib(16.0), gib(10.0))),
         calls: Vec::new(),
     }));
     let mut config = Config::windows(
@@ -670,6 +694,14 @@ fn t08b_13_states_events_and_errors_serialize_to_the_contract() {
         to(&event),
         r#"{"step":"service","state":"skipped","done":null,"total":null,"message":"m"}"#
     );
+    let status = Status {
+        check: Check::Missing(Missing::Model),
+        memory: Memory::assess(None),
+    };
+    assert_eq!(
+        to(&status),
+        r#"{"status":"missing","component":"model","memory":{"total_bytes":null,"available_bytes":null,"level":"unknown","warning":null}}"#
+    );
     for code in [
         ErrorCode::Network,
         ErrorCode::Signature,
@@ -704,6 +736,158 @@ mod erased {
             serde_json::to_string(self).unwrap()
         }
     }
+}
+
+#[test]
+fn t08b_14_memory_is_classified_against_16_and_8_gb() {
+    let level = |total: f64| Memory::assess(Some((gib(total), gib(10.0)))).level;
+    assert_eq!(level(16.0), MemoryLevel::Recommended);
+    // Lo que informa Windows de un equipo de 16 GB con gráficos integrados.
+    assert_eq!(level(15.6), MemoryLevel::Recommended);
+    assert_eq!(level(32.0), MemoryLevel::Recommended);
+    assert_eq!(level(12.0), MemoryLevel::BelowRecommended);
+    assert_eq!(level(9.0), MemoryLevel::BelowRecommended);
+    assert_eq!(level(8.0), MemoryLevel::Insufficient);
+    assert_eq!(level(7.7), MemoryLevel::Insufficient);
+    assert_eq!(level(4.0), MemoryLevel::Insufficient);
+
+    let ok = Memory::assess(Some((gib(16.0), gib(10.0))));
+    assert_eq!(ok.warning, None);
+    assert_eq!(ok.timeout_cause(), None);
+
+    let twelve = Memory::assess(Some((gib(12.0), gib(8.0))));
+    let warning = twelve.warning.clone().unwrap();
+    assert!(
+        warning.contains("12,0 GB") && warning.contains("16 GB"),
+        "{warning}"
+    );
+    assert!(
+        warning.contains("Groq") && !warning.contains("probablemente no"),
+        "{warning}"
+    );
+
+    let eight = Memory::assess(Some((gib(7.7), gib(3.0))));
+    let warning = eight.warning.clone().unwrap();
+    assert!(warning.contains("7,7 GB"), "{warning}");
+    assert!(
+        warning.contains("probablemente no responderá a tiempo"),
+        "{warning}"
+    );
+    assert!(warning.contains("3,0 GB libres"), "{warning}");
+
+    // Con 16 GB pero casi todo ocupado solo se sugiere cerrar programas.
+    let busy = Memory::assess(Some((gib(16.0), gib(2.0))));
+    assert_eq!(busy.level, MemoryLevel::Recommended);
+    assert!(busy
+        .warning
+        .clone()
+        .unwrap()
+        .contains("cierre otros programas"));
+    assert_eq!(busy.timeout_cause(), None);
+
+    let unknown = Memory::assess(None);
+    assert_eq!(
+        (
+            unknown.level,
+            unknown.warning.clone(),
+            unknown.timeout_cause()
+        ),
+        (MemoryLevel::Unknown, None, None)
+    );
+}
+
+#[test]
+fn t08b_15_low_memory_warns_without_blocking_or_switching_provider() {
+    for (total, level) in [
+        (16.0, MemoryLevel::Recommended),
+        (12.0, MemoryLevel::BelowRecommended),
+        (8.0, MemoryLevel::Insufficient),
+    ] {
+        let s = scenario(true, true, "0.40.14", true);
+        s.system.lock().unwrap().memory = Some((gib(total), gib(6.0)));
+        let status = s.setup.status();
+        assert_eq!(status.check, Check::Ready);
+        assert_eq!(status.memory.level, level);
+        let (result, events) = s.prepare();
+        let report = result.unwrap_or_else(|e| panic!("{total} GB: {e}"));
+        assert_eq!(report.memory.level, level);
+        assert_eq!(final_states(&events).last(), Some(&(Verify, Done)));
+        assert!(s.calls().is_empty(), "no se instala ni se arranca nada más");
+    }
+}
+
+#[test]
+fn t08b_16_verification_timeout_names_memory_as_the_likely_cause() {
+    for (total, mentions) in [(8.0, true), (12.0, true), (16.0, false)] {
+        let mut s = scenario(true, true, "0.40.14", true);
+        s.system.lock().unwrap().memory = Some((gib(total), gib(4.0)));
+        s.ollama.lock().unwrap().chat_delay = Duration::from_millis(1500);
+        let mut config = s.setup.config().clone();
+        config.verify_timeout = Duration::from_millis(300);
+        let double = Double {
+            state: s.system.clone(),
+            ollama: s.ollama.clone(),
+        };
+        s.setup = Setup::new(config, Box::new(double));
+        let (result, events) = s.prepare();
+        let error = result.unwrap_err();
+        assert_eq!(error.code, ErrorCode::VerifyFailed, "{total} GB");
+        assert!(error.message.starts_with("timeout:"), "{}", error.message);
+        assert_eq!(
+            error.message.contains("falta de memoria"),
+            mentions,
+            "{total} GB: {}",
+            error.message
+        );
+        assert_eq!(final_states(&events).last(), Some(&(Verify, Failed)));
+    }
+}
+
+/// Proveedor que siempre agota el tiempo.
+struct Slow(ProviderKind);
+
+impl Provider for Slow {
+    fn kind(&self) -> ProviderKind {
+        self.0
+    }
+    fn model(&self) -> &str {
+        "sintetico"
+    }
+    fn generate(&self, _request: &GenerateRequest) -> Result<GenerateResult, AiError> {
+        Err(AiError::Timeout)
+    }
+}
+
+#[test]
+fn t08b_17_task_timeouts_on_low_memory_keep_the_code_and_explain_the_cause() {
+    let request = GenerateRequest {
+        request_id: "sintetico".into(),
+        task: Task::Classification,
+        instructions: "x".into(),
+        content: "x".into(),
+        schema: None,
+    };
+    let eight = Memory::assess(Some((gib(8.0), gib(3.0))));
+    let error = explain_timeouts(Arc::new(Slow(ProviderKind::Ollama)), &eight)
+        .generate(&request)
+        .unwrap_err();
+    assert_eq!(error.code(), "timeout");
+    let text = error.to_string();
+    assert!(text.contains("no respondió a tiempo"), "{text}");
+    assert!(
+        text.contains("falta de memoria") && text.contains("8,0 GB"),
+        "{text}"
+    );
+
+    // Con 16 GB, o con Groq elegido, el error no cambia.
+    let sixteen = Memory::assess(Some((gib(16.0), gib(10.0))));
+    let error = explain_timeouts(Arc::new(Slow(ProviderKind::Ollama)), &sixteen)
+        .generate(&request)
+        .unwrap_err();
+    assert_eq!(error, AiError::Timeout);
+    let groq = explain_timeouts(Arc::new(Slow(ProviderKind::Groq)), &eight);
+    assert_eq!(groq.kind(), ProviderKind::Groq);
+    assert_eq!(groq.generate(&request).unwrap_err(), AiError::Timeout);
 }
 
 #[test]
@@ -779,7 +963,10 @@ fn this_machine_is_ready_and_the_local_model_answers() {
         ),
         Box::new(nestadmin_setup::WindowsSystem),
     );
-    println!("check: {}", serde_json::to_string(&setup.check()).unwrap());
+    println!(
+        "status: {}",
+        serde_json::to_string(&setup.status()).unwrap()
+    );
     let mut events = Vec::new();
     let report = setup.prepare(&mut |e| events.push(e), &Cancel::default());
     for event in &events {
@@ -787,4 +974,17 @@ fn this_machine_is_ready_and_the_local_model_answers() {
     }
     println!("{}", serde_json::to_string(&report).unwrap());
     assert!(report.is_ok());
+}
+
+/// Lectura real de la memoria de este equipo (no cambia nada).
+#[test]
+#[cfg(windows)]
+fn this_machine_memory_is_read() {
+    let total = nestadmin_setup::WindowsSystem
+        .memory()
+        .map(|(total, _)| total);
+    assert!(total.is_some_and(|t| t > GIB), "{total:?}");
+    let memory = Memory::assess(nestadmin_setup::WindowsSystem.memory());
+    assert_ne!(memory.level, MemoryLevel::Unknown);
+    println!("memoria: {}", serde_json::to_string(&memory).unwrap());
 }

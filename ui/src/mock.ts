@@ -1,7 +1,24 @@
 // Servidor simulado para ver la interfaz en un navegador sin Tauri. Imita los comandos
 // reales con datos sintéticos (dominio .test); no decide nada que la capa Rust no decida.
 
-import type { AuditEntry, ProviderChoice, Rule, SettingsView, SetupDone, SetupEvent, SetupStep, Startup, StepState, Task } from "./types";
+import type {
+  AccountFetch,
+  AuditEntry,
+  FetchReport,
+  MailAccount,
+  MailProviderKind,
+  MailView,
+  Memory,
+  ProviderChoice,
+  Rule,
+  SettingsView,
+  SetupDone,
+  SetupEvent,
+  SetupStep,
+  Startup,
+  StepState,
+  Task,
+} from "./types";
 
 const now = () => Date.now();
 const listeners: Array<() => void> = [];
@@ -14,15 +31,137 @@ const audit: AuditEntry[] = [];
 let choice: ProviderChoice = { provider: "ollama", base_url: "http://127.0.0.1:11434", model: "qwen3:8b" };
 let groqKey = false;
 
+// Cuentas de correo simuladas. `?sin-cuentas` en la URL abre la pantalla sin ninguna cuenta y
+// `?sin-cliente` imita una instalación sin clientes OAuth del editor. Iniciar sesión espera
+// unos segundos como si el usuario estuviera en el navegador; no se abre ninguna página.
+const params = new URLSearchParams(location.search);
+const clientsConfigured = !params.has("sin-cliente");
+let mailLimit = 25;
+let signingIn: { cancelled: boolean } | null = null;
+const signInListeners: Array<(url: string) => void> = [];
+const mailAccounts: MailAccount[] = params.has("sin-cuentas")
+  ? []
+  : [
+      { id: "simulador", provider: "simulator", label: "Correo simulado", status: "connected", last_fetch: null },
+      {
+        id: "microsoft-1",
+        provider: "microsoft",
+        label: "Oficina",
+        status: clientsConfigured ? "connected" : "not_configured",
+        last_fetch: { account: "microsoft-1", read: 25, added: 3, error: null },
+      },
+      {
+        id: "google-1",
+        provider: "google",
+        label: "Facturación",
+        status: clientsConfigured ? "signed_out" : "not_configured",
+        last_fetch: {
+          account: "google-1",
+          read: 0,
+          added: 0,
+          error: { code: "unauthorized", message: "la sesión caducó; vuelva a iniciar sesión" },
+        },
+      },
+    ];
+
+function nextAccountId(provider: MailProviderKind) {
+  const used = mailAccounts
+    .map((a) => a.id.match(new RegExp(`^${provider}-(\\d+)$`))?.[1])
+    .filter(Boolean)
+    .map(Number);
+  return `${provider}-${Math.max(0, ...used) + 1}`;
+}
+
+function signIn(provider: MailProviderKind, label: string, account: string | null): Promise<MailAccount> {
+  if (signingIn) return Promise.reject("ya hay un inicio de sesión en curso");
+  if (provider === "simulator" || !clientsConfigured)
+    return Promise.reject(`unavailable: esta instalación no tiene configurado el cliente OAuth de ${provider === "google" ? "Google" : "Microsoft"}`);
+  const run = { cancelled: false };
+  signingIn = run;
+  const host = provider === "google" ? "accounts.google.com" : "login.microsoftonline.com";
+  setTimeout(() => signInListeners.forEach((l) => l(`https://${host}/… (vista previa: no se abre ninguna página)`)), 0);
+  return new Promise((resolve, reject) => {
+    setTimeout(() => {
+      signingIn = null;
+      if (run.cancelled) return reject("inicio de sesión cancelado");
+      const existing = account ? mailAccounts.find((a) => a.id === account) : undefined;
+      if (existing) {
+        Object.assign(existing, { status: "connected", last_fetch: null });
+        changed();
+        return resolve(structuredClone(existing));
+      }
+      const id = nextAccountId(provider);
+      const created: MailAccount = {
+        id,
+        provider,
+        label: label.trim() || `${provider === "google" ? "Google" : "Microsoft"} ${id.split("-")[1]}`,
+        status: "connected",
+        last_fetch: null,
+      };
+      mailAccounts.push(created);
+      changed();
+      resolve(structuredClone(created));
+    }, 2500);
+  });
+}
+
+function fetchMail(): FetchReport {
+  const accounts: AccountFetch[] = mailAccounts.map((a) => {
+    const fetch: AccountFetch =
+      a.status === "connected"
+        ? { account: a.id, read: Math.min(mailLimit, a.provider === "simulator" ? 5 : 2), added: 0, error: null }
+        : {
+            account: a.id,
+            read: 0,
+            added: 0,
+            error:
+              a.status === "not_configured"
+                ? { code: "unavailable", message: "esta instalación no tiene configurado el cliente OAuth" }
+                : { code: "unauthorized", message: "la sesión caducó; vuelva a iniciar sesión" },
+          };
+    if (a.status === "connected" && a.provider !== "simulator") {
+      const n = tasks.filter((t) => t.input_ref.includes(`"${a.id}:`)).length + 1;
+      task("email", { message_id: `${a.id}:sintetico-${n}`, account: a.id }, "queued", null);
+      fetch.added = 1;
+    }
+    a.last_fetch = fetch;
+    return fetch;
+  });
+  return { added: accounts.reduce((sum, a) => sum + a.added, 0), limit: mailLimit, accounts };
+}
+
 // Preparación simulada: Ollama está instalado y en marcha, falta el modelo. La primera
 // descarga del modelo se corta una vez para mostrar el reintento. `?preparar` en la URL
-// imita el modo del instalador.
+// imita el modo del instalador y `?ram=12` u `?ram=8` un equipo con poca memoria (D46): con
+// 8 GB la primera verificación agota el tiempo y la siguiente responde despacio.
 const setupListeners: Array<(event: SetupEvent) => void> = [];
 const doneListeners: Array<(done: SetupDone) => void> = [];
 const startupListeners: Array<(startup: Startup) => void> = [];
 const prepareOnly = new URLSearchParams(location.search).has("preparar");
 let modelPresent = false;
 let preparing: { cancelled: boolean } | null = null;
+const GIB = 2 ** 30;
+const ramGb = Number(new URLSearchParams(location.search).get("ram") ?? "16") || 16;
+let verifyAttempts = 0;
+
+// Mismos umbrales y textos que `crates/setup/src/memory.rs`; aquí solo se imitan.
+function memory(): Memory {
+  const total = ramGb * GIB;
+  const available = Math.min(total * 0.4, 10 * GIB);
+  const gb = (bytes: number) => (bytes / GIB).toFixed(1).replace(".", ",");
+  const level = total + GIB >= 16 * GIB ? "recommended" : total < 9 * GIB ? "insufficient" : "below_recommended";
+  let warning =
+    level === "insufficient"
+      ? `Este equipo tiene ${gb(total)} GB de memoria. Con 8 GB o menos, la IA local (Qwen3 8B) probablemente no responderá a tiempo. Puede intentarlo igualmente o elegir Groq en Configuración; NestAdmin no lo cambiará por su cuenta.`
+      : level === "below_recommended"
+        ? `Este equipo tiene ${gb(total)} GB de memoria; se recomiendan 16 GB para la IA local. Puede seguir, pero las respuestas serán más lentas y alguna podría no llegar a tiempo; si ocurre, puede elegir Groq en Configuración.`
+        : null;
+  if (available < 6 * GIB) {
+    const free = `Ahora hay ${gb(available)} GB libres: cierre otros programas antes de usar la IA local.`;
+    warning = warning ? `${warning} ${free}` : free;
+  }
+  return { total_bytes: total, available_bytes: available, level, warning };
+}
 
 function simulatePreparation(run: { cancelled: boolean }) {
   let last: SetupStep = "ocr";
@@ -50,7 +189,8 @@ function simulatePreparation(run: { cancelled: boolean }) {
     plan.push(() => emit("model", "skipped", "El modelo qwen3:8b ya está descargado"));
   }
   plan.push(() => emit("verify", "running", "Pidiendo una respuesta al modelo local"));
-  plan.push(() => emit("verify", "done", "El modelo respondió en 2,4 s"));
+  const timesOut = memory().level === "insufficient" && verifyAttempts++ === 0;
+  if (!timesOut) plan.push(() => emit("verify", "done", "El modelo respondió «listo»"));
   let step = 0;
   const tick = () => {
     if (run.cancelled) {
@@ -62,6 +202,11 @@ function simulatePreparation(run: { cancelled: boolean }) {
       next();
       return void setTimeout(tick, 350);
     }
+    if (timesOut) {
+      const message = `timeout: el proveedor no respondió a tiempo, probablemente por falta de memoria: el equipo tiene ${ramGb.toFixed(1).replace(".", ",")} GB y la IA local necesita 16 GB; puede elegir Groq en Configuración`;
+      emit("verify", "failed", message);
+      return finish({ report: null, error: { code: "verify_failed", message } });
+    }
     finish({
       report: {
         ollama_version: "0.40.14",
@@ -69,7 +214,8 @@ function simulatePreparation(run: { cancelled: boolean }) {
         model: "qwen3:8b",
         model_digest: "500a1f067a9f",
         answer: "listo",
-        latency_ms: 2400,
+        latency_ms: memory().level === "recommended" ? 2400 : 94_000,
+        memory: memory(),
       },
       error: null,
     });
@@ -119,11 +265,11 @@ const invoiceResult = (document: string, total: string, issues: string[]) => ({
 
 task("invoice", { document: "factura-alfa.txt" }, "awaiting_review", invoiceResult("factura-alfa.txt", "121.00", []));
 task("invoice", { document: "factura-beta.txt" }, "awaiting_review", invoiceResult("factura-beta.txt", "125.00", ["total_mismatch"]));
-task("email", { message_id: "M-0002" }, "awaiting_review", {
+task("email", { message_id: "microsoft-1:AAMk-sintetico-2", account: "microsoft-1" }, "awaiting_review", {
   type: "email",
   version: 1,
   message: {
-    id: "M-0002",
+    id: "microsoft-1:AAMk-sintetico-2",
     subject: "Consulta sobre el pedido 2231",
     from: "cliente.beta@ejemplo.test",
     body: "¿Podrían confirmar la fecha de entrega del pedido 2231?",
@@ -144,7 +290,7 @@ task("invoice", { document: "escaneada.txt" }, "failed", null, {
   message: "unavailable: no se pudo conectar con Ollama",
   recoverable: true,
 });
-task("email", { message_id: "M-0001" }, "queued", null);
+task("email", { message_id: "simulador:M-0001", account: "simulador" }, "queued", null);
 
 function find(id: number) {
   const t = tasks.find((t) => t.id === id);
@@ -184,7 +330,36 @@ const handlers: Record<string, (a: any, options?: any) => unknown> = {
     if (bytes.length === 0) throw `«${name}» está vacío`;
     return task("invoice", { document: name }, "queued", null);
   },
-  fetch_mail: () => 0,
+  fetch_mail: () => fetchMail(),
+  mail_accounts: (): MailView => ({
+    accounts: mailAccounts,
+    limit: mailLimit,
+    google_configured: clientsConfigured,
+    microsoft_configured: clientsConfigured,
+    clients_error: null,
+    signing_in: signingIn !== null,
+  }),
+  set_mail_limit: ({ limit }) => {
+    if (!Number.isInteger(limit) || limit < 1 || limit > 500) throw "el límite de mensajes debe estar entre 1 y 500";
+    mailLimit = limit;
+  },
+  mail_sign_in: ({ provider, label, account }) => signIn(provider, String(label ?? ""), account ?? null),
+  mail_sign_in_cancel: () => {
+    if (signingIn) signingIn.cancelled = true;
+  },
+  remove_mail_account: ({ id }) => {
+    const index = mailAccounts.findIndex((a) => a.id === id);
+    if (index < 0) throw `not_found: la cuenta ${id} no está conectada en NestAdmin`;
+    mailAccounts.splice(index, 1);
+  },
+  add_simulated_mail_account: () => {
+    let account = mailAccounts.find((a) => a.id === "simulador");
+    if (!account) {
+      account = { id: "simulador", provider: "simulator", label: "Correo simulado", status: "connected", last_fetch: null };
+      mailAccounts.unshift(account);
+    }
+    return account;
+  },
   approve: ({ id, version }) => {
     const t = reviewable(id);
     const current = t.result?.version ?? 1;
@@ -246,7 +421,7 @@ const handlers: Record<string, (a: any, options?: any) => unknown> = {
     preparing: preparing !== null,
     startup: prepareOnly ? null : startup(),
   }),
-  setup_check: () => (modelPresent ? { status: "ready" } : { status: "missing", component: "model" }),
+  setup_check: () => ({ ...(modelPresent ? { status: "ready" } : { status: "missing", component: "model" }), memory: memory() }),
   setup_prepare: () => {
     if (preparing) throw "la preparación ya está en curso";
     preparing = { cancelled: false };
@@ -265,7 +440,19 @@ function startup(): Startup {
   return modelPresent ? { outcome: "ready" } : { outcome: "needs_preparation", check: { status: "missing", component: "model" } };
 }
 
-const mutating = new Set(["import_file", "approve", "edit_draft", "reject", "retry", "create_rule", "update_rule", "set_rule_active"]);
+const mutating = new Set([
+  "import_file",
+  "fetch_mail",
+  "approve",
+  "edit_draft",
+  "reject",
+  "retry",
+  "create_rule",
+  "update_rule",
+  "set_rule_active",
+  "remove_mail_account",
+  "add_simulated_mail_account",
+]);
 
 export async function invoke<T>(
   command: string,
@@ -274,7 +461,7 @@ export async function invoke<T>(
 ): Promise<T> {
   const handler = handlers[command];
   if (!handler) throw `comando desconocido: ${command}`;
-  const value = handler(args, options) as T;
+  const value = (await handler(args, options)) as T;
   if (mutating.has(command)) changed();
   return structuredClone(value);
 }
@@ -293,4 +480,8 @@ export function onSetupDone(handler: (done: SetupDone) => void) {
 
 export function onStartup(handler: (startup: Startup) => void) {
   startupListeners.push(handler);
+}
+
+export function onMailSignIn(handler: (url: string) => void) {
+  signInListeners.push(handler);
 }

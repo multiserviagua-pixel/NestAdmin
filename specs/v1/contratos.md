@@ -8,17 +8,17 @@ Estos contratos son independientes del transporte y no afirman que existan imple
 
 - Solicitud: `request_id`, `task` (extracción, clasificación o borrador), contenido mínimo necesario, formato esperado y configuración explícita del proveedor.
 - Resultado: `request_id`, proveedor y modelo realmente utilizados, salida estructurada o texto, y metadatos disponibles de tiempo/uso. Los campos no encontrados se devuelven como `null`, sin inventar datos.
-- Errores: proveedor no disponible (`unavailable`), credenciales inválidas (`unauthorized`), límite de tiempo (`timeout`), respuesta que no cumple el formato esperado (`invalid_response`). Ninguno autoriza cambiar a otro proveedor. El adaptador local solo envía contenido a la instancia local configurada; el externo solo se invoca tras su selección explícita.
+- Errores: proveedor no disponible (`unavailable`), credenciales inválidas (`unauthorized`), límite de tiempo (`timeout`, que puede añadir una causa probable al mensaje, como la memoria insuficiente de D46), respuesta que no cumple el formato esperado (`invalid_response`). Ninguno autoriza cambiar a otro proveedor. El adaptador local solo envía contenido a la instancia local configurada; el externo solo se invoca tras su selección explícita.
 - Selección inicial: Ollama / Qwen3 8B. El identificador y versión concretos del modelo deberán registrarse en cada evaluación. Groq es el primer adaptador externo.
 
 ## Preparación de componentes locales
 
-`check() -> status`, `prepare(events) -> report | error` (D36–D39).
+`check() -> status`, `prepare(events) -> report | error` (D36–D39, D46).
 
-- `check` es rápida y no descarga nada: devuelve `ready` (servicio, modelo y OCR disponibles), `stopped` (Ollama instalado pero sin responder) o `missing` con el componente que falta (`ollama`, `ollama_outdated`, `model` u `ocr`).
+- `check` es rápida y no descarga nada: devuelve `ready` (servicio, modelo y OCR disponibles), `stopped` (Ollama instalado pero sin responder) o `missing` con el componente que falta (`ollama`, `ollama_outdated`, `model` u `ocr`). Junto al estado se informa la memoria del equipo (`memory`): total y libre en bytes cuando se pueden leer, nivel (`recommended`, `below_recommended`, `insufficient` o `unknown`) y un aviso legible opcional. La memoria nunca cambia el estado ni bloquea la preparación.
 - `prepare` recorre los pasos `ocr`, `ollama`, `service`, `model` y `verify` en ese orden; reutiliza lo que ya está y solo actúa sobre lo que falta. Emite eventos con el paso, su estado (`running`, `done`, `skipped`, `failed`), bytes descargados y totales cuando se conocen y un mensaje legible. Repetirla tras un fallo o una interrupción no duplica instalaciones ni descargas completas.
-- El informe indica la versión de Ollama, si se instaló o se reutilizó, el modelo y su digest cuando Ollama lo informa, y la respuesta de verificación.
-- Errores: `network` (descarga o conexión fallida, reintentable), `signature` (instalador sin firma válida del editor esperado; no se ejecuta), `install_failed` (el instalador de Ollama terminó con error), `unavailable` (el servicio no responde tras arrancarlo), `model_failed` (Ollama rechazó la descarga del modelo, por ejemplo por espacio), `verify_failed` (el modelo no dio una respuesta válida), `ocr_missing` (faltan o no responden los componentes de OCR del paquete; reinstalar lo corrige) y `cancelled`. Ningún error activa un proveedor externo.
+- El informe indica la versión de Ollama, si se instaló o se reutilizó, el modelo y su digest cuando Ollama lo informa, la respuesta de verificación y la memoria leída.
+- Errores: `network` (descarga o conexión fallida, reintentable), `signature` (instalador sin firma válida del editor esperado; no se ejecuta), `install_failed` (el instalador de Ollama terminó con error), `unavailable` (el servicio no responde tras arrancarlo), `model_failed` (Ollama rechazó la descarga del modelo, por ejemplo por espacio), `verify_failed` (el modelo no dio una respuesta válida o no respondió a tiempo; con poca memoria, el mensaje lo señala como causa probable), `ocr_missing` (faltan o no responden los componentes de OCR del paquete; reinstalar lo corrige) y `cancelled`. Ningún error activa un proveedor externo.
 
 ## Correo
 
@@ -27,6 +27,7 @@ Estos contratos son independientes del transporte y no afirman que existan imple
 - Errores: `not_found` (mensaje o borrador inexistente), `conflict` (clave de idempotencia reutilizada con contenido distinto), `unavailable` (conector no accesible), `unauthorized` (credenciales inválidas o ausentes) y `invalid_input`. Un error nunca se registra como envío realizado.
 - `send_draft` con una clave ya usada para el mismo borrador devuelve el recibo original sin volver a enviar.
 - Conectores reales (R13, D30–D35): los IDs de mensaje y borrador son los del proveedor y el cursor es opaco. Cada cuenta es un conector independiente; quien agrupe varias cuentas debe anteponer el identificador de cuenta a los IDs y a las claves para que no choquen. El recibo de envío lleva como `receipt_id` el ID del mensaje enviado en el proveedor. La reconciliación consulta el estado del borrador en el proveedor (D33); en Gmail, si el borrador ya no existe, busca el mensaje enviado por el `Message-ID` propio que se puso al borrador (D41).
+- Varias cuentas en la aplicación (D42): `crates/app` las agrupa en un único `MailConnector` con IDs `<cuenta>:<id>` y pasa a cada cuenta la clave como `<cuenta>/<clave>`; el recibo lleva los IDs con su cuenta y el campo `account`. Consultar el correo devuelve un informe por cuenta (`account`, `read`, `added`, `error` con `code` y `message`); una cuenta con error no detiene a las demás. Cada consulta lee como mucho el límite configurado de mensajes por cuenta (D44).
 
 ## Administración
 

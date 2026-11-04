@@ -66,6 +66,10 @@ pub enum AiError {
     Unauthorized,
     #[error("timeout: el proveedor no respondió a tiempo")]
     Timeout,
+    /// Mismo código que `Timeout`, con la causa probable que conoce quien llama (por
+    /// ejemplo, poca memoria para el modelo local, D46). No cambia de proveedor.
+    #[error("timeout: el proveedor no respondió a tiempo, {0}")]
+    TimeoutCause(String),
     #[error("invalid_response: {0}")]
     InvalidResponse(String),
 }
@@ -75,7 +79,7 @@ impl AiError {
         match self {
             Self::Unavailable(_) => "unavailable",
             Self::Unauthorized => "unauthorized",
-            Self::Timeout => "timeout",
+            Self::Timeout | Self::TimeoutCause(_) => "timeout",
             Self::InvalidResponse(_) => "invalid_response",
         }
     }

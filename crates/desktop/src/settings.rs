@@ -1,5 +1,6 @@
-//! Configuración local: solo la selección de proveedor. La clave de Groq nunca se guarda
-//! aquí, sino en el almacén de credenciales del sistema (R09, D13).
+//! Configuración local: la selección de proveedor y el límite de mensajes leídos por cuenta
+//! en cada consulta. La clave de Groq y los tokens de correo nunca se guardan aquí, sino en el
+//! almacén de credenciales del sistema (R09, D13, D31).
 
 use std::fs;
 use std::io;
@@ -11,15 +12,32 @@ use nestadmin_ai::{
     build_provider, AiError, CredentialStore, GenerateRequest, GenerateResult, Provider,
     ProviderChoice, ProviderKind,
 };
+use nestadmin_setup::{explain_timeouts, Memory, System, WindowsSystem};
 use serde::{Deserialize, Serialize};
 
 const FILE: &str = "configuracion.json";
 /// Plazo por solicitud; una extracción local tarda del orden de decenas de segundos.
 const TIMEOUT: Duration = Duration::from_secs(180);
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Settings {
     pub provider: ProviderChoice,
+    /// Mensajes leídos como mucho por cuenta en cada consulta (D42).
+    #[serde(default = "default_mail_limit")]
+    pub mail_limit: usize,
+}
+
+fn default_mail_limit() -> usize {
+    nestadmin_app::accounts::DEFAULT_MAIL_LIMIT
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Self {
+            provider: ProviderChoice::default(),
+            mail_limit: default_mail_limit(),
+        }
+    }
 }
 
 impl Settings {
@@ -40,11 +58,17 @@ impl Settings {
     }
 }
 
+/// Con Ollama en un equipo con poca memoria, un tiempo agotado indica esa causa probable
+/// (D46); el código sigue siendo `timeout` y no se cambia de proveedor.
 pub fn build(
     choice: &ProviderChoice,
     credentials: &dyn CredentialStore,
 ) -> Result<Arc<dyn Provider>, AiError> {
-    build_provider(choice, credentials, TIMEOUT).map(Arc::from)
+    let provider: Arc<dyn Provider> = build_provider(choice, credentials, TIMEOUT)?.into();
+    Ok(explain_timeouts(
+        provider,
+        &Memory::assess(WindowsSystem.memory()),
+    ))
 }
 
 /// Al arrancar se respeta la selección guardada aunque no se pueda preparar: las tareas
@@ -82,16 +106,16 @@ impl Provider for Unprepared {
 }
 
 #[cfg(windows)]
-pub fn credential_store() -> Box<dyn CredentialStore> {
+pub fn credential_store() -> Arc<dyn CredentialStore> {
     match nestadmin_ai::credentials::WindowsCredentialStore::new() {
-        Ok(store) => Box::new(store),
-        Err(error) => Box::new(Failing(error)),
+        Ok(store) => Arc::new(store),
+        Err(error) => Arc::new(Failing(error)),
     }
 }
 
 #[cfg(not(windows))]
-pub fn credential_store() -> Box<dyn CredentialStore> {
-    Box::new(nestadmin_ai::MemoryCredentialStore::default())
+pub fn credential_store() -> Arc<dyn CredentialStore> {
+    Arc::new(nestadmin_ai::MemoryCredentialStore::default())
 }
 
 /// Almacén del sistema no disponible: se informa en cada uso en lugar de guardar en claro.
@@ -149,6 +173,7 @@ mod tests {
             provider: ProviderChoice::Groq {
                 model: "modelo-t09".into(),
             },
+            ..Settings::default()
         };
         settings.save(&dir).unwrap();
         let text = fs::read_to_string(dir.join(FILE)).unwrap();
