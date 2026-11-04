@@ -1,0 +1,166 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Política de privacidad — NestAdmin</title>
+<meta name="description" content="Política de privacidad de NestAdmin: qué datos usa la aplicación, dónde se guardan, con quién se comparten y cómo revocar el acceso.">
+<link rel="canonical" href="https://nestadmin.humannaia.com/privacidad/">
+<link rel="alternate" hreflang="es" href="https://nestadmin.humannaia.com/privacidad/">
+<link rel="alternate" hreflang="en" href="https://nestadmin.humannaia.com/en/privacy/">
+<link rel="stylesheet" href="../estilo.css">
+</head>
+<body>
+<a class="salto" href="#contenido">Saltar al contenido</a>
+<header>
+  <a class="marca" href="../">NestAdmin</a>
+  <nav aria-label="Principal">
+    <ul>
+      <li><a href="../">Inicio</a></li>
+      <li><a href="./" aria-current="page">Privacidad</a></li>
+      <li><a href="../condiciones/">Condiciones</a></li>
+      <li><a href="../soporte/">Soporte</a></li>
+      <li><a href="../en/privacy/" hreflang="en" lang="en">English</a></li>
+    </ul>
+  </nav>
+</header>
+
+<main id="contenido">
+<h1>Política de privacidad de NestAdmin</h1>
+<p class="fecha">Vigente desde: [FECHA DE VIGENCIA]</p>
+
+<p>Esta política explica qué información usa la aplicación de escritorio NestAdmin, para qué, dónde se guarda y qué control tienes sobre ella. Se aplica a la aplicación NestAdmin para Windows y a este sitio web.</p>
+
+<div class="caja">
+<p><strong>En resumen:</strong> NestAdmin se ejecuta en tu equipo. El editor no tiene servidores que reciban, guarden o procesen tu correo ni tus documentos, y nadie del editor los lee. Por defecto la IA funciona en tu equipo. Tus datos de Gmail no se usan para publicidad, no se venden y no se usan para entrenar modelos de IA.</p>
+</div>
+
+<h2 id="responsable">1. Quién es el responsable</h2>
+<p>NestAdmin es una aplicación de [RAZÓN SOCIAL] («el editor»), con domicilio en [PAÍS Y DIRECCIÓN]. Contacto para cualquier cuestión de privacidad: <a href="mailto:[CORREO]@humannaia.com">[CORREO]@humannaia.com</a>.</p>
+<p>Como la aplicación procesa tu correo y tus documentos en tu propio equipo, el editor no recibe esa información. Tú, o la empresa que usa NestAdmin, decides qué cuentas y documentos se procesan.</p>
+
+<h2 id="datos">2. Qué datos usa NestAdmin</h2>
+<h3>Correo de las cuentas que conectas</h3>
+<p>Solo si conectas una cuenta de Gmail o de Microsoft 365, NestAdmin accede, a través de la API oficial de ese proveedor, a:</p>
+<ul>
+  <li>los mensajes de la bandeja de entrada: remitente, destinatarios, asunto, fecha, identificadores de mensaje y de hilo, etiquetas o estado, y el texto del cuerpo;</li>
+  <li>los borradores de respuesta que la propia aplicación crea, y su estado de envío.</li>
+</ul>
+<p>La versión actual no descarga los archivos adjuntos de los mensajes. NestAdmin no borra mensajes.</p>
+
+<h3>Documentos que importas</h3>
+<p>Los archivos de texto y PDF (incluidos los escaneados) que añades a la aplicación, y los datos que se extraen de ellos, como proveedor, fechas, importes e impuestos.</p>
+
+<h3>Credenciales</h3>
+<p>Los tokens de acceso y renovación que Google o Microsoft entregan al iniciar sesión con OAuth 2.0 y, si eliges Groq, tu clave de API de Groq. NestAdmin nunca ve ni guarda la contraseña de tu cuenta de correo: la escribes en la página del proveedor.</p>
+
+<h3>Este sitio web</h3>
+<p>Este sitio no usa cookies, analítica, píxeles ni seguimiento, y no tiene formularios. El servicio de alojamiento puede registrar datos técnicos de cada visita (como la dirección IP) para entregar las páginas y protegerse frente a abusos.</p>
+
+<h2 id="permisos">3. Permisos que solicita y para qué</h2>
+<div class="tabla">
+<table>
+  <thead><tr><th>Proveedor</th><th>Permiso</th><th>Uso</th></tr></thead>
+  <tbody>
+    <tr><td>Google (Gmail API)</td><td><code>https://www.googleapis.com/auth/gmail.modify</code></td><td>Leer mensajes de la bandeja de entrada, crear borradores de respuesta en el hilo original y enviar un borrador solo cuando lo apruebas o lo cubre una regla que has activado. No se usa para borrar correo.</td></tr>
+    <tr><td>Microsoft (Graph)</td><td><code>Mail.ReadWrite</code></td><td>Leer mensajes y crear borradores de respuesta.</td></tr>
+    <tr><td>Microsoft (Graph)</td><td><code>Mail.Send</code></td><td>Enviar un borrador solo cuando lo apruebas o lo cubre una regla que has activado.</td></tr>
+    <tr><td>Microsoft (Graph)</td><td><code>offline_access</code></td><td>Mantener la conexión sin pedirte que inicies sesión cada vez.</td></tr>
+  </tbody>
+</table>
+</div>
+
+<h2 id="uso">4. Cómo se usan los datos</h2>
+<p>NestAdmin usa estos datos solo para darte las funciones que ves en la aplicación:</p>
+<ul>
+  <li>mostrar tus mensajes y documentos y clasificarlos;</li>
+  <li>extraer y comprobar los datos de las facturas;</li>
+  <li>preparar borradores de respuesta para que los revises;</li>
+  <li>enviar un borrador cuando lo apruebas, o cuando lo cubre una regla concreta que tú has creado y activado;</li>
+  <li>mostrarte el historial de decisiones y acciones.</li>
+</ul>
+<p>Por defecto, el análisis con IA lo hace un modelo de lenguaje local (Qwen3 8B, mediante Ollama) que se ejecuta en tu equipo. Los modelos solo se usan para procesar lo que pides; NestAdmin no los entrena ni los ajusta con tus datos.</p>
+
+<h2 id="google">5. Datos de usuario de Google</h2>
+<div class="caja">
+<p>El uso y la transferencia a cualquier otra aplicación de la información recibida de las API de Google por parte de NestAdmin se ajustarán a la <a href="https://developers.google.com/terms/api-services-user-data-policy">Política de datos de usuario de los servicios de API de Google</a>, incluidos los requisitos de uso limitado.</p>
+</div>
+<p>En concreto, respecto a los datos de Gmail:</p>
+<ul>
+  <li>Solo se usan para ofrecer las funciones de la aplicación visibles para ti descritas en esta política.</li>
+  <li>No se usan para publicidad, ni personalizada ni de ningún otro tipo.</li>
+  <li>No se venden ni se ceden a terceros, incluidos intermediarios de datos o de información.</li>
+  <li>Ninguna persona del editor los lee: el editor no los recibe, porque se procesan en tu equipo.</li>
+  <li>No se usan para entrenar ni mejorar modelos de IA o de aprendizaje automático, ni del editor ni de terceros.</li>
+  <li>No se usan para determinar la solvencia crediticia ni para conceder préstamos.</li>
+</ul>
+<p>Solo se transmiten fuera de tu equipo en los casos del apartado 7, y siempre para prestar una función que has pedido.</p>
+
+<h2 id="almacenamiento">6. Dónde se guardan</h2>
+<p>Todo se guarda en tu equipo, no en servidores del editor:</p>
+<ul>
+  <li><strong>Datos de trabajo</strong> (tareas, mensajes y documentos procesados, datos extraídos, borradores, reglas e historial): en una base de datos local dentro de la carpeta <code>%LOCALAPPDATA%\NestAdmin</code> de tu usuario de Windows, junto con un archivo por cuenta de correo que anota qué borradores creó la aplicación y si ya se enviaron, para no enviar nada dos veces.</li>
+  <li><strong>Credenciales</strong> (tokens de Google y Microsoft, clave de Groq): en el Administrador de credenciales de Windows. No se escriben en la base de datos ni en los registros.</li>
+</ul>
+<p>Los mensajes originales siguen en tu cuenta de Gmail o Microsoft 365; NestAdmin no los mueve ni los elimina.</p>
+
+<h2 id="compartir">7. Con quién se comparten</h2>
+<p>El editor no recibe ni comparte tus datos. La aplicación solo se comunica con:</p>
+<ul>
+  <li><strong>Google o Microsoft</strong>, para leer el correo y crear y enviar borradores en la cuenta que tú has conectado. El contenido viaja directamente entre tu equipo y el proveedor de esa cuenta, sin intermediarios.</li>
+  <li><strong>Groq, solo si lo eliges expresamente</strong> como proveedor de IA y das tu propia clave. En ese caso, el texto que se procesa (incluido el de correos y documentos) se envía a Groq para generar la respuesta. NestAdmin nunca activa Groq por su cuenta ni pasa a usarlo si falla la IA local. El tratamiento por parte de Groq se rige por su <a href="https://groq.com/privacy-policy/">política de privacidad</a>.</li>
+  <li><strong>Descargas de instalación</strong>: durante la instalación se descargan componentes (Ollama y el modelo de lenguaje) de sus fuentes oficiales. Estas descargas no incluyen tus datos.</li>
+</ul>
+<p>El editor solo revelaría información si la tuviera y una ley o una autoridad competente se lo exigiera; por diseño, no tiene tu correo ni tus documentos.</p>
+
+<h2 id="proteccion">8. Cómo se protegen</h2>
+<ul>
+  <li>El inicio de sesión usa OAuth 2.0 con PKCE: la aplicación nunca conoce tu contraseña.</li>
+  <li>Las credenciales se guardan en el almacén protegido de Windows y no aparecen en registros.</li>
+  <li>Las comunicaciones con Google, Microsoft y Groq usan HTTPS. La aplicación rechaza enviar tu token a un servidor distinto del proveedor y no usa proxies implícitos.</li>
+  <li>La aplicación no abre puertos de red para recibir conexiones; durante el inicio de sesión escucha un momento solo en el propio equipo (<code>127.0.0.1</code>) para recibir la respuesta del proveedor.</li>
+  <li>La protección de los datos guardados depende también de tu equipo. Te recomendamos proteger tu usuario de Windows con contraseña y cifrar el disco (por ejemplo, con BitLocker).</li>
+</ul>
+
+<h2 id="conservacion">9. Conservación y borrado</h2>
+<ul>
+  <li>Los datos de trabajo se conservan en tu equipo hasta que tú los borras. Desinstalar NestAdmin no borra la carpeta <code>%LOCALAPPDATA%\NestAdmin</code>, para que no pierdas tu trabajo; puedes borrarla tú después de desinstalar.</li>
+  <li>Al desconectar una cuenta en la aplicación, sus tokens se eliminan del Administrador de credenciales de Windows. También puedes eliminarlos desde ese administrador.</li>
+  <li>Los borradores creados en tu cuenta de correo se conservan en ella hasta que los envíes o los borres desde tu correo.</li>
+  <li>Si usas Groq, la conservación del texto enviado depende de Groq.</li>
+</ul>
+
+<h2 id="revocar">10. Cómo revocar el acceso</h2>
+<ul>
+  <li><strong>En la aplicación:</strong> desconecta la cuenta de correo.</li>
+  <li><strong>Google:</strong> revoca el acceso de NestAdmin en <a href="https://myaccount.google.com/permissions">myaccount.google.com/permissions</a>.</li>
+  <li><strong>Microsoft, cuenta personal:</strong> en <a href="https://account.live.com/consent/Manage">account.live.com/consent/Manage</a>.</li>
+  <li><strong>Microsoft, cuenta de trabajo o centro educativo:</strong> en <a href="https://myapps.microsoft.com">myapps.microsoft.com</a> o pidiéndoselo al administrador de tu organización.</li>
+</ul>
+<p>Tras revocar el acceso, NestAdmin ya no puede leer ni enviar correo de esa cuenta.</p>
+
+<h2 id="derechos">11. Tus derechos</h2>
+<p>Como tus datos están en tu equipo, puedes consultarlos, corregirlos, exportarlos o borrarlos directamente. Si tu legislación te reconoce derechos de acceso, rectificación, supresión, oposición, limitación o portabilidad, puedes ejercerlos escribiendo a <a href="mailto:[CORREO]@humannaia.com">[CORREO]@humannaia.com</a>; el editor te responderá sobre los datos que tenga, que normalmente se limitan a los que tú le envíes al contactar. También puedes reclamar ante la autoridad de protección de datos que corresponda.</p>
+<p>Si escribes al soporte, el editor usará lo que envíes solo para atender tu consulta y lo conservará el tiempo necesario para ello. No adjuntes correos ni documentos reales con datos personales si no es imprescindible.</p>
+
+<h2 id="menores">12. Menores</h2>
+<p>NestAdmin es una herramienta de gestión para empresas y profesionales. No está dirigida a menores de edad y el editor no recopila a sabiendas datos de menores.</p>
+
+<h2 id="cambios">13. Cambios en esta política</h2>
+<p>Si cambia la forma en que NestAdmin usa los datos, publicaremos la nueva versión en esta página con su fecha de vigencia antes de que el cambio se aplique. Si el cambio supone usar los datos de Google de una forma nueva, se pedirá tu consentimiento antes.</p>
+
+<h2 id="contacto">14. Contacto</h2>
+<p>[RAZÓN SOCIAL], [PAÍS Y DIRECCIÓN]. Correo: <a href="mailto:[CORREO]@humannaia.com">[CORREO]@humannaia.com</a>.</p>
+</main>
+
+<footer>
+  <ul>
+    <li><a href="./">Política de privacidad</a></li>
+    <li><a href="../condiciones/">Condiciones del servicio</a></li>
+    <li><a href="../soporte/">Soporte</a></li>
+  </ul>
+  <p>NestAdmin es una aplicación de [RAZÓN SOCIAL], [PAÍS Y DIRECCIÓN]. Contacto: <a href="mailto:[CORREO]@humannaia.com">[CORREO]@humannaia.com</a></p>
+  <p>Este sitio no usa cookies, analítica ni seguimiento.</p>
+</footer>
+</body>
+</html>

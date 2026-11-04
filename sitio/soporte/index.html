@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Soporte — NestAdmin</title>
+<meta name="description" content="Ayuda y contacto de NestAdmin: requisitos, conexión de cuentas, desconexión y revocación del acceso.">
+<link rel="canonical" href="https://nestadmin.humannaia.com/soporte/">
+<link rel="alternate" hreflang="es" href="https://nestadmin.humannaia.com/soporte/">
+<link rel="alternate" hreflang="en" href="https://nestadmin.humannaia.com/en/support/">
+<link rel="stylesheet" href="../estilo.css">
+</head>
+<body>
+<a class="salto" href="#contenido">Saltar al contenido</a>
+<header>
+  <a class="marca" href="../">NestAdmin</a>
+  <nav aria-label="Principal">
+    <ul>
+      <li><a href="../">Inicio</a></li>
+      <li><a href="../privacidad/">Privacidad</a></li>
+      <li><a href="../condiciones/">Condiciones</a></li>
+      <li><a href="./" aria-current="page">Soporte</a></li>
+      <li><a href="../en/support/" hreflang="en" lang="en">English</a></li>
+    </ul>
+  </nav>
+</header>
+
+<main id="contenido">
+<h1>Soporte</h1>
+
+<h2>Contacto</h2>
+<p>Escríbenos a <a href="mailto:[CORREO]@humannaia.com">[CORREO]@humannaia.com</a>. Indica tu versión de Windows y describe el problema.</p>
+<div class="caja aviso">
+<p><strong>Nunca te pediremos tu contraseña, tus tokens ni tu clave de API.</strong> No las envíes por correo. Evita adjuntar correos o documentos reales con datos personales; si hace falta un ejemplo, usa uno inventado.</p>
+</div>
+
+<h2>Requisitos</h2>
+<ul>
+  <li>Windows 10 u 11 de 64 bits.</li>
+  <li>16 GB de RAM recomendados para la IA local.</li>
+  <li>Conexión a Internet durante la instalación, que descarga Ollama y el modelo de lenguaje si no están ya en el equipo.</li>
+</ul>
+
+<h2>Conectar una cuenta de correo</h2>
+<p>Desde la aplicación, elige Gmail o Microsoft 365 e inicia sesión. Se abrirá la página oficial de Google o Microsoft en tu navegador, donde verás los permisos que solicita NestAdmin y podrás aceptarlos o rechazarlos. NestAdmin no ve tu contraseña.</p>
+
+<h2>Revisar y enviar respuestas</h2>
+<p>NestAdmin prepara un borrador de respuesta dentro del hilo del mensaje. El borrador no se envía hasta que lo revisas y lo apruebas, salvo que hayas creado y activado una regla concreta para ese caso. Cada acción queda en el historial de la aplicación.</p>
+
+<h2>Desconectar una cuenta o revocar el acceso</h2>
+<ul>
+  <li>Desconecta la cuenta en la aplicación: sus tokens se eliminan del Administrador de credenciales de Windows.</li>
+  <li>Google: <a href="https://myaccount.google.com/permissions">myaccount.google.com/permissions</a>.</li>
+  <li>Microsoft, cuenta personal: <a href="https://account.live.com/consent/Manage">account.live.com/consent/Manage</a>.</li>
+  <li>Microsoft, cuenta de trabajo o centro educativo: <a href="https://myapps.microsoft.com">myapps.microsoft.com</a> o el administrador de tu organización.</li>
+</ul>
+
+<h2>Borrar tus datos del equipo</h2>
+<p>Desinstalar NestAdmin conserva tus datos para que no pierdas tu trabajo. Para borrarlos, después de desinstalar, elimina la carpeta <code>%LOCALAPPDATA%\NestAdmin</code>. Ollama y el modelo de lenguaje se conservan porque pueden usarlos otras aplicaciones; puedes desinstalarlos desde la configuración de Windows.</p>
+
+<h2>Proveedor de IA</h2>
+<p>Por defecto, NestAdmin usa IA local. Si eliges Groq, el texto procesado se envía a Groq con tu clave. Si la IA local falla, NestAdmin te lo indica y no pasa a Groq por su cuenta.</p>
+
+<p>Más información en la <a href="../privacidad/">política de privacidad</a> y las <a href="../condiciones/">condiciones del servicio</a>.</p>
+</main>
+
+<footer>
+  <ul>
+    <li><a href="../privacidad/">Política de privacidad</a></li>
+    <li><a href="../condiciones/">Condiciones del servicio</a></li>
+    <li><a href="./">Soporte</a></li>
+  </ul>
+  <p>NestAdmin es una aplicación de [RAZÓN SOCIAL], [PAÍS Y DIRECCIÓN]. Contacto: <a href="mailto:[CORREO]@humannaia.com">[CORREO]@humannaia.com</a></p>
+  <p>Este sitio no usa cookies, analítica ni seguimiento.</p>
+</footer>
+</body>
+</html>
