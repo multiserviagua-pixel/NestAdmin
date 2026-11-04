@@ -72,6 +72,9 @@ pub struct World {
     pub drop_send_response: bool,
     /// El envío falla antes de producir efecto.
     pub send_status: Option<u16>,
+    /// Gmail: el mensaje enviado conserva el ID del mensaje del borrador. Por defecto no,
+    /// como se observó con una cuenta real (T13).
+    pub keep_sent_id: bool,
     /// Estado forzado para cualquier ruta que contenga el texto.
     pub force: Option<(String, u16)>,
 }

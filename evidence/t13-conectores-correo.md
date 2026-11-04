@@ -15,13 +15,15 @@ cargo test -p nestadmin-mail --locked
 - Rust 1.99.1 (MSVC), `ureq` 3.5.1
 - Resultado: 31 pruebas superadas, 0 fallidas (10 unitarias, 13 de Graph, 8 de Gmail y OAuth). `cargo clippy -p nestadmin-mail --all-targets -- -D warnings` sin avisos.
 
+Reconciliación de Gmail con `Message-ID` propio (D41), 2026-11-04, mismo equipo y versiones: 35 pruebas superadas, 0 fallidas (11 unitarias, 13 de Graph sin cambios, 11 de Gmail y OAuth); clippy sin avisos. El Gmail simulado da ahora al mensaje enviado un ID distinto del borrador, como el real.
+
 | Área | Qué comprueban las pruebas |
 | --- | --- |
 | Normalización | Graph y Gmail dan el mismo `Message`: HTML convertido a texto sin scripts ni estilos, parte `text/plain` preferida, adjuntos ignorados, Latin-1 legible y campos ausentes como `None` (asunto vacío, sin destinatarios, sin cuerpo). |
 | Paginación | El cursor de Graph se sigue solo si es del mismo origen y ruta; uno de otro servidor se rechaza sin enviar ninguna petición. Gmail usa `pageToken`. |
 | Borradores | La misma clave con el mismo contenido devuelve el mismo borrador sin otra llamada; con otro contenido, `conflict`. Destinatarios con saltos de línea, cuerpo vacío o clave vacía no llegan al proveedor. La respuesta va en el hilo (`createReply`; `In-Reply-To`, `References` y `threadId`) en UTF-8. |
-| Envío único | Si el envío ocurre y la respuesta se pierde, `lookup` lo confirma consultando el borrador (Graph `isDraft`, Gmail etiqueta `SENT`) y no hay un segundo envío. Un envío que falla sin efecto se repite. Un borrador borrado por el usuario es `not_found` y no se reenvía. Clave reutilizada con otro borrador u otra clave para un borrador enviado: `conflict`. |
-| Reinicio | El registro local por cuenta sobrevive a reabrir el conector: misma clave, mismo borrador; envío pendiente reconciliado. |
+| Envío único | Si el envío ocurre y la respuesta se pierde, `lookup` lo confirma y no hay un segundo envío: Graph por `isDraft`; Gmail, aunque el mensaje enviado tenga otro ID, buscando con `rfc822msgid:` el mensaje con etiqueta `SENT` y el `Message-ID` propio del borrador, y el recibo lleva el ID real (si Gmail conservara el ID, basta la etiqueta `SENT`). Otro mensaje enviado por el usuario en el mismo hilo no se toma por el nuestro. Un envío que falla sin efecto se repite. Un borrador borrado por el usuario es `not_found` y no se reenvía. Clave reutilizada con otro borrador u otra clave para un borrador enviado: `conflict`. |
+| Reinicio | El registro local por cuenta sobrevive a reabrir el conector: misma clave, mismo borrador; envío pendiente reconciliado. En Gmail, el `Message-ID` propio se guarda en el registro y un conector nuevo confirma con él el envío cortado, sin segundo envío. |
 | Tokens | Token caducado: se renueva antes de llamar. 401: una renovación y un reintento. Renovación rechazada: `unauthorized` sin insistir. Ni errores ni `Debug` muestran tokens o el secreto de cliente. |
 | Inicio de sesión | URL con `client_id`, `redirect_uri` en 127.0.0.1, `state` y reto S256; el verificador canjeado corresponde al reto (incluido el ejemplo de RFC 7636). `state` distinto, consentimiento denegado o tiempo agotado: `unauthorized` sin canjear ningún código. |
 | Errores | 403 → `unauthorized`, 404 → `not_found`, 400 → `invalid_input`, 409 → `conflict`, 429 y 500 → `unavailable`. |
@@ -64,6 +66,8 @@ Para el envío, conviene responder a un mensaje que la cuenta se haya enviado a 
 
 **Hallazgo:** Gmail **no conserva** el ID del mensaje del borrador al enviarlo. El mensaje enviado tiene un ID distinto del que tenía el borrador. Por tanto, si el proceso se corta después de enviar y antes de anotar el recibo, la reconciliación (D33) no puede confirmar el envío por la etiqueta `SENT`: lo informa como `not_found` y no reenvía. Es el comportamiento seguro previsto, pero deja la respuesta sin confirmar. No se ha provocado ese corte con la cuenta real.
 
+**Corrección (D41), solo probada con el Gmail simulado:** cada borrador lleva un `Message-ID` propio guardado en el registro local, y la reconciliación busca con él el mensaje enviado. Esta ejecución real fue anterior al cambio.
+
 ## Integración en la aplicación (D42–D45)
 
 ```sh
@@ -93,7 +97,7 @@ Pantalla «Correo», comprobada en la vista previa de la interfaz (`npm run dev 
 ## Pendiente para completar T13
 
 - Ensayo con una cuenta de prueba real de Microsoft 365: requiere registrar la aplicación en Entra ID.
-- Gmail: mejorar la reconciliación tras un corte durante el envío, ya que el ID del borrador no sirve. Por ejemplo, buscar en el hilo un mensaje enviado con la cabecera `Message-ID` que generó el borrador. Hay que probarlo provocando el corte.
+- Gmail: provocar con la cuenta real un corte entre el envío y el recibo y comprobar que la reconciliación por `Message-ID` propio (D41) lo confirma; en particular, que Gmail mantiene esa cabecera al enviar. La parte simulada está hecha.
 - Recorrido con una cuenta real desde la ventana: añadir la cuenta, consultar, aprobar un envío y desconectar. Requiere `correo-oauth.json` con los clientes del editor (D43).
 - Si tras una respuesta perdida la tarea se reprocesa y la IA propone otro texto, crear el borrador con la misma clave da `conflict` y la tarea queda fallida sin enviar: nunca hay doble envío, pero hace falta una salida para el usuario (comportamiento heredado del núcleo, también con el simulador).
 - Calidad de clasificación y borradores con correo real: sin medir.
