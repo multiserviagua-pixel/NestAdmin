@@ -1,5 +1,9 @@
 //! Gmail y Google Workspace mediante Gmail API v1 (D30). La respuesta se compone como
 //! mensaje MIME en el hilo original (`In-Reply-To`, `References` y `threadId`).
+//!
+//! Gmail da al mensaje enviado un ID distinto del que tenía el borrador. Por eso cada
+//! borrador lleva un `Message-ID` generado aquí y anotado en el registro local: tras un corte
+//! durante el envío, se busca un mensaje con la etiqueta `SENT` y esa cabecera (D41).
 
 use base64::engine::general_purpose::{URL_SAFE, URL_SAFE_NO_PAD};
 use base64::Engine;
@@ -106,8 +110,21 @@ fn message(value: &Value) -> Option<Message> {
     })
 }
 
+/// Dominio del `Message-ID` propio: reservado (RFC 2606), así no se atribuye a nadie.
+const MESSAGE_ID_DOMAIN: &str = "nestadmin.invalid";
+
+/// `Message-ID` nuevo con 128 bits aleatorios en hexadecimal, que el buscador de Gmail
+/// trata como una sola palabra.
+fn new_message_id() -> MailResult<String> {
+    let mut bytes = [0u8; 16];
+    getrandom::fill(&mut bytes)
+        .map_err(|_| error(codes::UNAVAILABLE, "no hay fuente de aleatoriedad"))?;
+    let hex: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
+    Ok(format!("<nestadmin.{hex}@{MESSAGE_ID_DOMAIN}>"))
+}
+
 /// Mensaje RFC 5322 de respuesta, en UTF-8 con el cuerpo en base64.
-fn reply_mime(draft: &NewDraft, original: &Value) -> String {
+fn reply_mime(draft: &NewDraft, original: &Value, own_id: &str) -> String {
     let subject = draft.subject.clone().unwrap_or_else(|| {
         let original = header(original, "Subject").unwrap_or("").trim();
         if original.to_ascii_lowercase().starts_with("re:") {
@@ -119,6 +136,7 @@ fn reply_mime(draft: &NewDraft, original: &Value) -> String {
     let mut lines = vec![
         format!("To: {}", header_value(&draft.to.join(", "))),
         format!("Subject: {}", encode_header(&subject)),
+        format!("Message-ID: {own_id}"),
     ];
     if let Some(id) = header(original, "Message-ID").map(header_value) {
         let references = header(original, "References")
@@ -143,6 +161,65 @@ fn labels(message: &Value) -> Vec<&str> {
         .and_then(Value::as_array)
         .map(|l| l.iter().filter_map(Value::as_str).collect())
         .unwrap_or_default()
+}
+
+fn is_sent(message: &Value) -> bool {
+    labels(message).contains(&"SENT")
+}
+
+/// Compara dos `Message-ID` sin tener en cuenta espacios ni ángulos.
+fn same_message_id(a: &str, b: &str) -> bool {
+    let bare = |s: &str| {
+        s.trim()
+            .trim_start_matches('<')
+            .trim_end_matches('>')
+            .to_owned()
+    };
+    bare(a) == bare(b)
+}
+
+impl Gmail {
+    /// Mensaje con la etiqueta `SENT` y la cabecera `Message-ID` indicada, si existe. Incluye
+    /// papelera y spam: un mensaje enviado y luego borrado sigue estando enviado.
+    fn find_sent(&self, rfc822_id: &str) -> MailResult<Option<String>> {
+        let bare = rfc822_id
+            .trim()
+            .trim_start_matches('<')
+            .trim_end_matches('>');
+        let query = format!("rfc822msgid:{bare}");
+        let url = self.api.url(
+            &["messages"],
+            &[
+                ("q", query.as_str()),
+                ("labelIds", "SENT"),
+                ("includeSpamTrash", "true"),
+                ("maxResults", "10"),
+            ],
+        );
+        let page = self.api.call(Method::Get, &url, None)?;
+        for entry in page
+            .get("messages")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            let Some(id) = entry.get("id").and_then(Value::as_str) else {
+                continue;
+            };
+            // Se comprueban la cabecera y la etiqueta en el propio mensaje, sin fiarse solo
+            // de la búsqueda.
+            let message = self.get_message(
+                id,
+                &[("format", "metadata"), ("metadataHeaders", "Message-ID")],
+            )?;
+            if is_sent(&message)
+                && header(&message, "Message-ID").is_some_and(|h| same_message_id(h, rfc822_id))
+            {
+                return Ok(Some(id.to_owned()));
+            }
+        }
+        Ok(None)
+    }
 }
 
 impl MailProvider for Gmail {
@@ -187,7 +264,8 @@ impl MailProvider for Gmail {
                 ("metadataHeaders", "References"),
             ],
         )?;
-        let mut message = json!({ "raw": URL_SAFE.encode(reply_mime(draft, &original)) });
+        let own_id = new_message_id()?;
+        let mut message = json!({ "raw": URL_SAFE.encode(reply_mime(draft, &original, &own_id)) });
         if let Some(thread) = original.get("threadId").and_then(Value::as_str) {
             message["threadId"] = json!(thread);
         }
@@ -205,6 +283,7 @@ impl MailProvider for Gmail {
                 .pointer("/message/id")
                 .and_then(Value::as_str)
                 .map(str::to_owned),
+            rfc822_id: Some(own_id),
         })
     }
 
@@ -224,9 +303,12 @@ impl MailProvider for Gmail {
             })
     }
 
-    /// Si el borrador existe, no se ha enviado. Si ya no existe, se mira la etiqueta `SENT`
-    /// del mensaje que contenía; sin esa prueba no se da por enviado ni se reenvía.
-    fn status(&self, draft_id: &str, message_id: Option<&str>) -> MailResult<DraftStatus> {
+    /// Si el borrador existe, no se ha enviado. Si ya no existe, se busca el mensaje enviado:
+    /// primero por el ID del mensaje del borrador (por si Gmail lo conserva) y después por el
+    /// `Message-ID` propio con la etiqueta `SENT`. Sin esa prueba no se da por enviado ni se
+    /// reenvía.
+    fn status(&self, draft: &CreatedDraft) -> MailResult<DraftStatus> {
+        let draft_id = draft.draft_id.as_str();
         let url = self
             .api
             .url(&["drafts", draft_id], &[("format", "minimal")]);
@@ -235,27 +317,25 @@ impl MailProvider for Gmail {
             Err(e) if e.code != codes::NOT_FOUND => return Err(e),
             Err(_) => {}
         }
-        let gone = || {
-            error(
-                codes::NOT_FOUND,
-                format!("el borrador {draft_id} ya no existe; no se reenvía"),
-            )
-        };
-        let message_id = message_id.ok_or_else(gone)?;
-        let message = self
-            .get_message(message_id, &[("format", "minimal")])
-            .map_err(|e| {
-                if e.code == codes::NOT_FOUND {
-                    gone()
-                } else {
-                    e
+        if let Some(message_id) = &draft.message_id {
+            match self.get_message(message_id, &[("format", "minimal")]) {
+                Ok(message) if is_sent(&message) => {
+                    return Ok(DraftStatus::Sent(message_id.clone()))
                 }
-            })?;
-        if labels(&message).contains(&"SENT") {
-            Ok(DraftStatus::Sent(message_id.to_owned()))
-        } else {
-            Err(gone())
+                Ok(_) => {}
+                Err(e) if e.code == codes::NOT_FOUND => {}
+                Err(e) => return Err(e),
+            }
         }
+        if let Some(rfc822_id) = &draft.rfc822_id {
+            if let Some(sent_id) = self.find_sent(rfc822_id)? {
+                return Ok(DraftStatus::Sent(sent_id));
+            }
+        }
+        Err(error(
+            codes::NOT_FOUND,
+            format!("el borrador {draft_id} ya no existe y no consta enviado; no se reenvía"),
+        ))
     }
 }
 
@@ -275,11 +355,12 @@ mod tests {
             subject: None,
             body: "Gracias, la revisamos mañana.".into(),
         };
-        let mime = reply_mime(&draft, &original);
+        let mime = reply_mime(&draft, &original, "<propio@nestadmin.invalid>");
         assert!(mime.contains("To: ana@cliente.test\r\n"));
         assert!(mime.contains("Subject: Re: Factura de octubre\r\n"));
         assert!(mime.contains("In-Reply-To: <abc@cliente.test>\r\n"));
         assert!(mime.contains("References: <prev@cliente.test> <abc@cliente.test>\r\n"));
+        assert!(mime.contains("Message-ID: <propio@nestadmin.invalid>\r\n"));
         let encoded = mime.split("\r\n\r\n").nth(1).unwrap().replace("\r\n", "");
         let decoded = base64::engine::general_purpose::STANDARD
             .decode(encoded)
@@ -314,5 +395,20 @@ mod tests {
         assert_eq!(m.to, Some(vec!["compras@empresa.test".to_owned()]));
         assert_eq!(m.subject, None, "un asunto ausente no se inventa");
         assert_eq!(m.date.as_deref(), Some("2026-11-03T00:00:00Z"));
+    }
+
+    #[test]
+    fn own_message_ids_are_unique_and_searchable() {
+        let (a, b) = (new_message_id().unwrap(), new_message_id().unwrap());
+        assert_ne!(a, b);
+        assert!(a.starts_with("<nestadmin.") && a.ends_with("@nestadmin.invalid>"));
+        let left = &a[11..a.find('@').unwrap()];
+        assert_eq!(left.len(), 32);
+        assert!(left.chars().all(|c| c.is_ascii_hexdigit()));
+        assert!(same_message_id(
+            &a,
+            &format!(" {} ", a.trim_matches(['<', '>']))
+        ));
+        assert!(!same_message_id(&a, &b));
     }
 }

@@ -63,6 +63,12 @@ Numeración desde D30 para no chocar con las ramas abiertas del instalador. *Mot
 - **D39 Comprobación al abrir.** Si la selección guardada es Ollama, al arrancar se comprueba en un hilo aparte servicio y modelo: si Ollama está detenido se arranca; si falta Ollama o el modelo, la ventana abre el asistente. Nunca se descarga nada en segundo plano ni se cambia de proveedor. Con Groq elegido no se comprueba nada local.
 - **D40 Pruebas sin tocar el equipo.** La lógica de preparación no depende de Tauri y accede al sistema (buscar, verificar firma, instalar y arrancar Ollama, probar Tesseract) mediante el *trait* `System`. Las pruebas automáticas usan un Ollama y un servidor de descargas simulados en 127.0.0.1 y un doble de `System` que registra las llamadas; la instalación real solo se acredita en Windows (T08).
 
+## 2026-11-04 — Reconciliación de envíos en Gmail (revisa D33)
+
+*Motivo:* en la prueba con una cuenta real de Gmail (T13) el mensaje enviado con `drafts.send` tuvo un ID distinto del mensaje del borrador, así que la reconciliación de D33 no podía confirmar un envío cortado. Numeración desde D41: D36–D40 son el instalador.
+
+- **D41 `Message-ID` propio en Gmail (revisa D33).** Al crear la respuesta, el conector de Gmail le pone una cabecera `Message-ID` propia, `<nestadmin.<32 hex aleatorios>@nestadmin.invalid>` (dominio reservado), y la guarda en el registro local junto al borrador. Para reconciliar, si el borrador ya no existe, primero mira la etiqueta `SENT` del mensaje del borrador, por si Gmail conservara su ID; si no, busca con `messages.list` (`q=rfc822msgid:…`, `labelIds=SENT`, papelera y spam incluidos) y da por enviado solo el mensaje que, leído, tiene la etiqueta `SENT` y esa misma cabecera; el recibo lleva su ID real. Sin esa prueba sigue siendo `not_found` y no se reenvía. Los registros anteriores sin `Message-ID` propio se reconcilian como antes. Graph no cambia: con IDs inmutables el mensaje enviado conserva el ID del borrador. Falta comprobar con la cuenta real que Gmail mantiene la cabecera al enviar.
+
 ## Versiones de desarrollo fijadas
 
 | Componente | Versión | Licencia | Dónde se fija |
