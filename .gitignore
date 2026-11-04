@@ -3,6 +3,7 @@ evaluation/results/
 evaluation/predictions/
 
 # Credenciales y configuración local.
+correo-oauth.json
 .env
 .env.*
 !.env.example

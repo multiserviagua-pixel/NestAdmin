@@ -259,9 +259,9 @@ fn mail_is_fetched_once_and_edited_drafts_need_new_approval() {
     let dir = tempfile::tempdir().unwrap();
     let mut app = open(&dir, FakeProvider::new());
     let fetched = app.fetch_mail().unwrap();
-    assert!(fetched > 0);
+    assert!(fetched.added > 0);
     assert_eq!(
-        app.fetch_mail().unwrap(),
+        app.fetch_mail().unwrap().added,
         0,
         "los mensajes ya encolados no se repiten"
     );
@@ -293,7 +293,8 @@ fn mail_is_fetched_once_and_edited_drafts_need_new_approval() {
     assert_eq!(receipts.len(), 1);
     assert_eq!(
         receipts[0].idempotency_key,
-        format!("task-{}/send_draft/v2", task.id)
+        format!("simulador/task-{}/send_draft/v2", task.id),
+        "la clave que recibe la cuenta lleva su identificador"
     );
     let drafts = app.simulators().0.drafts().unwrap();
     assert_eq!(drafts.last().unwrap().content.body, "Texto corregido.");

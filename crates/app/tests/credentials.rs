@@ -456,7 +456,7 @@ fn groq_key_stays_in_the_store_through_tasks_and_credential_errors() {
     assert_eq!(reviewed.state, TaskState::AwaitingReview, "{reviewed:?}");
     let done = app.approve(task.id, 1).unwrap();
     assert_eq!(done.state, TaskState::Completed);
-    assert!(app.fetch_mail().unwrap() > 0);
+    assert!(app.fetch_mail().unwrap().added > 0);
     while let Some(task) = app.process_next().unwrap() {
         texts.push(serde_json::to_string(&task).unwrap());
     }
