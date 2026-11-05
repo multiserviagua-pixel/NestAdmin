@@ -122,7 +122,7 @@ fn only_text_and_pdf_files_are_imported_and_pdf_failures_are_visible() {
     let result = app.process_next().unwrap().unwrap().result.unwrap();
     assert_eq!(
         result["pages"],
-        json!([{ "number": 1, "method": "plain_text", "chars": 115 }])
+        json!([{ "number": 1, "method": "plain_text", "chars": 115, "offset": 0 }])
     );
 }
 
@@ -320,7 +320,7 @@ fn a_draft_without_sender_is_never_sent_by_a_rule() {
     assert!(states.contains(&(1, TaskState::Completed)));
     assert!(
         states.contains(&(0, TaskState::AwaitingReview)),
-        "M-0005 no tiene remitente"
+        "M-0006 no tiene remitente"
     );
     assert!(states
         .iter()
@@ -436,4 +436,118 @@ fn audit_log_records_actions_and_rules() {
         actions.contains(&json!(["register_invoice", "confirmed"])),
         "{actions:?}"
     );
+}
+
+#[test]
+fn imported_documents_record_where_they_came_from() {
+    use sha2::{Digest, Sha256};
+
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = open(&dir, FakeProvider::new());
+    let outside = tempfile::tempdir().unwrap();
+    let original = outside.path().join("factura-alfa.txt");
+    let content = invoice("Alfa SL", "F-7", "121.00");
+    std::fs::write(&original, &content).unwrap();
+
+    let task = app.import_path(&original).unwrap();
+    let input: Value = serde_json::from_str(&task.input_ref).unwrap();
+    let origin = &input["origin"];
+    assert_eq!(origin["kind"], "file");
+    assert_eq!(origin["name"], "factura-alfa.txt");
+    assert_eq!(origin["original_path"], original.display().to_string());
+    assert!(origin["imported_at"].as_u64().unwrap() > 1_700_000_000);
+    let digest: String = Sha256::digest(content.as_bytes())
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    assert_eq!(origin["sha256"], digest);
+    assert_eq!(origin["size"], content.len());
+
+    // El original se abre desde la copia guardada en la carpeta de documentos.
+    let copy = app.document_file(task.id).unwrap();
+    assert!(copy.starts_with(std::fs::canonicalize(dir.path().join("documentos")).unwrap()));
+    assert_eq!(std::fs::read_to_string(&copy).unwrap(), content);
+
+    let done = app.process_next().unwrap().unwrap();
+    let result = done.result.unwrap();
+    assert_eq!(result["origin"], *origin);
+    // Cada campo dice dónde aparece en el texto; el documento de texto es una sola página.
+    assert_eq!(result["sources"]["total"]["pages"], json!([1]));
+    assert!(result["sources"]["total"]["line"]
+        .as_str()
+        .unwrap()
+        .contains("121.00"));
+    assert_eq!(result["sources"]["supplier"]["text"], "Alfa SL");
+    // La moneda no aparece en el texto: no tiene procedencia, en lugar de una inventada.
+    assert!(result["sources"].get("currency").is_none());
+
+    // Sin ruta conocida, la ruta queda explícitamente ausente.
+    let pasted = app
+        .import_file("pegada.txt", invoice("Beta SL", "F-8", "121.00").as_bytes())
+        .unwrap();
+    let pasted: Value = serde_json::from_str(&pasted.input_ref).unwrap();
+    assert_eq!(pasted["origin"]["original_path"], Value::Null);
+
+    // Si la copia desaparece, se dice; nunca se abre otra ruta.
+    std::fs::remove_file(&copy).unwrap();
+    let error = app.document_file(task.id).unwrap_err().to_string();
+    assert!(error.contains("ya no está"), "{error}");
+}
+
+#[test]
+fn mail_origin_is_kept_in_mail_tasks_and_their_attachments() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = open(&dir, FakeProvider::new());
+    app.fetch_mail().unwrap();
+    let mail_task = app
+        .tasks()
+        .unwrap()
+        .into_iter()
+        .find(|t| {
+            let input: Value = serde_json::from_str(&t.input_ref).unwrap();
+            input["message_id"] == "simulador:M-0005"
+        })
+        .unwrap();
+    let input: Value = serde_json::from_str(&mail_task.input_ref).unwrap();
+    assert_eq!(
+        input["origin"],
+        json!({
+            "account": "simulador", "provider": "simulator",
+            "label": "Correo simulado", "address": "administracion@nestadmin.test",
+        })
+    );
+    // El simulador trae remitente sintético, destinatarios y fecha.
+    assert_eq!(input["message"]["from"], "logistica@transportes-delta.test");
+    assert_eq!(
+        input["message"]["to"],
+        json!(["administracion@nestadmin.test"])
+    );
+    assert_eq!(input["message"]["date"], "2026-10-06");
+
+    // Un adjunto de ese correo hereda la cuenta, el remitente y el asunto.
+    let attachment = app
+        .import_attachment(
+            mail_task.id,
+            "horario.txt",
+            invoice("Delta SL", "F-9", "121.00").as_bytes(),
+        )
+        .unwrap();
+    let origin = serde_json::from_str::<Value>(&attachment.input_ref).unwrap()["origin"].clone();
+    assert_eq!(origin["kind"], "email");
+    assert_eq!(
+        origin["account"]["address"],
+        "administracion@nestadmin.test"
+    );
+    assert_eq!(origin["message_id"], "simulador:M-0005");
+    assert_eq!(origin["from"], "logistica@transportes-delta.test");
+    assert_eq!(origin["subject"], "Cambio de horario");
+    assert_eq!(origin["attachment"], "horario.txt");
+    assert_eq!(origin["sha256"].as_str().unwrap().len(), 64);
+    assert!(app.document_file(attachment.id).is_ok());
+
+    // Solo los correos tienen adjuntos, y un correo no tiene documento que abrir.
+    assert!(app
+        .import_attachment(attachment.id, "x.txt", b"texto")
+        .is_err());
+    assert!(app.document_file(mail_task.id).is_err());
 }

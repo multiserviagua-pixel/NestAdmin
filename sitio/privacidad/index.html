@@ -65,6 +65,7 @@
     <tr><td>Google (Gmail API)</td><td><code>https://www.googleapis.com/auth/gmail.modify</code></td><td>Leer mensajes de la bandeja de entrada, crear borradores de respuesta en el hilo original y enviar un borrador solo cuando lo apruebas o lo cubre una regla que has activado. No se usa para borrar correo.</td></tr>
     <tr><td>Microsoft (Graph)</td><td><code>Mail.ReadWrite</code></td><td>Leer mensajes y crear borradores de respuesta.</td></tr>
     <tr><td>Microsoft (Graph)</td><td><code>Mail.Send</code></td><td>Enviar un borrador solo cuando lo apruebas o lo cubre una regla que has activado.</td></tr>
+    <tr><td>Microsoft (Graph)</td><td><code>User.Read</code></td><td>Leer la dirección de correo de la cuenta al iniciar sesión, para indicar de qué buzón viene cada mensaje. Se guarda solo en tu equipo.</td></tr>
     <tr><td>Microsoft (Graph)</td><td><code>offline_access</code></td><td>Mantener la conexión sin pedirte que inicies sesión cada vez.</td></tr>
   </tbody>
 </table>
@@ -99,7 +100,7 @@
 <h2 id="almacenamiento">6. Dónde se guardan</h2>
 <p>Todo se guarda en tu equipo, no en servidores del editor:</p>
 <ul>
-  <li><strong>Datos de trabajo</strong> (tareas, mensajes y documentos procesados, datos extraídos, borradores, reglas e historial): en una base de datos local dentro de la carpeta <code>%LOCALAPPDATA%\NestAdmin</code> de tu usuario de Windows, junto con un archivo por cuenta de correo que anota qué borradores creó la aplicación y si ya se enviaron, para no enviar nada dos veces.</li>
+  <li><strong>Datos de trabajo</strong> (tareas, mensajes y documentos procesados, datos extraídos, borradores, reglas e historial): en una base de datos local dentro de la carpeta <code>%LOCALAPPDATA%\NestAdmin</code> de tu usuario de Windows, junto con un archivo por cuenta de correo que anota qué borradores creó la aplicación y si ya se enviaron, para no enviar nada dos veces, y la lista de cuentas conectadas con el nombre que les das y la dirección de cada buzón (para indicar de dónde viene cada correo). Los documentos que importas se copian a esa carpeta con su nombre, la ruta de la que los importaste y una huella SHA-256, para que puedas abrir el original y comprobar los datos.</li>
   <li><strong>Credenciales</strong> (tokens de Google y Microsoft, clave de Groq): en el Administrador de credenciales de Windows. No se escriben en la base de datos ni en los registros.</li>
 </ul>
 <p>Los mensajes originales siguen en tu cuenta de Gmail o Microsoft 365; NestAdmin no los mueve ni los elimina.</p>

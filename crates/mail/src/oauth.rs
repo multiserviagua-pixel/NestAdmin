@@ -54,7 +54,8 @@ impl OAuthConfig {
             token_url: "https://login.microsoftonline.com/common/oauth2/v2.0/token".into(),
             client_id: client_id.to_owned(),
             client_secret: None,
-            scopes: ["offline_access", "Mail.ReadWrite", "Mail.Send"]
+            // `User.Read` solo para leer la dirección del buzón al iniciar sesión (D48).
+            scopes: ["offline_access", "User.Read", "Mail.ReadWrite", "Mail.Send"]
                 .map(String::from)
                 .to_vec(),
             extra_auth_params: Vec::new(),

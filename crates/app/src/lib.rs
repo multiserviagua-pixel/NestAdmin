@@ -23,11 +23,12 @@ use nestadmin_core::{
     TaskError, TaskState,
 };
 use nestadmin_documents::{process_invoice, DuplicateRegistry, Evidenced, Invoice, RawInvoice};
-use nestadmin_extract::Extractor;
+use nestadmin_extract::{Extraction, Extractor};
 use nestadmin_mail::{OAuthConfig, Tokens};
 use nestadmin_simulators::{AdminSimulator, MailSimulator, Message, NewDraft};
 use serde::Serialize;
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 
 use crate::accounts::{
     split_id, AccountFetch, AccountView, Accounts, FetchReport, MailAccountsView, MailEnv,
@@ -128,8 +129,8 @@ pub struct Job {
 pub struct Completed {
     task: Task,
     outcome: Result<GenerateResult, TaskError>,
-    /// Páginas del documento y método de cada una (texto, PDF u OCR).
-    pages: Option<Value>,
+    /// Texto y páginas del documento (método de cada una: texto, PDF u OCR).
+    extraction: Option<Extraction>,
 }
 
 impl Job {
@@ -142,7 +143,7 @@ impl Job {
             extractor,
             prepared,
         } = self;
-        let mut pages = None;
+        let mut extracted = None;
         let outcome = prepared.and_then(|prepared| {
             let request = match prepared {
                 Prepared::Request(request) => request,
@@ -150,8 +151,9 @@ impl Job {
                     let extraction = extractor
                         .extract(&path)
                         .map_err(|e| task_error(e.code(), e.to_string(), e.recoverable()))?;
-                    pages = serde_json::to_value(&extraction.pages).ok();
-                    extraction_request(&task.id.to_string(), &extraction.text)
+                    let request = extraction_request(&task.id.to_string(), &extraction.text);
+                    extracted = Some(extraction);
+                    request
                 }
             };
             provider.generate(&request).map_err(|e| TaskError {
@@ -163,7 +165,7 @@ impl Job {
         Completed {
             task,
             outcome,
-            pages,
+            extraction: extracted,
         }
     }
 }
@@ -243,43 +245,136 @@ impl App {
         if text.trim().is_empty() {
             return Err(AppError::Invalid("el documento está vacío".into()));
         }
-        self.store_document(name, "txt", text.as_bytes())
+        let origin = json!({ "kind": "file", "name": name, "original_path": null });
+        self.store_document(name, "txt", text.as_bytes(), origin)
     }
 
-    /// Encola un archivo `.txt` o `.pdf`. Se guarda una copia en los datos locales; la
-    /// extracción (con OCR si hace falta) se hace al procesar la tarea.
+    /// Encola un archivo `.txt` o `.pdf` del que no se conoce la ruta original.
     pub fn import_file(&mut self, name: &str, bytes: &[u8]) -> AppResult<Task> {
-        let extension = Path::new(name)
-            .extension()
-            .and_then(|e| e.to_str())
-            .map(str::to_ascii_lowercase)
-            .unwrap_or_default();
-        if extension != "txt" && extension != "pdf" {
-            return Err(AppError::Invalid(format!(
-                "«{name}»: solo se admiten archivos .txt y .pdf"
-            )));
-        }
-        if bytes.is_empty() {
-            return Err(AppError::Invalid(format!("«{name}» está vacío")));
-        }
-        if bytes.len() > MAX_DOCUMENT_BYTES {
+        self.import_file_from(name, None, bytes)
+    }
+
+    /// Lee un archivo del disco y lo encola anotando su ruta original como origen.
+    pub fn import_path(&mut self, path: &Path) -> AppResult<Task> {
+        let name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .ok_or_else(|| AppError::Invalid("el archivo no tiene un nombre válido".into()))?
+            .to_owned();
+        let size = fs::metadata(path)?.len();
+        if size > MAX_DOCUMENT_BYTES as u64 {
             return Err(AppError::Invalid(format!(
                 "«{name}» supera el tamaño máximo de {} MB",
                 MAX_DOCUMENT_BYTES / 1_000_000
             )));
         }
-        self.store_document(name, &extension, bytes)
+        let bytes = fs::read(path)?;
+        self.import_file_from(&name, Some(path), &bytes)
     }
 
-    fn store_document(&mut self, name: &str, extension: &str, bytes: &[u8]) -> AppResult<Task> {
-        let stamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0);
+    /// Encola un archivo `.txt` o `.pdf`. Se guarda una copia en los datos locales junto con
+    /// su origen (nombre, ruta original si se conoce, fecha de importación y SHA-256); la
+    /// extracción (con OCR si hace falta) se hace al procesar la tarea.
+    pub fn import_file_from(
+        &mut self,
+        name: &str,
+        original: Option<&Path>,
+        bytes: &[u8],
+    ) -> AppResult<Task> {
+        let extension = check_document(name, bytes)?;
+        let origin = json!({
+            "kind": "file",
+            "name": name,
+            // Ruta tal como la dio el sistema; `null` si no se conoce (texto pegado o un
+            // selector que no la facilita).
+            "original_path": original.map(|p| p.display().to_string()),
+        });
+        self.store_document(name, &extension, bytes, origin)
+    }
+
+    /// Encola un adjunto de un correo ya recibido (`message_task`, la tarea de ese correo).
+    /// El origen copia la cuenta, el remitente y el asunto guardados en esa tarea, de modo que
+    /// la factura dice de qué buzón y de qué mensaje salió (D49).
+    pub fn import_attachment(
+        &mut self,
+        message_task: i64,
+        name: &str,
+        bytes: &[u8],
+    ) -> AppResult<Task> {
+        let task = self.store.task(message_task)?;
+        if task.kind != EMAIL {
+            return Err(AppError::Invalid(format!(
+                "la tarea {message_task} no es un correo"
+            )));
+        }
+        let extension = check_document(name, bytes)?;
+        let input: Value = serde_json::from_str(&task.input_ref).unwrap_or(Value::Null);
+        let message = &input["message"];
+        let account = match input.get("origin").filter(|o| !o.is_null()) {
+            Some(origin) => origin.clone(),
+            None => {
+                let id = input["message_id"].as_str().unwrap_or("");
+                serde_json::to_value(self.mail.origin(split_id(id).0)).unwrap_or_default()
+            }
+        };
+        let origin = json!({
+            "kind": "email",
+            "account": account,
+            "message_id": input["message_id"],
+            "from": message["from"],
+            "subject": message["subject"],
+            "attachment": name,
+        });
+        self.store_document(name, &extension, bytes, origin)
+    }
+
+    /// Guarda la copia y encola la tarea. `origin` dice de dónde vino; aquí se añaden la
+    /// fecha de importación, el tamaño y la huella SHA-256 del contenido.
+    fn store_document(
+        &mut self,
+        name: &str,
+        extension: &str,
+        bytes: &[u8],
+        mut origin: Value,
+    ) -> AppResult<Task> {
+        let now = SystemTime::now().duration_since(UNIX_EPOCH).ok();
+        let stamp = now.map(|d| d.as_nanos()).unwrap_or(0);
         let path = self.documents.join(format!("{stamp}.{extension}"));
         fs::write(&path, bytes)?;
-        let input = json!({ "document": name, "path": path });
+        origin["imported_at"] = json!(now.map(|d| d.as_secs()));
+        origin["sha256"] = json!(hex(&Sha256::digest(bytes)));
+        origin["size"] = json!(bytes.len());
+        let input = json!({ "document": name, "path": path, "origin": origin });
         Ok(self.store.enqueue(INVOICE, &input.to_string())?)
+    }
+
+    /// Copia guardada del documento de una tarea, para abrirla con el visor del sistema. Solo
+    /// se devuelve si está dentro de la carpeta de documentos de NestAdmin y sigue existiendo.
+    pub fn document_file(&mut self, task_id: i64) -> AppResult<PathBuf> {
+        let task = self.store.task(task_id)?;
+        if task.kind != INVOICE {
+            return Err(AppError::Invalid(format!(
+                "la tarea {task_id} no tiene documento"
+            )));
+        }
+        let input: Value = serde_json::from_str(&task.input_ref).unwrap_or(Value::Null);
+        let missing = || {
+            AppError::Invalid(format!(
+                "la copia guardada del documento de la tarea {task_id} ya no está"
+            ))
+        };
+        let path = input["path"]
+            .as_str()
+            .map(PathBuf::from)
+            .ok_or_else(missing)?;
+        let folder = fs::canonicalize(&self.documents)?;
+        let file = fs::canonicalize(&path).map_err(|_| missing())?;
+        if !file.starts_with(&folder) || !file.is_file() {
+            return Err(AppError::Invalid(
+                "el documento no está en la carpeta de NestAdmin".into(),
+            ));
+        }
+        Ok(file)
     }
 
     /// Consulta cada cuenta (como mucho el límite de mensajes por cuenta) y encola los
@@ -314,6 +409,7 @@ impl App {
                             let input = json!({
                                 "message_id": message.id,
                                 "account": account,
+                                "origin": self.mail.origin(&account),
                                 "message": message,
                             });
                             self.store.enqueue(EMAIL, &input.to_string())?;
@@ -411,7 +507,7 @@ impl App {
             Err(error) => return Ok(self.store.fail(task.id, &error)?),
         };
         let built = match task.kind.as_str() {
-            INVOICE => self.invoice_result(&task, &generated, completed.pages),
+            INVOICE => self.invoice_result(&task, &generated, completed.extraction.as_ref()),
             _ => self.email_result(&task, &generated),
         };
         let mut result = match built {
@@ -450,7 +546,7 @@ impl App {
         &mut self,
         task: &Task,
         generated: &GenerateResult,
-        pages: Option<Value>,
+        extraction: Option<&Extraction>,
     ) -> Result<Value, TaskError> {
         let raw = parse_extraction(&generated.output)
             .map_err(|e| task_error(e.code(), e.to_string(), true))?;
@@ -477,12 +573,26 @@ impl App {
             "total": field("total"),
         });
         let input: Value = serde_json::from_str(&task.input_ref).unwrap_or(Value::Null);
+        let pages = extraction.and_then(|e| serde_json::to_value(&e.pages).ok());
+        let sources: serde_json::Map<String, Value> = extraction
+            .map(|extraction| {
+                fields
+                    .iter()
+                    .filter_map(|(name, value)| {
+                        let source = field_source(extraction, name, value.as_str()?)?;
+                        Some((name.clone(), source))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
         Ok(json!({
             "type": INVOICE,
             "version": 1,
             "document": input["document"],
+            "origin": input["origin"],
             "pages": pages,
             "fields": fields,
+            "sources": sources,
             "issues": report.issues.iter().map(|i| i.as_str()).collect::<Vec<_>>(),
             "duplicates": report.duplicates,
             "unreadable": report.unreadable,
@@ -508,9 +618,17 @@ impl App {
         // Sin remitente no hay a quién responder: el borrador se muestra, pero no se puede enviar.
         let to: Vec<String> = message.from.iter().cloned().collect();
         let subject = message.subject.as_ref().map(|s| format!("Re: {s}"));
+        // Tareas anteriores a D48 no guardaron el origen: se toma el de la cuenta actual.
+        let origin = match input.get("origin").filter(|o| !o.is_null()) {
+            Some(origin) => origin.clone(),
+            None => {
+                serde_json::to_value(self.mail.origin(split_id(&message.id).0)).unwrap_or_default()
+            }
+        };
         Ok(json!({
             "type": EMAIL,
             "version": 1,
+            "origin": origin,
             "message": message,
             "category": category,
             "draft": { "to": to, "subject": subject, "body": body },
@@ -705,6 +823,12 @@ impl App {
         Ok(self.mail.reconnect(id, tokens)?)
     }
 
+    /// Cambia el nombre visible de una cuenta; vacío vuelve al predeterminado. Las tareas ya
+    /// encoladas conservan el nombre con que llegaron; la ventana muestra el actual.
+    pub fn rename_mail_account(&mut self, id: &str, label: &str) -> AppResult<AccountView> {
+        Ok(self.mail.rename(id, label)?)
+    }
+
     /// Vuelve a añadir la cuenta simulada si se había quitado.
     pub fn add_simulated_mail_account(&mut self) -> AppResult<AccountView> {
         Ok(self.mail.add_simulator()?)
@@ -760,6 +884,99 @@ fn check_rule(action_kind: &str, conditions: &Value) -> AppResult<()> {
     }
 }
 
+/// Comprueba nombre, tamaño y contenido de un documento; devuelve su extensión.
+fn check_document(name: &str, bytes: &[u8]) -> AppResult<String> {
+    let extension = Path::new(name)
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(str::to_ascii_lowercase)
+        .unwrap_or_default();
+    if extension != "txt" && extension != "pdf" {
+        return Err(AppError::Invalid(format!(
+            "«{name}»: solo se admiten archivos .txt y .pdf"
+        )));
+    }
+    if bytes.is_empty() {
+        return Err(AppError::Invalid(format!("«{name}» está vacío")));
+    }
+    if bytes.len() > MAX_DOCUMENT_BYTES {
+        return Err(AppError::Invalid(format!(
+            "«{name}» supera el tamaño máximo de {} MB",
+            MAX_DOCUMENT_BYTES / 1_000_000
+        )));
+    }
+    Ok(extension)
+}
+
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// Formas en que un valor normalizado puede aparecer escrito en el documento: el importe
+/// `1234.50` como `1234,50`, `1.234,50` o `1,234.50`; la fecha `2026-10-05` como `05/10/2026`.
+fn written_forms(field: &str, value: &str) -> Vec<String> {
+    let mut forms = vec![value.to_owned()];
+    match field {
+        "subtotal" | "tax" | "total" => {
+            if let Some((units, cents)) = value.split_once('.') {
+                let (sign, digits) = match units.strip_prefix('-') {
+                    Some(rest) => ("-", rest),
+                    None => ("", units),
+                };
+                let grouped = |separator: char| {
+                    let mut out = String::new();
+                    for (i, c) in digits.chars().enumerate() {
+                        if i > 0 && (digits.len() - i) % 3 == 0 {
+                            out.push(separator);
+                        }
+                        out.push(c);
+                    }
+                    out
+                };
+                forms.push(format!("{units},{cents}"));
+                forms.push(format!("{sign}{},{cents}", grouped('.')));
+                forms.push(format!("{sign}{}.{cents}", grouped(',')));
+            }
+        }
+        "date" => {
+            let parts: Vec<&str> = value.split('-').collect();
+            if let [year, month, day] = parts[..] {
+                for separator in ['/', '-', '.'] {
+                    forms.push(format!("{day}{separator}{month}{separator}{year}"));
+                }
+                let (d, m) = (day.trim_start_matches('0'), month.trim_start_matches('0'));
+                forms.push(format!("{d}/{m}/{year}"));
+            }
+        }
+        _ => {}
+    }
+    let mut unique = Vec::new();
+    for form in forms {
+        if !unique.contains(&form) {
+            unique.push(form);
+        }
+    }
+    unique
+}
+
+/// Dónde aparece un campo en el texto extraído: páginas y la línea de la primera aparición.
+/// `None` si no se encuentra literalmente (el modelo pudo reescribirlo): nunca se adivina.
+fn field_source(extraction: &Extraction, field: &str, value: &str) -> Option<Value> {
+    for form in written_forms(field, value) {
+        let pages = extraction.pages_containing(&form);
+        if pages.is_empty() {
+            continue;
+        }
+        let text = &extraction.text;
+        let at = text.find(&form)?;
+        let start = text[..at].rfind('\n').map_or(0, |i| i + 1);
+        let end = text[at..].find('\n').map_or(text.len(), |i| at + i);
+        let line: String = text[start..end].trim().chars().take(160).collect();
+        return Some(json!({ "pages": pages, "text": form, "line": line }));
+    }
+    None
+}
+
 fn raw_from_fields(fields: &Value) -> RawInvoice {
     let field = |name: &str| fields[name].as_str().map(|v| Evidenced::new(v.to_owned()));
     RawInvoice {
@@ -776,4 +993,39 @@ fn raw_from_fields(fields: &Value) -> RawInvoice {
 /// Directorio de datos por defecto en Windows (D03).
 pub fn default_data_dir() -> Option<PathBuf> {
     std::env::var_os("LOCALAPPDATA").map(|base| Path::new(&base).join("NestAdmin"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use nestadmin_extract::{Method, Page};
+
+    fn page(number: usize, offset: usize) -> Page {
+        Page {
+            number,
+            method: Method::PdfText,
+            chars: 1,
+            offset,
+        }
+    }
+
+    #[test]
+    fn amounts_and_dates_are_found_as_written_with_their_page() {
+        let first = "Proveedor Alfa SL\nFecha: 05/10/2026";
+        let text = format!("{first}\n\nBase 1.234,50\nTotal: 1.493,75 EUR");
+        let extraction = Extraction {
+            pages: vec![page(1, 0), page(2, first.len() + 2)],
+            text,
+        };
+        let total = field_source(&extraction, "total", "1493.75").unwrap();
+        assert_eq!(total["pages"], json!([2]));
+        assert_eq!(total["line"], "Total: 1.493,75 EUR");
+        let date = field_source(&extraction, "date", "2026-10-05").unwrap();
+        assert_eq!(date["pages"], json!([1]));
+        assert_eq!(date["text"], "05/10/2026");
+        assert!(
+            field_source(&extraction, "tax", "259.25").is_none(),
+            "lo que no aparece en el texto no tiene página"
+        );
+    }
 }

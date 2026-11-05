@@ -29,6 +29,7 @@ use serde_json::Value;
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{AppHandle, Emitter, Manager, State, WindowEvent};
+use tauri_plugin_dialog::DialogExt;
 
 use crate::settings::{credential_store, provider_for, Settings};
 
@@ -127,6 +128,84 @@ fn import_file(
     shared.wake();
     changed(&handle);
     Ok(task)
+}
+
+/// Resultado de importar desde el selector: lo importado y, aparte, cada archivo rechazado.
+#[derive(Serialize)]
+struct ImportReport {
+    imported: Vec<Task>,
+    errors: Vec<String>,
+}
+
+/// Abre el selector de archivos del sistema y encola lo elegido leyéndolo del disco, de modo
+/// que el origen guarda la ruta original (D49). Cancelar el selector no importa nada.
+#[tauri::command]
+async fn import_dialog(
+    shared: State<'_, SharedState>,
+    handle: AppHandle,
+) -> CmdResult<ImportReport> {
+    let shared = Arc::clone(shared.inner());
+    let worker = Arc::clone(&shared);
+    let dialog = handle.clone();
+    let report = tauri::async_runtime::spawn_blocking(move || {
+        let picked = dialog
+            .dialog()
+            .file()
+            .set_title("Importar documentos")
+            .add_filter("Facturas en PDF o texto", &["pdf", "txt"])
+            .blocking_pick_files()
+            .unwrap_or_default();
+        let mut report = ImportReport {
+            imported: Vec::new(),
+            errors: Vec::new(),
+        };
+        for file in picked {
+            let path = match file.into_path() {
+                Ok(path) => path,
+                Err(e) => {
+                    report.errors.push(format!("ruta no válida: {e}"));
+                    continue;
+                }
+            };
+            match worker.app()?.import_path(&path) {
+                Ok(task) => report.imported.push(task),
+                Err(e) => report.errors.push(e.to_string()),
+            }
+        }
+        Ok::<_, String>(report)
+    })
+    .await
+    .map_err(text)??;
+    if !report.imported.is_empty() {
+        shared.wake();
+        changed(&handle);
+    }
+    Ok(report)
+}
+
+/// Abre con el visor del sistema la copia guardada del documento de una tarea. Solo se abren
+/// archivos de la carpeta de documentos de NestAdmin, nunca una ruta que envíe la ventana.
+#[tauri::command]
+fn open_original(shared: State<'_, SharedState>, id: i64) -> CmdResult<()> {
+    let path = shared.app()?.document_file(id).map_err(text)?;
+    open_file(&path)
+}
+
+/// Abre un archivo local con la aplicación predeterminada sin pasar por un intérprete.
+fn open_file(path: &std::path::Path) -> CmdResult<()> {
+    #[cfg(windows)]
+    {
+        std::process::Command::new("explorer")
+            .arg(path)
+            .spawn()
+            .map(|_| ())
+            .map_err(|e| format!("no se pudo abrir el visor del sistema: {e}"))
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = path;
+        Err("abrir el original solo está disponible en Windows".into())
+    }
 }
 
 /// Decodifica `%XX` (UTF-8); `None` si la secuencia no es válida.
@@ -301,6 +380,22 @@ fn remove_mail_account(
     shared.app()?.remove_mail_account(&id).map_err(text)?;
     changed(&handle);
     Ok(())
+}
+
+/// Cambia el nombre visible de una cuenta (el identificador no cambia).
+#[tauri::command]
+fn rename_mail_account(
+    shared: State<'_, SharedState>,
+    handle: AppHandle,
+    id: String,
+    label: String,
+) -> CmdResult<AccountView> {
+    let view = shared
+        .app()?
+        .rename_mail_account(&id, &label)
+        .map_err(text)?;
+    changed(&handle);
+    Ok(view)
 }
 
 #[tauri::command]
@@ -812,6 +907,7 @@ fn main() {
         }));
     }
     builder
+        .plugin(tauri_plugin_dialog::init())
         .setup(move |app| {
             if prepare_only {
                 setup_prepare_only(app.handle())?;
@@ -841,12 +937,15 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             tasks,
             import_file,
+            import_dialog,
+            open_original,
             fetch_mail,
             mail_accounts,
             set_mail_limit,
             mail_sign_in,
             mail_sign_in_cancel,
             remove_mail_account,
+            rename_mail_account,
             add_simulated_mail_account,
             approve,
             edit_draft,
