@@ -35,8 +35,29 @@ $s = Start-Process target\debug\nestadmin.exe -PassThru; Start-Sleep 5; $s.HasEx
 | Segunda ejecución | Termina con código 0; la ventana de la primera vuelve a ser visible; queda un único proceso. |
 | Interfaz en navegador con datos simulados (solo desarrollo) | Vistas de pendientes, factura con incidencias, correo con borrador, reglas y configuración renderizadas sin errores. |
 
+## Parte automatizada desde la capa de comandos (2026-11-05, D48)
+
+`cargo test -p nestadmin-desktop --locked` ejecuta la aplicación con el runtime simulado de Tauri (ver [T07](t07-revision-reglas.md#recorrido-desde-la-ventana-d48)). Para R01 cubre:
+
+- `salir_por_completo_conserva_la_cola_y_reabrir_la_retoma`: la misma parada que usa «Salir de NestAdmin por completo» (`stop_worker`) detiene la cola; una importación posterior queda en cola sin llamar al modelo y, al volver a abrir, se procesa sin repetir el registro ya hecho.
+- `interrumpir_el_proceso_no_repite_efectos`: el proceso se termina con una tarea en curso (llamada al modelo sin responder); al reabrir, la tarea vuelve a la cola con el intento contado. Es lo que ocurre al salir desde la bandeja con trabajo en marcha.
+
+No cubre la bandeja de Windows ni la ventana WebView2: la prueba no crea el icono para no tocar el área de notificación del equipo.
+
+## Lista de comprobación manual (unos 2 minutos)
+
+Con la versión instalada de NestAdmin, en Windows. Anotar fecha, versión y resultado de cada paso.
+
+1. Abrir NestAdmin desde el menú Inicio. Se ve la ventana «NestAdmin» con su icono y, en el área de notificación (junto al reloj; quizá en la flecha «^»), el icono de NestAdmin con la indicación «NestAdmin» al pasar el ratón.
+2. Importar un documento de prueba (por ejemplo, un `.txt` sintético) y, mientras aparece «En proceso», cerrar la ventana con la X. La ventana desaparece y el icono sigue en el área de notificación.
+3. En el Administrador de tareas (Ctrl+Mayús+Esc) sigue apareciendo `nestadmin.exe`.
+4. Clic izquierdo en el icono del área de notificación: la ventana vuelve. La tarea del paso 2 ha avanzado (en revisión o con error visible), no se ha perdido.
+5. Cerrar otra vez la ventana. Clic derecho en el icono → «Mostrar NestAdmin»: la ventana vuelve.
+6. Abrir NestAdmin otra vez desde el menú Inicio con la ventana visible: no aparece una segunda ventana ni un segundo icono.
+7. Clic derecho en el icono → «Salir de NestAdmin por completo». El icono desaparece (puede tardar en irse hasta pasar el ratón por encima) y, en el Administrador de tareas, ya no hay `nestadmin.exe` en unos segundos.
+8. Abrir NestAdmin: las tareas anteriores siguen en la lista con su estado.
+
 ## Pendiente
 
-- Restaurar y salir **desde el menú del área de notificación** no se ha automatizado (requiere interactuar con la bandeja de Windows); falta comprobarlo a mano y confirmar que el proceso termina.
-- Cerrar la ventana **con una tarea en curso** y comprobar que termina igualmente.
+- Ejecutar la lista de comprobación manual y registrar el resultado; hasta entonces, restaurar y salir **desde el menú del área de notificación** no tiene evidencia.
 - Construir con `tauri build` (sin el servidor de desarrollo) forma parte del instalador (T08).

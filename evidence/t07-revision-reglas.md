@@ -39,8 +39,32 @@ cargo test -p nestadmin-app --test ollama -- --ignored --nocapture   # requiere 
 | `audit_log_records_actions_and_rules` | El historial contiene la regla y el registro confirmado. |
 | `document_and_mail_flow_with_local_ollama` (ignorada por defecto) | Con Ollama real: factura sintética extraída (total 121.00) y en revisión; aprobada, registrada; correo clasificado con borrador en revisión y sin envíos. |
 
+## Recorrido desde la ventana (D48)
+
+`crates/desktop/src/recorrido.rs` arranca la aplicación de escritorio real con el runtime simulado de Tauri: la misma `configure` que `main` registra comandos y eventos de ventana, la misma `start` abre datos, cola e hilo de trabajo, y una ventana `main` llama a los comandos por IPC con los nombres y argumentos de `ui/src/api.ts` (incluidos `actionKind` en camelCase y el cuerpo binario de `import_file`). El proveedor es el adaptador real de Ollama, elegido en `configuracion.json`, contra un Ollama simulado en 127.0.0.1; correo y administración son los simuladores; credenciales en memoria; sin bandeja, sin `%LOCALAPPDATA%\NestAdmin` ni el Ollama del equipo. Datos sintéticos (dominio `.test`) en carpetas temporales.
+
+```powershell
+cargo test -p nestadmin-desktop --locked recorrido::
+```
+
+- Fecha: 2026-11-05
+- Plataforma: Windows 11 Pro 10.0.26300, Intel Core Ultra 5 125U, 16 GB; Rust 1.99.1 (MSVC), Tauri 2.12.5 (`tauri::test`)
+- Resultado: 7 superadas, 0 fallidas (1 ignorada: `proceso_hijo`, que solo se lanza como proceso hijo); repetida 3 veces seguidas, entre 3 y 16 s. CI la repite en `windows-latest` (en Linux, `nestadmin-desktop` se excluye como el resto de pruebas de escritorio).
+
+| Prueba | Qué recorre |
+| --- | --- |
+| `la_interfaz_solo_llama_a_comandos_registrados` | Los comandos que invoca `api.ts` son exactamente los registrados en `configure`. |
+| `documento_importado_se_revisa_y_se_registra_una_sola_vez` | Importar dos facturas → procesar → una sin incidencias y otra con `total_mismatch`; nada registrado sin aprobación; descartar una (`cancelled`, sin acciones); aprobar la versión vista registra una vez; repetir la aprobación es error; historial con `confirmed` y autorización «aprobación». |
+| `correo_simulado_borrador_editado_se_envia_una_sola_vez` | Consultar el correo (informe por cuenta del simulador); consultar otra vez no duplica tareas; borrador en revisión; editarlo crea la versión 2; aprobar la 1 se rechaza sin enviar; aprobar la 2 envía una vez el texto editado. |
+| `regla_expresa_se_activa_y_desactiva_desde_la_ventana` | Crear regla (inactiva; una regla sin proveedor se rechaza) → la factura espera revisión; activarla → la siguiente se registra sola con la regla y su versión como autorización; otro proveedor o una incidencia siguen en revisión; desactivarla → vuelve la revisión; versiones crecientes e historial con la regla. Activar no ejecuta la factura que ya esperaba. |
+| `fallo_del_modelo_es_visible_y_el_reintento_es_explicito` | Ollama responde 500 → tarea `failed` con código y sin resultado, sin reintento automático; elegir Groq sin clave se rechaza y la selección local se mantiene; «Reintentar» la procesa (2 intentos). |
+| `salir_por_completo_conserva_la_cola_y_reabrir_la_retoma` | Proceso hijo: registra una factura, detiene la cola como «Salir por completo», importa otra (queda en cola sin llamar al modelo) y termina con código 0. Al reabrir, la pendiente se procesa y el registro no se repite. |
+| `interrumpir_el_proceso_no_repite_efectos` | Procesos hijos terminados con `TerminateProcess`: con la llamada al modelo en curso, con la factura en revisión y justo tras aprobarla. Al reabrir: la tarea vuelve a la cola con 2 intentos, la revisión se conserva, la aprobada sigue completada, un único registro y un único `confirmed`, y no se vuelve a llamar al modelo. Base y simuladores quedan libres tras cada corte. |
+
+Límites: no se ejecuta el JavaScript de `ui/` ni WebView2 ni se pulsan botones (D48); el corte entre el efecto externo y su confirmación se prueba en el núcleo y los simuladores ([T02](t02-nucleo.md), [T06](t06-simuladores.md)), no con el proceso completo.
+
 ## Pendiente
 
-- Recorrer el mismo flujo desde la ventana (importar, revisar, editar, aprobar, reglas e historial) y registrarlo.
+- El mismo flujo con la ventana WebView2 (clics y pintado) solo se ha visto a mano; no hay prueba automática de la interfaz gráfica.
 - La moneda no forma parte de la extracción: se registra como ausente.
 - La importación de PDF y documentos escaneados se prueba en [T04](t04-pdf-ocr.md).

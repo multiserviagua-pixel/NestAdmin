@@ -26,4 +26,6 @@ tauri = { version = "=2.12.5", features = ["tray-icon"] }
 tauri-plugin-single-instance = "=2.5.5"
 
 [dev-dependencies]
+# Runtime simulado de Tauri para los recorridos desde la ventana (D48); no añade paquetes.
+tauri = { version = "=2.12.5", features = ["tray-icon", "test"] }
 tempfile = "3"
