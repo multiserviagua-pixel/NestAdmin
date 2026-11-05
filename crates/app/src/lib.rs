@@ -19,8 +19,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use nestadmin_ai::tasks::{email_request, extraction_request, parse_email, parse_extraction};
 use nestadmin_ai::{GenerateRequest, GenerateResult, Provider, ProviderKind};
 use nestadmin_core::{
-    ActionRequest, AuditEntry, Authorization, ConnectorError, CoreError, Rule, Store, Task,
-    TaskError, TaskState,
+    ActionRecord, ActionRequest, AuditEntry, Authorization, Connector, ConnectorError, CoreError,
+    Rule, Store, Task, TaskError, TaskState,
 };
 use nestadmin_documents::{process_invoice, DuplicateRegistry, Evidenced, Invoice, RawInvoice};
 use nestadmin_extract::Extractor;
@@ -110,11 +110,35 @@ pub struct App {
     extractor: Arc<Extractor>,
 }
 
-/// Trabajo de una tarea: una solicitud lista o un documento del que extraer el texto.
+/// Trabajo de una tarea: una solicitud lista, un documento del que extraer el texto o, si ya
+/// se intentó ejecutar su acción, el resultado guardado entonces (D50), sin volver a la IA.
 enum Prepared {
     Request(GenerateRequest),
     Document(PathBuf),
+    Resume(Value),
 }
+
+/// Lo que devuelve el trabajo de una tarea.
+enum Outcome {
+    Generated(GenerateResult),
+    Resumed(Value),
+}
+
+/// Estado de los intentos anteriores de la acción de una tarea (D50).
+enum Previous {
+    /// No queda ningún intento sin cerrar: se puede ejecutar.
+    Clear,
+    /// Una versión consta realizada.
+    Done { version: i64, receipt: Value },
+    /// Un intento no se pudo comprobar: el conector falló o el borrador ya no existe.
+    Unknown { version: i64, error: ConnectorError },
+}
+
+/// Motivo de revisión de una tarea cuyo intento anterior no se confirmó.
+const RESUMED_REASON: &str =
+    "el intento anterior no se confirmó; se conserva el contenido aprobado, sin pedir otro a la IA";
+/// Motivo de revisión cuando el borrador anterior ya no existe y no consta enviado.
+const MISSING_REASON: &str = "el borrador del intento anterior ya no existe y no consta enviado; confirme que no se envió antes de preparar otro";
 
 /// Tarea tomada de la cola con su trabajo preparado.
 pub struct Job {
@@ -127,7 +151,7 @@ pub struct Job {
 /// Respuesta del proveedor (o el motivo del fallo) lista para `finish`.
 pub struct Completed {
     task: Task,
-    outcome: Result<GenerateResult, TaskError>,
+    outcome: Result<Outcome, TaskError>,
     /// Páginas del documento y método de cada una (texto, PDF u OCR).
     pages: Option<Value>,
 }
@@ -145,6 +169,7 @@ impl Job {
         let mut pages = None;
         let outcome = prepared.and_then(|prepared| {
             let request = match prepared {
+                Prepared::Resume(result) => return Ok(Outcome::Resumed(result)),
                 Prepared::Request(request) => request,
                 Prepared::Document(path) => {
                     let extraction = extractor
@@ -154,11 +179,14 @@ impl Job {
                     extraction_request(&task.id.to_string(), &extraction.text)
                 }
             };
-            provider.generate(&request).map_err(|e| TaskError {
-                code: e.code().to_owned(),
-                message: e.to_string(),
-                recoverable: true,
-            })
+            provider
+                .generate(&request)
+                .map(Outcome::Generated)
+                .map_err(|e| TaskError {
+                    code: e.code().to_owned(),
+                    message: e.to_string(),
+                    recoverable: true,
+                })
         });
         Completed {
             task,
@@ -209,8 +237,172 @@ impl App {
         app.store.recover()?;
         app.store.reconcile_actions(SEND_DRAFT, &app.mail)?;
         app.store.reconcile_actions(REGISTER_INVOICE, &app.admin)?;
+        app.complete_confirmed_reviews()?;
         app.rebuild_registry()?;
         Ok(app)
+    }
+
+    /// Una tarea que seguía en revisión cuando se cortó su acción y cuya acción consta ya
+    /// confirmada (por ejemplo, al reconciliar al abrir) se completa: no se vuelve a pedir
+    /// aprobación de algo que ya ocurrió.
+    fn complete_confirmed_reviews(&mut self) -> AppResult<()> {
+        for task in self.store.tasks_in(TaskState::AwaitingReview)? {
+            let kind = action_kind(&task);
+            let done = self
+                .store
+                .task_actions(task.id)?
+                .into_iter()
+                .rfind(|a| a.kind == kind && a.status == "confirmed");
+            if let Some(done) = done {
+                let result = task.result.clone().unwrap_or(Value::Null);
+                let receipt = done.receipt.unwrap_or(Value::Null);
+                self.complete_with(task.id, result, done.version, receipt)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Resultado guardado de una tarea cuya acción ya se intentó (D50): se reutiliza al
+    /// reprocesarla. También cubre tareas anteriores a D50 con acciones registradas.
+    fn attempted_result(&self, task: &Task) -> AppResult<Option<Value>> {
+        let Some(result) = task.result.as_ref().filter(|r| r.get("action").is_some()) else {
+            return Ok(None);
+        };
+        if result.get("attempt").is_some() || !self.store.task_actions(task.id)?.is_empty() {
+            return Ok(Some(result.clone()));
+        }
+        Ok(None)
+    }
+
+    /// Comprueba con el conector los intentos anteriores de la acción de una tarea. La versión
+    /// `executing` se excluye porque `perform_action` ya la consulta antes de repetirla. Con
+    /// `supersede`, los intentos que el conector no ve realizados se cierran como sustituidos
+    /// con esa autorización; sin ella se dejan como están.
+    fn check_previous(
+        &mut self,
+        task: &Task,
+        executing: Option<i64>,
+        supersede: Option<&Authorization>,
+    ) -> AppResult<Previous> {
+        let kind = action_kind(task);
+        let actions: Vec<ActionRecord> = self
+            .store
+            .task_actions(task.id)?
+            .into_iter()
+            .filter(|a| a.kind == kind)
+            .collect();
+        if let Some(done) = actions.iter().rev().find(|a| a.status == "confirmed") {
+            return Ok(Previous::Done {
+                version: done.version,
+                receipt: done.receipt.clone().unwrap_or(Value::Null),
+            });
+        }
+        let mut unsent = Vec::new();
+        let mut unknown = None;
+        for action in actions
+            .iter()
+            .filter(|a| a.is_unsettled() && Some(a.version) != executing)
+        {
+            let found = match kind {
+                REGISTER_INVOICE => self.admin.lookup(&action.idempotency_key),
+                _ => self.mail.lookup(&action.idempotency_key),
+            };
+            match found {
+                Ok(Some(receipt)) => {
+                    self.store.reconcile_action(task.id, action, &receipt)?;
+                    return Ok(Previous::Done {
+                        version: action.version,
+                        receipt,
+                    });
+                }
+                Ok(None) => unsent.push(action),
+                Err(error) => {
+                    unknown.get_or_insert((action.version, error));
+                }
+            }
+        }
+        if let Some((version, error)) = unknown {
+            return Ok(Previous::Unknown { version, error });
+        }
+        if let Some(authorization) = supersede {
+            for action in unsent {
+                self.store.supersede_action(
+                    task.id,
+                    action,
+                    authorization,
+                    "el conector no lo ve realizado; lo sustituye otra versión",
+                )?;
+            }
+        }
+        Ok(Previous::Clear)
+    }
+
+    /// Completa la tarea con el recibo de una versión ya realizada. Si no es la versión que
+    /// se muestra, se recupera el contenido de ese intento y se indica cuál salió.
+    fn complete_with(
+        &mut self,
+        task_id: i64,
+        mut result: Value,
+        version: i64,
+        receipt: Value,
+    ) -> AppResult<Task> {
+        if result["version"].as_i64() != Some(version) {
+            if result["attempt"]["version"].as_i64() == Some(version)
+                && !result["attempt"]["draft"].is_null()
+            {
+                result["draft"] = result["attempt"]["draft"].clone();
+                result["version"] = json!(version);
+            } else {
+                result["sent_version"] = json!(version);
+            }
+        }
+        result["receipt"] = receipt;
+        // Para la ventana: se completó con un intento anterior, no con una ejecución nueva.
+        result["recovered"] = json!({ "version": version });
+        if let Some(fields) = result.as_object_mut() {
+            fields.remove("recovery");
+        }
+        Ok(self.store.complete(task_id, &result)?)
+    }
+
+    /// Deja la tarea en revisión con el contenido dado, desde `running` o desde la revisión.
+    fn back_to_review(&mut self, task: &Task, result: &Value) -> AppResult<Task> {
+        let current = self.store.task(task.id)?;
+        Ok(match current.state {
+            TaskState::AwaitingReview => self.store.revise(task.id, result)?,
+            _ => self.store.await_review(task.id, result)?,
+        })
+    }
+
+    /// Reproceso de una tarea cuya acción ya se intentó: si consta realizada se completa; si
+    /// no, vuelve a revisión con el mismo contenido y versión, explicando lo ocurrido. Nunca se
+    /// ejecuta nada sin una nueva aprobación.
+    fn resume(&mut self, task: Task, mut result: Value) -> AppResult<Task> {
+        let attempted = result["attempt"]["version"]
+            .as_i64()
+            .or_else(|| result["version"].as_i64())
+            .unwrap_or(1);
+        let (error, missing) = match self.check_previous(&task, None, None)? {
+            Previous::Done { version, receipt } => {
+                return self.complete_with(task.id, result, version, receipt)
+            }
+            Previous::Unknown { error, .. } => {
+                let missing = error.code == nestadmin_simulators::codes::NOT_FOUND;
+                (Some(error.code), missing)
+            }
+            Previous::Clear => (task.error.as_ref().map(|e| e.code.clone()), false),
+        };
+        result["review_reason"] = json!(if missing {
+            MISSING_REASON
+        } else {
+            RESUMED_REASON
+        });
+        result["recovery"] = json!({
+            "version": attempted,
+            "error": error,
+            "needs_confirmation": missing,
+        });
+        self.back_to_review(&task, &result)
     }
 
     /// Vuelve a cargar en orden las facturas ya procesadas para seguir detectando duplicados.
@@ -358,6 +550,14 @@ impl App {
         };
         let input: Value = serde_json::from_str(&task.input_ref).unwrap_or(Value::Null);
         let id = task.id.to_string();
+        if let Some(result) = self.attempted_result(&task)? {
+            return Ok(Some(Job {
+                task,
+                provider: Arc::clone(&self.provider),
+                extractor: Arc::clone(&self.extractor),
+                prepared: Ok(Prepared::Resume(result)),
+            }));
+        }
         let prepared = match task.kind.as_str() {
             INVOICE => match input["path"].as_str() {
                 Some(path) => Ok(Prepared::Document(PathBuf::from(path))),
@@ -407,7 +607,8 @@ impl App {
     pub fn finish(&mut self, completed: Completed) -> AppResult<Task> {
         let task = completed.task;
         let generated = match completed.outcome {
-            Ok(generated) => generated,
+            Ok(Outcome::Generated(generated)) => generated,
+            Ok(Outcome::Resumed(result)) => return self.resume(task, result),
             Err(error) => return Ok(self.store.fail(task.id, &error)?),
         };
         let built = match task.kind.as_str() {
@@ -530,6 +731,45 @@ impl App {
         authorization: Authorization,
     ) -> AppResult<Task> {
         let version = result["version"].as_i64().unwrap_or(1);
+        // Antes de ejecutar otra versión, los intentos anteriores deben constar como no
+        // realizados: si alguno salió, la tarea se completa con él y no se ejecuta otro.
+        match self.check_previous(&task, Some(version), Some(&authorization))? {
+            Previous::Clear => {}
+            Previous::Done { version, receipt } => {
+                return self.complete_with(task.id, result, version, receipt)
+            }
+            Previous::Unknown { version, error }
+                if error.code == nestadmin_simulators::codes::NOT_FOUND =>
+            {
+                result["review_reason"] = json!(MISSING_REASON);
+                result["recovery"] = json!({
+                    "version": version,
+                    "error": error.code,
+                    "needs_confirmation": true,
+                });
+                return self.back_to_review(&task, &result);
+            }
+            Previous::Unknown { error, .. } => {
+                return Ok(self.store.fail(
+                    task.id,
+                    &task_error(
+                        &error.code,
+                        format!("no se pudo comprobar el intento anterior: {error}"),
+                        true,
+                    ),
+                )?)
+            }
+        }
+        // Se guarda lo que se va a ejecutar antes de llamar a ningún conector (D50).
+        let draft = match task.kind.as_str() {
+            INVOICE => Value::Null,
+            _ => result["draft"].clone(),
+        };
+        result["attempt"] = json!({ "version": version, "draft": draft });
+        if let Some(fields) = result.as_object_mut() {
+            fields.remove("recovery");
+        }
+        self.store.record_attempt(task.id, &result)?;
         let outcome = match task.kind.as_str() {
             INVOICE => {
                 let request = ActionRequest {
@@ -623,6 +863,62 @@ impl App {
         }
         result["draft"]["body"] = json!(body);
         result["version"] = json!(result["version"].as_i64().unwrap_or(1) + 1);
+        Ok(self.store.revise(task_id, &result)?)
+    }
+
+    /// El usuario confirma que el intento anterior no se envió (o registró), por ejemplo
+    /// porque borró el borrador. Antes se pregunta al conector: si consta realizado, la tarea
+    /// se completa con ese recibo. Si no, los intentos se cierran como sustituidos y el mismo
+    /// contenido pasa a una versión nueva, con claves nuevas, que requiere aprobación (D50).
+    pub fn confirm_not_sent(&mut self, task_id: i64) -> AppResult<Task> {
+        let (task, mut result) = self.reviewable(task_id)?;
+        let kind = action_kind(&task);
+        let actions: Vec<ActionRecord> = self
+            .store
+            .task_actions(task.id)?
+            .into_iter()
+            .filter(|a| a.kind == kind)
+            .collect();
+        if result.get("attempt").is_none() && actions.is_empty() {
+            return Err(AppError::Invalid(format!(
+                "la tarea {task_id} no tiene ningún intento anterior"
+            )));
+        }
+        if let Some(done) = actions.iter().rev().find(|a| a.status == "confirmed") {
+            let receipt = done.receipt.clone().unwrap_or(Value::Null);
+            return self.complete_with(task.id, result, done.version, receipt);
+        }
+        let mut unsent = Vec::new();
+        for action in actions.iter().filter(|a| a.is_unsettled()) {
+            let found = match kind {
+                REGISTER_INVOICE => self.admin.lookup(&action.idempotency_key),
+                _ => self.mail.lookup(&action.idempotency_key),
+            };
+            match found {
+                Ok(Some(receipt)) => {
+                    self.store.reconcile_action(task.id, action, &receipt)?;
+                    return self.complete_with(task.id, result, action.version, receipt);
+                }
+                Ok(None) => unsent.push(action),
+                Err(e) if e.code == nestadmin_simulators::codes::NOT_FOUND => unsent.push(action),
+                Err(e) => return Err(AppError::Connector(e)),
+            }
+        }
+        for action in unsent {
+            self.store.supersede_action(
+                task.id,
+                action,
+                &Authorization::Approval,
+                "el usuario confirmó que no se realizó",
+            )?;
+        }
+        let version = result["version"].as_i64().unwrap_or(1);
+        result["version"] = json!(version + 1);
+        result["review_reason"] =
+            json!("versión nueva tras confirmar que el intento anterior no se realizó");
+        if let Some(fields) = result.as_object_mut() {
+            fields.remove("recovery");
+        }
         Ok(self.store.revise(task_id, &result)?)
     }
 

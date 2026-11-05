@@ -113,7 +113,7 @@ const state = {
   mail: null as MailView | null,
   // Dirección del inicio de sesión en curso, por si el navegador no se abrió solo.
   signInUrl: null as string | null,
-  notice: null as { kind: "ok" | "error"; text: string } | null,
+  notice: null as { kind: "ok" | "error" | "warn"; text: string } | null,
   // Borradores editados y aún no guardados, para no perderlos al refrescar.
   drafts: {} as Record<number, string>,
   // Preparación (R08): modo instalador, última comprobación y la ejecución en curso.
@@ -141,6 +141,72 @@ async function act(work: () => Promise<unknown>, success?: string) {
   } catch (error) {
     notify("error", error);
   }
+}
+
+/// Aviso según cómo terminó una aprobación: hecha, ya hecha en un intento anterior, de vuelta
+/// en revisión (hay que confirmar algo) o fallida.
+function afterApproval(task: Task, done: string) {
+  const r = task.result ?? {};
+  if (task.state === "completed") {
+    state.notice = r.recovered
+      ? { kind: "ok", text: `Ya constaba realizada la versión ${r.recovered.version}; no se ha repetido` }
+      : { kind: "ok", text: done };
+  } else if (task.state === "failed") {
+    state.notice = { kind: "error", text: task.error?.message ?? "la acción falló" };
+  } else {
+    state.notice = { kind: "warn", text: `No se ha realizado: ${r.review_reason ?? "requiere revisión"}` };
+  }
+}
+
+/// Explica un intento anterior sin confirmar (D50) y, si el borrador ya no existe, ofrece
+/// confirmar que no se envió para preparar una versión nueva.
+function recoveryBox(task: Task, verb: string) {
+  const r = task.result ?? {};
+  // Tras confirmar que no salió, la versión mostrada ya es otra y el aviso no aplica.
+  if (!r.recovery && r.attempt?.version !== (r.version ?? 1)) return null;
+  const version = r.recovery?.version ?? r.attempt?.version;
+  const error = r.recovery?.error;
+  const missing = r.recovery?.needs_confirmation === true;
+  return h(
+    "div",
+    { class: "recovery" },
+    h(
+      "p",
+      {},
+      h("strong", {}, `Ya se intentó ${verb} la versión ${version} y no consta confirmado`),
+      error ? ` (último error: ${error})` : "",
+      ". Se conserva el contenido aprobado; la IA no ha propuesto otro.",
+    ),
+    missing
+      ? h(
+          "p",
+          {},
+          "El borrador de ese intento ya no existe en el buzón y no consta enviado. Si lo borró usted y está seguro de que no salió, confírmelo para preparar uno nuevo con el texto de abajo; después tendrá que aprobarlo.",
+        )
+      : h(
+          "p",
+          {},
+          `Aprobar lo vuelve a intentar con la misma clave: si ya se hizo, solo se confirma y nunca se repite. Si cambia el contenido, antes de ${verb} la versión nueva se comprueba que la anterior no se realizó.`,
+        ),
+    missing
+      ? h(
+          "div",
+          { class: "buttons" },
+          h(
+            "button",
+            { onclick: () => void act(() => api.confirmNotSent(task.id).then((t) => afterConfirm(t))) },
+            "Confirmo que no se envió: preparar uno nuevo",
+          ),
+        )
+      : null,
+  );
+}
+
+function afterConfirm(task: Task) {
+  state.notice =
+    task.state === "completed"
+      ? { kind: "ok", text: "El proveedor lo ve realizado: la tarea se ha completado sin repetirlo" }
+      : { kind: "ok", text: `Preparada la versión ${task.result?.version}; revísela y apruébela` };
 }
 
 async function refresh(background = false) {
@@ -335,6 +401,7 @@ function invoiceDetail(task: Task) {
         )
       : null,
     h("p", { class: "reason" }, `Motivo de la revisión: ${r.review_reason ?? "requiere aprobación"}`),
+    recoveryBox(task, "registrar"),
     issues.length
       ? h("ul", { class: "issues" }, ...issues.map((i) => h("li", {}, ISSUE_LABEL[i] ?? i)))
       : h("p", { class: "ok-line" }, "Sin incidencias en los importes."),
@@ -373,7 +440,11 @@ function invoiceDetail(task: Task) {
       { class: "buttons" },
       h(
         "button",
-        { class: "primary", onclick: () => void act(() => api.approve(task.id, r.version ?? 1), "Factura registrada en el simulador") },
+        {
+          class: "primary",
+          disabled: r.recovery?.needs_confirmation === true,
+          onclick: () => void act(async () => afterApproval(await api.approve(task.id, r.version ?? 1), "Factura registrada en el simulador")),
+        },
         "Aprobar y registrar",
       ),
       h("button", { class: "danger", onclick: () => void act(() => api.reject(task.id), "Tarea descartada") }, "Descartar"),
@@ -398,6 +469,7 @@ function emailDetail(task: Task) {
     h("h2", {}, message.subject ?? h("span", { class: "missing" }, "(sin asunto)")),
     provenance(r),
     h("p", { class: "reason" }, `Motivo de la revisión: ${r.review_reason ?? "requiere aprobación"}`),
+    recoveryBox(task, "enviar"),
     h("p", { class: "meta" }, "Cuenta: ", accountName(message.id)),
     h(
       "div",
@@ -416,14 +488,15 @@ function emailDetail(task: Task) {
         "button",
         {
           class: "primary",
-          disabled: recipients.length === 0,
+          // Con el borrador anterior desaparecido, primero hay que confirmar que no se envió.
+          disabled: recipients.length === 0 || r.recovery?.needs_confirmation === true,
           onclick: () =>
             void act(async () => {
               let version = r.version ?? 1;
               // Si se ha editado, se guarda primero como versión nueva y se aprueba esa.
               if (body.value !== (draft.body ?? "")) version = (await api.editDraft(task.id, body.value)).result?.version;
-              await api.approve(task.id, version);
-            }, `Respuesta enviada desde ${accountName(message.id)}`),
+              afterApproval(await api.approve(task.id, version), `Respuesta enviada desde ${accountName(message.id)}`);
+            }),
         },
         "Aprobar y enviar",
       ),

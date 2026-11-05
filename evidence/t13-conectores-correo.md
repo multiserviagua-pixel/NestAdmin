@@ -94,10 +94,34 @@ Gmail y Graph se simulan con un servidor HTTP propio de la prueba en 127.0.0.1 (
 
 Pantalla «Correo», comprobada en la vista previa de la interfaz (`npm run dev --prefix ui`, datos simulados de `ui/src/mock.ts`): tabla de cuentas con proveedor, estado, última consulta (leídos y nuevos, o el error en rojo con su motivo) y botones «Volver a iniciar sesión» y «Desconectar» (con confirmación); tarjeta «Añadir cuenta» con nombre opcional y botones de Google y Microsoft, que muestran «Esperando al navegador…» con la dirección y «Cancelar»; tarjeta del límite por cuenta. «Consultar correo» resume los mensajes nuevos y las cuentas que fallaron. `?sin-cuentas` muestra la pantalla vacía y `?sin-cliente`, una instalación sin clientes OAuth. En la revisión de una respuesta aparece la cuenta de origen. El flujo OAuth real desde la ventana Tauri no se ha ejecutado.
 
+## Reproceso de un envío ya intentado (D50)
+
+Resuelve el hallazgo anterior: tras una respuesta perdida o un corte, reprocesar la tarea pedía otro texto a la IA y crear el borrador con la misma clave daba `conflict`, sin salida para el usuario (nunca hubo doble envío). Ahora se reutiliza el contenido aprobado y el usuario tiene una salida explícita.
+
+```sh
+cargo test -p nestadmin-app --locked --test reprocess
+```
+
+- Fecha: 2026-11-05. Plataforma: Windows 11 Pro 10.0.26300, Rust 1.99.1 (MSVC).
+- Resultado: 8 pruebas superadas, 0 fallidas. Gmail y Graph simulados en un servidor de 127.0.0.1 (el Gmail simulado da al enviado otro ID y lo encuentra por `rfc822msgid:`); la IA simulada propone un texto distinto cada vez que se le pide, para detectar cualquier llamada de más.
+- Los cortes del proceso se provocan con un pánico al guardar el token renovado justo antes de la llamada de envío (borrador ya creado, acción `pending`); después se descarta la aplicación y se reabre sobre los mismos datos. No es una interrupción real del sistema operativo.
+
+| Escenario (Graph y Gmail salvo indicación) | Resultado comprobado |
+| --- | --- |
+| Envío con respuesta perdida, reinicio y reintento | Sin otra llamada a la IA; `lookup` confirma el envío y la tarea se completa sola (`pending`, `failed`, `reconciled`). Un envío, un borrador. |
+| Corte tras crear el borrador, reinicio | La tarea sigue en revisión con la misma versión y `attempt`; aprobarla reutiliza el mismo borrador y envía una vez. |
+| Corte durante un envío por regla (Graph) | Al reabrir vuelve a la cola; al reprocesarla no se llama a la IA y vuelve a revisión con `recovery`; no se envía sin aprobación. |
+| Texto cambiado tras un envío con respuesta perdida | Con el proveedor caído al reprocesar, vuelve a revisión con el mismo texto. Al aprobar la versión 2 se comprueba la 1, que salió: la tarea se completa mostrando el texto enviado; la versión 2 no se envía. |
+| Texto cambiado tras un envío fallido sin efecto | La versión 1 se cierra como `superseded` y se envía solo la 2, con otro borrador; el de la 1 queda sin enviar en el buzón. |
+| Borrador borrado por el usuario, reinicio | Vuelve a revisión con `needs_confirmation`. Aprobar la misma versión falla con `not_found` sin enviar; aprobar otro texto vuelve a revisión sin enviar. «Confirmo que no se envió» crea la versión 3 sin enviar nada; aprobarla envía una vez. |
+| Confirmar cuando sí salió (Graph) | El conector lo ve enviado y la tarea se completa sin otro envío. Sin intento previo, la confirmación se rechaza. |
+| Simulador caído al aprobar, reinicio y reintento | Mismo texto, sin otra llamada a la IA; un borrador y un envío. |
+
+En `tests/mail_accounts.rs`, la prueba de respuesta perdida en Graph termina ahora sin segunda aprobación. La revisión muestra un aviso con la versión intentada, el último error y, si el borrador desapareció, el botón «Confirmo que no se envió: preparar uno nuevo» (y deshabilita «Aprobar»); tras aprobar, el aviso distingue enviado, ya enviado en un intento anterior, vuelta a revisión y fallo. Comprobado en la vista previa con datos simulados de `ui/src/mock.ts` (una tarea de Gmail con el borrador borrado); no se ha ejecutado desde la ventana Tauri.
+
 ## Pendiente para completar T13
 
 - Ensayo con una cuenta de prueba real de Microsoft 365: requiere registrar la aplicación en Entra ID.
 - Gmail: provocar con la cuenta real un corte entre el envío y el recibo y comprobar que la reconciliación por `Message-ID` propio (D41) lo confirma; en particular, que Gmail mantiene esa cabecera al enviar. La parte simulada está hecha.
 - Recorrido con una cuenta real desde la ventana: añadir la cuenta, consultar, aprobar un envío y desconectar. Requiere `correo-oauth.json` con los clientes del editor (D43).
-- Si tras una respuesta perdida la tarea se reprocesa y la IA propone otro texto, crear el borrador con la misma clave da `conflict` y la tarea queda fallida sin enviar: nunca hay doble envío, pero hace falta una salida para el usuario (comportamiento heredado del núcleo, también con el simulador).
 - Calidad de clasificación y borradores con correo real: sin medir.
