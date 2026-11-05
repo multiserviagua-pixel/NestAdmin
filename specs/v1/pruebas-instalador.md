@@ -1,6 +1,6 @@
 # Casos de prueba del instalador v1
 
-Especificación de las pruebas de R08 (decisiones D36–D40 y D46, contrato «Preparación de componentes locales»). Un caso descrito aquí no es una prueba superada: la [matriz](trazabilidad.md) recoge el estado y la evidencia.
+Especificación de las pruebas de R08 (decisiones D36–D40, D46, D51 y D52, contrato «Preparación de componentes locales»). Un caso descrito aquí no es una prueba superada: la [matriz](trazabilidad.md) recoge el estado y la evidencia.
 
 Reglas comunes:
 
@@ -39,6 +39,18 @@ Reglas comunes:
 | T08c-03 | Proveedor Groq elegido. | No se comprueba ni se arranca nada local. |
 | T08c-04 | La comprobación tarda (servicio lento al arrancar). | La ventana no se bloquea mientras espera. |
 
+## T08d — Construcción del paquete (D51, D52)
+
+Se comprueban en la máquina de empaquetado con `scripts/build-clean.ps1`, sin instalar nada. El cliente OAuth de las pruebas es sintético (valores inventados); nunca el real.
+
+| Caso | Situación inicial | Resultado esperado |
+| --- | --- | --- |
+| T08d-01 | Sin `-ClienteOAuth` ni `NESTADMIN_OAUTH_INSTALADOR`. | El instalador se construye; el paquete no contiene `correo-oauth.json` y el paso lo dice. |
+| T08d-02 | `-ClienteOAuth` con un archivo sintético fuera del repositorio. | El paquete contiene `correo-oauth.json` junto al ejecutable, idéntico al indicado (misma huella); su contenido no aparece en la salida; el árbol del clon queda limpio y la configuración temporal se borra. |
+| T08d-03 | `-ClienteOAuth` inexistente, dentro del repositorio o de la carpeta de construcción, que no es JSON o sin ningún cliente. | Falla antes de clonar con un mensaje que lo explica. Con marcadores `PONER-AQUI` solo avisa. |
+| T08d-04 | `scripts/correo-oauth.ps1` con un JSON sintético de Google de tipo `installed` y un GUID. | Escribe `google` y `microsoft` en UTF-8 sin BOM. Rechaza un JSON de tipo `web`, un ID que no es GUID, una salida dentro del repositorio y sobrescribir sin `-Sobrescribir`. |
+| T08d-05 | Ganchos NSIS. | `makensis` compila el instalador con los ganchos; el script generado contiene la redirección de carpeta, la retirada de la copia anterior y el aviso de desinstalación. |
+
 ## T08 — Instalación real en Windows
 
 Requiere Windows 11 limpio (máquina virtual con instantánea) y, para tiempos, el equipo objetivo. Registrar versión del instalador, fecha, red, duración y capturas del asistente. `scripts/t08-registro.ps1`, ejecutado dentro de la máquina virtual, instala o desinstala y anota en un archivo de texto el estado antes y después: versión de Windows, WebView2, Ollama y modelo, huella del instalador, código de salida, duración y archivos instalados, sin nombres de equipo ni de usuario. Una ejecución en Windows 10 22H2 se registra aparte como compatibilidad adicional; no sustituye a la de Windows 11.
@@ -54,3 +66,8 @@ Requiere Windows 11 limpio (máquina virtual con instantánea) y, para tiempos, 
 | T08-07 | Instalar encima de una versión anterior de NestAdmin. | Conserva datos y configuración; la comprobación final pasa sin descargas. |
 | T08-08 | Instalación silenciosa (`/S`). | Mismo resultado que T08-01 sin preguntas. |
 | T08-09 | Desinstalar. | Se quita NestAdmin; Ollama y el modelo se conservan porque pueden usarlos otras aplicaciones, y así se informa. |
+| T08-10 | Instalación nueva (D52). | El programa queda en `%LOCALAPPDATA%\Programs\NestAdmin` (también con `/S`); al abrir, los datos se crean en `%LOCALAPPDATA%\NestAdmin`, que no contiene nada del programa. El acceso del menú Inicio apunta a la carpeta nueva. |
+| T08-11 | Instalar la versión nueva encima de una anterior instalada en `%LOCALAPPDATA%\NestAdmin`, con tareas, una cuenta de correo y configuración propias; con interfaz (eligiendo desinstalar antes y sin hacerlo) y con `/S`; una vez con la versión anterior abierta. | Los datos siguen y la aplicación los muestra. En `%LOCALAPPDATA%\NestAdmin` ya no quedan `nestadmin.exe`, `uninstall.exe`, `pdfium\`, `tessdata\` ni `tesseract\`. Hay una sola entrada en «Aplicaciones instaladas», con la carpeta nueva. Los accesos del menú Inicio, del escritorio y de la barra de tareas abren la versión nueva. La copia abierta se cierra antes de retirarla (con interfaz, preguntando). |
+| T08-12 | Desinstalar tras T08-10 o T08-11, con interfaz (marcando y sin marcar la casilla de borrar datos de la aplicación) y con `/S`. | Desaparece `%LOCALAPPDATA%\Programs\NestAdmin` y su entrada; `%LOCALAPPDATA%\NestAdmin` queda intacta en los tres casos. Con interfaz, el aviso da la ruta de los datos; en silencio, el registro de detalles. |
+| T08-13 | Instalador construido con y sin `-ClienteOAuth` (con los clientes reales del editor, solo en la máquina de prueba). | Con él, `correo-oauth.json` está junto a `nestadmin.exe` y «Correo» ofrece añadir cuentas de Gmail y Microsoft 365; sin él, ambos figuran como no configurados y la aplicación funciona igual. |
+| T08-14 | En el asistente con interfaz, elegir otra carpeta (por ejemplo `D:\Apps\NestAdmin`) y después reinstalar. | Se instala en la carpeta elegida y la reinstalación la mantiene; no se mueve a `Programs`. |

@@ -423,6 +423,14 @@ fn approve<R: Runtime>(
     task
 }
 
+/// El usuario confirma que el intento anterior no se envió; prepara una versión nueva (D50).
+#[tauri::command]
+fn confirm_not_sent(shared: State<'_, SharedState>, handle: AppHandle, id: i64) -> CmdResult<Task> {
+    let task = shared.app()?.confirm_not_sent(id).map_err(text);
+    changed(&handle);
+    task
+}
+
 #[tauri::command]
 fn edit_draft<R: Runtime>(
     shared: State<'_, SharedState>,
@@ -1009,6 +1017,7 @@ fn configure<R: Runtime>(builder: Builder<R>, prepare_only: bool) -> Builder<R> 
             rename_mail_account,
             add_simulated_mail_account,
             approve,
+            confirm_not_sent,
             edit_draft,
             reject,
             retry,

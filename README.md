@@ -64,7 +64,34 @@ cd crates/desktop
 ..\..\ui\node_modules\.bin\tauri build --config tauri.installer.json
 ```
 
-El instalador queda en `target/release/bundle/nsis/`. Se instala por usuario e incluye PDFium, Tesseract portátil y los datos de idioma. Antes de terminar, ejecuta `nestadmin.exe --preparar`, que instala o arranca Ollama y descarga el modelo `qwen3:8b` si faltan, comprueba la huella SHA-256 y la firma de Ollama Inc. del instalador y solo da la instalación por buena cuando el modelo responde (D36–D38). Al abrir NestAdmin, un Ollama detenido se arranca solo; si falta algo, la ventana muestra el mismo asistente (D39). El asistente avisa si la memoria es menor que la recomendada (D46).
+Así se construye sin el cliente OAuth del editor: el correo real figurará como «no configurado». Para incluirlo, use `scripts/build-clean.ps1 -ClienteOAuth` (siguiente apartado) o añada a mano un segundo `--config` con el recurso, escrito fuera del repositorio:
+
+```powershell
+..\..\ui\node_modules\.bin\tauri build --config tauri.installer.json --config C:\fuera\oauth-recurso.json
+# oauth-recurso.json: { "bundle": { "resources": { "C:/fuera/correo-oauth.json": "correo-oauth.json" } } }
+```
+
+El instalador queda en `target/release/bundle/nsis/`. Se instala por usuario en `%LOCALAPPDATA%\Programs\NestAdmin`; los datos van aparte, en `%LOCALAPPDATA%\NestAdmin`. Instalar encima de una versión anterior, que ponía el programa en la carpeta de datos, retira de ahí solo los archivos del programa y reapunta los accesos directos; desinstalar quita el programa y conserva los datos (D52). Incluye PDFium, Tesseract portátil y los datos de idioma. Antes de terminar, ejecuta `nestadmin.exe --preparar`, que instala o arranca Ollama y descarga el modelo `qwen3:8b` si faltan, comprueba la huella SHA-256 y la firma de Ollama Inc. del instalador y solo da la instalación por buena cuando el modelo responde (D36–D38). Al abrir NestAdmin, un Ollama detenido se arranca solo; si falta algo, la ventana muestra el mismo asistente (D39). El asistente avisa si la memoria es menor que la recomendada (D46).
+
+### Cliente OAuth del editor
+
+Gmail y Microsoft 365 necesitan los clientes OAuth de quien distribuye NestAdmin, en `correo-oauth.json` (D43, D51). Ese archivo **nunca entra en Git ni en la CI**: se guarda en la máquina de empaquetado, fuera del repositorio (`.gitignore` lo excluye por si acaso). El formato está en `crates/desktop/correo-oauth.ejemplo.json`.
+
+1. **Google.** En Google Cloud Console, «APIs y servicios» → «Credenciales» → «Crear credenciales» → «ID de cliente de OAuth», tipo **App de escritorio**. Descargue el JSON (`client_secret_….json`): sus valores están en el bloque `installed` (`client_id` y `client_secret`). Un cliente de tipo «Aplicación web» (bloque `web`) no sirve. Este tipo admite cualquier puerto de `127.0.0.1` sin registrar la redirección.
+2. **Microsoft.** En Entra ID, «Registros de aplicaciones» → su aplicación → «Información general»: copie el **Id. de aplicación (cliente)**, un GUID. La aplicación necesita la plataforma «Aplicaciones móviles y de escritorio» con una redirección de bucle local: NestAdmin usa `http://127.0.0.1:<puerto>/` con un puerto variable. Este registro no se ha ensayado aún con Microsoft 365 real (T13).
+3. Genere el archivo fuera del repositorio (basta con uno de los dos proveedores):
+
+   ```powershell
+   powershell -NoProfile -ExecutionPolicy Bypass -File scripts/correo-oauth.ps1 -Google C:\fuera\client_secret_XXXX.json -MicrosoftClientId <GUID> -Salida C:\fuera\correo-oauth.json
+   ```
+
+4. Construya el instalador con él. También puede indicarse con la variable `NESTADMIN_OAUTH_INSTALADOR`:
+
+   ```powershell
+   powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-clean.ps1 -ClienteOAuth C:\fuera\correo-oauth.json
+   ```
+
+El instalador lo copia junto a `nestadmin.exe`. La construcción comprueba que el archivo está fuera del repositorio, que es JSON con al menos un cliente y que el paquete lleva exactamente ese archivo, sin mostrar su contenido. Sin `-ClienteOAuth` el instalador se construye igual. Para desarrollo, `NESTADMIN_MAIL_OAUTH` apunta la aplicación a otro archivo.
 
 ## Verificación local
 
@@ -81,7 +108,8 @@ cargo test --workspace
 Para comprobar que todo esto funciona desde cero, `scripts/build-clean.ps1` clona el repositorio en una carpeta nueva y ejecuta allí todos los pasos, incluido el instalador. Termina comprobando que lo generado queda ignorado por Git y que las pruebas no tocan los datos del usuario (T11):
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-clean.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-clean.ps1                                  # sin cliente OAuth
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-clean.ps1 -ClienteOAuth C:\fuera\correo-oauth.json
 ```
 
 `cargo test --workspace` usa un proveedor de IA simulado. La prueba del flujo completo con el Ollama local se ejecuta aparte: `cargo test -p nestadmin-app --test ollama -- --ignored`. Estas comprobaciones no acreditan por sí solas los criterios de aceptación: cada requisito necesita la evidencia indicada en la matriz. El protocolo para puntuar predicciones está en [evaluation/README.md](evaluation/README.md); las predicciones y resultados locales se guardan fuera del contenido del usuario y están excluidos de Git.
