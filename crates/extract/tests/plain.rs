@@ -2,7 +2,7 @@
 
 use std::path::Path;
 
-use nestadmin_extract::{ExtractError, Extractor, Method, Ocr, Tesseract};
+use nestadmin_extract::{ExtractError, Extraction, Extractor, Method, Ocr, Page, Tesseract};
 
 struct NoOcr;
 
@@ -95,4 +95,31 @@ fn tesseract_without_language_data_or_binary_is_unavailable() {
         .unwrap_err();
     assert_eq!(error.code(), "ocr_unavailable");
     assert!(error.recoverable());
+}
+
+#[test]
+fn each_found_text_names_its_page() {
+    let first = "Proveedor Alfa SL
+Fecha 05/10/2026";
+    let page = |number, offset| Page {
+        number,
+        method: Method::PdfText,
+        chars: 1,
+        confidence: None,
+        low_confidence: false,
+        offset,
+    };
+    let extraction = Extraction {
+        text: format!(
+            "{first}
+
+Total 121,00
+Proveedor Alfa SL"
+        ),
+        pages: vec![page(1, 0), page(2, first.len() + 2)],
+    };
+    assert_eq!(extraction.pages_containing("Total 121,00"), [2]);
+    assert_eq!(extraction.pages_containing("Alfa SL"), [1, 2]);
+    assert!(extraction.pages_containing("No aparece").is_empty());
+    assert!(extraction.pages_containing("  ").is_empty());
 }

@@ -29,7 +29,7 @@ pub trait Ocr: Send + Sync {
     }
 }
 
-/// Tiempo máximo de Tesseract por página (D61). Una página limpia tarda unos segundos; una
+/// Tiempo máximo de Tesseract por página (D66). Una página limpia tarda unos segundos; una
 /// imagen muy ruidosa puede tenerlo minutos ocupado sin obtener nada útil.
 pub const OCR_TIMEOUT: Duration = Duration::from_secs(90);
 

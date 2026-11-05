@@ -14,10 +14,10 @@ use serde::{Deserialize, Serialize};
 pub use ocr::{mean_confidence, Ocr, OcrText, Tesseract};
 
 /// Una página con menos caracteres visibles que este umbral se considera escaneada (D10,
-/// calibrado en D60).
+/// calibrado en D65).
 pub const DEFAULT_MIN_CHARS: usize = 60;
 /// Por debajo de esta confianza media de Tesseract (0–100) la página se marca como OCR de
-/// baja calidad (D61).
+/// baja calidad (D66).
 pub const DEFAULT_MIN_CONFIDENCE: f32 = 85.0;
 /// Resolución con la que se rasteriza una página para el OCR.
 pub const OCR_DPI: f32 = 300.0;
@@ -39,9 +39,37 @@ pub struct Page {
     /// Confianza media del OCR (0–100); solo en páginas con OCR.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub confidence: Option<f32>,
-    /// OCR por debajo del umbral de confianza: el texto puede tener errores (D61).
+    /// OCR por debajo del umbral de confianza: el texto puede tener errores (D66).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub low_confidence: bool,
+    /// Posición (en bytes) en que empieza el texto de la página dentro de `Extraction::text`.
+    /// Sirve para saber de qué página salió cada campo extraído (D49).
+    #[serde(default)]
+    pub offset: usize,
+}
+
+impl Extraction {
+    /// Páginas en que aparece `needle` en el texto extraído, en orden y sin repetir.
+    pub fn pages_containing(&self, needle: &str) -> Vec<usize> {
+        if needle.trim().is_empty() {
+            return Vec::new();
+        }
+        let mut found = Vec::new();
+        for (index, _) in self.text.match_indices(needle) {
+            let page = self
+                .pages
+                .iter()
+                .rev()
+                .find(|p| p.offset <= index)
+                .map(|p| p.number);
+            if let Some(page) = page {
+                if !found.contains(&page) {
+                    found.push(page);
+                }
+            }
+        }
+        found
+    }
 }
 
 impl Page {
@@ -52,6 +80,7 @@ impl Page {
             chars,
             confidence: None,
             low_confidence: false,
+            offset: 0,
         }
     }
 
@@ -62,6 +91,7 @@ impl Page {
             chars,
             confidence,
             low_confidence: confidence.is_some_and(|c| c < min),
+            offset: 0,
         }
     }
 }

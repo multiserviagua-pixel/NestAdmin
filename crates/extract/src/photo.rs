@@ -1,6 +1,6 @@
 //! Imágenes de una página (foto de móvil o escaneo en JPG/PNG): se endereza según la
 //! orientación EXIF, se pasa a gris, se lleva a una resolución útil para Tesseract y se
-//! reconoce como una página escaneada (D62).
+//! reconoce como una página escaneada (D67).
 
 use std::path::Path;
 
@@ -10,10 +10,10 @@ use image::{DynamicImage, GrayImage, ImageDecoder, ImageReader};
 use crate::{visible_chars, ExtractError, Extraction, Ocr, Page};
 
 /// Lado mayor máximo que se entrega al OCR. Una foto de móvil de 12–50 Mpx se reduce a este
-/// tamaño (equivale a un A4 a 300 ppp): el OCR tarda menos y no pierde calidad (D62).
+/// tamaño (equivale a un A4 a 300 ppp): el OCR tarda menos y no pierde calidad (D67).
 pub const MAX_LONG_SIDE: u32 = 3508;
 /// Por debajo de este lado mayor la imagen se amplía (un A4 a unos 150 ppp): con poca
-/// resolución Tesseract pierde caracteres (D62).
+/// resolución Tesseract pierde caracteres (D67).
 pub const MIN_LONG_SIDE: u32 = 1754;
 /// Ampliación máxima de una imagen pequeña.
 const MAX_UPSCALE: u32 = 3;

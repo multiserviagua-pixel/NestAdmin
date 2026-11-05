@@ -138,6 +138,10 @@ fn text_scanned_and_mixed_pdfs_use_the_right_method() {
         .unwrap();
     let methods: Vec<_> = mixed.pages.iter().map(|p| p.method).collect();
     assert_eq!(methods, [Method::PdfText, Method::Ocr]);
+    // Cada página sabe dónde empieza su texto: el mismo dato aparece en las dos (D49).
+    assert_eq!(mixed.pages[0].offset, 0);
+    assert!(mixed.pages[1].offset > 0);
+    assert_eq!(mixed.pages_containing("F-2026-077"), [1, 2]);
 }
 
 struct FailingOcr(Option<&'static str>);
@@ -287,7 +291,7 @@ fn packaged_tesseract_reads_a_phone_photo_from_an_install_folder() {
     }
 }
 
-/// D60: algunos escáneres añaden a la página escaneada un sello de texto (fecha, «página 1
+/// D65: algunos escáneres añaden a la página escaneada un sello de texto (fecha, «página 1
 /// de 1», el nombre de la aplicación). Con el umbral anterior de 20 caracteres esa página se
 /// tomaba como texto y no se hacía OCR; con el actual se reconoce la factura.
 #[test]

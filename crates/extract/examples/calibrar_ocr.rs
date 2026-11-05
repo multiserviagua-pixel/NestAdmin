@@ -1,4 +1,4 @@
-//! Calibración del OCR con facturas sintéticas (D60–D62). Genera facturas inventadas, las
+//! Calibración del OCR con facturas sintéticas (D65–D67). Genera facturas inventadas, las
 //! convierte en escaneos o fotos degradados (baja resolución, ruido, inclinación, desenfoque,
 //! JPEG, foto de móvil con orientación EXIF) y las pasa por el extractor con el Tesseract
 //! empaquetado en `vendor/tesseract` (el mismo que copia el instalador, D38). Informa de la
@@ -522,7 +522,7 @@ fn main() {
     let mut rng = Rng(0x00C0_FFEE_2026_1105);
     let invoices: Vec<Invoice> = (0..count).map(|i| invoice(&mut rng, i)).collect();
 
-    // Umbral de caracteres (D60): páginas con capa de texto frente a sellos y marcas de
+    // Umbral de caracteres (D65): páginas con capa de texto frente a sellos y marcas de
     // agua que algunos escáneres añaden a una página escaneada.
     println!("\n## Caracteres visibles de la capa de texto\n");
     let mut text_chars = Vec::new();

@@ -1,6 +1,6 @@
 # Evidencia T04 (parcial): texto, PDF, PDF escaneado y fotos con OCR local
 
-Cubre R04 con documentos sintéticos generados en las propias pruebas (no hay documentos de ejemplo en el repositorio) y una medición local con una foto real, de la que solo se registran métricas agregadas. La extracción está en `crates/extract`: texto plano UTF-8; PDF mediante PDFium (D09) y, por cada página con menos de 60 caracteres visibles (D60), rasterizado a 300 ppp y OCR con Tesseract 5 como proceso local con `spa+eng` (D10); y fotos o escaneos `.jpg`, `.jpeg` y `.png` de una página, enderezados según su EXIF y llevados a una resolución útil antes del OCR (D62). Cada página con OCR lleva la confianza media de Tesseract y, por debajo de 85, la marca `low_confidence`, que la revisión muestra como «OCR de baja calidad» (D61). La capa de aplicación ejecuta la extracción en `Job::run`, fuera del cerrojo, antes de llamar al modelo.
+Cubre R04 con documentos sintéticos generados en las propias pruebas (no hay documentos de ejemplo en el repositorio) y una medición local con una foto real, de la que solo se registran métricas agregadas. La extracción está en `crates/extract`: texto plano UTF-8; PDF mediante PDFium (D09) y, por cada página con menos de 60 caracteres visibles (D65), rasterizado a 300 ppp y OCR con Tesseract 5 como proceso local con `spa+eng` (D10); y fotos o escaneos `.jpg`, `.jpeg` y `.png` de una página, enderezados según su EXIF y llevados a una resolución útil antes del OCR (D67). Cada página con OCR lleva la confianza media de Tesseract y, por debajo de 85, la marca `low_confidence`, que la revisión muestra como «OCR de baja calidad» (D66). La capa de aplicación ejecuta la extracción en `Job::run`, fuera del cerrojo, antes de llamar al modelo.
 
 Si una página falla (o el OCR no reconoce nada, o tarda más de 90 s), el documento entero falla con el motivo y un código: nunca se pasa al modelo una extracción incompleta.
 
@@ -35,7 +35,7 @@ cargo test -p nestadmin-app --test ollama -- --ignored --nocapture --test-thread
 
 `crates/extract/examples/calibrar_ocr.rs` genera facturas inventadas (proveedor, número, fecha, conceptos e importes en formato español, en Helvetica, Times o Courier de 10 a 14 puntos), las rasteriza con PDFium y las degrada; cada imagen pasa por el extractor de la aplicación con el Tesseract empaquetado. Un campo cuenta como encontrado si su valor exacto aparece en el texto (sin tener en cuenta los espacios); los seis campos son número, proveedor, fecha, base, IVA y total. Generador determinista: las mismas cifras en cada ejecución salvo los tiempos.
 
-### Umbral de página escaneada (D60)
+### Umbral de página escaneada (D65)
 
 | Página | Caracteres visibles | Umbral 20 | Umbral 60 |
 | --- | --- | --- | --- |
@@ -47,7 +47,7 @@ cargo test -p nestadmin-app --test ollama -- --ignored --nocapture --test-thread
 
 `a_scanned_page_with_a_short_text_stamp_still_goes_through_ocr` reproduce el caso de 33 caracteres con PDFium real: con 20 la página queda como texto; con el valor por defecto pasa por OCR y se recuperan número, proveedor y total.
 
-### OCR por condición (D61, D62)
+### OCR por condición (D66, D67)
 
 | Condición | Confianza media | Mínima | Campos encontrados | Facturas completas | Tiempo medio |
 | --- | --- | --- | --- | --- | --- |
@@ -66,9 +66,9 @@ cargo test -p nestadmin-app --test ollama -- --ignored --nocapture --test-thread
 | móvil 2 Mpx, EXIF 6, q60 | 69,8 | 0,0 | 12/36 (33 %) | 0/6 | 1,4 s |
 | móvil 12 Mpx sin EXIF (girada) | 34,9 | 28,2 | 0/36 (0 %) | 0/6 | 1,9 s |
 
-Tiempos de la última ejecución (en ejecuciones con el equipo cargado por otras compilaciones fueron de 1,4 a 11 s por página). Con ruido σ=45 Tesseract no lee nada: sin límite tardó 178 s por página en una ejecución anterior; ahora cada página se corta a los 90 s con `ocr_failed` (D61), y alguna falla antes por no reconocer texto. La ampliación de D62 mantiene el 100 % de campos hasta 75 ppp. La condición «sin EXIF» genera la foto igual que «móvil 12 Mpx, EXIF 6», pero sin la etiqueta de orientación. Una confianza mínima de 0,0 corresponde a una página que falló (`ocr_failed`).
+Tiempos de la última ejecución (en ejecuciones con el equipo cargado por otras compilaciones fueron de 1,4 a 11 s por página). Con ruido σ=45 Tesseract no lee nada: sin límite tardó 178 s por página en una ejecución anterior; ahora cada página se corta a los 90 s con `ocr_failed` (D66), y alguna falla antes por no reconocer texto. La ampliación de D67 mantiene el 100 % de campos hasta 75 ppp. La condición «sin EXIF» genera la foto igual que «móvil 12 Mpx, EXIF 6», pero sin la etiqueta de orientación. Una confianza mínima de 0,0 corresponde a una página que falló (`ocr_failed`).
 
-### Umbral de confianza (D61)
+### Umbral de confianza (D66)
 
 Una página es «incompleta» si le falta al menos uno de los seis campos (25 de 84).
 
@@ -97,7 +97,7 @@ El 2026-11-05 se probó una foto de factura hecha con móvil que el usuario dej�
 | Métrica | Resultado |
 | --- | --- |
 | Archivo | JPEG de 3,6 MB, 4000×2252 px, orientación EXIF «girar 90°» |
-| Imagen entregada al OCR | 1975×3508 px (enderezada y reducida, D62) |
+| Imagen entregada al OCR | 1975×3508 px (enderezada y reducida, D67) |
 | Tiempo de extracción | 7,1–16,8 s en tres ejecuciones (variable por la carga del equipo) |
 | Caracteres reconocidos | 2109 |
 | Confianza media | 71,5 → marcada como OCR de baja calidad |
@@ -105,7 +105,7 @@ El 2026-11-05 se probó una foto de factura hecha con móvil que el usuario dej�
 | Sin aplicar el EXIF (imagen tal como se guardó) | confianza 30,2; solo aparece un importe |
 | Girada 180° o 90° más | 32,3 y 76,4; la de 76,4 pierde la palabra «factura» |
 
-La foto mostró el problema que D62 corrige: el móvil guarda la imagen apaisada y la orientación en EXIF; sin aplicarla, el OCR no lee nada útil. El caso sintético equivalente es la condición «móvil 12 Mpx, EXIF 6» (y su contraste «sin EXIF»), y en CI `exif_orientation_of_a_phone_photo_is_applied_before_ocr` y `the_ocr_receives_the_upright_normalized_image`. La confianza de 71,5 en una foto real frente a 90 en las sintéticas indica que los escaneos sintéticos son más fáciles que una foto real: con un solo documento no se puede generalizar.
+La foto mostró el problema que D67 corrige: el móvil guarda la imagen apaisada y la orientación en EXIF; sin aplicarla, el OCR no lee nada útil. El caso sintético equivalente es la condición «móvil 12 Mpx, EXIF 6» (y su contraste «sin EXIF»), y en CI `exif_orientation_of_a_phone_photo_is_applied_before_ocr` y `the_ocr_receives_the_upright_normalized_image`. La confianza de 71,5 en una foto real frente a 90 en las sintéticas indica que los escaneos sintéticos son más fáciles que una foto real: con un solo documento no se puede generalizar.
 
 ## Pruebas registradas
 
@@ -119,7 +119,7 @@ La foto mostró el problema que D62 corrige: el móvil guarda la imagen apaisada
 | `photo.rs` (6 pruebas, siempre en CI) | EXIF 6 endereza la foto antes del OCR; reducción de fotos grandes y ampliación de escaneos pequeños; confianza y `low_confidence` en el resultado y en el JSON; imagen dañada o inexistente → `document_unreadable`; OCR vacío → `ocr_failed`; reglas de `Tesseract::locate`. Superadas. |
 | Pruebas unitarias de `ocr.rs` (2, siempre en CI) | Confianza media ponderada del TSV; un proceso que no termina a tiempo se mata y devuelve «agotado». Superadas. |
 | `text_scanned_and_mixed_pdfs_use_the_right_method` | PDF con texto → `pdf_text`; página escaneada → `ocr` con confianza y sin marca de baja calidad, y el OCR recupera número, proveedor, fecha y total; PDF mixto → `[pdf_text, ocr]`. Superada. |
-| `a_scanned_page_with_a_short_text_stamp_still_goes_through_ocr` | Ver D60. Superada. |
+| `a_scanned_page_with_a_short_text_stamp_still_goes_through_ocr` | Ver D65. Superada. |
 | `packaged_tesseract_reads_a_phone_photo_from_an_install_folder` | Ver D38. Superada. |
 | `ocr_failure_never_returns_a_partial_extraction` | En un PDF mixto, un fallo del OCR en la página 2 o un OCR sin texto devuelve `ocr_failed` con la página y ninguna extracción. Superada. |
 | `damaged_and_blank_pdfs_are_explicit_errors` | PDF dañado → `document_unreadable`; página en blanco → `empty_document`. Superada. |
@@ -131,7 +131,7 @@ La foto mostró el problema que D62 corrige: el móvil guarda la imagen apaisada
 
 ## Pendiente
 
-- Medir con más documentos reales (solo se ha probado una foto); los umbrales de D60–D62 pueden cambiar.
+- Medir con más documentos reales (solo se ha probado una foto); los umbrales de D65–D67 pueden cambiar.
 - PDF protegido con contraseña: el código lo identifica, pero no hay un caso de prueba sintético.
 - Las pruebas con PDFium y Tesseract no se ejecutan en CI.
 - Comprobar la aplicación instalada con una foto desde la ventana (T08); aquí se acredita la copia empaquetada en una carpeta con la forma de la instalación, no el instalador.

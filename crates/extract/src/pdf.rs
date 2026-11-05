@@ -73,8 +73,12 @@ pub(crate) fn extract(
         if !text.is_empty() {
             text.push_str("\n\n");
         }
+        let offset = text.len();
         text.push_str(page_text.trim_end());
-        pages.push(page_info);
+        pages.push(Page {
+            offset,
+            ..page_info
+        });
     }
     if pages.is_empty() || visible_chars(&text) == 0 {
         return Err(ExtractError::Empty);
