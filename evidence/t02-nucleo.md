@@ -27,6 +27,14 @@ cargo test -p nestadmin-core --test recovery
 | `changed_content_needs_new_version_and_never_reuses_key` | Cambiar el contenido aprobado exige una versión nueva; no se reutiliza la clave. |
 | `audit_log_does_not_store_action_content` | El historial no guarda el contenido de la acción. |
 | `newer_schema_is_refused` | No se abre una base con un esquema más reciente que el soportado. |
+| `recorded_attempts_survive_restart_and_superseded_actions_are_never_reconciled` | El resultado guardado antes de ejecutar (`record_attempt`, D50) sobrevive al corte y a la recuperación; una acción `superseded` no se reconcilia ni se ejecuta, y sustituirla dos veces deja una sola entrada en el historial. |
+| `reconcile_action_confirms_a_failed_attempt_that_did_happen` | Una acción `failed` cuyo efecto sí ocurrió se confirma con el recibo del conector sin volver a ejecutarla. |
+
+Ejecución con D50, 2026-11-05, mismo equipo: 12 pruebas superadas, 0 fallidas.
+
+## Reproceso en la capa de aplicación (D50)
+
+`cargo test -p nestadmin-app --locked --test reprocess` cubre el reproceso de una tarea cuya acción ya se intentó, con el simulador y con Gmail y Graph simulados, incluidos cortes del proceso (pánico) y reinicios de la aplicación entre medias: no se pide otro texto a la IA, lo ya realizado se completa sin repetirlo y otra versión solo se ejecuta tras comprobar que la anterior no salió. Detalle de escenarios en [la evidencia T13](t13-conectores-correo.md#reproceso-de-un-envío-ya-intentado-d50).
 
 ## Pendiente para completar T02
 

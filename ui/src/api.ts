@@ -87,6 +87,7 @@ export const api = {
   removeMailAccount: (id: string) => invoke<void>("remove_mail_account", { id }),
   addSimulatedMailAccount: () => invoke<MailAccount>("add_simulated_mail_account"),
   approve: (id: number, version: number) => invoke<Task>("approve", { id, version }),
+  confirmNotSent: (id: number) => invoke<Task>("confirm_not_sent", { id }),
   editDraft: (id: number, body: string) => invoke<Task>("edit_draft", { id, body }),
   reject: (id: number) => invoke<Task>("reject", { id }),
   retry: (id: number) => invoke<Task>("retry", { id }),
