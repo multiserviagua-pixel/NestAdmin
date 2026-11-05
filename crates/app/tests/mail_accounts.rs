@@ -575,13 +575,18 @@ fn approved_reply_is_sent_once_through_its_own_account_even_if_the_answer_is_los
     // Las demás cuentas no recibieron nada.
     assert!(app.simulators().0.sent().unwrap().is_empty());
 
-    // Tras reiniciar, reintentar y volver a aprobar: la cuenta que envió confirma por el
-    // estado del borrador y no hay un segundo envío.
+    // Tras reiniciar y reintentar: se reutiliza el texto aprobado (D50), la cuenta que envió
+    // confirma por el estado del borrador y la tarea se completa sin un segundo envío.
     drop(app);
     let mut app = fixture.open();
     app.retry(task.id).unwrap();
     process_all(&mut app);
-    let done = app.approve(task.id, 1).unwrap();
+    let done = app
+        .tasks()
+        .unwrap()
+        .into_iter()
+        .find(|t| t.id == task.id)
+        .unwrap();
     assert_eq!(done.state, TaskState::Completed);
     assert_eq!(done.result.unwrap()["receipt"]["account"], "microsoft-1");
     assert_eq!(fixture.graph.1.lock().unwrap().sends, 1);

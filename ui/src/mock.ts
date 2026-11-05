@@ -379,6 +379,31 @@ task("email", { message_id: "microsoft-1:AAMk-sintetico-2", account: "microsoft-
   review_reason: "ninguna regla activa coincide",
   action: { kind: "send_draft" },
 });
+// Envío reintentado cuyo borrador borró el usuario (D50): se conserva el texto aprobado y hay
+// que confirmar que no se envió antes de preparar uno nuevo.
+task("email", { message_id: "google-1:18c2-sintetico-7", account: "google-1" }, "awaiting_review", {
+  type: "email",
+  version: 1,
+  message: {
+    id: "google-1:18c2-sintetico-7",
+    subject: "Solicitud de duplicado de factura",
+    from: "compras@cliente-delta.test",
+    body: "¿Pueden reenviarnos el duplicado de la factura FS-2026-011?",
+  },
+  category: "solicitud_factura",
+  draft: {
+    to: ["compras@cliente-delta.test"],
+    subject: "Re: Solicitud de duplicado de factura",
+    body: "Buenos días:\n\nAdjuntamos el duplicado de la factura FS-2026-011.\n\nUn saludo.",
+  },
+  provider: "ollama",
+  model: "qwen3:8b",
+  review_reason:
+    "el borrador del intento anterior ya no existe y no consta enviado; confirme que no se envió antes de preparar otro",
+  attempt: { version: 1 },
+  recovery: { version: 1, error: "not_found", needs_confirmation: true },
+  action: { kind: "send_draft" },
+});
 task("invoice", { document: "escaneada.txt" }, "failed", null, {
   code: "unavailable",
   message: "unavailable: no se pudo conectar con Ollama",
@@ -479,9 +504,31 @@ const handlers: Record<string, (a: any, options?: any) => unknown> = {
     const current = t.result?.version ?? 1;
     if (current !== version) throw `el contenido cambió (versión ${current}, se aprobó la ${version}); revíselo de nuevo`;
     const action = t.kind === "invoice" ? "register_invoice" : "send_draft";
+    // Como la aplicación: sin confirmar que el intento anterior no salió, no se envía otro.
+    if (t.result?.recovery?.needs_confirmation) return t;
     audit.push({ task_id: id, action, status: "confirmed", authorization: "aprobación", detail: null });
     t.state = "completed";
     t.result = { ...t.result, receipt: { simulated: true } };
+    return t;
+  },
+  confirm_not_sent: ({ id }) => {
+    const t = reviewable(id);
+    if (!t.result?.attempt) throw `la tarea ${id} no tiene ningún intento anterior`;
+    const action = t.kind === "invoice" ? "register_invoice" : "send_draft";
+    const version = t.result.version ?? 1;
+    audit.push({
+      task_id: id,
+      action,
+      status: "superseded",
+      authorization: "aprobación",
+      detail: `task-${id}/${action}/v${version}: el usuario confirmó que no se realizó`,
+    });
+    const { recovery: _recovery, ...rest } = t.result;
+    t.result = {
+      ...rest,
+      version: version + 1,
+      review_reason: "versión nueva tras confirmar que el intento anterior no se realizó",
+    };
     return t;
   },
   edit_draft: ({ id, body }) => {
@@ -558,6 +605,7 @@ const mutating = new Set([
   "import_file",
   "fetch_mail",
   "approve",
+  "confirm_not_sent",
   "edit_draft",
   "reject",
   "retry",
