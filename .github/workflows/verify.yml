@@ -23,6 +23,9 @@ jobs:
         run: python scripts/check.py
       - name: Test specification checker
         run: python -m unittest discover -s scripts/tests -v
+      # Usa cargo metadata; rustup instala la versión de rust-toolchain.toml.
+      - name: Third-party notices up to date
+        run: python scripts/third_party.py --check
       - name: Test evaluation harness
         run: python -m unittest discover -s evaluation/tests -v
 

@@ -124,6 +124,8 @@ struct Ollama {
     running: bool,
     version: String,
     has_model: bool,
+    /// Digest que Ollama da para el modelo en `/api/tags`.
+    digest: &'static str,
     pull: Pull,
     pulls: u32,
     answer: &'static str,
@@ -145,7 +147,10 @@ fn fake_ollama(state: SharedOllama) -> String {
             ("GET", "/api/version") => json("200 OK", &format!("{{\"version\":\"{}\"}}", s.version)),
             ("GET", "/api/tags") if s.has_model => json(
                 "200 OK",
-                "{\"models\":[{\"name\":\"qwen3:8b\",\"model\":\"qwen3:8b\",\"digest\":\"500a1f067a9f\"}]}",
+                &format!(
+                    "{{\"models\":[{{\"name\":\"qwen3:8b\",\"model\":\"qwen3:8b\",\"digest\":\"{}\"}}]}}",
+                    s.digest
+                ),
             ),
             ("GET", "/api/tags") => json("200 OK", "{\"models\":[]}"),
             ("POST", "/api/pull") => {
@@ -352,6 +357,7 @@ fn scenario(running: bool, exe: bool, version: &str, has_model: bool) -> Scenari
         running,
         version: version.into(),
         has_model,
+        digest: "500a1f067a9f",
         pull: Pull::Success,
         pulls: 0,
         answer: "listo",
@@ -383,6 +389,7 @@ fn scenario(running: bool, exe: bool, version: &str, has_model: bool) -> Scenari
         file_name: "OllamaSetup-0.40.14.exe".into(),
         sha256: sha256(&installer_bytes()),
     };
+    config.model_digest = Some("500a1f067a9f".into());
     config.retry_delay = Duration::from_millis(10);
     config.start_timeout = Duration::from_secs(3);
     config.verify_timeout = Duration::from_secs(5);
@@ -469,7 +476,27 @@ fn t08b_01_clean_machine_installs_everything_and_ends_ready() {
         ("0.40.14", true, "listo")
     );
     assert_eq!(report.model_digest.as_deref(), Some("500a1f067a9f"));
+    assert_eq!(report.model_pinned, Some(true));
     assert_eq!(s.setup.check(), Check::Ready);
+}
+
+/// D62: un modelo con otro digest que el evaluado se avisa, pero no bloquea ni se cambia.
+#[test]
+fn model_with_other_digest_is_reported_without_blocking() {
+    let s = scenario(true, true, "0.40.14", true);
+    s.ollama.lock().unwrap().digest = "0123456789ab";
+    let (result, events) = s.prepare();
+    let report = result.unwrap();
+    assert_eq!(report.model_pinned, Some(false));
+    assert_eq!(report.model_digest.as_deref(), Some("0123456789ab"));
+    assert!(events
+        .iter()
+        .any(|e| e.step == Model && e.message.contains("distinto del evaluado")));
+    assert_eq!(
+        s.ollama.lock().unwrap().pulls,
+        0,
+        "no se vuelve a descargar"
+    );
 }
 
 #[test]

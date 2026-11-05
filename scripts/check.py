@@ -8,7 +8,7 @@ ROOT = Path(__file__).resolve().parent.parent
 REQUIRED = (
     "PLAN.md", "AGENTS.md", "README.md", "specs/v1/README.md", "specs/v1/requisitos.md",
     "specs/v1/decisiones.md", "specs/v1/contratos.md", "specs/v1/trazabilidad.md",
-    "specs/v1/tareas.md", "specs/v1/pruebas-instalador.md",
+    "specs/v1/tareas.md", "specs/v1/pruebas-instalador.md", "specs/v1/actualizaciones.md",
 )
 STATUSES = ("Pendiente", "Parcial", "Cumplido")
 ROW = re.compile(r"^\| (R\d{2}) \| (T\d{2}[a-z]?): .+ \| (.+?) \|$", re.MULTILINE)

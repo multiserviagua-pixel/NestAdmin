@@ -75,24 +75,24 @@ pub struct Store {
 
 impl Store {
     pub fn open(path: &Path) -> Result<Self> {
-        Self::init(Connection::open(path)?)
+        Self::init(Connection::open(path)?, Some(path))
     }
 
     pub fn open_in_memory() -> Result<Self> {
-        Self::init(Connection::open_in_memory()?)
+        Self::init(Connection::open_in_memory()?, None)
     }
 
-    fn init(conn: Connection) -> Result<Self> {
+    fn init(conn: Connection, path: Option<&Path>) -> Result<Self> {
         conn.busy_timeout(std::time::Duration::from_secs(5))?;
         // WAL no aplica a bases en memoria; SQLite devuelve entonces "memory".
         let _mode: String = conn.query_row("PRAGMA journal_mode = WAL", [], |r| r.get(0))?;
         conn.execute_batch("PRAGMA foreign_keys = ON; PRAGMA synchronous = FULL;")?;
         let mut store = Self { conn };
-        store.migrate()?;
+        store.migrate(path)?;
         Ok(store)
     }
 
-    fn migrate(&mut self) -> Result<()> {
+    fn migrate(&mut self, path: Option<&Path>) -> Result<()> {
         let current: i64 = self
             .conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))?;
@@ -103,6 +103,9 @@ impl Store {
                 supported,
             });
         }
+        if let (Some(path), true) = (path, current > 0 && current < supported) {
+            self.backup_before_migration(path, current)?;
+        }
         for (index, sql) in MIGRATIONS.iter().enumerate().skip(current as usize) {
             let tx = self.conn.transaction()?;
             tx.execute_batch(sql)?;
@@ -112,11 +115,37 @@ impl Store {
         Ok(())
     }
 
+    /// Copia la base, tal como está, antes de migrarla (D61): `nestadmin.db` con esquema N
+    /// se guarda como `nestadmin.esquema-N.db` junto a ella, para volver a una versión
+    /// anterior de NestAdmin. `VACUUM INTO` da una copia coherente aunque haya WAL. Se escribe
+    /// primero en un temporal y se renombra, así que una copia a medias nunca sustituye a otra.
+    fn backup_before_migration(&self, path: &Path, version: i64) -> Result<()> {
+        let target = backup_path(path, version);
+        let partial = target.with_extension("db.part");
+        let _ = std::fs::remove_file(&partial);
+        self.conn
+            .execute("VACUUM INTO ?1", [partial.to_string_lossy()])?;
+        std::fs::rename(&partial, &target).map_err(CoreError::Backup)?;
+        Ok(())
+    }
+
     pub fn schema_version(&self) -> Result<i64> {
         Ok(self
             .conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))?)
     }
+}
+
+/// Versión de esquema que esta compilación sabe leer y escribir (D03, D61).
+pub const SCHEMA_VERSION: i64 = MIGRATIONS.len() as i64;
+
+/// Ruta de la copia previa a migrar desde el esquema `version` (D61).
+pub fn backup_path(db: &Path, version: i64) -> std::path::PathBuf {
+    let stem = db
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "nestadmin".into());
+    db.with_file_name(format!("{stem}.esquema-{version}.db"))
 }
 
 pub(crate) fn now_ms() -> i64 {

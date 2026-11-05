@@ -19,6 +19,7 @@ Procesar documentos y correo mediante una aplicación Windows propia que prioriz
 - **R11** El desarrollo dispone de instrucciones, verificaciones y pasos reproducibles de construcción y empaquetado; las evidencias de evaluación quedan separadas de los resultados del usuario.
 - **R12** La aceptación incluye mediciones en un equipo equivalente a 16 GB RAM e Intel Core Ultra 5, con proveedor local y externo sobre los mismos casos y condiciones documentadas.
 - **R13** Conectores directos de Microsoft 365 (Graph) y Gmail (API) cumplen el contrato de correo con varias cuentas a la vez. Cada cuenta inicia sesión con OAuth de escritorio y sus credenciales viven en el almacén protegido. El contenido solo viaja entre el equipo y el proveedor de esa cuenta, sin intermediarios. Un envío ocurre una sola vez por clave, también tras una interrupción, y el fallo de una cuenta no detiene a las demás. Cada correo indica la cuenta de la que vino (nombre y dirección del buzón), remitente, destinatarios y fecha de recepción, con «No consta» si falta un dato; la revisión se puede filtrar por cuenta y cada cuenta se puede renombrar sin cambiar su identificador (D48).
+- **R14** Las versiones de la aplicación y de sus componentes están fijadas y su procedencia se verifica (huella o firma). Ninguna actualización se instala sin que el usuario la acepte ni mientras haya una tarea en curso; los datos se migran con una copia previa que permite volver a la versión anterior. Los componentes de terceros que se distribuyen llevan sus avisos de licencia (cambio de alcance del 2026-11-05, D60–D64).
 
 ## Flujos
 
@@ -28,6 +29,7 @@ Procesar documentos y correo mediante una aplicación Windows propia que prioriz
 4. **Proveedor:** local por defecto; el usuario elige expresamente el externo y configura credenciales. Un fallo informa y mantiene la selección; nunca hace transferencia de respaldo. Volver a local es una selección explícita.
 5. **Ventana:** cerrar oculta; un control accesible en el área de notificación permite restaurar o salir por completo. Al salir, persistir el trabajo en curso y permitir recuperación posterior.
 6. **Instalación:** un único instalador copia la aplicación e instala WebView2 si falta → antes de terminar, el asistente de preparación detecta versión compatible de Ollama, servicio y modelo → instala o descarga únicamente lo faltante → muestra progreso, errores y reintentos → verifica una respuesta real del modelo → el instalador termina. Los pasos que necesiten elevación, aceptación o interacción la solicitan cuando corresponda. Al abrir la aplicación se repite una comprobación rápida: si Ollama está detenido se arranca; si falta algo, la ventana muestra el mismo asistente.
+7. **Actualización:** al abrir, la aplicación comprueba la versión mínima de Ollama y el modelo (D39) y, cuando exista el actualizador, si hay una versión nueva de NestAdmin → avisa con la versión y sus notas → el usuario acepta o pospone → se instala solo sin tareas en curso → al arrancar, la nueva versión copia la base y la migra. Nada se actualiza en segundo plano sin aceptación ([política](actualizaciones.md)).
 
 ## Decisiones técnicas y riesgos abiertos
 

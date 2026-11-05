@@ -100,6 +100,7 @@ export interface SetupReport {
   ollama_installed: boolean;
   model: string;
   model_digest: string | null;
+  model_pinned: boolean | null;
   answer: string;
   latency_ms: number;
   memory: Memory;
