@@ -18,7 +18,7 @@ fn pdfium_dir() -> PathBuf {
 
 fn tesseract() -> Box<dyn Ocr> {
     Box::new(Tesseract::new(
-        Tesseract::default_executable(),
+        Tesseract::packaged_executable(&root().join("vendor")),
         root().join("vendor/tessdata"),
     ))
 }
@@ -118,6 +118,10 @@ fn text_scanned_and_mixed_pdfs_use_the_right_method() {
         .unwrap();
     println!("OCR:\n{}", scanned.text);
     assert_eq!(scanned.pages[0].method, Method::Ocr);
+    let confidence = scanned.pages[0]
+        .confidence
+        .expect("Tesseract informa la confianza");
+    assert!(!scanned.pages[0].low_confidence, "confianza {confidence}");
     let ocr = normalized(&scanned.text);
     for expected in ["F-2026-077", "Alba Solar SL", "2026-01-10", "121.00"] {
         assert!(
@@ -202,4 +206,83 @@ fn damaged_and_blank_pdfs_are_explicit_errors() {
         .extract(&save(&blank, dir.path(), "blanco.pdf"))
         .unwrap_err();
     assert_eq!(error.code(), "empty_document");
+}
+
+/// Foto de móvil sintética de la factura de prueba: página sobre fondo oscuro, píxeles
+/// guardados girados como en el sensor y orientación EXIF 6, JPEG de calidad media.
+fn phone_photo_jpeg(pdfium: &Pdfium, path: &Path) {
+    use image::{codecs::jpeg::JpegEncoder, GrayImage, ImageEncoder, Luma};
+    let mut source = pdfium.create_new_pdf().unwrap();
+    add_text_page(&mut source);
+    let page = source
+        .pages()
+        .first()
+        .unwrap()
+        .render_with_config(&PdfRenderConfig::new().scale_page_by_factor(300.0 / 72.0))
+        .unwrap()
+        .as_image()
+        .unwrap()
+        .into_luma8();
+    let mut canvas = GrayImage::from_pixel(page.width() + 400, page.height() + 300, Luma([70]));
+    image::imageops::overlay(&mut canvas, &page, 200, 150);
+    let sensor = image::imageops::rotate270(&image::imageops::blur(&canvas, 0.8));
+    let exif = [
+        0x49, 0x49, 0x2A, 0x00, 0x08, 0x00, 0x00, 0x00, 0x01, 0x00, 0x12, 0x01, 0x03, 0x00, 0x01,
+        0x00, 0x00, 0x00, 0x06, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    ];
+    let mut bytes = Vec::new();
+    let mut encoder = JpegEncoder::new_with_quality(&mut bytes, 80);
+    encoder.set_exif_metadata(exif.to_vec()).unwrap();
+    encoder
+        .write_image(
+            sensor.as_raw(),
+            sensor.width(),
+            sensor.height(),
+            image::ExtendedColorType::L8,
+        )
+        .unwrap();
+    std::fs::write(path, bytes).unwrap();
+}
+
+/// D38: la copia de `vendor/tesseract` (la que lleva el instalador) funciona sola desde una
+/// carpeta de instalación, con un `PATH` sin ningún otro Tesseract, y `Tesseract::locate` la
+/// elige en una aplicación instalada. Reconoce una foto de móvil sintética con EXIF.
+#[test]
+#[ignore = "requiere PDFium y el Tesseract empaquetado (scripts/setup-ocr.ps1)"]
+fn packaged_tesseract_reads_a_phone_photo_from_an_install_folder() {
+    let _guard = PDFIUM_LOCK.lock().unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let app = dir.path().join("NestAdmin");
+    let target = app.join("tesseract");
+    std::fs::create_dir_all(&target).unwrap();
+    for entry in std::fs::read_dir(root().join("vendor/tesseract")).unwrap() {
+        let entry = entry.unwrap();
+        std::fs::copy(entry.path(), target.join(entry.file_name())).unwrap();
+    }
+    let exe = Tesseract::locate(Some(&app), &dir.path().join("sin-vendor"), false);
+    assert_eq!(exe, target.join("tesseract.exe"));
+
+    let photo = dir.path().join("foto.jpg");
+    phone_photo_jpeg(&pdfium(), &photo);
+    let extractor = Extractor::new(
+        pdfium_dir(),
+        Box::new(Tesseract::new(&exe, root().join("vendor/tessdata"))),
+    );
+    let system32 = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".into());
+    let saved = std::env::var_os("PATH");
+    std::env::set_var("PATH", format!(r"{system32}\System32"));
+    let result = extractor.extract(&photo);
+    match saved {
+        Some(path) => std::env::set_var("PATH", path),
+        None => std::env::remove_var("PATH"),
+    }
+    let extraction = result.unwrap();
+    let page = &extraction.pages[0];
+    println!("confianza {:?}", page.confidence);
+    assert_eq!(page.method, Method::Ocr);
+    assert!(!page.low_confidence, "confianza {:?}", page.confidence);
+    let ocr = normalized(&extraction.text);
+    for expected in ["F-2026-077", "Alba Solar SL", "2026-01-10", "121.00"] {
+        assert!(ocr.contains(expected), "falta «{expected}»: {ocr}");
+    }
 }

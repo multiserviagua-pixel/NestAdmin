@@ -665,19 +665,22 @@ fn component_dir(variable: &str, installed: &str, vendor: &str) -> PathBuf {
     }
 }
 
-/// Tesseract viaja en el paquete (D38); en desarrollo sin `vendor/tesseract`, se usa el
-/// instalado en Program Files.
+/// Tesseract viaja en el paquete (D38): la aplicación instalada solo usa
+/// `tesseract\tesseract.exe` junto al ejecutable (`Tesseract::locate`); en desarrollo sin
+/// `vendor/tesseract`, el instalado en Program Files.
 fn tesseract_exe() -> PathBuf {
     if let Some(exe) = std::env::var_os("NESTADMIN_TESSERACT") {
         return PathBuf::from(exe);
     }
-    let packaged =
-        component_dir("NESTADMIN_TESSERACT_DIR", "tesseract", "tesseract").join("tesseract.exe");
-    if packaged.is_file() || !cfg!(debug_assertions) {
-        packaged
-    } else {
-        Tesseract::default_executable()
+    if let Some(dir) = std::env::var_os("NESTADMIN_TESSERACT_DIR") {
+        return PathBuf::from(dir).join("tesseract.exe");
     }
+    let exe = std::env::current_exe().ok();
+    Tesseract::locate(
+        exe.as_deref().and_then(std::path::Path::parent),
+        &PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../vendor"),
+        cfg!(debug_assertions),
+    )
 }
 
 fn pdfium_dir() -> PathBuf {

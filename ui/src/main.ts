@@ -189,7 +189,7 @@ function header() {
   const active = state.settings?.active;
   const fileInput = h("input", {
     type: "file",
-    accept: ".txt,.pdf,text/plain,application/pdf",
+    accept: ".txt,.pdf,.jpg,.jpeg,.png,text/plain,application/pdf,image/jpeg,image/png",
     multiple: true,
     hidden: true,
     onchange: (event) => {
@@ -317,8 +317,9 @@ function invoiceDetail(task: Task) {
   const fields: Record<string, string | null> = r.fields ?? {};
   const issues: string[] = r.issues ?? [];
   const unreadable: Array<{ field: string }> = r.unreadable ?? [];
-  const pages: Array<{ number: number; method: string }> = r.pages ?? [];
+  const pages: Array<{ number: number; method: string; low_confidence?: boolean }> = r.pages ?? [];
   const ocrPages = pages.filter((p) => p.method === "ocr").map((p) => p.number);
+  const lowPages = pages.filter((p) => p.low_confidence).map((p) => p.number);
   return h(
     "article",
     {},
@@ -331,6 +332,9 @@ function invoiceDetail(task: Task) {
           `${pages.length} ${pages.length === 1 ? "página" : "páginas"}`,
           ocrPages.length
             ? ` · texto obtenido por OCR local en ${ocrPages.length === pages.length ? "todas" : `la(s) página(s) ${ocrPages.join(", ")}`}; compruebe los importes con el original`
+            : "",
+          lowPages.length
+            ? ` · OCR de baja calidad en ${lowPages.length === pages.length ? "el documento" : `la(s) página(s) ${lowPages.join(", ")}`}: puede haber errores de lectura`
             : "",
         )
       : null,

@@ -1,20 +1,24 @@
 //! Extracción local de texto (R04, D09, D10): texto plano, PDF con capa de texto mediante
-//! PDFium y páginas escaneadas mediante OCR con Tesseract como proceso local. Nada sale del
-//! equipo. Si una página no se puede leer, el documento entero falla con el motivo: nunca se
+//! PDFium, y páginas escaneadas e imágenes (fotos de factura) mediante OCR con Tesseract como
+//! proceso local. Nada sale del equipo. Si una página no se puede leer, el documento entero falla con el motivo: nunca se
 //! entrega una extracción incompleta como si fuera completa.
 
 mod ocr;
 mod pdf;
+pub mod photo;
 
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-pub use ocr::{Ocr, Tesseract};
+pub use ocr::{mean_confidence, Ocr, OcrText, Tesseract};
 
-/// Una página con menos caracteres visibles que este umbral se considera escaneada (D10).
-/// Valor inicial; se ajustará con pruebas sobre facturas.
-pub const DEFAULT_MIN_CHARS: usize = 20;
+/// Una página con menos caracteres visibles que este umbral se considera escaneada (D10,
+/// calibrado en D60).
+pub const DEFAULT_MIN_CHARS: usize = 60;
+/// Por debajo de esta confianza media de Tesseract (0–100) la página se marca como OCR de
+/// baja calidad (D61).
+pub const DEFAULT_MIN_CONFIDENCE: f32 = 80.0;
 /// Resolución con la que se rasteriza una página para el OCR.
 pub const OCR_DPI: f32 = 300.0;
 
@@ -26,15 +30,43 @@ pub enum Method {
     Ocr,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Page {
     pub number: usize,
     pub method: Method,
     /// Caracteres visibles (sin espacios) obtenidos en la página.
     pub chars: usize,
+    /// Confianza media del OCR (0–100); solo en páginas con OCR.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confidence: Option<f32>,
+    /// OCR por debajo del umbral de confianza: el texto puede tener errores (D61).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub low_confidence: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+impl Page {
+    pub(crate) fn text(number: usize, method: Method, chars: usize) -> Self {
+        Self {
+            number,
+            method,
+            chars,
+            confidence: None,
+            low_confidence: false,
+        }
+    }
+
+    pub(crate) fn ocr(number: usize, chars: usize, confidence: Option<f32>, min: f32) -> Self {
+        Self {
+            number,
+            method: Method::Ocr,
+            chars,
+            confidence,
+            low_confidence: confidence.is_some_and(|c| c < min),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Extraction {
     pub text: String,
     pub pages: Vec<Page>,
@@ -78,6 +110,9 @@ impl ExtractError {
     }
 }
 
+/// Extensiones de imagen admitidas (fotos o escaneos de una sola página).
+pub const IMAGE_EXTENSIONS: [&str; 3] = ["jpg", "jpeg", "png"];
+
 pub fn visible_chars(text: &str) -> usize {
     text.chars().filter(|c| !c.is_whitespace()).count()
 }
@@ -87,6 +122,7 @@ pub struct Extractor {
     pdfium_dir: PathBuf,
     ocr: Box<dyn Ocr>,
     min_chars: usize,
+    min_confidence: f32,
 }
 
 impl Extractor {
@@ -95,6 +131,7 @@ impl Extractor {
             pdfium_dir: pdfium_dir.into(),
             ocr,
             min_chars: DEFAULT_MIN_CHARS,
+            min_confidence: DEFAULT_MIN_CONFIDENCE,
         }
     }
 
@@ -103,7 +140,18 @@ impl Extractor {
         self
     }
 
-    /// Extrae el texto según la extensión del archivo: `.txt` o `.pdf`.
+    pub fn with_min_confidence(mut self, min_confidence: f32) -> Self {
+        self.min_confidence = min_confidence;
+        self
+    }
+
+    /// Motor de OCR configurado.
+    pub fn ocr(&self) -> &dyn Ocr {
+        self.ocr.as_ref()
+    }
+
+    /// Extrae el texto según la extensión del archivo: `.txt`, `.pdf` o imagen (`.jpg`,
+    /// `.jpeg`, `.png`).
     pub fn extract(&self, path: &Path) -> Result<Extraction, ExtractError> {
         let extension = path
             .extension()
@@ -112,7 +160,16 @@ impl Extractor {
             .unwrap_or_default();
         match extension.as_str() {
             "txt" => plain_text(path),
-            "pdf" => pdf::extract(&self.pdfium_dir, self.ocr.as_ref(), self.min_chars, path),
+            "pdf" => pdf::extract(
+                &self.pdfium_dir,
+                self.ocr.as_ref(),
+                self.min_chars,
+                self.min_confidence,
+                path,
+            ),
+            ext if IMAGE_EXTENSIONS.contains(&ext) => {
+                photo::extract(self.ocr.as_ref(), self.min_confidence, path)
+            }
             "" => Err(ExtractError::Unsupported("archivo sin extensión".into())),
             other => Err(ExtractError::Unsupported(format!(".{other}"))),
         }
@@ -129,10 +186,6 @@ fn plain_text(path: &Path) -> Result<Extraction, ExtractError> {
     }
     Ok(Extraction {
         text,
-        pages: vec![Page {
-            number: 1,
-            method: Method::PlainText,
-            chars,
-        }],
+        pages: vec![Page::text(1, Method::PlainText, chars)],
     })
 }

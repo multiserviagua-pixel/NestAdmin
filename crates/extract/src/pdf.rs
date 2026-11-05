@@ -32,6 +32,7 @@ pub(crate) fn extract(
     pdfium_dir: &Path,
     ocr: &dyn Ocr,
     min_chars: usize,
+    min_confidence: f32,
     path: &Path,
 ) -> Result<Extraction, ExtractError> {
     let pdfium = pdfium(pdfium_dir)?;
@@ -47,8 +48,9 @@ pub(crate) fn extract(
             .text()
             .map(|t| t.all())
             .map_err(|e| ExtractError::Unreadable(format!("página {number}: {e}")))?;
-        let (page_text, method) = if visible_chars(&page_text) >= min_chars {
-            (page_text, Method::PdfText)
+        let (page_text, page_info) = if visible_chars(&page_text) >= min_chars {
+            let chars = visible_chars(&page_text);
+            (page_text, Page::text(number, Method::PdfText, chars))
         } else {
             let image = scratch.path().join(format!("pagina-{number}.png"));
             page.render_with_config(&PdfRenderConfig::new().scale_page_by_factor(OCR_DPI / 72.0))
@@ -63,18 +65,16 @@ pub(crate) fn extract(
                     page: number,
                     message: format!("no se pudo guardar la imagen ({e})"),
                 })?;
-            (ocr.recognize(&image, number)?, Method::Ocr)
+            let recognized = ocr.recognize_page(&image, number)?;
+            let chars = visible_chars(&recognized.text);
+            let info = Page::ocr(number, chars, recognized.confidence, min_confidence);
+            (recognized.text, info)
         };
-        let chars = visible_chars(&page_text);
         if !text.is_empty() {
             text.push_str("\n\n");
         }
         text.push_str(page_text.trim_end());
-        pages.push(Page {
-            number,
-            method,
-            chars,
-        });
+        pages.push(page_info);
     }
     if pages.is_empty() || visible_chars(&text) == 0 {
         return Err(ExtractError::Empty);

@@ -326,7 +326,7 @@ const handlers: Record<string, (a: any, options?: any) => unknown> = {
   tasks: () => structuredClone(tasks),
   import_file: (bytes: Uint8Array, options?: { headers: Record<string, string> }) => {
     const name = decodeURIComponent(options?.headers["x-nestadmin-name"] ?? "");
-    if (!/\.(txt|pdf)$/i.test(name)) throw `«${name}»: solo se admiten archivos .txt y .pdf`;
+    if (!/\.(txt|pdf|jpe?g|png)$/i.test(name)) throw `«${name}»: solo se admiten archivos .txt, .pdf y fotos .jpg o .png`;
     if (bytes.length === 0) throw `«${name}» está vacío`;
     return task("invoice", { document: name }, "queued", null);
   },

@@ -246,7 +246,7 @@ impl App {
         self.store_document(name, "txt", text.as_bytes())
     }
 
-    /// Encola un archivo `.txt` o `.pdf`. Se guarda una copia en los datos locales; la
+    /// Encola un archivo `.txt`, `.pdf` o una imagen (`.jpg`, `.jpeg`, `.png`; D62). Se guarda una copia en los datos locales; la
     /// extracción (con OCR si hace falta) se hace al procesar la tarea.
     pub fn import_file(&mut self, name: &str, bytes: &[u8]) -> AppResult<Task> {
         let extension = Path::new(name)
@@ -254,9 +254,12 @@ impl App {
             .and_then(|e| e.to_str())
             .map(str::to_ascii_lowercase)
             .unwrap_or_default();
-        if extension != "txt" && extension != "pdf" {
+        if extension != "txt"
+            && extension != "pdf"
+            && !nestadmin_extract::IMAGE_EXTENSIONS.contains(&extension.as_str())
+        {
             return Err(AppError::Invalid(format!(
-                "«{name}»: solo se admiten archivos .txt y .pdf"
+                "«{name}»: solo se admiten archivos .txt, .pdf y fotos .jpg o .png"
             )));
         }
         if bytes.is_empty() {

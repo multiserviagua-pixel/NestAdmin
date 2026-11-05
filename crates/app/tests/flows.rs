@@ -89,7 +89,7 @@ fn open(dir: &tempfile::TempDir, provider: Arc<FakeProvider>) -> App {
 }
 
 #[test]
-fn only_text_and_pdf_files_are_imported_and_pdf_failures_are_visible() {
+fn only_text_pdf_and_image_files_are_imported_and_failures_are_visible() {
     let dir = tempfile::tempdir().unwrap();
     let mut app = open(&dir, FakeProvider::new());
     for (name, bytes) in [
@@ -113,6 +113,19 @@ fn only_text_and_pdf_files_are_imported_and_pdf_failures_are_visible() {
     assert_eq!(
         (error.code.as_str(), error.recoverable),
         ("pdf_unavailable", true)
+    );
+    assert!(failed.result.is_none());
+
+    // Las fotos se admiten (D62) y van al OCR; una imagen ilegible falla sin resultado.
+    let photo = app
+        .import_file("Foto.JPG", b"\xFF\xD8\xFF no es JPEG")
+        .unwrap();
+    let failed = app.process_next().unwrap().unwrap();
+    assert_eq!(failed.id, photo.id);
+    let error = failed.error.unwrap();
+    assert_eq!(
+        (error.code.as_str(), error.recoverable),
+        ("document_unreadable", false)
     );
     assert!(failed.result.is_none());
 
