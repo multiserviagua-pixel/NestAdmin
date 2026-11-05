@@ -32,6 +32,34 @@ pub struct Page {
     pub method: Method,
     /// Caracteres visibles (sin espacios) obtenidos en la página.
     pub chars: usize,
+    /// Posición (en bytes) en que empieza el texto de la página dentro de `Extraction::text`.
+    /// Sirve para saber de qué página salió cada campo extraído (D49).
+    #[serde(default)]
+    pub offset: usize,
+}
+
+impl Extraction {
+    /// Páginas en que aparece `needle` en el texto extraído, en orden y sin repetir.
+    pub fn pages_containing(&self, needle: &str) -> Vec<usize> {
+        if needle.trim().is_empty() {
+            return Vec::new();
+        }
+        let mut found = Vec::new();
+        for (index, _) in self.text.match_indices(needle) {
+            let page = self
+                .pages
+                .iter()
+                .rev()
+                .find(|p| p.offset <= index)
+                .map(|p| p.number);
+            if let Some(page) = page {
+                if !found.contains(&page) {
+                    found.push(page);
+                }
+            }
+        }
+        found
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -133,6 +161,7 @@ fn plain_text(path: &Path) -> Result<Extraction, ExtractError> {
             number: 1,
             method: Method::PlainText,
             chars,
+            offset: 0,
         }],
     })
 }

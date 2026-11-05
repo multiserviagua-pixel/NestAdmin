@@ -88,12 +88,16 @@ impl MailSimulator {
         }
     }
 
-    /// Abre o crea el archivo de estado; si no existe, parte de los mensajes de ejemplo.
+    /// Abre o crea el archivo de estado; si no existe, parte de los mensajes de ejemplo. Un
+    /// estado creado por una versión anterior recibe los ejemplos que le falten y el remitente
+    /// sintético de los ejemplos que no lo tenían (D48); los mensajes cambiados no se tocan.
     pub fn open(path: &Path) -> SimResult<Self> {
-        Ok(Self {
+        let simulator = Self {
             state: SimState::open(path, || MailState::new(sample_messages()))?,
             page_size: DEFAULT_PAGE_SIZE,
-        })
+        };
+        simulator.state.mutate(|s| Ok(((), s.refresh_samples())))?;
+        Ok(simulator)
     }
 
     pub fn with_page_size(mut self, page_size: usize) -> Self {
@@ -257,6 +261,31 @@ impl MailState {
             sent: Vec::new(),
         }
     }
+
+    /// Completa los ejemplos de un estado anterior. Devuelve si cambió algo.
+    fn refresh_samples(&mut self) -> bool {
+        let mut changed = false;
+        for sample in sample_messages() {
+            match self.messages.iter_mut().find(|m| m.id == sample.id) {
+                // Mismo ejemplo de antes, sin remitente: recibe el sintético actual.
+                Some(stored)
+                    if stored.from.is_none()
+                        && sample.from.is_some()
+                        && stored.subject == sample.subject
+                        && stored.body == sample.body =>
+                {
+                    stored.from = sample.from;
+                    changed = true;
+                }
+                Some(_) => {}
+                None => {
+                    self.messages.push(sample);
+                    changed = true;
+                }
+            }
+        }
+        changed
+    }
 }
 
 fn validate_draft(draft: &NewDraft) -> SimResult<()> {
@@ -370,9 +399,17 @@ pub fn sample_messages() -> Vec<Message> {
         message(
             "M-0005",
             Some("Cambio de horario"),
-            None,
+            Some("logistica@transportes-delta.test"),
             "El horario de recogida cambia a partir del lunes.",
             Some("2026-10-06"),
+        ),
+        // Caso de dato ausente a propósito: sin remitente no se puede responder (R06).
+        message(
+            "M-0006",
+            Some("Aviso reenviado sin remitente (prueba de dato ausente)"),
+            None,
+            "Mensaje reenviado sin cabecera de remitente; la respuesta no se puede enviar.",
+            Some("2026-10-07"),
         ),
     ]
 }

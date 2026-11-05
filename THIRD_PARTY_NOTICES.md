@@ -47,7 +47,7 @@ Licencia del proyecto original de cada DLL de `tesseract\`. JBIG-KIT (GPL) y lib
 | `libzstd.dll` | Zstandard | BSD-3-Clause OR GPL-2.0-only |
 | `zlib1.dll` | zlib | Zlib |
 
-## Crates de Rust enlazados en `nestadmin.exe` (283)
+## Crates de Rust enlazados en `nestadmin.exe` (286)
 
 Dependencias normales de `nestadmin-desktop` para `x86_64-pc-windows-msvc`; se excluyen las de compilación y pruebas.
 
@@ -213,6 +213,7 @@ Dependencias normales de `nestadmin-desktop` para `x86_64-pc-windows-msvc`; se e
 | regex | 1.13.1 | MIT OR Apache-2.0 | https://github.com/rust-lang/regex |
 | regex-automata | 0.4.18 | MIT OR Apache-2.0 | https://github.com/rust-lang/regex |
 | regex-syntax | 0.8.11 | MIT OR Apache-2.0 | https://github.com/rust-lang/regex |
+| rfd | 0.17.2 | MIT | https://github.com/PolyMeilex/rfd |
 | ring | 0.17.14 | Apache-2.0 AND ISC | https://github.com/briansmith/ring |
 | rusqlite | 0.41.1 | MIT | https://github.com/rusqlite/rusqlite |
 | rust_decimal | 1.43.0 | MIT | https://github.com/paupino/rust-decimal |
@@ -258,6 +259,8 @@ Dependencias normales de `nestadmin-desktop` para `x86_64-pc-windows-msvc`; se e
 | tauri | 2.12.5 | Apache-2.0 OR MIT | https://github.com/tauri-apps/tauri |
 | tauri-codegen | 2.7.4 | Apache-2.0 OR MIT | https://github.com/tauri-apps/tauri |
 | tauri-macros | 2.7.4 | Apache-2.0 OR MIT | https://github.com/tauri-apps/tauri |
+| tauri-plugin-dialog | 2.8.4 | Apache-2.0 OR MIT | https://github.com/tauri-apps/plugins-workspace |
+| tauri-plugin-fs | 2.7.1 | Apache-2.0 OR MIT | https://github.com/tauri-apps/plugins-workspace |
 | tauri-plugin-single-instance | 2.5.5 | Apache-2.0 OR MIT | https://github.com/tauri-apps/plugins-workspace |
 | tauri-runtime | 2.12.2 | Apache-2.0 OR MIT | https://github.com/tauri-apps/tauri |
 | tauri-runtime-wry | 2.12.3 | Apache-2.0 OR MIT | https://github.com/tauri-apps/tauri |

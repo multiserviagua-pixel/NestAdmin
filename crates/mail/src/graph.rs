@@ -30,6 +30,21 @@ impl Graph {
     pub fn tokens(&self) -> &TokenSource {
         self.api.tokens()
     }
+
+    /// Dirección del buzón (`/me`: `mail` o, si falta, `userPrincipalName`); `None` si la
+    /// respuesta no trae ninguna (D48).
+    pub fn address(&self) -> MailResult<Option<String>> {
+        let url = self
+            .api
+            .url(&["me"], &[("$select", "mail,userPrincipalName")]);
+        let me = self.api.call(Method::Get, &url, None)?;
+        Ok(["mail", "userPrincipalName"]
+            .iter()
+            .filter_map(|key| me.get(*key).and_then(Value::as_str))
+            .map(str::trim)
+            .find(|a| a.contains('@'))
+            .map(str::to_owned))
+    }
 }
 
 fn address(value: &Value) -> Option<String> {
