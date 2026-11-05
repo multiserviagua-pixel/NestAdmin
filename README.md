@@ -41,7 +41,7 @@ cd crates/desktop
 ..\..\ui\node_modules\.bin\tauri dev
 ```
 
-La ventana usa los datos de `%LOCALAPPDATA%\NestAdmin`; para probar sin tocarlos, defina antes `$env:NESTADMIN_DATA_DIR` con otra carpeta. Cerrar la ventana la oculta: para salir, use «Salir de NestAdmin por completo» en el icono del área de notificación. Se importan archivos `.txt` y `.pdf`; las páginas escaneadas pasan por OCR local, y la revisión indica en qué páginas se usó.
+La ventana usa los datos de `%LOCALAPPDATA%\NestAdmin`; para probar sin tocarlos, defina antes `$env:NESTADMIN_DATA_DIR` con otra carpeta. Cerrar la ventana la oculta: para salir, use «Salir de NestAdmin por completo» en el icono del área de notificación. Se importan archivos `.txt`, `.pdf` y fotos `.jpg` o `.png`; las páginas escaneadas y las fotos pasan por OCR local, y la revisión indica en qué páginas se usó y si su calidad es baja.
 
 Para ver solo la interfaz en un navegador, con datos sintéticos simulados: `npm run dev --prefix ui` y abrir `http://localhost:5173`. `?preparar` imita el modo del instalador y `?ram=12` u `?ram=8`, un equipo con poca memoria.
 

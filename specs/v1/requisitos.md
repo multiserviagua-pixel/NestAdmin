@@ -9,7 +9,7 @@ Procesar documentos y correo mediante una aplicación Windows propia que prioriz
 - **R01** La ventana Tauri usa WebView2 y tiene identidad visual propia; cerrarla oculta la ventana y mantiene el trabajo. Una acción identificable termina el programa completamente.
 - **R02** El servicio local conserva tareas y resultados, muestra estado, incidencias y pendientes, y recupera tareas interrumpidas sin repetir acciones externas ya confirmadas.
 - **R03** Ollama con Qwen3 8B es la selección inicial. Groq es una opción explícita mediante el mismo contrato. Un error local nunca provoca un cambio automático ni envío de contenido a la nube.
-- **R04** Texto, PDF con texto y PDF escaneado se procesan; el OCR se ejecuta localmente. Los fallos se comunican sin presentar una extracción incompleta como completa.
+- **R04** Texto, PDF con texto, PDF escaneado y fotos o escaneos en imagen (JPG, PNG; D62) se procesan; el OCR se ejecuta localmente. Los fallos se comunican sin presentar una extracción incompleta como completa.
 - **R05** Se extraen campos de factura con ausencia explícita, se comprueban importes mediante aritmética decimal y se señalan posibles duplicados sin descartarlos silenciosamente.
 - **R06** Los simuladores permiten consultar mensajes, crear borradores y registrar facturas mediante interfaces reemplazables; no acceden a cuentas reales.
 - **R07** Enviar y registrar requieren revisión por defecto. Solo una regla concreta, activa y aplicable permite automatizar; cada decisión y acción queda en historial visible.

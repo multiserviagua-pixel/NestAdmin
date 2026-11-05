@@ -18,7 +18,7 @@ pub use ocr::{mean_confidence, Ocr, OcrText, Tesseract};
 pub const DEFAULT_MIN_CHARS: usize = 60;
 /// Por debajo de esta confianza media de Tesseract (0–100) la página se marca como OCR de
 /// baja calidad (D61).
-pub const DEFAULT_MIN_CONFIDENCE: f32 = 80.0;
+pub const DEFAULT_MIN_CONFIDENCE: f32 = 85.0;
 /// Resolución con la que se rasteriza una página para el OCR.
 pub const OCR_DPI: f32 = 300.0;
 

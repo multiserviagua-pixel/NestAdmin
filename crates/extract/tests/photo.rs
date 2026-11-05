@@ -117,7 +117,7 @@ fn large_photos_are_reduced_and_small_scans_enlarged() {
         normalize(GrayImage::new(2480, 3508)).dimensions(),
         (2480, 3508)
     );
-    assert!(MIN_LONG_SIDE < MAX_LONG_SIDE);
+    const { assert!(MIN_LONG_SIDE < MAX_LONG_SIDE) };
 }
 
 #[test]

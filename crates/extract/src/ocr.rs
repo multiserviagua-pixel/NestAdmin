@@ -1,8 +1,10 @@
 //! OCR local. `Tesseract` ejecuta el binario empaquetado como proceso hijo, sin red; el trait
 //! permite sustituirlo en pruebas.
 
+use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Command, ExitStatus, Stdio};
+use std::time::{Duration, Instant};
 
 use crate::ExtractError;
 
@@ -27,10 +29,15 @@ pub trait Ocr: Send + Sync {
     }
 }
 
+/// Tiempo máximo de Tesseract por página (D61). Una página limpia tarda unos segundos; una
+/// imagen muy ruidosa puede tenerlo minutos ocupado sin obtener nada útil.
+pub const OCR_TIMEOUT: Duration = Duration::from_secs(90);
+
 pub struct Tesseract {
     executable: PathBuf,
     tessdata: PathBuf,
     languages: String,
+    timeout: Duration,
 }
 
 impl Tesseract {
@@ -39,7 +46,13 @@ impl Tesseract {
             executable: executable.into(),
             tessdata: tessdata.into(),
             languages: "spa+eng".into(),
+            timeout: OCR_TIMEOUT,
         }
+    }
+
+    pub fn with_timeout(mut self, timeout: Duration) -> Self {
+        self.timeout = timeout;
+        self
     }
 
     /// Ubicación habitual del instalador de UB Mannheim en Windows. Solo para desarrollo:
@@ -101,7 +114,7 @@ impl Tesseract {
             // Texto y TSV (con la confianza por palabra) en una sola pasada.
             .args(["-c", "tessedit_create_txt=1", "-c", "tessedit_create_tsv=1"])
             .stdin(Stdio::null())
-            .stdout(Stdio::piped())
+            .stdout(Stdio::null())
             .stderr(Stdio::piped());
         #[cfg(windows)]
         {
@@ -110,15 +123,29 @@ impl Tesseract {
             const CREATE_NO_WINDOW: u32 = 0x0800_0000;
             command.creation_flags(CREATE_NO_WINDOW);
         }
-        let output = command.output().map_err(|e| {
-            ExtractError::OcrUnavailable(format!("no se pudo ejecutar Tesseract ({})", e.kind()))
-        })?;
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
+        let (status, stderr) = match run_with_timeout(&mut command, self.timeout) {
+            Ok(Some(finished)) => finished,
+            Ok(None) => {
+                return Err(ExtractError::OcrFailed {
+                    page,
+                    message: format!(
+                        "Tesseract no terminó en {} s; la imagen puede ser ilegible",
+                        self.timeout.as_secs()
+                    ),
+                })
+            }
+            Err(e) => {
+                return Err(ExtractError::OcrUnavailable(format!(
+                    "no se pudo ejecutar Tesseract ({})",
+                    e.kind()
+                )))
+            }
+        };
+        if !status.success() {
             let message = stderr.lines().last().unwrap_or("sin detalle").trim();
             return Err(ExtractError::OcrFailed {
                 page,
-                message: format!("Tesseract terminó con {}: {message}", output.status),
+                message: format!("Tesseract terminó con {status}: {message}"),
             });
         }
         let read = |extension: &str| {
@@ -144,6 +171,43 @@ impl Ocr for Tesseract {
     fn recognize_page(&self, image: &Path, page: usize) -> Result<OcrText, ExtractError> {
         self.run(image, page)
     }
+}
+
+/// Ejecuta el proceso con un límite de tiempo. `Ok(None)` si se agotó: el proceso se termina
+/// y no deja nada en marcha.
+pub fn run_with_timeout(
+    command: &mut Command,
+    timeout: Duration,
+) -> std::io::Result<Option<(ExitStatus, String)>> {
+    let mut child = command.spawn()?;
+    // stderr se lee en otro hilo para que un proceso que escriba mucho no se bloquee.
+    let reader = child.stderr.take().map(|mut stderr| {
+        std::thread::spawn(move || {
+            let mut bytes = Vec::new();
+            let _ = stderr.read_to_end(&mut bytes);
+            String::from_utf8_lossy(&bytes).into_owned()
+        })
+    });
+    let deadline = Instant::now() + timeout;
+    let status = loop {
+        if let Some(status) = child.try_wait()? {
+            break Some(status);
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            break None;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    // Si se agotó el tiempo no se espera al lector: un nieto del proceso podría mantener
+    // abierta la tubería.
+    Ok(status.map(|status| {
+        let stderr = reader
+            .and_then(|handle| handle.join().ok())
+            .unwrap_or_default();
+        (status, stderr)
+    }))
 }
 
 /// Confianza media de las palabras del TSV de Tesseract, ponderada por sus caracteres
@@ -173,6 +237,30 @@ pub fn mean_confidence(tsv: &str) -> Option<f32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(windows)]
+    #[test]
+    fn a_process_that_does_not_finish_in_time_is_killed() {
+        let mut slow = Command::new("ping");
+        slow.args(["-n", "30", "127.0.0.1"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped());
+        let start = Instant::now();
+        let result = run_with_timeout(&mut slow, Duration::from_millis(500)).unwrap();
+        assert!(result.is_none());
+        assert!(start.elapsed() < Duration::from_secs(10));
+
+        let mut quick = Command::new("cmd");
+        quick
+            .args(["/C", "echo aviso 1>&2"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped());
+        let (status, stderr) = run_with_timeout(&mut quick, Duration::from_secs(20))
+            .unwrap()
+            .unwrap();
+        assert!(status.success());
+        assert!(stderr.contains("aviso"));
+    }
 
     #[test]
     fn confidence_is_weighted_by_word_length_and_ignores_non_words() {

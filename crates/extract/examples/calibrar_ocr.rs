@@ -21,7 +21,9 @@ use std::time::Instant;
 
 use image::codecs::jpeg::JpegEncoder;
 use image::{GrayImage, ImageEncoder, Luma};
-use nestadmin_extract::{Extraction, Extractor, Method, Tesseract, DEFAULT_MIN_CHARS};
+use nestadmin_extract::{
+    Extraction, Extractor, Method, Tesseract, DEFAULT_MIN_CHARS, DEFAULT_MIN_CONFIDENCE,
+};
 use pdfium_render::prelude::*;
 
 fn root() -> PathBuf {
@@ -57,7 +59,7 @@ fn eur(cents: u64) -> String {
     let units = (cents / 100).to_string();
     let mut grouped = String::new();
     for (i, c) in units.chars().enumerate() {
-        if i > 0 && (units.len() - i) % 3 == 0 {
+        if i > 0 && (units.len() - i).is_multiple_of(3) {
             grouped.push('.');
         }
         grouped.push(c);
@@ -381,6 +383,46 @@ fn mean(values: impl Iterator<Item = f64>) -> f64 {
 /// Métricas agregadas de una imagen local: nunca imprime su texto.
 fn measure_local(extractor: &Extractor, path: &Path) {
     println!("\n## Imagen local (solo métricas agregadas)\n");
+    if let Ok(mut decoder) = image::ImageReader::open(path)
+        .and_then(|r| r.with_guessed_format())
+        .map_err(image::ImageError::IoError)
+        .and_then(|r| r.into_decoder())
+    {
+        use image::ImageDecoder;
+        let original = decoder.dimensions();
+        let orientation = decoder.orientation().ok();
+        let prepared = nestadmin_extract::photo::prepare(path).map(|i| i.dimensions());
+        println!(
+            "- Archivo: {} KB; píxeles {}×{}; orientación EXIF {:?}; al OCR {:?}",
+            std::fs::metadata(path).map_or(0, |m| m.len() / 1024),
+            original.0,
+            original.1,
+            orientation,
+            prepared.ok()
+        );
+    }
+    // Confianza con la imagen girada otros 90°, 180° y 270°: indica si la orientación
+    // elegida es la buena.
+    if let Ok(upright) = nestadmin_extract::photo::prepare(path) {
+        let dir = tempfile::tempdir().unwrap();
+        for (degrees, image) in [
+            (90, image::imageops::rotate90(&upright)),
+            (180, image::imageops::rotate180(&upright)),
+            (270, image::imageops::rotate270(&upright)),
+        ] {
+            let png = dir.path().join(format!("giro-{degrees}.png"));
+            image.save(&png).unwrap();
+            match extractor.ocr().recognize_page(&png, 1) {
+                Ok(r) => println!(
+                    "- Girada {degrees}° más: confianza {:?}; caracteres {}; {}",
+                    r.confidence,
+                    nestadmin_extract::visible_chars(&r.text),
+                    field_shapes(&r.text)
+                ),
+                Err(e) => println!("- Girada {degrees}° más: {}", e.code()),
+            }
+        }
+    }
     let start = Instant::now();
     let result = extractor.extract(path);
     let seconds = start.elapsed().as_secs_f64();
@@ -388,46 +430,52 @@ fn measure_local(extractor: &Extractor, path: &Path) {
         Err(e) => println!("- Error: {} ({})", e.code(), seconds),
         Ok(extraction) => {
             let page = &extraction.pages[0];
-            let text = extraction.text.to_lowercase();
-            let has = |pred: &dyn Fn(&str) -> bool| text.split_whitespace().any(pred);
-            let date = has(&|w| {
-                let parts: Vec<&str> = w
-                    .trim_matches(|c: char| !c.is_ascii_digit())
-                    .split(['/', '-', '.'])
-                    .collect();
-                parts.len() == 3 && parts.iter().all(|p| p.chars().all(|c| c.is_ascii_digit()))
-            });
-            let amount = has(&|w| {
-                let w = w.trim_matches(|c: char| !c.is_ascii_digit());
-                w.len() >= 4
-                    && w.chars()
-                        .all(|c| c.is_ascii_digit() || c == ',' || c == '.')
-                    && w.chars().rev().nth(2).is_some_and(|c| c == ',' || c == '.')
-            });
-            let nif = has(&|w| {
-                let w: String = w.chars().filter(|c| c.is_ascii_alphanumeric()).collect();
-                w.len() == 9
-                    && w.chars().filter(|c| c.is_ascii_digit()).count() >= 7
-                    && w.chars().any(|c| c.is_ascii_alphabetic())
-            });
-            let invoice_word = text.contains("factura");
-            let total_word = text.contains("total");
             println!(
                 "- Tiempo: {seconds:.1} s; caracteres: {}; confianza media: {}; baja confianza: {}",
                 page.chars,
                 page.confidence.map_or("—".into(), |c| format!("{c:.1}")),
                 if page.low_confidence { "sí" } else { "no" },
             );
-            println!(
-                "- Palabra «factura»: {}; «total»: {}; fecha: {}; importe con decimales: {}; NIF/CIF: {}",
-                yes(invoice_word),
-                yes(total_word),
-                yes(date),
-                yes(amount),
-                yes(nif)
-            );
+            println!("- {}", field_shapes(&extraction.text));
         }
     }
+}
+
+/// Si el texto contiene campos con forma de factura, sin mostrar ningún valor.
+fn field_shapes(text: &str) -> String {
+    let text = text.to_lowercase();
+    let has = |pred: &dyn Fn(&str) -> bool| text.split_whitespace().any(pred);
+    let date = has(&|w| {
+        let parts: Vec<&str> = w
+            .trim_matches(|c: char| !c.is_ascii_digit())
+            .split(['/', '-', '.'])
+            .collect();
+        parts.len() == 3
+            && parts
+                .iter()
+                .all(|p| !p.is_empty() && p.chars().all(|c| c.is_ascii_digit()))
+    });
+    let amount = has(&|w| {
+        let w = w.trim_matches(|c: char| !c.is_ascii_digit());
+        w.len() >= 4
+            && w.chars()
+                .all(|c| c.is_ascii_digit() || c == ',' || c == '.')
+            && w.chars().rev().nth(2).is_some_and(|c| c == ',' || c == '.')
+    });
+    let nif = has(&|w| {
+        let w: String = w.chars().filter(|c| c.is_ascii_alphanumeric()).collect();
+        w.len() == 9
+            && w.chars().filter(|c| c.is_ascii_digit()).count() >= 7
+            && w.chars().any(|c| c.is_ascii_alphabetic())
+    });
+    format!(
+        "palabra «factura»: {}; «total»: {}; fecha: {}; importe con decimales: {}; NIF/CIF: {}",
+        yes(text.contains("factura")),
+        yes(text.contains("total")),
+        yes(date),
+        yes(amount),
+        yes(nif)
+    )
 }
 
 fn yes(value: bool) -> &'static str {
@@ -602,6 +650,17 @@ fn main() {
             all_incomplete - caught,
         );
     }
-    let by_condition = |c: &str| samples.iter().filter(move |s| s.condition == c).count();
-    debug_assert!(by_condition("limpia 300 ppp") == count);
+    println!("\nIncompletas sin marcar con el umbral por defecto ({DEFAULT_MIN_CONFIDENCE:.0}):\n");
+    for s in samples
+        .iter()
+        .filter(|s| incomplete(s) && s.confidence.unwrap_or(0.0) >= DEFAULT_MIN_CONFIDENCE)
+    {
+        println!(
+            "- {}: confianza {:.1}, {} de {} campos",
+            s.condition,
+            s.confidence.unwrap_or(0.0),
+            s.fields_found,
+            s.fields_total
+        );
+    }
 }

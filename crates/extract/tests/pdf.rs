@@ -286,3 +286,48 @@ fn packaged_tesseract_reads_a_phone_photo_from_an_install_folder() {
         assert!(ocr.contains(expected), "falta «{expected}»: {ocr}");
     }
 }
+
+/// D60: algunos escáneres añaden a la página escaneada un sello de texto (fecha, «página 1
+/// de 1», el nombre de la aplicación). Con el umbral anterior de 20 caracteres esa página se
+/// tomaba como texto y no se hacía OCR; con el actual se reconoce la factura.
+#[test]
+#[ignore = "requiere PDFium y el Tesseract empaquetado (scripts/setup-ocr.ps1)"]
+fn a_scanned_page_with_a_short_text_stamp_still_goes_through_ocr() {
+    let _guard = PDFIUM_LOCK.lock().unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let pdfium = pdfium();
+    let mut document = pdfium.create_new_pdf().unwrap();
+    add_scanned_page(&pdfium, &mut document);
+    let font = document.fonts_mut().helvetica();
+    let stamp = "Digitalizado con EscanerMovil Gratis";
+    document
+        .pages_mut()
+        .first()
+        .unwrap()
+        .objects_mut()
+        .create_text_object(
+            PdfPoints::new(40.0),
+            PdfPoints::new(20.0),
+            stamp,
+            font,
+            PdfPoints::new(7.0),
+        )
+        .unwrap();
+    let path = save(&document, dir.path(), "sello.pdf");
+    assert!(nestadmin_extract::visible_chars(stamp) > 20);
+
+    let before = Extractor::new(pdfium_dir(), tesseract()).with_min_chars(20);
+    assert_eq!(
+        before.extract(&path).unwrap().pages[0].method,
+        Method::PdfText
+    );
+
+    let extraction = Extractor::new(pdfium_dir(), tesseract())
+        .extract(&path)
+        .unwrap();
+    assert_eq!(extraction.pages[0].method, Method::Ocr);
+    let ocr = normalized(&extraction.text);
+    for expected in ["F-2026-077", "Alba Solar SL", "121.00"] {
+        assert!(ocr.contains(expected), "falta «{expected}»: {ocr}");
+    }
+}
