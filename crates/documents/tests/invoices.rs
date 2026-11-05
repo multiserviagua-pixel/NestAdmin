@@ -121,10 +121,10 @@ fn unreadable_amount_or_date_is_a_field_error_not_a_zero() {
         Some("A-1"),
         None,
         Some("100.00"),
-        Some("21,00"),
+        Some("2l,00"),
         Some("121.00"),
     ]);
-    source.tax = Some(Evidenced::with_evidence("21,00".to_owned(), "IVA: 21,00"));
+    source.tax = Some(Evidenced::with_evidence("2l,00".to_owned(), "IVA: 2l,00"));
     let inv = Invoice::from_raw(&source);
     // El campo ilegible no consta y queda anotado con su literal; el resto se conserva.
     assert_eq!(inv.tax, None);
@@ -134,8 +134,8 @@ fn unreadable_amount_or_date_is_a_field_error_not_a_zero() {
         vec![FieldError {
             field: "tax".to_owned(),
             kind: FieldErrorKind::InvalidAmount,
-            literal: "21,00".to_owned(),
-            evidence: Some("IVA: 21,00".to_owned()),
+            literal: "2l,00".to_owned(),
+            evidence: Some("IVA: 2l,00".to_owned()),
         }]
     );
     assert_eq!(inv.unreadable[0].code(), "invalid_amount");
@@ -150,7 +150,7 @@ fn unreadable_amount_or_date_is_a_field_error_not_a_zero() {
         None,
         None,
         Some("31/01/2026"),
-        Some("1.000,00"),
+        Some("1.0OO,00"),
         None,
         Some("abc"),
     ]));
@@ -196,7 +196,7 @@ fn unreadable_field_still_registers_and_detects_duplicates() {
         Some("X-1"),
         Some("2026-05-01"),
         Some("10.00"),
-        Some("2,10"),
+        Some("2,l0"),
         Some("12.10"),
     ]));
     let report = process_invoice(&mut registry, "b", &garbled);
@@ -214,7 +214,7 @@ fn unreadable_field_still_registers_and_detects_duplicates() {
     );
     assert_eq!(report.unreadable.len(), 1);
     assert_eq!(report.unreadable[0].field, "tax");
-    assert_eq!(report.unreadable[0].literal, "2,10");
+    assert_eq!(report.unreadable[0].literal, "2,l0");
     assert_eq!(registry.len(), 2);
 
     // Las facturas posteriores también se comparan con la de campo ilegible.
@@ -265,8 +265,16 @@ fn currency_is_kept_with_evidence_and_never_assumed() {
     assert_eq!(inv.currency, None);
 
     // Un importe ilegible no sirve como indicio de moneda.
-    let inv = Invoice::from_raw(&raw([None, None, None, None, None, Some("12,10 EUR")]));
+    let inv = Invoice::from_raw(&raw([None, None, None, None, None, Some("12,l0 EUR")]));
     assert_eq!(inv.currency, None);
+
+    // Un importe en formato español sirve como indicio, igual que con punto (D48).
+    let inv = Invoice::from_raw(&raw([None, None, None, None, None, Some("12,10 €")]));
+    assert_eq!(
+        inv.currency,
+        Some(Evidenced::with_evidence("EUR".to_owned(), "12,10 €"))
+    );
+    assert_eq!(inv.total.as_ref().unwrap().value, Decimal::new(1210, 2));
 
     // Otra moneda es un error del campo, nunca una conversión ni un euro supuesto.
     let mut source = raw([None, None, None, None, None, Some("12.10 EUR")]);
@@ -662,4 +670,84 @@ fn evaluation_corpus_labels_match_expected_in_order() {
     }
     assert_eq!(checked.len(), 10);
     assert_eq!(registry.len(), 10, "ninguna factura se descarta");
+}
+
+#[test]
+fn spanish_amounts_are_read_without_review() {
+    // El caso de la prueba real con la versión instalada (2026-11-04): importes con coma.
+    let inv = invoice([
+        Some("Suministros Ejemplo S.L."),
+        Some("F-2026-0142"),
+        Some("2026-10-28"),
+        Some("200,00"),
+        Some("42,00"),
+        Some("242,00 €"),
+    ]);
+    assert!(inv.recovered.is_empty());
+    assert_eq!(validate(&inv), vec![]);
+    assert_eq!(inv.total.as_ref().unwrap().value, Decimal::new(24200, 2));
+}
+
+#[test]
+fn doubtful_amount_is_proposed_and_flagged_for_review() {
+    let mut source = raw([
+        Some("Ejemplo SL"),
+        Some("R-7"),
+        Some("2026-10-28"),
+        Some("1.000"),
+        Some("210,00"),
+        Some("1.210,00"),
+    ]);
+    source.subtotal = Some(Evidenced::with_evidence(
+        "1.000".to_owned(),
+        "Base imponible 1.000",
+    ));
+    let inv = Invoice::from_raw(&source);
+    // El valor propuesto se usa para comprobar la suma, pero queda marcado para revisión.
+    assert_eq!(
+        inv.subtotal.as_ref().unwrap().value,
+        Decimal::new(100000, 2)
+    );
+    assert!(inv.unreadable.is_empty());
+    assert_eq!(inv.recovered.len(), 1);
+    let r = &inv.recovered[0];
+    assert_eq!(
+        (
+            r.field.as_str(),
+            r.literal.as_str(),
+            r.value.as_str(),
+            r.reason.code()
+        ),
+        ("subtotal", "1.000", "1000.00", "ambiguous_separator")
+    );
+    assert_eq!(r.evidence.as_deref(), Some("Base imponible 1.000"));
+    assert_eq!(validate(&inv), vec![Issue::AmountToReview]);
+
+    // Si además la suma no cuadra, se dicen las dos cosas.
+    let inv = Invoice::from_raw(&raw([
+        None,
+        None,
+        None,
+        Some("100"),
+        Some("21,00"),
+        Some("122,00"),
+    ]));
+    assert_eq!(
+        validate(&inv),
+        vec![Issue::AmountToReview, Issue::TotalMismatch]
+    );
+
+    // Lo irrecuperable sigue siendo ilegible y no se propone nada.
+    let inv = Invoice::from_raw(&raw([None, None, None, None, None, Some("doscientos")]));
+    assert!(inv.recovered.is_empty());
+    assert_eq!(inv.total, None);
+    assert_eq!(inv.unreadable[0].code(), "invalid_amount");
+
+    // Un importe recuperado no sirve de indicio de moneda.
+    let inv = Invoice::from_raw(&raw([None, None, None, None, None, Some("242 €")]));
+    assert_eq!(inv.currency, None);
+    assert_eq!(inv.recovered[0].value, "242.00");
+    let report = process_invoice(&mut DuplicateRegistry::default(), "x", &inv);
+    assert_eq!(report.recovered, inv.recovered);
+    assert!(report.issues.contains(&Issue::AmountToReview));
 }

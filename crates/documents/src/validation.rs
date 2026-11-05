@@ -5,7 +5,7 @@ use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 
 use crate::duplicates::{DuplicateCandidate, DuplicateRegistry};
-use crate::invoice::{FieldError, Invoice};
+use crate::invoice::{FieldError, Invoice, RecoveredAmount};
 
 /// Etiquetas de incidencia del contrato del evaluador.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -16,6 +16,8 @@ pub enum Issue {
     /// Base + IVA distinto del total, con aritmética decimal exacta.
     TotalMismatch,
     PossibleDuplicate,
+    /// Algún importe se recuperó como propuesta y debe confirmarlo una persona (D49).
+    AmountToReview,
 }
 
 impl Issue {
@@ -25,6 +27,7 @@ impl Issue {
             Self::MissingTotal => "missing_total",
             Self::TotalMismatch => "total_mismatch",
             Self::PossibleDuplicate => "possible_duplicate",
+            Self::AmountToReview => "amount_to_review",
         }
     }
 }
@@ -34,6 +37,9 @@ impl Issue {
 /// concreto queda en `Invoice::unreadable` y en `ValidationReport::unreadable`.
 pub fn validate(invoice: &Invoice) -> Vec<Issue> {
     let mut issues = Vec::new();
+    if !invoice.recovered.is_empty() {
+        issues.push(Issue::AmountToReview);
+    }
     if invoice.tax.is_none() {
         issues.push(Issue::MissingTax);
     }
@@ -68,6 +74,8 @@ pub struct ValidationReport {
     pub duplicates: Vec<DuplicateCandidate>,
     /// Campos presentes pero ilegibles; vacío si todos se interpretaron.
     pub unreadable: Vec<FieldError>,
+    /// Importes recuperados como propuesta (D49); vacío si todos se leyeron sin duda.
+    pub recovered: Vec<RecoveredAmount>,
 }
 
 /// Valida la factura, busca posibles duplicados entre las ya procesadas y la añade al
@@ -88,5 +96,6 @@ pub fn process_invoice(
         issues,
         duplicates,
         unreadable: invoice.unreadable.clone(),
+        recovered: invoice.recovered.clone(),
     }
 }

@@ -53,7 +53,19 @@ const ISSUE_LABEL: Record<string, string> = {
   missing_total: "Falta el total",
   total_mismatch: "Base + IVA no coincide con el total",
   possible_duplicate: "Posible duplicado",
+  amount_to_review: "Importe dudoso: confírmelo con el documento",
 };
+
+const RECOVERY_LABEL: Record<string, string> = {
+  no_decimals: "sin decimales",
+  one_decimal: "con un solo decimal",
+  ambiguous_separator: "el punto o la coma podría ser de miles",
+};
+
+const AMOUNT_LABEL: Record<string, string> = { subtotal: "Base imponible", tax: "IVA", total: "Total" };
+
+/** Facturas con importes dudosos ya avisadas en esta sesión, para no repetir el aviso. */
+const announced = new Set<number>();
 
 const CATEGORY_LABEL: Record<string, string> = {
   solicitud_factura: "Solicitud de factura",
@@ -113,7 +125,9 @@ const state = {
   mail: null as MailView | null,
   // Dirección del inicio de sesión en curso, por si el navegador no se abrió solo.
   signInUrl: null as string | null,
-  notice: null as { kind: "ok" | "error"; text: string } | null,
+  notice: null as { kind: "ok" | "error" | "warn"; text: string } | null,
+  /** Tareas cuyos importes dudosos ha confirmado la persona antes de aprobar. */
+  amountsChecked: {} as Record<number, boolean>,
   // Borradores editados y aún no guardados, para no perderlos al refrescar.
   drafts: {} as Record<number, string>,
   // Preparación (R08): modo instalador, última comprobación y la ejecución en curso.
@@ -153,6 +167,7 @@ async function refresh(background = false) {
       api.mailAccounts(),
     ]);
     Object.assign(state, { tasks, rules, audit, settings, mail });
+    announceDoubtfulAmounts();
   } catch (error) {
     state.notice = { kind: "error", text: String(error) };
   }
@@ -175,6 +190,16 @@ function safeJson(text: string): Record<string, any> {
 
 function badge(taskState: string) {
   return h("span", { class: `badge state-${taskState}` }, STATE_LABEL[taskState] ?? taskState);
+}
+
+/** Avisa una vez de cada factura que llega con importes dudosos (D49). */
+function announceDoubtfulAmounts() {
+  for (const t of state.tasks) {
+    const message = t.result?.amount_review;
+    if (t.state !== "awaiting_review" || !message || announced.has(t.id)) continue;
+    announced.add(t.id);
+    state.notice = { kind: "warn", text: message };
+  }
 }
 
 function missing() {
@@ -317,6 +342,9 @@ function invoiceDetail(task: Task) {
   const fields: Record<string, string | null> = r.fields ?? {};
   const issues: string[] = r.issues ?? [];
   const unreadable: Array<{ field: string }> = r.unreadable ?? [];
+  const recovered: Array<{ field: string; literal: string; value: string; reason: string }> = r.recovered ?? [];
+  const doubtful = Boolean(r.amount_review);
+  const checked = !doubtful || Boolean(state.amountsChecked[task.id]);
   const pages: Array<{ number: number; method: string }> = r.pages ?? [];
   const ocrPages = pages.filter((p) => p.method === "ocr").map((p) => p.number);
   return h(
@@ -334,7 +362,43 @@ function invoiceDetail(task: Task) {
             : "",
         )
       : null,
-    h("p", { class: "reason" }, `Motivo de la revisión: ${r.review_reason ?? "requiere aprobación"}`),
+    doubtful
+      ? h(
+          "div",
+          { class: "amount-review", role: "alert" },
+          h("strong", {}, "Revise los importes antes de aprobar"),
+          r.document_path ? h("p", { class: "meta" }, "Archivo: ", h("code", {}, r.document_path)) : null,
+          recovered.length
+            ? h(
+                "ul",
+                {},
+                ...recovered.map((a) =>
+                  h(
+                    "li",
+                    {},
+                    `${AMOUNT_LABEL[a.field] ?? a.field}: el documento dice «${a.literal}»; se propone ${a.value} (${RECOVERY_LABEL[a.reason] ?? a.reason}).`,
+                  ),
+                ),
+              )
+            : null,
+          issues.includes("total_mismatch")
+            ? h("p", {}, `Base ${fields.subtotal ?? "?"} + IVA ${fields.tax ?? "?"} no coincide con el total ${fields.total ?? "?"}.`)
+            : null,
+          h(
+            "label",
+            { class: "confirm" },
+            h("input", {
+              type: "checkbox",
+              ...(checked ? { checked: "" } : {}),
+              onchange: (e: Event) => {
+                state.amountsChecked[task.id] = (e.target as HTMLInputElement).checked;
+                render();
+              },
+            }),
+            " He comprobado los importes con el documento",
+          ),
+        )
+      : h("p", { class: "reason" }, `Motivo de la revisión: ${r.review_reason ?? "requiere aprobación"}`),
     issues.length
       ? h("ul", { class: "issues" }, ...issues.map((i) => h("li", {}, ISSUE_LABEL[i] ?? i)))
       : h("p", { class: "ok-line" }, "Sin incidencias en los importes."),
@@ -363,6 +427,7 @@ function invoiceDetail(task: Task) {
               {},
               fields[key] ?? missing(),
               unreadable.some((u) => u.field === key) ? h("span", { class: "missing" }, " (ilegible)") : null,
+              recovered.some((a) => a.field === key) ? h("span", { class: "proposed" }, " (propuesta: revísela)") : null,
             ),
           ),
         ),
@@ -373,7 +438,11 @@ function invoiceDetail(task: Task) {
       { class: "buttons" },
       h(
         "button",
-        { class: "primary", onclick: () => void act(() => api.approve(task.id, r.version ?? 1), "Factura registrada en el simulador") },
+        {
+          class: "primary",
+          ...(checked ? {} : { disabled: "", title: "Confirme antes los importes con el documento" }),
+          onclick: () => void act(() => api.approve(task.id, r.version ?? 1), "Factura registrada en el simulador"),
+        },
         "Aprobar y registrar",
       ),
       h("button", { class: "danger", onclick: () => void act(() => api.reject(task.id), "Tarea descartada") }, "Descartar"),

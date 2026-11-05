@@ -264,6 +264,16 @@ const invoiceResult = (document: string, total: string, issues: string[]) => ({
 });
 
 task("invoice", { document: "factura-alfa.txt" }, "awaiting_review", invoiceResult("factura-alfa.txt", "121.00", []));
+task("invoice", { document: "factura-dudosa.txt" }, "awaiting_review", {
+  ...invoiceResult("factura-dudosa.txt", "1210.00", ["amount_to_review"]),
+  fields: { supplier: "Suministros Alfa SL", invoice_number: "FS-2026-015", date: "2026-10-02", subtotal: "1000.00", tax: "210.00", total: "1210.00", currency: "EUR" },
+  document_path: "C:\\Users\\demo\\AppData\\Local\\NestAdmin\\documentos\\1793816133.txt",
+  recovered: [{ field: "subtotal", literal: "1.000", evidence: "1.000", value: "1000.00", reason: "ambiguous_separator" }],
+  amount_review:
+    "Revise los importes en «factura-dudosa.txt», copia en «C:\\Users\\demo\\AppData\\Local\\NestAdmin\\documentos\\1793816133.txt»: Base imponible leído como «1.000», se propone 1000.00 (el punto o la coma podría ser de miles). Compruébelos con el documento; solo se registra con su aprobación.",
+  review_reason:
+    "Revise los importes en «factura-dudosa.txt», copia en «C:\\Users\\demo\\AppData\\Local\\NestAdmin\\documentos\\1793816133.txt»: Base imponible leído como «1.000», se propone 1000.00 (el punto o la coma podría ser de miles). Compruébelos con el documento; solo se registra con su aprobación.",
+});
 task("invoice", { document: "factura-beta.txt" }, "awaiting_review", invoiceResult("factura-beta.txt", "125.00", ["total_mismatch"]));
 task("email", { message_id: "microsoft-1:AAMk-sintetico-2", account: "microsoft-1" }, "awaiting_review", {
   type: "email",

@@ -437,3 +437,85 @@ fn audit_log_records_actions_and_rules() {
         "{actions:?}"
     );
 }
+
+#[test]
+fn doubtful_amounts_ask_for_human_review_with_file_and_amount() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = open(&dir, FakeProvider::new());
+    // Ni siquiera una regla activa que coincida registra una factura con importes dudosos.
+    app.create_rule(
+        "alfa",
+        "register_invoice",
+        &json!({ "supplier": "Alfa SL" }),
+    )
+    .unwrap();
+    app.set_rule_active("alfa", true).unwrap();
+    let before = app.simulators().1.record_count().unwrap();
+
+    // Formato español: se lee sin duda y la regla lo registra.
+    let spanish = json!({
+        "supplier": "Alfa SL", "invoice_number": "F-1", "date": "2026-10-01",
+        "subtotal": "1.000,00", "tax": "210,00", "total": "1.210,00 €",
+    });
+    app.import_document("es.txt", &spanish.to_string()).unwrap();
+    let done = app.process_next().unwrap().unwrap();
+    assert_eq!(done.state, TaskState::Completed);
+    let result = done.result.unwrap();
+    assert_eq!(result["fields"]["total"], "1210.00");
+    assert_eq!(result["amount_review"], Value::Null);
+    assert_eq!(app.simulators().1.record_count().unwrap(), before + 1);
+
+    // «1.000» sin decimales: se propone 1000.00 y se pide revisión con archivo e importe.
+    let doubtful = json!({
+        "supplier": "Alfa SL", "invoice_number": "F-2", "date": "2026-10-02",
+        "subtotal": "1.000", "tax": "210,00", "total": "1.210,00",
+    });
+    app.import_document("dudosa.txt", &doubtful.to_string())
+        .unwrap();
+    let task = app.process_next().unwrap().unwrap();
+    assert_eq!(task.state, TaskState::AwaitingReview);
+    let result = task.result.clone().unwrap();
+    assert_eq!(result["issues"], json!(["amount_to_review"]));
+    assert_eq!(result["fields"]["subtotal"], "1000.00");
+    assert_eq!(
+        result["recovered"],
+        json!([{
+            "field": "subtotal", "literal": "1.000", "evidence": "1.000",
+            "value": "1000.00", "reason": "ambiguous_separator",
+        }])
+    );
+    let path = result["document_path"].as_str().unwrap();
+    assert!(Path::new(path).is_file(), "la copia del documento existe");
+    let reason = result["review_reason"].as_str().unwrap();
+    assert_eq!(reason, result["amount_review"].as_str().unwrap());
+    for expected in [
+        "dudosa.txt",
+        path,
+        "Base imponible",
+        "«1.000»",
+        "1000.00",
+        "su aprobación",
+    ] {
+        assert!(
+            reason.contains(expected),
+            "falta {expected:?} en {reason:?}"
+        );
+    }
+    assert_eq!(app.simulators().1.record_count().unwrap(), before + 1);
+
+    // Una suma que no cuadra también pide revisión con los importes.
+    app.import_document("descuadre.txt", &invoice("Alfa SL", "F-3", "130.00"))
+        .unwrap();
+    let mismatch = app.process_next().unwrap().unwrap();
+    assert_eq!(mismatch.state, TaskState::AwaitingReview);
+    let reason = mismatch.result.unwrap()["review_reason"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert!(reason.contains("base 100.00 + IVA 21.00 no coincide con el total 130.00"));
+
+    // La persona revisa y aprueba: se registra una sola vez con el valor confirmado.
+    let approved = app.approve(task.id, 1).unwrap();
+    assert_eq!(approved.state, TaskState::Completed);
+    assert_eq!(app.simulators().1.record_count().unwrap(), before + 2);
+}

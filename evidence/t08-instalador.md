@@ -73,6 +73,27 @@ El asistente se ha comprobado en el navegador con el servidor simulado, con dato
 
 No se ha recorrido a mano en la ventana instalada.
 
+### Instalación con interfaz en este equipo, sin Ollama ni modelo (T08-01 aproximado)
+
+- Fecha: 2026-11-04, 18:57–19:10. Mismo equipo (Windows 11 Pro 26H2, compilación 26300.9818; 15,5 GB de RAM; WebView2 156.0.4314.58).
+- Antes de instalar se desinstaló Ollama 0.40.14 (su desinstalador, `/VERYSILENT`) y se borraron `%USERPROFILE%\.ollama` (con `qwen3:8b`), `%LOCALAPPDATA%\NestAdmin`, la caché de WebView y las credenciales de prueba. El Tesseract del sistema siguió instalado, pero el paquete trae el suyo.
+- Instalador: `NestAdmin_0.1.0_x64-setup.exe` de `scripts/build-clean.ps1` sobre `main` 7f9a0f4, 48 073 268 bytes, SHA-256 `A3C15A3E…22694`, sin firmar. El usuario lo ejecutó con interfaz; `scripts/t08-registro.ps1` anotó el estado antes y después.
+
+| Paso | Resultado |
+| --- | --- |
+| Instalación y asistente | Una sola ejecución. Copió la aplicación (18:58), descargó e instaló Ollama 0.40.14 (19:02) y `qwen3:8b` (5 225 388 164 bytes, digest `500a1f067a9f`) y borró el instalador descargado de `descargas\`. |
+| Estado después | `nestadmin.exe`, `uninstall.exe`, `pdfium\`, `tessdata\`, `tesseract\` (29 archivos, `eng` y `spa`); NestAdmin 0.1.0 en Aplicaciones y acceso directo en el menú Inicio; Ollama en marcha. |
+| Abrir la aplicación | Ventana principal sin asistente: la comprobación al abrir encontró Ollama y el modelo. Indicador «Local · qwen3:8b». |
+| Documento sintético | Factura `.txt` sintética (200,00 + 42,00 = 242,00 EUR) importada con «Importar documento». Procesada con `qwen3:8b` en 52,2 s y pendiente de revisión, sin datos inventados. Los tres importes salieron ilegibles porque el validador solo admitía punto decimal; se corrigió con D48 y D49. |
+
+Límites de esta ejecución:
+
+- No es un Windows limpio: WebView2, las herramientas de desarrollo y el Tesseract del sistema estaban presentes.
+- Durante la instalación, otra sesión de trabajo lanzó la versión de desarrollo (`tauri dev`) con la misma carpeta de datos. Probablemente creó `nestadmin.db`, `correo\`, `documentos\` y los `simulador-*.json` de las 18:58, así que no cuentan como creados por el instalador.
+- No se anotaron los avisos de SmartScreen ni los mensajes del asistente.
+- `t08-registro.ps1` no terminó solo: `Start-Process -Wait` de PowerShell 5.1 espera también a los procesos hijos, y Ollama quedó en marcha como descendiente del instalador. El estado posterior se tomó con `-Accion Estado`.
+- La comprobación final de `build-clean.ps1` falló al detectar `%LOCALAPPDATA%\NestAdmin`. La creó esa misma versión de desarrollo, no las pruebas; en ejecuciones anteriores la carpeta ya existía y la comprobación no llegaba a aplicarse.
+
 ## Pendiente
 
 - Ensayo de D46 en un equipo real de 8 GB: ver el aviso del asistente y el mensaje de tiempo agotado de una tarea con Ollama.

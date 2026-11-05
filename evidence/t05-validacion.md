@@ -15,9 +15,14 @@ cargo test -p nestadmin-documents --locked
 - Rust 1.99.1 (MSVC), `rust_decimal` 1.43.0
 - Resultado: 18 pruebas superadas (2 unitarias y 16 de integración), 0 fallidas.
 
+Importes en formato español e importes dudosos (D48, D49), 2026-11-05, mismo equipo y versiones: `cargo test -p nestadmin-documents --locked` con 21 pruebas superadas (3 unitarias y 18 de integración), 0 fallidas. En `crates/app`, `doubtful_amounts_ask_for_human_review_with_file_and_amount` comprueba que una regla activa registra la factura con importes españoles, que una con `1.000` queda pendiente con el archivo, la copia guardada y el importe en el motivo, que una suma descuadrada también lo dice, y que tras aprobar se registra una sola vez. La tarjeta de revisión (aviso, archivo, importe propuesto y casilla obligatoria antes de aprobar) se comprobó en el navegador con datos simulados.
+
 | Prueba | Qué comprueba |
 | --- | --- |
-| `amounts_accept_only_two_decimals_with_point` | Importes en euros con punto y dos decimales; coma decimal, miles, otra precisión o texto son `invalid_amount`. |
+| `amounts_accept_point_or_comma_with_two_decimals` | Importes con dos decimales y punto o coma decimal, con miles bien agrupados (D48): `121,00`, `1.210,00`, `1,210.00`, `1 210,00 €`. Lo ambiguo (`1.234`, `121`), los grupos mal formados, mezclas de separadores o texto son `invalid_amount`. |
+| `doubtful_amounts_are_recovered_only_in_known_patterns` | Recuperación de D49: `121` → 121.00, `121,5` → 121.50, `1.234` → 1234.00, cada uno con su motivo; `abc`, `1,21,00` o `1.2345` no se recuperan. |
+| `spanish_amounts_are_read_without_review` | La factura de la prueba real (200,00 + 42,00 = 242,00 €) se lee sin incidencias. |
+| `doubtful_amount_is_proposed_and_flagged_for_review` | Un importe recuperado lleva `amount_to_review` y su literal, evidencia y valor; con suma descuadrada se señalan las dos cosas; lo irrecuperable sigue siendo ilegible; un importe recuperado no indica la moneda. |
 | `dates_must_exist_in_the_calendar` | Fechas ISO con día existente (2024-02-29 válido); cualquier otro formato es `invalid_date`. |
 | `century_leap_year_rule` | Regla secular de bisiestos: 1900-02-29 se rechaza y 2000-02-29 se acepta. |
 | `coherent_invoice_has_no_issues_and_keeps_evidence` | Una factura coherente no tiene incidencias y conserva la evidencia literal. |
