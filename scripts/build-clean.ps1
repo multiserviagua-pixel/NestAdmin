@@ -13,9 +13,43 @@ param(
     [string]$Ref = '',
     # Carpeta nueva donde clonar. Por defecto, una carpeta temporal única.
     [string]$Destination = (Join-Path ([IO.Path]::GetTempPath()) "nestadmin-limpio-$([guid]::NewGuid().ToString('N').Substring(0, 8))"),
-    [switch]$SkipInstaller
+    [switch]$SkipInstaller,
+    # correo-oauth.json del editor (D43, D51), fuera del repositorio. Si se indica, el instalador
+    # lo lleva junto a nestadmin.exe; si no, se construye igual y el correo real queda «no
+    # configurado». Por defecto, la variable de entorno NESTADMIN_OAUTH_INSTALADOR.
+    [string]$ClienteOAuth = $env:NESTADMIN_OAUTH_INSTALADOR
 )
 $ErrorActionPreference = 'Stop'
+
+# Comprueba el archivo antes de clonar nada y prepara, fuera del clon, la configuración de Tauri
+# que lo añade como recurso. Nunca se imprime su contenido.
+$oauthConfig = $null
+if ($ClienteOAuth) {
+    if ($SkipInstaller) { throw '-ClienteOAuth solo tiene sentido al construir el instalador' }
+    if (-not (Test-Path -LiteralPath $ClienteOAuth -PathType Leaf)) { throw "No existe el cliente OAuth: $ClienteOAuth" }
+    $ClienteOAuth = (Resolve-Path -LiteralPath $ClienteOAuth).ProviderPath
+    # Fuera del repositorio de origen (si es local) y de la carpeta del clon.
+    $forbidden = @($Destination)
+    if (Test-Path -LiteralPath $Source) { $forbidden += $Source }
+    foreach ($inside in $forbidden) {
+        $root = [IO.Path]::GetFullPath($inside).TrimEnd('\') + '\'
+        if ($ClienteOAuth.StartsWith($root, [StringComparison]::OrdinalIgnoreCase)) {
+            throw "El cliente OAuth debe estar fuera del repositorio y de la carpeta de construcción: $ClienteOAuth"
+        }
+    }
+    try { $oauth = Get-Content -LiteralPath $ClienteOAuth -Raw -Encoding UTF8 | ConvertFrom-Json }
+    catch { throw "El cliente OAuth no es JSON válido: $ClienteOAuth" }
+    $hasGoogle = $oauth.google -and $oauth.google.client_id -and $oauth.google.client_secret
+    $hasMicrosoft = $oauth.microsoft -and $oauth.microsoft.client_id
+    if (-not ($hasGoogle -or $hasMicrosoft)) {
+        throw 'El cliente OAuth no tiene google.client_id y google.client_secret ni microsoft.client_id (ver README, «Cliente OAuth del editor»)'
+    }
+    if ((Get-Content -LiteralPath $ClienteOAuth -Raw) -match 'PONER-AQUI') {
+        Write-Warning 'El cliente OAuth conserva marcadores PONER-AQUI: esos proveedores figurarán como no configurados.'
+    }
+    # Se escribe al construir el instalador, fuera del clon, y se borra al terminar.
+    $oauthConfig = Join-Path ([IO.Path]::GetTempPath()) "nestadmin-oauth-$([guid]::NewGuid().ToString('N').Substring(0, 8)).json"
+}
 
 $env:Path = [Environment]::GetEnvironmentVariable('Path', 'Machine') + ';' +
     [Environment]::GetEnvironmentVariable('Path', 'User') + ';' +
@@ -75,7 +109,29 @@ try {
     if (-not $SkipInstaller) {
         Invoke-Step 'Instalador (tauri build)' {
             Push-Location crates/desktop
-            try { & ..\..\ui\node_modules\.bin\tauri.cmd build --config tauri.installer.json } finally { Pop-Location }
+            $configs = @('--config', 'tauri.installer.json')
+            if ($oauthConfig) {
+                # Se fusiona con tauri.installer.json: añade un recurso más a bundle.resources.
+                $resource = $ClienteOAuth.Replace('\', '/')
+                $json = @{ bundle = @{ resources = @{ $resource = 'correo-oauth.json' } } } | ConvertTo-Json -Depth 4
+                [IO.File]::WriteAllText($oauthConfig, $json)   # UTF-8 sin BOM: lo exige el lector de Tauri
+                $configs += @('--config', $oauthConfig)
+            }
+            try { & ..\..\ui\node_modules\.bin\tauri.cmd build @configs } finally { Pop-Location }
+        }
+        Invoke-Step 'Cliente OAuth del editor en el paquete' {
+            # Tauri copia los recursos junto al ejecutable compilado: el mismo archivo entra en el
+            # instalador. Sin -ClienteOAuth no debe haber ninguno.
+            $packaged = Join-Path $env:CARGO_TARGET_DIR 'release\correo-oauth.json'
+            if ($oauthConfig) {
+                if (-not (Test-Path $packaged)) { throw 'El paquete no incluye correo-oauth.json' }
+                if ((Get-FileHash $packaged).Hash -ne (Get-FileHash $ClienteOAuth).Hash) { throw 'correo-oauth.json del paquete no coincide con el indicado' }
+                Write-Host 'Incluido correo-oauth.json (no se muestra su contenido).'
+            } else {
+                if (Test-Path $packaged) { throw 'El paquete incluye un correo-oauth.json que no se ha indicado' }
+                Write-Host 'Sin cliente OAuth: el correo real figurará como «no configurado».'
+            }
+            $global:LASTEXITCODE = 0
         }
     }
 
@@ -95,6 +151,7 @@ try {
 } finally {
     Pop-Location
     Remove-Item Env:CARGO_TARGET_DIR -ErrorAction SilentlyContinue
+    if ($oauthConfig) { Remove-Item -LiteralPath $oauthConfig -ErrorAction SilentlyContinue }
 }
 
 Write-Host ""
