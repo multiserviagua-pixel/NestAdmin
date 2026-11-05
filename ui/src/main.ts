@@ -2,7 +2,10 @@ import "./style.css";
 import { api, isPreview, onChanged, onMailSignIn, onSetup, onSetupDone, onStartup } from "./api";
 import type {
   AuditEntry,
+  DocumentOrigin,
   FetchReport,
+  FieldSource,
+  MailOrigin,
   MailAccount,
   MailProviderKind,
   MailView,
@@ -106,6 +109,8 @@ const MAIL_ERROR: Record<string, string> = {
 const state = {
   view: "review" as View,
   selected: null as number | null,
+  // Filtro de la lista de pendientes por origen: "" (todo), "file" o el ID de una cuenta.
+  originFilter: "",
   tasks: [] as Task[],
   rules: [] as Rule[],
   audit: [] as AuditEntry[],
@@ -222,7 +227,30 @@ function header() {
       "div",
       { class: "actions" },
       fileInput,
-      h("button", { class: "primary", onclick: () => fileInput.click() }, "Importar documento"),
+      h(
+        "button",
+        {
+          class: "primary",
+          onclick: () => {
+            // En la aplicación, el selector del sistema da la ruta original (D49); en la vista
+            // previa del navegador solo hay nombre y contenido.
+            if (isPreview) return fileInput.click();
+            void act(async () => {
+              const report = await api.importDialog();
+              if (report.errors.length) throw report.errors.join(" · ");
+              if (report.imported.length)
+                state.notice = {
+                  kind: "ok",
+                  text:
+                    report.imported.length === 1
+                      ? `«${title(report.imported[0]!)}» añadido a la cola`
+                      : `${report.imported.length} documentos añadidos a la cola`,
+                };
+            });
+          },
+        },
+        "Importar documento",
+      ),
       h(
         "button",
         {
@@ -271,9 +299,31 @@ function nav() {
 }
 
 function reviewView() {
-  const pending = state.tasks.filter((t) => t.state === "awaiting_review");
+  const all = state.tasks.filter((t) => t.state === "awaiting_review");
+  // Orígenes presentes en la lista, para el filtro: archivos importados y cada cuenta.
+  const origins = new Map<string, string>();
+  for (const t of all) {
+    const key = originKey(t);
+    if (!origins.has(key)) origins.set(key, key === "file" ? "Archivos importados" : accountShort(taskMailOrigin(t), key));
+  }
+  if (state.originFilter && !origins.has(state.originFilter)) state.originFilter = "";
+  const pending = all.filter((t) => !state.originFilter || originKey(t) === state.originFilter);
   if (state.selected === null || !pending.some((t) => t.id === state.selected)) state.selected = pending[0]?.id ?? null;
   const selected = pending.find((t) => t.id === state.selected);
+  const filter = h(
+    "select",
+    {
+      "aria-label": "Filtrar por origen",
+      onchange: (event) => {
+        state.originFilter = (event.target as HTMLSelectElement).value;
+        render();
+      },
+    },
+    h("option", { value: "" }, `Todos los orígenes (${all.length})`),
+    ...[...origins].map(([key, label]) =>
+      h("option", { value: key, selected: key === state.originFilter }, `${label} (${all.filter((t) => originKey(t) === key).length})`),
+    ),
+  );
   return h(
     "section",
     { class: "split" },
@@ -281,7 +331,8 @@ function reviewView() {
       "div",
       { class: "list" },
       h("h2", {}, "Pendientes de revisión"),
-      pending.length === 0 ? h("p", { class: "empty" }, "No hay nada pendiente. Las tareas nuevas aparecerán aquí.") : null,
+      origins.size > 1 ? h("label", { class: "filter" }, "Origen ", filter) : null,
+      all.length === 0 ? h("p", { class: "empty" }, "No hay nada pendiente. Las tareas nuevas aparecerán aquí.") : null,
       ...pending.map((t) =>
         h(
           "button",
@@ -295,6 +346,7 @@ function reviewView() {
           h("span", { class: "kind" }, t.kind === "invoice" ? "Factura" : "Correo"),
           h("span", { class: "item-title" }, title(t)),
           (t.result?.issues?.length ?? 0) > 0 ? h("span", { class: "warn-dot", title: "Con incidencias" }, "!") : null,
+          h("span", { class: "item-origin" }, itemOrigin(t)),
         ),
       ),
     ),
@@ -319,11 +371,14 @@ function invoiceDetail(task: Task) {
   const unreadable: Array<{ field: string }> = r.unreadable ?? [];
   const pages: Array<{ number: number; method: string }> = r.pages ?? [];
   const ocrPages = pages.filter((p) => p.method === "ocr").map((p) => p.number);
+  const sources: Record<string, FieldSource> = r.sources ?? {};
+  const origin: DocumentOrigin | null = r.origin ?? safeJson(task.input_ref).origin ?? null;
   return h(
     "article",
     {},
     h("h2", {}, title(task)),
     provenance(r),
+    documentOrigin(task, origin),
     pages.length
       ? h(
           "p",
@@ -353,6 +408,7 @@ function invoiceDetail(task: Task) {
       h(
         "tbody",
         {},
+        h("tr", {}, h("th", {}, "Campo"), h("th", {}, "Valor extraído"), h("th", {}, "Dónde aparece en el original")),
         ...Object.keys(FIELD_LABEL).map((key) =>
           h(
             "tr",
@@ -364,6 +420,7 @@ function invoiceDetail(task: Task) {
               fields[key] ?? missing(),
               unreadable.some((u) => u.field === key) ? h("span", { class: "missing" }, " (ilegible)") : null,
             ),
+            h("td", { class: "source" }, fieldSource(fields[key], sources[key], pages.length)),
           ),
         ),
       ),
@@ -398,13 +455,19 @@ function emailDetail(task: Task) {
     h("h2", {}, message.subject ?? h("span", { class: "missing" }, "(sin asunto)")),
     provenance(r),
     h("p", { class: "reason" }, `Motivo de la revisión: ${r.review_reason ?? "requiere aprobación"}`),
-    h("p", { class: "meta" }, "Cuenta: ", accountName(message.id)),
     h(
-      "div",
-      { class: "message" },
-      h("p", { class: "meta" }, "De: ", message.from ?? missing()),
-      h("p", {}, message.body ?? missing()),
+      "dl",
+      { class: "origin" },
+      h("dt", {}, "Cuenta"),
+      h("dd", {}, accountLine(r.origin ?? safeJson(task.input_ref).origin, message.id)),
+      h("dt", {}, "De"),
+      h("dd", {}, message.from ?? missing()),
+      h("dt", {}, "Para"),
+      h("dd", {}, Array.isArray(message.to) && message.to.length ? message.to.join(", ") : missing()),
+      h("dt", {}, "Recibido"),
+      h("dd", {}, message.date ? dateText(message.date) : missing()),
     ),
+    h("div", { class: "message" }, h("p", {}, message.body ?? missing())),
     h("p", {}, "Categoría: ", h("strong", {}, CATEGORY_LABEL[r.category] ?? r.category)),
     h("h3", {}, "Borrador"),
     h("p", { class: "meta" }, "Para: ", recipients.length ? recipients.join(", ") : h("span", { class: "missing" }, "sin destinatario; no se puede enviar")),
@@ -423,7 +486,7 @@ function emailDetail(task: Task) {
               // Si se ha editado, se guarda primero como versión nueva y se aprueba esa.
               if (body.value !== (draft.body ?? "")) version = (await api.editDraft(task.id, body.value)).result?.version;
               await api.approve(task.id, version);
-            }, `Respuesta enviada desde ${accountName(message.id)}`),
+            }, `Respuesta enviada desde ${accountName(message.id, r.origin)}`),
         },
         "Aprobar y enviar",
       ),
@@ -611,16 +674,149 @@ function historyView() {
 
 // ---- Cuentas de correo (R13) ----
 
-function accountOf(messageId: string | undefined): MailAccount | undefined {
-  const prefix = messageId?.includes(":") ? messageId.split(":")[0] : "simulador";
-  return state.mail?.accounts.find((a) => a.id === prefix);
+function accountId(messageId: string | undefined): string {
+  return messageId?.includes(":") ? messageId.split(":")[0]! : "simulador";
 }
 
-function accountName(messageId: string | undefined): string {
-  const account = accountOf(messageId);
-  if (account) return `${account.label} (${PROVIDER_LABEL[account.provider]})`;
-  const prefix = messageId?.includes(":") ? messageId.split(":")[0] : "simulador";
-  return `${prefix} (desconectada)`;
+// Origen de un correo: el guardado en la tarea (D48) o, en tareas anteriores, el de la cuenta
+// actual. El simulador es siempre una cuenta simulada, nunca una cuenta «desconectada».
+function mailOrigin(saved: MailOrigin | null | undefined, messageId: string | undefined): MailOrigin | null {
+  // El nombre actual de la cuenta prevalece (se puede renombrar); el guardado sirve si ya no está.
+  const account = state.mail?.accounts.find((a) => a.id === (saved?.account ?? accountId(messageId)));
+  if (account) return { account: account.id, provider: account.provider, label: account.label, address: account.address };
+  if (saved) return saved;
+  if (accountId(messageId) === "simulador")
+    return { account: "simulador", provider: "simulator", label: "Correo simulado", address: "administracion@nestadmin.test" };
+  return null;
+}
+
+const PROVIDER_SHORT: Record<MailProviderKind, string> = {
+  simulator: "cuenta simulada",
+  google: "Gmail",
+  microsoft: "Outlook",
+};
+
+function accountShort(origin: MailOrigin | null, id: string): string {
+  if (!origin) return `${id} (ya no está en NestAdmin)`;
+  return origin.address ? `${origin.label} · ${origin.address}` : origin.label;
+}
+
+// «Oficina · admin@empresa.test (Gmail)»; la dirección que falta se dice, no se inventa.
+function accountName(messageId: string | undefined, saved?: MailOrigin | null): string {
+  const origin = mailOrigin(saved, messageId);
+  if (!origin) return `${accountId(messageId)} (cuenta quitada de NestAdmin)`;
+  const connected = state.mail?.accounts.some((a) => a.id === origin.account) ?? true;
+  return `${origin.label} · ${origin.address ?? "dirección no consta"} (${PROVIDER_SHORT[origin.provider]}${connected ? "" : "; ya no está en NestAdmin"})`;
+}
+
+function accountLine(saved: MailOrigin | null | undefined, messageId: string | undefined) {
+  const origin = mailOrigin(saved, messageId);
+  if (!origin) return h("span", {}, `${accountId(messageId)} `, h("span", { class: "missing" }, "(cuenta quitada de NestAdmin)"));
+  const connected = state.mail?.accounts.some((a) => a.id === origin.account) ?? true;
+  return h(
+    "span",
+    {},
+    h("strong", {}, origin.label),
+    " · ",
+    origin.address ?? missing(),
+    ` (${PROVIDER_LABEL[origin.provider]}${origin.provider === "simulator" ? ", datos sintéticos" : ""})`,
+    connected ? null : h("span", { class: "missing" }, " · ya no está en NestAdmin"),
+  );
+}
+
+function taskMailOrigin(task: Task): MailOrigin | null {
+  const input = safeJson(task.input_ref);
+  if (task.kind === "invoice") {
+    const origin: DocumentOrigin | undefined = task.result?.origin ?? input.origin;
+    return origin?.kind === "email" ? mailOrigin(origin.account, `${origin.account.account}:`) : null;
+  }
+  const messageId = task.result?.message?.id ?? input.message_id;
+  return mailOrigin(task.result?.origin ?? input.origin, messageId);
+}
+
+// Clave del filtro por origen: "file" para archivos importados o el ID de la cuenta.
+function originKey(task: Task): string {
+  const input = safeJson(task.input_ref);
+  if (task.kind === "invoice") {
+    const origin: DocumentOrigin | undefined = task.result?.origin ?? input.origin;
+    return origin?.kind === "email" ? origin.account.account : "file";
+  }
+  return accountId(task.result?.message?.id ?? input.message_id);
+}
+
+// Segunda línea de cada pendiente: de qué buzón y de quién viene, o de qué archivo.
+function itemOrigin(task: Task): string {
+  const input = safeJson(task.input_ref);
+  if (task.kind === "invoice") {
+    const origin: DocumentOrigin | undefined = task.result?.origin ?? input.origin;
+    if (origin?.kind === "email")
+      return `Adjunto de ${origin.from ?? "remitente no consta"} · ${accountShort(mailOrigin(origin.account, `${origin.account.account}:`), origin.account.account)}`;
+    return origin ? `Archivo importado${origin.imported_at ? ` el ${dateText(origin.imported_at)}` : ""}` : "Archivo importado (origen no registrado)";
+  }
+  const message = task.result?.message ?? input.message ?? {};
+  return `${message.from ?? "Remitente no consta"} → ${accountShort(taskMailOrigin(task), accountId(message.id ?? input.message_id))}`;
+}
+
+function dateText(value: string | number): string {
+  const date = typeof value === "number" ? new Date(value * 1000) : new Date(value);
+  if (Number.isNaN(date.getTime())) return String(value);
+  // Una fecha sin hora (AAAA-MM-DD) se muestra sin hora para no inventarla.
+  if (typeof value === "string" && /^\d{4}-\d{2}-\d{2}$/.test(value)) return date.toLocaleDateString("es-ES", { timeZone: "UTC" });
+  return date.toLocaleString("es-ES", { dateStyle: "medium", timeStyle: "short" });
+}
+
+function fileSize(bytes: number) {
+  return bytes < 1024 ? `${bytes} B` : bytes < 1024 ** 2 ? `${(bytes / 1024).toFixed(1).replace(".", ",")} KB` : `${(bytes / 1024 ** 2).toFixed(1).replace(".", ",")} MB`;
+}
+
+// Origen de un documento (D49): archivo importado o adjunto de un correo, con su huella.
+function documentOrigin(task: Task, origin: DocumentOrigin | null) {
+  const open = h(
+    "button",
+    {
+      onclick: () =>
+        isPreview
+          ? ((state.notice = { kind: "ok", text: "Vista previa: en la aplicación se abriría la copia guardada con el visor del sistema." }), render())
+          : void act(() => api.openOriginal(task.id)),
+    },
+    "Abrir original",
+  );
+  const rows: Array<[string, Child]> = [];
+  if (!origin) {
+    rows.push(["Origen", h("span", { class: "missing" }, "No consta (documento importado antes de registrar el origen)")]);
+  } else if (origin.kind === "file") {
+    rows.push(["Origen", "Archivo importado"]);
+    rows.push(["Archivo", origin.name]);
+    rows.push(["Ruta original", origin.original_path ? h("span", { class: "mono" }, origin.original_path) : missing()]);
+  } else {
+    rows.push(["Origen", "Adjunto de un correo"]);
+    rows.push(["Cuenta", accountLine(origin.account, `${origin.account.account}:`)]);
+    rows.push(["Remitente", origin.from ?? missing()]);
+    rows.push(["Asunto", origin.subject ?? missing()]);
+    rows.push(["Adjunto", origin.attachment ?? missing()]);
+  }
+  if (origin) {
+    rows.push(["Importado", origin.imported_at ? dateText(origin.imported_at) : missing()]);
+    rows.push([
+      "SHA-256",
+      h("span", { class: "mono", title: origin.sha256 }, `${origin.sha256.slice(0, 12)}…`, ` · ${fileSize(origin.size)}`),
+    ]);
+  }
+  return h(
+    "div",
+    { class: "origin-box" },
+    h("dl", { class: "origin" }, ...rows.flatMap(([label, value]) => [h("dt", {}, label), h("dd", {}, value)])),
+    h("div", { class: "buttons" }, open, h("span", { class: "meta" }, "Abre la copia guardada en NestAdmin con el visor del sistema.")),
+  );
+}
+
+// Procedencia de un campo: páginas y línea del texto en que aparece. Si el valor no aparece
+// literalmente (el modelo lo reescribió o el OCR lo leyó distinto), se dice así.
+function fieldSource(value: string | null | undefined, source: FieldSource | undefined, pageCount: number) {
+  if (value == null) return "";
+  if (!source) return h("span", { class: "missing" }, "No localizado en el texto; compruébelo en el original");
+  const where = pageCount > 1 || source.pages.some((p) => p > 1) ? `pág. ${source.pages.join(", ")}` : "en el texto";
+  return h("span", {}, h("strong", {}, where), " · ", h("q", {}, source.line));
 }
 
 function needsAttention(account: MailAccount) {
@@ -709,7 +905,30 @@ function mailView() {
               return h(
                 "tr",
                 {},
-                h("td", {}, h("strong", {}, a.label), h("div", { class: "meta mono" }, a.id)),
+                h(
+                  "td",
+                  {},
+                  h("strong", {}, a.label),
+                  " ",
+                  h(
+                    "button",
+                    {
+                      class: "link",
+                      title: "Cambiar el nombre con que se muestra esta cuenta",
+                      onclick: () => {
+                        const label = prompt(
+                          `Nombre de la cuenta ${a.address ?? a.id}.
+Déjelo vacío para volver al predeterminado.`,
+                          a.label,
+                        );
+                        if (label !== null) void act(() => api.renameMailAccount(a.id, label), "Nombre de la cuenta guardado");
+                      },
+                    },
+                    "Renombrar",
+                  ),
+                  h("div", { class: "meta" }, a.address ?? h("span", { class: "missing" }, "dirección no consta")),
+                  h("div", { class: "meta mono" }, a.id),
+                ),
                 h("td", {}, PROVIDER_LABEL[a.provider]),
                 h("td", {}, h("span", { class: `badge ${statusClass}` }, statusText)),
                 h("td", { class: "detail-cell" }, lastFetch(a)),

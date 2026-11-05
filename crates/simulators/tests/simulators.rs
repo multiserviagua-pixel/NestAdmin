@@ -52,7 +52,10 @@ fn list_messages_pages_with_stable_ids_and_explicit_absences() {
             None => break,
         }
     }
-    assert_eq!(ids, ["M-0001", "M-0002", "M-0003", "M-0004", "M-0005"]);
+    assert_eq!(
+        ids,
+        ["M-0001", "M-0002", "M-0003", "M-0004", "M-0005", "M-0006"]
+    );
     // Releer la misma página da los mismos IDs.
     let again = mail.list_messages(Some("M-0002")).unwrap();
     assert_eq!(again.messages[0].id, "M-0003");
@@ -480,7 +483,7 @@ fn state_survives_restart_from_json_file() {
         1,
         "tras reiniciar no se reenvía"
     );
-    assert_eq!(mail.list_messages(None).unwrap().messages.len(), 5);
+    assert_eq!(mail.list_messages(None).unwrap().messages.len(), 6);
 
     let admin = AdminSimulator::open(&admin_path).unwrap();
     assert_eq!(admin.record_count().unwrap(), 3);
@@ -593,4 +596,38 @@ fn unreadable_or_newer_state_file_is_reported_as_unavailable() {
     assert_eq!(code(MailSimulator::open(&path)), codes::UNAVAILABLE);
     std::fs::write(&path, r#"{"version": 99, "state": {"records": []}}"#).unwrap();
     assert_eq!(code(AdminSimulator::open(&path)), codes::UNAVAILABLE);
+}
+
+#[test]
+fn an_older_sample_state_gets_the_synthetic_senders_without_touching_other_messages() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("mail.json");
+    // Estado guardado por una versión anterior: M-0005 sin remitente y sin M-0006, más un
+    // mensaje cambiado a mano que no debe tocarse.
+    let mut old: Vec<Message> = nestadmin_simulators::mail::sample_messages()
+        .into_iter()
+        .filter(|m| m.id != "M-0006")
+        .collect();
+    old[4].from = None;
+    old[2].from = None;
+    old[2].body = Some("Texto propio".into());
+    std::fs::write(
+        &path,
+        json!({ "version": 1, "state": { "messages": old, "drafts": [], "sent": [] } }).to_string(),
+    )
+    .unwrap();
+
+    let mail = MailSimulator::open(&path).unwrap();
+    let messages = mail.list_messages(None).unwrap().messages;
+    assert_eq!(messages.len(), 6);
+    assert_eq!(
+        messages[4].from.as_deref(),
+        Some("logistica@transportes-delta.test")
+    );
+    assert_eq!(messages[2].from, None, "un mensaje cambiado no se toca");
+    assert_eq!(messages[5].from, None, "M-0006 es el caso sin remitente");
+    drop(mail);
+    // Abrirlo otra vez no cambia nada más.
+    let again = MailSimulator::open(&path).unwrap();
+    assert_eq!(again.list_messages(None).unwrap().messages, messages);
 }

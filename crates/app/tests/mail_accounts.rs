@@ -227,6 +227,11 @@ fn graph(req: &Req, w: &mut World) -> Resp {
             }
             None => Resp::Json(404, json!({ "error": { "code": "ErrorItemNotFound" } })),
         },
+        // Dirección del buzón (D48).
+        ("GET", ["me"]) => Resp::Json(
+            200,
+            json!({ "mail": null, "userPrincipalName": "oficina@empresa.test" }),
+        ),
         ("GET", ["me", "messages", id]) => match w.drafts.get(*id) {
             Some(is_draft) => Resp::Json(200, json!({ "id": id, "isDraft": is_draft })),
             None => Resp::Json(404, json!({ "error": { "code": "ErrorItemNotFound" } })),
@@ -256,6 +261,8 @@ fn gmail(req: &Req, w: &mut World) -> Resp {
             }
             Resp::Json(200, page)
         }
+        // Dirección del buzón (D48).
+        ("GET", ["profile"]) => Resp::Json(200, json!({ "emailAddress": "facturas@empresa.test" })),
         ("GET", ["messages", id]) => match w.messages.iter().find(|m| m.0 == *id) {
             Some((id, subject, from, body)) => Resp::Json(
                 200,
@@ -472,9 +479,10 @@ fn the_limit_caps_messages_read_per_account() {
             .read,
         3
     );
-    // Con límite 3 y 7 mensajes, Graph no pasa de la primera página.
+    // Con límite 3 y 7 mensajes, Graph no pasa de la primera página (la otra petición es la
+    // dirección del buzón al iniciar sesión, D48).
     let requests = fixture.graph.1.lock().unwrap().requests;
-    assert_eq!(requests, 1);
+    assert_eq!(requests, 2);
 }
 
 #[test]
@@ -668,4 +676,149 @@ fn a_new_account_id_is_never_reused_while_its_predecessor_exists() {
         .add_mail_account(MailProviderKind::Google, "", &valid_tokens())
         .unwrap();
     assert_eq!(third.id, "google-3");
+}
+
+#[test]
+fn each_mail_keeps_the_address_and_name_of_its_account() {
+    let fixture = Fixture::new(2, 1);
+    let mut app = three_accounts(&fixture);
+    let addresses: HashMap<String, Option<String>> = app
+        .mail_accounts()
+        .accounts
+        .into_iter()
+        .map(|a| (a.id, a.address))
+        .collect();
+    assert_eq!(
+        addresses["simulador"].as_deref(),
+        Some("administracion@nestadmin.test")
+    );
+    // Graph sin `mail`: se usa `userPrincipalName`.
+    assert_eq!(
+        addresses["microsoft-1"].as_deref(),
+        Some("oficina@empresa.test")
+    );
+    assert_eq!(
+        addresses["google-1"].as_deref(),
+        Some("facturas@empresa.test")
+    );
+    // La lista guarda la dirección (D48), nunca los tokens.
+    let list =
+        std::fs::read_to_string(fixture.dir.path().join("correo").join("cuentas.json")).unwrap();
+    assert!(list.contains("oficina@empresa.test"), "{list}");
+    assert!(!list.contains("sintetic"), "{list}");
+
+    app.fetch_mail().unwrap();
+    let origin_of = |app: &App, message: &str| {
+        app.tasks()
+            .unwrap()
+            .into_iter()
+            .map(|t| serde_json::from_str::<Value>(&t.input_ref).unwrap())
+            .find(|i| i["message_id"] == message)
+            .unwrap()["origin"]
+            .clone()
+    };
+    assert_eq!(
+        origin_of(&app, "microsoft-1:g1"),
+        json!({
+            "account": "microsoft-1", "provider": "microsoft",
+            "label": "Oficina", "address": "oficina@empresa.test",
+        })
+    );
+    assert_eq!(origin_of(&app, "google-1:m1")["label"], "Google 1");
+
+    // Quitar la cuenta no borra de dónde vinieron sus correos.
+    app.remove_mail_account("microsoft-1").unwrap();
+    let tasks = process_all(&mut app);
+    let from_office = tasks
+        .iter()
+        .find(|t| t.result.as_ref().unwrap()["message"]["id"] == "microsoft-1:g1")
+        .unwrap();
+    let result = from_office.result.as_ref().unwrap();
+    assert_eq!(result["origin"]["label"], "Oficina");
+    assert_eq!(result["origin"]["address"], "oficina@empresa.test");
+    assert_eq!(result["message"]["from"], "facturas1@proveedor-g.test");
+}
+
+#[test]
+fn an_address_the_provider_does_not_give_stays_absent() {
+    let fixture = Fixture::new(0, 0);
+    let mut app = fixture.open();
+    fixture.gmail.1.lock().unwrap().fail = Some(503);
+    let added = app
+        .add_mail_account(MailProviderKind::Google, "Facturación", &valid_tokens())
+        .unwrap();
+    assert_eq!(added.address, None, "sin dirección no se inventa ninguna");
+    let list =
+        std::fs::read_to_string(fixture.dir.path().join("correo").join("cuentas.json")).unwrap();
+    assert!(!list.contains("\"address\": null"), "{list}");
+
+    // Al renovar la sesión se obtiene y se guarda.
+    fixture.gmail.1.lock().unwrap().fail = None;
+    let renewed = app
+        .reconnect_mail_account("google-1", &valid_tokens())
+        .unwrap();
+    assert_eq!(renewed.address.as_deref(), Some("facturas@empresa.test"));
+    drop(app);
+    let mut app = fixture.open();
+    let google = app
+        .mail_accounts()
+        .accounts
+        .into_iter()
+        .find(|a| a.id == "google-1")
+        .unwrap();
+    assert_eq!(google.address.as_deref(), Some("facturas@empresa.test"));
+
+    // Si después falla, se conserva la que constaba.
+    fixture.gmail.1.lock().unwrap().fail = Some(503);
+    let kept = app
+        .reconnect_mail_account("google-1", &valid_tokens())
+        .unwrap();
+    assert_eq!(kept.address.as_deref(), Some("facturas@empresa.test"));
+}
+
+#[test]
+fn accounts_can_be_renamed_without_changing_their_id() {
+    let fixture = Fixture::new(1, 1);
+    let mut app = three_accounts(&fixture);
+    app.fetch_mail().unwrap();
+
+    let renamed = app
+        .rename_mail_account("google-1", "  Facturación  ")
+        .unwrap();
+    assert_eq!(renamed.id, "google-1");
+    assert_eq!(renamed.label, "Facturación");
+    // Un nombre repetido se admite: la dirección las distingue.
+    let same = app
+        .rename_mail_account("microsoft-1", "Facturación")
+        .unwrap();
+    assert_eq!(same.label, "Facturación");
+    assert_ne!(same.address, renamed.address);
+    // Vacío vuelve al predeterminado; el simulador también se puede renombrar.
+    assert_eq!(
+        app.rename_mail_account("microsoft-1", " ").unwrap().label,
+        "Microsoft 1"
+    );
+    assert_eq!(
+        app.rename_mail_account("simulador", "Pruebas")
+            .unwrap()
+            .label,
+        "Pruebas"
+    );
+    assert_eq!(
+        app.rename_mail_account("simulador", "").unwrap().label,
+        "Correo simulado"
+    );
+    assert!(app.rename_mail_account("google-9", "x").is_err());
+
+    // Se guarda en cuentas.json y sobrevive a reabrir; los mensajes siguen en su cuenta.
+    drop(app);
+    let mut app = fixture.open();
+    let google = app
+        .mail_accounts()
+        .accounts
+        .into_iter()
+        .find(|a| a.id == "google-1")
+        .unwrap();
+    assert_eq!(google.label, "Facturación");
+    assert_eq!(app.fetch_mail().unwrap().added, 0, "el ID no cambió");
 }

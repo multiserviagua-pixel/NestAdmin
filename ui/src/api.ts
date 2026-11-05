@@ -73,6 +73,9 @@ export const api = {
   // El archivo viaja como datos binarios; el nombre, en una cabecera.
   importFile: (name: string, bytes: Uint8Array) =>
     invoke<Task>("import_file", bytes, { headers: { "x-nestadmin-name": encodeURIComponent(name) } }),
+  // Selector de archivos del sistema: conserva la ruta original como origen (D49).
+  importDialog: () => invoke<{ imported: Task[]; errors: string[] }>("import_dialog"),
+  openOriginal: (id: number) => invoke<void>("open_original", { id }),
   fetchMail: () => invoke<FetchReport>("fetch_mail"),
   mailAccounts: () => invoke<MailView>("mail_accounts"),
   setMailLimit: (limit: number) => invoke<void>("set_mail_limit", { limit }),
@@ -80,6 +83,7 @@ export const api = {
   mailSignIn: (provider: MailProviderKind, label: string, account?: string) =>
     invoke<MailAccount>("mail_sign_in", { provider, label, account: account ?? null }),
   mailSignInCancel: () => invoke<void>("mail_sign_in_cancel"),
+  renameMailAccount: (id: string, label: string) => invoke<MailAccount>("rename_mail_account", { id, label }),
   removeMailAccount: (id: string) => invoke<void>("remove_mail_account", { id }),
   addSimulatedMailAccount: () => invoke<MailAccount>("add_simulated_mail_account"),
   approve: (id: number, version: number) => invoke<Task>("approve", { id, version }),

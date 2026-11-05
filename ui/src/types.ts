@@ -151,6 +151,8 @@ export interface MailAccount {
   id: string;
   provider: MailProviderKind;
   label: string;
+  /** Dirección del buzón (D48); null si no consta. */
+  address: string | null;
   status: AccountStatus;
   last_fetch: AccountFetch | null;
 }
@@ -162,4 +164,44 @@ export interface MailView {
   microsoft_configured: boolean;
   clients_error: string | null;
   signing_in: boolean;
+}
+
+// Origen de correos y documentos (D48, D49). Lo que falta llega como null, nunca inventado.
+
+/** Cuenta de la que vino un correo, copiada en la tarea al encolarlo. */
+export interface MailOrigin {
+  account: string;
+  provider: MailProviderKind;
+  label: string;
+  address: string | null;
+}
+
+export type DocumentOrigin =
+  | {
+      kind: "file";
+      name: string;
+      original_path: string | null;
+      /** Segundos desde 1970. */
+      imported_at: number | null;
+      sha256: string;
+      size: number;
+    }
+  | {
+      /** Adjunto de un correo ya recibido (`import_attachment`). */
+      kind: "email";
+      account: MailOrigin;
+      message_id: string | null;
+      from: string | null;
+      subject: string | null;
+      attachment: string | null;
+      imported_at: number | null;
+      sha256: string;
+      size: number;
+    };
+
+/** Dónde aparece un campo extraído en el texto del documento. */
+export interface FieldSource {
+  pages: number[];
+  text: string;
+  line: string;
 }
