@@ -19,7 +19,8 @@ class CheckTests(unittest.TestCase):
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy(check.ROOT / name, target)
         # Destinos enlazados desde los documentos copiados.
-        for name in ('evaluation/README.md', '.github/workflows/verify.yml', 'sitio/README.md'):
+        for name in ('evaluation/README.md', '.github/workflows/verify.yml', 'sitio/README.md',
+                     'THIRD_PARTY_NOTICES.md'):
             target = self.root / name
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text('x', encoding='utf-8')

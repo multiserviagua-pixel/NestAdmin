@@ -114,28 +114,41 @@ Numeración D53: D48–D49 son el origen de correos y documentos, D50 el reproce
 
 - **D53 Recorridos con el runtime simulado de Tauri.** Los recorridos de extremo a extremo se prueban en Rust dentro de `crates/desktop` (`src/recorrido.rs`) con `tauri::test`: la misma función `configure` que usa `main` registra los comandos y los eventos de ventana, la misma `start` abre los datos, la cola y su hilo, y una ventana `main` llama a los comandos por IPC con los nombres y argumentos de `ui/src/api.ts` (incluido el cuerpo binario de `import_file`). El proveedor es el adaptador real de Ollama, elegido en `configuracion.json`, contra un Ollama simulado en 127.0.0.1; correo y administración son los simuladores. Solo se sustituyen, mediante `Deps`, la carpeta de datos, el almacén de credenciales (en memoria), el sistema de la preparación (sin Ollama ni Tesseract) y la bandeja (no se crea). Los cortes reales se hacen terminando con `TerminateProcess` un proceso hijo —el mismo ejecutable de pruebas— que recibe la carpeta por `NESTADMIN_DATA_DIR`. La característica `test` de Tauri solo se activa en las dependencias de desarrollo y no añade paquetes. *Motivo:* WebDriver de Tauri en Windows exige instalar `tauri-driver` y un `msedgedriver` de la versión exacta del WebView2 del equipo, y la instancia única (identificador `es.nestadmin.app`) haría que una compilación de desarrollo abierta junto a la versión en prueba del usuario solo mostrara la ventana instalada y terminara; evitarlo obliga a compilar con otro identificador y no da más cobertura de la lógica. *Límites:* no se ejecuta el JavaScript de `ui/` ni WebView2, no se pinta ni se pulsan botones; una prueba comprueba que `api.ts` solo llama a comandos registrados y el tipado de la interfaz lo verifica su compilación. La bandeja, restaurar y salir desde su menú se comprueban a mano con la lista de T01.
 
+## 2026-11-05 — Versiones, licencias y actualizaciones (R14)
+
+*Motivo:* el usuario pregunta cómo se manejarán las actualizaciones futuras, y la primera tarea de [tareas.md](tareas.md) seguía parcial por las licencias. **Cambio de alcance:** R14 y el flujo 7 añaden la política de actualizaciones ([actualizaciones.md](actualizaciones.md)). Numeración desde D60 para no chocar con las ramas abiertas, que toman D48 y siguientes.
+
+- **D60 Inventario de terceros y herramientas fijadas.** `scripts/third_party.py` genera `THIRD_PARTY_NOTICES.md` (versionado) a partir de `cargo metadata --locked` para `x86_64-pc-windows-msvc` (dependencias normales de `nestadmin-desktop`, sin las de compilación ni pruebas), de `ui/package-lock.json` (solo producción) y de un inventario propio de los componentes que no salen de esos archivos: PDFium, Tesseract y sus 26 DLL, datos de idioma, Ollama, Qwen3, WebView2 y NSIS. CI comprueba con `--check` que está al día. Al empaquetar, `--textos vendor/THIRD_PARTY_NOTICES.txt` añade el texto completo de cada licencia (agrupando los idénticos) y falla si faltan las del OCR; el instalador lleva ese archivo y la carpeta `licenses/` de PDFium, que antes no se incluía. No se usa `cargo about` ni `cargo deny` para no añadir otra herramienta que instalar; el resultado es la licencia que declara cada paquete, no una revisión legal. `scripts/setup-dev.ps1` instala o comprueba (`-Comprobar`, solo lectura) Python 3.12, Node de `.node-version`, rustup con la versión de `rust-toolchain.toml`, Build Tools 2022 con MSVC x64 y un SDK de Windows 11, y WebView2; NSIS lo descarga tauri-cli.
+- **D61 Copia previa a migrar.** Concreta D03. Antes de aplicar migraciones a una base existente con esquema N, el núcleo la copia con `VACUUM INTO` en `nestadmin.esquema-N.db` junto a ella (escrita como `.part` y renombrada, así que una copia a medias nunca sustituye a otra; una copia anterior del mismo esquema se sustituye). Una base nueva o ya al día no se copia. Una versión que encuentra un esquema más reciente se niega a abrirlo, sin modificarlo, e indica qué copia restaurar. La copia contiene los mismos datos del usuario que la base y queda en su misma carpeta; no se envía a ningún sitio.
+- **D62 Modelo fijado por digest.** `qwen3:8b` se fija también por el digest de su manifiesto, `500a1f067a9f782620b40bee6f7b0c89e17ae61f686b92c24933e4ca4b2b8b41` (el de T10, igual al SHA-256 del manifiesto en `registry.ollama.ai`). La preparación compara el digest que da Ollama: si difiere lo dice en el paso `model` y el informe lleva `model_pinned: false`, sin bloquear, sin volver a descargar y sin cambiar de modelo. Cambiar de modelo o aceptar otro digest exige evaluación nueva (R10, R12).
+- **D63 Actualizador de NestAdmin (propuesta).** `tauri-plugin-updater` con versiones completas del instalador firmadas con minisign y publicadas como *releases* de GitHub con `latest.json`; comprobación al abrir, aviso con aceptación o aplazamiento, instalación solo con la cola sin tareas en curso, migración con copia (D61) y vuelta atrás instalando la versión anterior y restaurando la copia. La clave privada la genera y custodia el editor fuera del repositorio; en el repositorio solo irá la pública. No se implementa hasta tener esa clave y un origen de *releases* accesible sin credenciales (el repositorio es privado). Pasos en [actualizaciones.md](actualizaciones.md).
+- **D64 Componentes externos.** Ollama no se actualiza desde NestAdmin; la versión mínima se comprueba al abrir (ya en D39) y por debajo de ella el usuario decide en el asistente. WebView2 lo actualiza Windows. PDFium, Tesseract y los datos de idioma solo cambian con una versión nueva de NestAdmin.
+
 ## Versiones de desarrollo fijadas
 
 | Componente | Versión | Licencia | Dónde se fija |
 | --- | --- | --- | --- |
 | Rust | 1.99.1 (MSVC) | MIT/Apache-2.0 | `rust-toolchain.toml` |
-| Node.js | 26.13.0 | MIT | `.node-version` |
-| Python (harness) | 3.12 | PSF | CI |
+| Visual Studio Build Tools | 2022 (17.x), MSVC x64 y SDK de Windows 11 | Licencia de Build Tools de Microsoft (solo desarrollo) | `scripts/setup-dev.ps1` |
+| WebView2 Runtime | Evergreen (lo actualiza Windows) | Términos de distribución de Microsoft | `tauri.installer.json` (*bootstrapper*) |
+| Node.js | 26.13.0 | MIT | `.node-version` (lo usan CI y `scripts/setup-dev.ps1`) |
+| Python (harness) | 3.12 | PSF | CI, `scripts/setup-dev.ps1` |
 | Tauri / tauri-build / CLI | 2.12.5 / 2.7.4 / 2.12.4 | MIT/Apache-2.0 | `Cargo.lock`, `ui/package-lock.json` |
 | tauri-plugin-single-instance / `@tauri-apps/api` | 2.5.5 / 2.12.4 | MIT/Apache-2.0 | `Cargo.lock`, `ui/package-lock.json` |
 | tauri-plugin-dialog (selector de archivos, D49) | 2.8.4 (con rfd 0.17.2) | MIT/Apache-2.0 | `Cargo.lock` |
 | Vite / TypeScript | 8.3.5 / 7.0.2 | MIT / Apache-2.0 | `ui/package-lock.json` |
 | Ollama | 0.40.14 (`OllamaSetup.exe`, SHA-256 fijado) | MIT | `crates/setup` |
-| Qwen3 8B | `qwen3:8b` (digest a registrar al descargar) | Apache-2.0 | instalador y evaluación |
+| Qwen3 8B | `qwen3:8b`, digest `500a1f06…b41` (D62) | Apache-2.0 | `crates/ai` (`DEFAULT_MODEL_DIGEST`) |
 | Tesseract | 5.4.0.20240606 (build UB Mannheim, portátil en el paquete, D38) | Apache-2.0 | `scripts/setup-ocr.ps1`, `tauri.installer.json` |
 | Datos de idioma Tesseract | tessdata 4.1.0 (`spa`, `eng`) | Apache-2.0 | `scripts/setup-ocr.ps1` (SHA-256) |
 | PDFium / pdfium-render | `chromium/8125` / 0.9.5 | BSD-3/Apache-2.0 / MIT-Apache-2.0 | `scripts/setup-ocr.ps1` (SHA-256), `Cargo.lock` |
 
-Las dependencias de Rust y npm quedan fijadas por sus archivos de bloqueo, que se versionan. Cambiar una versión de esta tabla requiere una entrada nueva en este registro.
+Las dependencias de Rust y npm quedan fijadas por sus archivos de bloqueo, que se versionan; su licencia declarada está en [THIRD_PARTY_NOTICES.md](../../THIRD_PARTY_NOTICES.md) (D60). Cambiar una versión de esta tabla requiere una entrada nueva en este registro y regenerar ese inventario.
 
 ## Riesgos abiertos
 
 - El rendimiento de `qwen3:8b` en el equipo objetivo no está medido; puede ser necesario otro modelo o cuantización (R12). Con 8 GB de memoria no respondió a tiempo en un equipo de prueba (D46); no hay modelo alternativo para esos equipos.
-- La redistribución de PDFium y Tesseract debe revisarse antes de publicar el instalador, que además no está firmado (SmartScreen lo advertirá).
+- La redistribución de PDFium y Tesseract debe revisarse antes de publicar el instalador, que además no está firmado (SmartScreen lo advertirá). El inventario (D60) muestra que el Tesseract portátil incluye `libjbig-0.dll` (GPL-2.0-or-later) e `libiconv-2.dll` (LGPL-2.1-or-later): redistribuirlas exige dar acceso a su código fuente, o bien sustituirlas por una build de Tesseract sin JBIG-KIT. Las licencias de esas DLL son las de sus proyectos originales y faltan confirmar con los paquetes de la build.
+- Sin la clave de firma del actualizador (D63), las versiones nuevas se instalan a mano con el instalador completo.
 - El umbral de detección de páginas escaneadas y la calidad del OCR en facturas reales están por medir.
 - Los conectores de correo no descargan adjuntos: el origen «adjunto de correo» (D49) está en el contrato, la capa de aplicación y la ventana, pero ninguna factura llega así todavía. La procedencia por página de cada campo depende de que el valor aparezca literalmente en el texto; con OCR ruidoso puede no localizarse.

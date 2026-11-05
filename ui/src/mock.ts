@@ -226,6 +226,7 @@ function simulatePreparation(run: { cancelled: boolean }) {
         ollama_installed: false,
         model: "qwen3:8b",
         model_digest: "500a1f067a9f",
+        model_pinned: true,
         answer: "listo",
         latency_ms: memory().level === "recommended" ? 2400 : 94_000,
         memory: memory(),

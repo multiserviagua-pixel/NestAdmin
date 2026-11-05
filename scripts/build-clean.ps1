@@ -94,6 +94,10 @@ try {
     Invoke-Step 'PDFium, Tesseract y datos de idioma (scripts/setup-ocr.ps1)' {
         powershell -NoProfile -ExecutionPolicy Bypass -File scripts/setup-ocr.ps1
     }
+    Invoke-Step 'Avisos de terceros (scripts/third_party.py, D60)' {
+        python scripts/third_party.py --check
+        if ($LASTEXITCODE -eq 0) { python scripts/third_party.py --textos vendor/THIRD_PARTY_NOTICES.txt }
+    }
     Invoke-Step 'Especificación (scripts/check.py)' { python scripts/check.py }
     Invoke-Step 'Pruebas del verificador' { python -m unittest discover -s scripts/tests }
     Invoke-Step 'Pruebas del evaluador' { python -m unittest discover -s evaluation/tests }
