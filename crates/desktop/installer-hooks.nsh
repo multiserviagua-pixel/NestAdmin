@@ -90,8 +90,10 @@ FunctionEnd
 !macroend
 
 !macro NSIS_HOOK_POSTUNINSTALL
+  ; La casilla de Tauri para borrar los datos de la aplicación solo quita la caché de WebView2
+  ; (%LOCALAPPDATA%\<identificador>), nunca la carpeta de datos de NestAdmin (D51).
   DetailPrint "Se ha quitado el programa. Los datos de NestAdmin se conservan en ${NESTADMIN_DATA_DIR}."
   DetailPrint "Ollama y el modelo de IA se conservan: pueden usarlos otras aplicaciones."
   IfSilent +2
-  MessageBox MB_ICONINFORMATION|MB_OK "NestAdmin se ha desinstalado.$\r$\n$\r$\nSus datos (tareas, documentos, cuentas de correo y configuración) se conservan en ${NESTADMIN_DATA_DIR}; puede borrar esa carpeta a mano si ya no los necesita.$\r$\n$\r$\nOllama y el modelo de IA local también se conservan; puede quitar Ollama desde Aplicaciones instaladas."
+  MessageBox MB_ICONINFORMATION|MB_OK "NestAdmin se ha desinstalado.$\r$\n$\r$\nSus datos (tareas, documentos, cuentas de correo y configuración) se conservan en ${NESTADMIN_DATA_DIR}, también si marcó borrar los datos de la aplicación, que solo quita la caché de la ventana. Puede borrar esa carpeta a mano si ya no los necesita.$\r$\n$\r$\nOllama y el modelo de IA local también se conservan; puede quitar Ollama desde Aplicaciones instaladas."
 !macroend
