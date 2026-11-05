@@ -69,11 +69,13 @@ pub(crate) fn extract(
         if !text.is_empty() {
             text.push_str("\n\n");
         }
+        let offset = text.len();
         text.push_str(page_text.trim_end());
         pages.push(Page {
             number,
             method,
             chars,
+            offset,
         });
     }
     if pages.is_empty() || visible_chars(&text) == 0 {

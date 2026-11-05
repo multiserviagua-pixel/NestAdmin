@@ -286,6 +286,57 @@ h3 {
   padding: 10px 12px;
 }
 
+.item-origin {
+  grid-column: 1 / -1;
+  font-size: 0.78rem;
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.filter {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  font-size: 0.86rem;
+  color: var(--muted);
+}
+
+.filter select {
+  flex: 1;
+  min-width: 0;
+}
+
+.origin {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 4px 14px;
+  margin: 12px 0;
+  font-size: 0.9rem;
+}
+
+.origin dt {
+  color: var(--muted);
+}
+
+.origin dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.origin-box {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 4px 14px 12px;
+  margin: 12px 0;
+}
+
+.fields td.source {
+  font-size: 0.84rem;
+  color: var(--muted);
+}
+
 .item.selected {
   border-color: var(--brand);
   box-shadow: inset 3px 0 0 var(--brand);
@@ -597,4 +648,14 @@ h3 {
   gap: 12px;
   align-items: center;
   justify-content: space-between;
+}
+
+button.link {
+  background: none;
+  border: none;
+  padding: 0 4px;
+  color: var(--brand);
+  text-decoration: underline;
+  font-size: 0.82rem;
+  cursor: pointer;
 }
