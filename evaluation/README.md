@@ -32,7 +32,7 @@ Los tiempos y memorias son valores comunicados por el proceso que obtiene las pr
 cargo run --release -p nestadmin-ai --bin nestadmin-predict -- --provider ollama --out evaluation/predictions/ollama.jsonl
 ```
 
-Groq solo se usa con `--provider groq --model <id>` y una clave guardada en el administrador de credenciales de Windows (servicio `NestAdmin`, nombre `groq_api_key`). Un fallo de un proveedor nunca se reintenta con el otro.
+Groq solo se usa con `--provider groq --model <id>` y una clave guardada en el administrador de credenciales de Windows (servicio `NestAdmin`, nombre `groq_api_key`). Un fallo de un proveedor nunca se reintenta con el otro. Con una cuota por minuto baja, como la del nivel gratuito de Groq, `--pause-secs N` espera N segundos entre casos; la pausa no cuenta en la latencia y queda en el `.meta.json`.
 
 ## Ejecución
 

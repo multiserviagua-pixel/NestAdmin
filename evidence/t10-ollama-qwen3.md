@@ -48,5 +48,5 @@ Las instrucciones no se han ajustado a las palabras de la rúbrica, para no sesg
 ## Limitaciones y pendiente
 
 - Corpus pequeño y artificial: textos limpios, sin PDF, escaneos ni variedad real de formatos. No permite extrapolar la calidad a documentos reales.
-- Falta la misma ejecución con Groq para comparar (requiere la clave del usuario) y la medición de memoria, incluida la de los procesos de Ollama; ambas forman parte de T12.
+- La misma ejecución con Groq está en [T12](t12-groq.md). Falta la medición de memoria, incluida la de los procesos de Ollama.
 - La latencia la mide el propio cliente por petición; no incluye el procesamiento del documento.

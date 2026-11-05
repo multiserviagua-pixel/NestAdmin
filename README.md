@@ -86,4 +86,4 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-clean.ps1
 
 `cargo test --workspace` usa un proveedor de IA simulado. La prueba del flujo completo con el Ollama local se ejecuta aparte: `cargo test -p nestadmin-app --test ollama -- --ignored`. Estas comprobaciones no acreditan por sí solas los criterios de aceptación: cada requisito necesita la evidencia indicada en la matriz. El protocolo para puntuar predicciones está en [evaluation/README.md](evaluation/README.md); las predicciones y resultados locales se guardan fuera del contenido del usuario y están excluidos de Git.
 
-Quedan pendientes la firma del instalador, su ensayo en un equipo limpio, las pruebas de privacidad y hardware objetivo, y la comparación con Groq.
+Quedan pendientes la firma del instalador, su ensayo en un equipo limpio, las pruebas de privacidad y hardware objetivo, y la medición de memoria. La comparación con Groq está en [T12](evidence/t12-groq.md).

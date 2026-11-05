@@ -17,13 +17,16 @@ use nestadmin_documents::{process_invoice, DuplicateRegistry, Invoice};
 use serde_json::{json, Value};
 
 const USAGE: &str = "uso: nestadmin-predict --provider ollama|groq --out ARCHIVO.jsonl \
-[--model MODELO] [--url URL_OLLAMA] [--inputs DIR] [--timeout-secs N]";
+[--model MODELO] [--url URL_OLLAMA] [--inputs DIR] [--timeout-secs N] [--pause-secs N]";
 
 struct Args {
     choice: ProviderChoice,
     out: PathBuf,
     inputs: PathBuf,
     timeout: Duration,
+    /// Espera entre casos para no superar la cuota por minuto de una API externa. No cuenta
+    /// en la latencia de cada caso.
+    pause: Duration,
 }
 
 fn parse_args() -> Result<Args, String> {
@@ -33,6 +36,7 @@ fn parse_args() -> Result<Args, String> {
     let mut out = None;
     let mut inputs = PathBuf::from("evaluation/data/inputs");
     let mut timeout = 300;
+    let mut pause = 0;
     let mut args = std::env::args().skip(1);
     while let Some(flag) = args.next() {
         let mut value = || {
@@ -46,6 +50,7 @@ fn parse_args() -> Result<Args, String> {
             "--out" => out = Some(PathBuf::from(value()?)),
             "--inputs" => inputs = PathBuf::from(value()?),
             "--timeout-secs" => timeout = value()?.parse().map_err(|_| "timeout inválido")?,
+            "--pause-secs" => pause = value()?.parse().map_err(|_| "pausa inválida")?,
             other => return Err(format!("argumento desconocido: {other}")),
         }
     }
@@ -80,6 +85,7 @@ fn parse_args() -> Result<Args, String> {
         out: out.ok_or("--out es obligatorio")?,
         inputs,
         timeout: Duration::from_secs(timeout),
+        pause: Duration::from_secs(pause),
     })
 }
 
@@ -151,7 +157,15 @@ fn run() -> Result<(), String> {
     let mut errors = 0;
     let mut models = std::collections::BTreeSet::new();
 
+    let mut first = true;
+    let mut wait = || {
+        if !std::mem::take(&mut first) {
+            std::thread::sleep(args.pause);
+        }
+    };
+
     for (id, text) in &invoices {
+        wait();
         let t0 = Instant::now();
         let line = match provider
             .generate(&extraction_request(id, text))
@@ -203,6 +217,7 @@ fn run() -> Result<(), String> {
     }
 
     for (id, text) in &emails {
+        wait();
         let t0 = Instant::now();
         let line = match provider
             .generate(&email_request(id, text))
@@ -239,6 +254,7 @@ fn run() -> Result<(), String> {
         "duration_ms": started.elapsed().as_millis() as u64,
         "timeout_secs": args.timeout.as_secs(),
         "concurrency": 1,
+        "pause_secs": args.pause.as_secs(),
         "memory": "no medida",
     });
     let meta_path = args.out.with_extension("meta.json");
