@@ -1,6 +1,6 @@
 # Evidencia T08 (parcial): instalador de una sola ejecución
 
-Cubre R08 según D36–D40, D46, D50 y D51; D36–D40 revisan D23–D25. El paquete NSIS de Tauri se instala por usuario e incluye la aplicación, `pdfium.dll`, Tesseract portátil y los datos de idioma `spa` y `eng`. Al terminar de copiar, el gancho `NSIS_HOOK_POSTINSTALL` ejecuta `nestadmin.exe --preparar` y espera. Ese modo muestra solo el asistente y prepara Ollama y el modelo si faltan. Termina con código 0 únicamente cuando el modelo local responde. Los casos están en [pruebas del instalador](../specs/v1/pruebas-instalador.md).
+Cubre R08 según D36–D40, D46, D51 y D52; D36–D40 revisan D23–D25. El paquete NSIS de Tauri se instala por usuario e incluye la aplicación, `pdfium.dll`, Tesseract portátil y los datos de idioma `spa` y `eng`. Al terminar de copiar, el gancho `NSIS_HOOK_POSTINSTALL` ejecuta `nestadmin.exe --preparar` y espera. Ese modo muestra solo el asistente y prepara Ollama y el modelo si faltan. Termina con código 0 únicamente cuando el modelo local responde. Los casos están en [pruebas del instalador](../specs/v1/pruebas-instalador.md).
 
 ## Cómo reproducir
 
@@ -73,7 +73,7 @@ El asistente se ha comprobado en el navegador con el servidor simulado, con dato
 
 No se ha recorrido a mano en la ventana instalada.
 
-### T08d: cliente OAuth en el paquete y carpeta del programa (D50, D51), 2026-11-05
+### T08d: cliente OAuth en el paquete y carpeta del programa (D51, D52), 2026-11-05
 
 Por indicación del usuario, el instalador no se ha construido en esta fase: se construirá una sola vez al final. Una construcción limpia empezada con un cliente sintético se detuvo durante `cargo test`, antes del paso del instalador, y no aporta resultado de T08d. No se ha instalado ni ejecutado nada en este equipo. Lo comprobado, en el equipo de desarrollo (Windows 11 Pro 10.0.26300):
 
@@ -98,10 +98,10 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-clean.ps1   # 
 
 ## Pendiente
 
-- T08-10 a T08-14 (D50, D51) en un Windows de prueba: carpeta `%LOCALAPPDATA%\Programs\NestAdmin`, instalación encima de la versión anterior con datos, desinstalación que conserva los datos y cliente OAuth empaquetado. `scripts/t08-registro.ps1` ya anota por separado la carpeta del programa (leída del registro) y la de datos, avisa de restos del programa en la carpeta de datos y comprueba si los accesos directos están rotos.
+- T08-10 a T08-14 (D51, D52) en un Windows de prueba: carpeta `%LOCALAPPDATA%\Programs\NestAdmin`, instalación encima de la versión anterior con datos, desinstalación que conserva los datos y cliente OAuth empaquetado. `scripts/t08-registro.ps1` ya anota por separado la carpeta del programa (leída del registro) y la de datos, avisa de restos del programa en la carpeta de datos y comprueba si los accesos directos están rotos.
 
 - Ensayo de D46 en un equipo real de 8 GB: ver el aviso del asistente y el mensaje de tiempo agotado de una tarea con Ollama.
 - T08-01, T08-03 a T08-07 en un Windows limpio (máquina virtual con instantánea): descarga real del instalador de Ollama (comprobación real de firma Authenticode de `OllamaSetup.exe`) y del modelo (unos 5,2 GB), cortes reales de red, cancelación y reapertura, reinicio del equipo e instalación encima de una versión anterior.
 - Instalación con interfaz (no silenciosa): ver el asistente lanzado por el instalador y sus mensajes.
 - Firma del instalador de NestAdmin y revisión de la redistribución de PDFium, Tesseract y sus DLL (riesgo abierto).
-- Las ejecuciones registradas arriba son de la versión anterior a D51, que instalaba el programa en la carpeta de datos (`%LOCALAPPDATA%\NestAdmin`). D51 los separa; falta ensayarlo (T08-10 a T08-12).
+- Las ejecuciones registradas arriba son de la versión anterior a D52, que instalaba el programa en la carpeta de datos (`%LOCALAPPDATA%\NestAdmin`). D52 los separa; falta ensayarlo (T08-10 a T08-12).

@@ -16,7 +16,7 @@ param(
 )
 $ErrorActionPreference = 'Continue'
 
-# Programa y datos van en carpetas distintas (D51). La carpeta del programa se lee del registro,
+# Programa y datos van en carpetas distintas (D52). La carpeta del programa se lee del registro,
 # por si se instaló en otra; los datos siempre están en %LOCALAPPDATA%\NestAdmin.
 $DataDir = Join-Path $env:LOCALAPPDATA 'NestAdmin'
 $DefaultInstallDir = Join-Path $env:LOCALAPPDATA 'Programs\NestAdmin'

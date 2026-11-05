@@ -1,9 +1,9 @@
-; Ganchos del instalador NSIS de Tauri (D36, D51).
+; Ganchos del instalador NSIS de Tauri (D36, D52).
 ;
 ; D36: tras copiar los archivos, el instalador ejecuta la preparación de la IA local y espera;
 ; termina con éxito solo cuando el modelo responde.
 ;
-; D51: el programa se instala en %LOCALAPPDATA%\Programs\NestAdmin y los datos siguen en
+; D52: el programa se instala en %LOCALAPPDATA%\Programs\NestAdmin y los datos siguen en
 ; %LOCALAPPDATA%\NestAdmin. La plantilla de Tauri propone %LOCALAPPDATA%\NestAdmin (o la carpeta
 ; de la instalación anterior, guardada en el registro); solo esa ruta se sustituye. Si el usuario
 ; elige otra carpeta en el asistente, se respeta. Al instalar encima de una versión anterior se
@@ -91,7 +91,7 @@ FunctionEnd
 
 !macro NSIS_HOOK_POSTUNINSTALL
   ; La casilla de Tauri para borrar los datos de la aplicación solo quita la caché de WebView2
-  ; (%LOCALAPPDATA%\<identificador>), nunca la carpeta de datos de NestAdmin (D51).
+  ; (%LOCALAPPDATA%\<identificador>), nunca la carpeta de datos de NestAdmin (D52).
   DetailPrint "Se ha quitado el programa. Los datos de NestAdmin se conservan en ${NESTADMIN_DATA_DIR}."
   DetailPrint "Ollama y el modelo de IA se conservan: pueden usarlos otras aplicaciones."
   IfSilent +2

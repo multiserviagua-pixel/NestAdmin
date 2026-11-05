@@ -1,4 +1,4 @@
-﻿# Genera correo-oauth.json (D43, D50) con los clientes OAuth del editor, FUERA del repositorio:
+﻿# Genera correo-oauth.json (D43, D51) con los clientes OAuth del editor, FUERA del repositorio:
 #
 #   powershell -NoProfile -ExecutionPolicy Bypass -File scripts/correo-oauth.ps1 `
 #       -Google C:\fuera\client_secret_XXXX.json -MicrosoftClientId 00000000-0000-0000-0000-000000000000 `

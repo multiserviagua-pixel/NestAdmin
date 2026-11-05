@@ -14,7 +14,7 @@ param(
     # Carpeta nueva donde clonar. Por defecto, una carpeta temporal única.
     [string]$Destination = (Join-Path ([IO.Path]::GetTempPath()) "nestadmin-limpio-$([guid]::NewGuid().ToString('N').Substring(0, 8))"),
     [switch]$SkipInstaller,
-    # correo-oauth.json del editor (D43, D50), fuera del repositorio. Si se indica, el instalador
+    # correo-oauth.json del editor (D43, D51), fuera del repositorio. Si se indica, el instalador
     # lo lleva junto a nestadmin.exe; si no, se construye igual y el correo real queda «no
     # configurado». Por defecto, la variable de entorno NESTADMIN_OAUTH_INSTALADOR.
     [string]$ClienteOAuth = $env:NESTADMIN_OAUTH_INSTALADOR

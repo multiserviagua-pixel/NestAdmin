@@ -53,13 +53,31 @@ impl MailProviderKind {
     }
 }
 
-/// Cuenta guardada en `correo/cuentas.json`. Sin tokens ni direcciones de correo.
+/// Dirección sintética del buzón simulado (la de destino de sus mensajes de ejemplo).
+pub const SIMULATOR_ADDRESS: &str = "administracion@nestadmin.test";
+
+/// Cuenta guardada en `correo/cuentas.json`. Sin tokens. Desde D48 guarda la dirección del
+/// buzón, que el proveedor da al iniciar sesión, para decir de qué buzón viene cada correo;
+/// solo se guarda en este equipo.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AccountRecord {
     pub id: String,
     pub provider: MailProviderKind,
     /// Nombre que el usuario da a la cuenta; solo para reconocerla en la ventana.
     pub label: String,
+    /// Dirección del buzón; `None` si el proveedor no la dio o la cuenta es anterior a D48.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub address: Option<String>,
+}
+
+/// Cuenta de la que vino un correo, copiada en la tarea al encolarlo para que siga constando
+/// aunque la cuenta se desconecte o cambie de nombre después.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MailOrigin {
+    pub account: String,
+    pub provider: MailProviderKind,
+    pub label: String,
+    pub address: Option<String>,
 }
 
 /// Cliente OAuth y dirección de la API de un proveedor real. En la aplicación salen de la
@@ -174,6 +192,8 @@ pub struct AccountView {
     pub id: String,
     pub provider: MailProviderKind,
     pub label: String,
+    /// Dirección del buzón; `None` si no consta.
+    pub address: Option<String>,
     pub status: AccountStatus,
     pub last_fetch: Option<AccountFetch>,
 }
@@ -280,7 +300,17 @@ impl Accounts {
     pub(crate) fn open(dir: &Path, simulator: MailSimulator, env: MailEnv) -> io::Result<Self> {
         fs::create_dir_all(dir)?;
         let records: Vec<AccountRecord> = match fs::read_to_string(dir.join(ACCOUNTS_FILE)) {
-            Ok(text) => serde_json::from_str(&text).map_err(io::Error::other)?,
+            Ok(text) => {
+                let mut records: Vec<AccountRecord> =
+                    serde_json::from_str(&text).map_err(io::Error::other)?;
+                // El simulador siempre tiene su dirección sintética, también en listas antiguas.
+                for record in &mut records {
+                    if record.provider == MailProviderKind::Simulator {
+                        record.address = Some(SIMULATOR_ADDRESS.into());
+                    }
+                }
+                records
+            }
             Err(e) if e.kind() == io::ErrorKind::NotFound => vec![simulator_record()],
             Err(e) => return Err(e),
         };
@@ -371,6 +401,34 @@ impl Accounts {
         Ok(())
     }
 
+    /// Pide al proveedor la dirección del buzón con los tokens recién guardados. Un fallo no
+    /// impide conectar la cuenta: la dirección queda como «no consta».
+    fn lookup_address(&self, record: &AccountRecord) -> Option<String> {
+        let profile = self.env.profiles.get(record.provider)?;
+        let tokens = self.token_source(record)?;
+        let found = match record.provider {
+            MailProviderKind::Google => {
+                Gmail::new(&profile.api_base, tokens, 1).and_then(|g| g.address())
+            }
+            MailProviderKind::Microsoft => {
+                Graph::new(&profile.api_base, tokens, 1).and_then(|g| g.address())
+            }
+            MailProviderKind::Simulator => return Some(SIMULATOR_ADDRESS.into()),
+        };
+        found.ok().flatten()
+    }
+
+    /// Origen de los correos de una cuenta, para guardarlo en sus tareas.
+    pub(crate) fn origin(&self, id: &str) -> Option<MailOrigin> {
+        let account = self.list.iter().find(|a| a.record.id == id)?;
+        Some(MailOrigin {
+            account: account.record.id.clone(),
+            provider: account.record.provider,
+            label: account.record.label.clone(),
+            address: account.record.address.clone(),
+        })
+    }
+
     fn status(&self, account: &Account) -> AccountStatus {
         if account.record.provider == MailProviderKind::Simulator {
             return AccountStatus::Connected;
@@ -390,6 +448,7 @@ impl Accounts {
             id: account.record.id.clone(),
             provider: account.record.provider,
             label: account.record.label.clone(),
+            address: account.record.address.clone(),
             status: self.status(account),
             last_fetch: account.last_fetch.clone(),
         }
@@ -449,19 +508,18 @@ impl Accounts {
             return self.add_simulator();
         }
         let id = self.next_id(kind);
-        let label = match label.trim() {
-            "" => format!("{} {}", kind.name(), id.rsplit('-').next().unwrap_or("1")),
-            text => text.chars().take(60).collect(),
-        };
-        let record = AccountRecord {
+        let label = account_label(kind, &id, label);
+        let mut record = AccountRecord {
             id,
             provider: kind,
             label,
+            address: None,
         };
         let source = self
             .token_source(&record)
             .ok_or_else(|| not_configured(kind))?;
         source.save(tokens)?;
+        record.address = self.lookup_address(&record);
         let account = self.build(record);
         self.list.push(account);
         if let Err(e) = self.save() {
@@ -480,6 +538,24 @@ impl Accounts {
         Ok(self.view_of(self.list.last().expect("cuenta recién añadida")))
     }
 
+    /// Cambia el nombre visible de una cuenta. El identificador no cambia (está en los IDs de
+    /// mensaje y en las claves de idempotencia). Vacío vuelve al nombre predeterminado; un
+    /// nombre repetido se admite, porque la dirección del buzón las distingue (D48).
+    pub(crate) fn rename(&mut self, id: &str, label: &str) -> Result<AccountView, ConnectorError> {
+        let index = self.position(id)?;
+        let record = &self.list[index].record;
+        let label = account_label(record.provider, &record.id, label);
+        let previous = std::mem::replace(&mut self.list[index].record.label, label);
+        if let Err(e) = self.save() {
+            self.list[index].record.label = previous;
+            return Err(issue(
+                codes::UNAVAILABLE,
+                format!("no se pudo guardar la lista de cuentas: {e}"),
+            ));
+        }
+        Ok(self.view_of(&self.list[index]))
+    }
+
     /// Vuelve a iniciar sesión en una cuenta existente (por ejemplo, tras un `unauthorized`).
     pub(crate) fn reconnect(
         &mut self,
@@ -487,15 +563,25 @@ impl Accounts {
         tokens: &Tokens,
     ) -> Result<AccountView, ConnectorError> {
         let index = self.position(id)?;
-        let record = self.list[index].record.clone();
+        let mut record = self.list[index].record.clone();
         let source = self
             .token_source(&record)
             .ok_or_else(|| not_configured(record.provider))?;
         source.save(tokens)?;
+        // Si el proveedor no la da ahora, se conserva la que ya constaba.
+        if let Some(address) = self.lookup_address(&record) {
+            record.address = Some(address);
+        }
+        let changed = record != self.list[index].record;
         // Conector nuevo: el anterior pudo guardar en caché tokens ya inválidos.
         let mut account = self.build(record);
         account.last_fetch = None;
         self.list[index] = account;
+        if changed {
+            // La sesión ya está renovada; si la lista no se guarda, la dirección se vuelve a
+            // pedir en el próximo inicio de sesión.
+            let _ = self.save();
+        }
         Ok(self.view_of(&self.list[index]))
     }
 
@@ -612,11 +698,22 @@ impl Accounts {
     }
 }
 
+/// Nombre de una cuenta: el que da el usuario (como mucho 60 caracteres) o, si está vacío,
+/// el predeterminado («Google 1», «Microsoft 2», «Correo simulado»).
+fn account_label(kind: MailProviderKind, id: &str, label: &str) -> String {
+    match label.trim() {
+        "" if kind == MailProviderKind::Simulator => "Correo simulado".into(),
+        "" => format!("{} {}", kind.name(), id.rsplit('-').next().unwrap_or("1")),
+        text => text.chars().take(60).collect(),
+    }
+}
+
 fn simulator_record() -> AccountRecord {
     AccountRecord {
         id: SIMULATOR.into(),
         provider: MailProviderKind::Simulator,
         label: "Correo simulado".into(),
+        address: Some(SIMULATOR_ADDRESS.into()),
     }
 }
 

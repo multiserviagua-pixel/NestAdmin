@@ -38,6 +38,18 @@ impl Gmail {
         self.api.tokens()
     }
 
+    /// Dirección del buzón (`users.getProfile`); `None` si la respuesta no la trae (D48).
+    pub fn address(&self) -> MailResult<Option<String>> {
+        let url = self.api.url(&["profile"], &[]);
+        let profile = self.api.call(Method::Get, &url, None)?;
+        Ok(profile
+            .get("emailAddress")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|a| a.contains('@'))
+            .map(str::to_owned))
+    }
+
     fn get_message(&self, id: &str, query: &[(&str, &str)]) -> MailResult<Value> {
         let url = self.api.url(&["messages", id], query);
         self.api.call(Method::Get, &url, None)
