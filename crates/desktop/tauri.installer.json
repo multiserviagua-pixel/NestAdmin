@@ -4,9 +4,11 @@
     "resources": {
       "../../vendor/pdfium/bin/pdfium.dll": "pdfium/pdfium.dll",
       "../../vendor/pdfium/LICENSE": "pdfium/LICENSE",
+      "../../vendor/pdfium/licenses/*": "pdfium/licenses/",
       "../../vendor/tessdata/spa.traineddata": "tessdata/spa.traineddata",
       "../../vendor/tessdata/eng.traineddata": "tessdata/eng.traineddata",
-      "../../vendor/tesseract/*": "tesseract/"
+      "../../vendor/tesseract/*": "tesseract/",
+      "../../vendor/THIRD_PARTY_NOTICES.txt": "THIRD_PARTY_NOTICES.txt"
     },
     "windows": {
       "webviewInstallMode": { "type": "downloadBootstrapper", "silent": true },
