@@ -16,7 +16,16 @@ param(
 )
 $ErrorActionPreference = 'Continue'
 
-$InstallDir = Join-Path $env:LOCALAPPDATA 'NestAdmin'
+# Programa y datos van en carpetas distintas (D51). La carpeta del programa se lee del registro,
+# por si se instaló en otra; los datos siempre están en %LOCALAPPDATA%\NestAdmin.
+$DataDir = Join-Path $env:LOCALAPPDATA 'NestAdmin'
+$DefaultInstallDir = Join-Path $env:LOCALAPPDATA 'Programs\NestAdmin'
+function Get-InstallDir {
+    $key = 'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\NestAdmin'
+    $location = (Get-ItemProperty $key -ErrorAction SilentlyContinue).InstallLocation
+    if ($location) { return $location.Trim('"') }
+    $DefaultInstallDir
+}
 $OllamaExe = Join-Path $env:LOCALAPPDATA 'Programs\Ollama\ollama.exe'
 $Stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
 $Log = Join-Path ([Environment]::GetFolderPath('Desktop')) "t08-$($Accion.ToLower())-$Stamp.txt"
@@ -79,9 +88,13 @@ function Write-State([string]$title) {
         ForEach-Object { "$($_.ProcessName) ($($_.Id))" })
     Write-Log "Procesos: $(if ($procs.Count) { $procs -join ', ' } else { 'ninguno' })"
 
+    $InstallDir = Get-InstallDir
+    Write-Log "Carpeta del programa: $InstallDir"
     if (Test-Path $InstallDir) {
         $items = Get-ChildItem $InstallDir -Name
-        Write-Log "Carpeta NestAdmin: $($items -join ', ')"
+        Write-Log "  Contenido: $($items -join ', ')"
+        $oauth = if (Test-Path (Join-Path $InstallDir 'correo-oauth.json')) { 'sí (no se anota su contenido)' } else { 'no' }
+        Write-Log "  correo-oauth.json junto al ejecutable: $oauth"
         $tess = Join-Path $InstallDir 'tesseract'
         if (Test-Path $tess) { Write-Log "  tesseract\: $((Get-ChildItem $tess).Count) archivos" }
         $exe = Join-Path $tess 'tesseract.exe'
@@ -89,12 +102,29 @@ function Write-State([string]$title) {
             $langs = (& $exe --tessdata-dir (Join-Path $InstallDir 'tessdata') --list-langs 2>&1 | Select-Object -Skip 1) -join ', '
             Write-Log "  Tesseract instalado lista: $langs"
         }
-    } else { Write-Log 'Carpeta NestAdmin: no existe' }
+    } else { Write-Log '  No existe' }
+    if (Test-Path $DataDir) {
+        Write-Log "Carpeta de datos ${DataDir}: $((Get-ChildItem $DataDir -Name) -join ', ')"
+        if ($DataDir -ne $InstallDir) {
+            foreach ($leftover in 'nestadmin.exe', 'uninstall.exe', 'tesseract', 'pdfium', 'tessdata') {
+                if (Test-Path (Join-Path $DataDir $leftover)) {
+                    Write-Log "  AVISO: queda $leftover del programa en la carpeta de datos (copia duplicada)"
+                }
+            }
+        }
+    } else { Write-Log "Carpeta de datos ${DataDir}: no existe" }
     $uninstall = Get-ChildItem 'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall' -ErrorAction SilentlyContinue |
         ForEach-Object { Get-ItemProperty $_.PSPath } | Where-Object { $_.DisplayName -like 'NestAdmin*' }
     Write-Log "Aplicaciones instaladas: $(if ($uninstall) { "$($uninstall.DisplayName) $($uninstall.DisplayVersion)" } else { 'sin entrada de NestAdmin' })"
     $menu = Get-ChildItem (Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs') -Recurse -Filter 'NestAdmin*.lnk' -ErrorAction SilentlyContinue
     Write-Log "Menú Inicio: $(if ($menu) { 'acceso directo presente' } else { 'sin acceso directo' })"
+    $desktopLink = Get-Item (Join-Path ([Environment]::GetFolderPath('Desktop')) 'NestAdmin.lnk') -ErrorAction SilentlyContinue
+    $shell = New-Object -ComObject WScript.Shell
+    foreach ($link in @($menu) + @($desktopLink) | Where-Object { $_ }) {
+        $target = $shell.CreateShortcut($link.FullName).TargetPath
+        $state = if (Test-Path $target) { 'existe' } else { 'ROTO' }
+        Write-Log "  Acceso $($link.Name) -> $target ($state)"
+    }
 }
 
 function Invoke-Timed([string]$file, [string[]]$arguments, [string]$label) {
@@ -121,7 +151,7 @@ switch ($Accion) {
         Invoke-Timed $Instalador $arguments 'Instalación'
     }
     'Desinstalar' {
-        $uninstaller = Join-Path $InstallDir 'uninstall.exe'
+        $uninstaller = Join-Path (Get-InstallDir) 'uninstall.exe'
         if (-not (Test-Path $uninstaller)) { Write-Log 'NestAdmin no está instalado'; exit 2 }
         $arguments = if ($Silencioso) { @('/S') } else { @() }
         Invoke-Timed $uninstaller $arguments 'Desinstalación'
