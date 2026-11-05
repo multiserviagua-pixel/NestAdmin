@@ -425,7 +425,11 @@ fn approve<R: Runtime>(
 
 /// El usuario confirma que el intento anterior no se envió; prepara una versión nueva (D50).
 #[tauri::command]
-fn confirm_not_sent(shared: State<'_, SharedState>, handle: AppHandle, id: i64) -> CmdResult<Task> {
+fn confirm_not_sent<R: Runtime>(
+    shared: State<'_, SharedState>,
+    handle: AppHandle<R>,
+    id: i64,
+) -> CmdResult<Task> {
     let task = shared.app()?.confirm_not_sent(id).map_err(text);
     changed(&handle);
     task

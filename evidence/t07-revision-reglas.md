@@ -49,13 +49,14 @@ cargo test -p nestadmin-desktop --locked recorrido::
 
 - Fecha: 2026-11-05
 - Plataforma: Windows 11 Pro 10.0.26300, Intel Core Ultra 5 125U, 16 GB; Rust 1.99.1 (MSVC), Tauri 2.12.5 (`tauri::test`)
-- Resultado: 7 superadas, 0 fallidas (1 ignorada: `proceso_hijo`, que solo se lanza como proceso hijo); repetida 3 veces seguidas, entre 3 y 16 s. CI la repite en `windows-latest` (en Linux, `nestadmin-desktop` se excluye como el resto de pruebas de escritorio).
+- Resultado: 8 superadas, 0 fallidas (1 ignorada: `proceso_hijo`, que solo se lanza como proceso hijo); repetida 3 veces seguidas, entre 3 y 16 s (con 7 pruebas; la de D50 se añadió después y pasó en la ejecución completa). CI la repite en `windows-latest` (en Linux, `nestadmin-desktop` se excluye como el resto de pruebas de escritorio).
 
 | Prueba | Qué recorre |
 | --- | --- |
 | `la_interfaz_solo_llama_a_comandos_registrados` | Los comandos que invoca `api.ts` son exactamente los registrados en `configure`. |
 | `documento_importado_se_revisa_y_se_registra_una_sola_vez` | Importar dos facturas → procesar → una sin incidencias y otra con `total_mismatch`; origen del archivo con tamaño y SHA-256 (D49); nada registrado sin aprobación; descartar una (`cancelled`, sin acciones); aprobar la versión vista registra una vez; repetir la aprobación es error; historial con `confirmed` y autorización «aprobación». |
 | `correo_simulado_borrador_editado_se_envia_una_sola_vez` | Consultar el correo (informe por cuenta del simulador); consultar otra vez no duplica tareas; borrador en revisión con el origen de la cuenta simulada (D48); editarlo crea la versión 2; aprobar la 1 se rechaza sin enviar; aprobar la 2 envía una vez el texto editado. |
+| `envio_fallido_se_confirma_como_no_enviado_y_se_envia_una_vez` | Envío aprobado con el correo simulado no disponible → `failed` con `unavailable` y nada enviado; «Reintentar» vuelve a revisión con la misma versión y `recovery`, sin llamar a la IA (D50); «No se envió» (`confirm_not_sent`) prepara la versión 2 sin enviar, la 1 ya no se aprueba y aprobar la 2 envía una vez. Sin intento previo, `confirm_not_sent` es error. |
 | `regla_expresa_se_activa_y_desactiva_desde_la_ventana` | Crear regla (inactiva; una regla sin proveedor se rechaza) → la factura espera revisión; activarla → la siguiente se registra sola con la regla y su versión como autorización; otro proveedor o una incidencia siguen en revisión; desactivarla → vuelve la revisión; versiones crecientes e historial con la regla. Activar no ejecuta la factura que ya esperaba. |
 | `fallo_del_modelo_es_visible_y_el_reintento_es_explicito` | Ollama responde 500 → tarea `failed` con código y sin resultado, sin reintento automático; elegir Groq sin clave se rechaza y la selección local se mantiene; «Reintentar» la procesa (2 intentos). |
 | `salir_por_completo_conserva_la_cola_y_reabrir_la_retoma` | Proceso hijo: registra una factura, detiene la cola como «Salir por completo», importa otra (queda en cola sin llamar al modelo) y termina con código 0. Al reabrir, la pendiente se procesa y el registro no se repite. |

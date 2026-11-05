@@ -27,6 +27,8 @@ tauri-plugin-dialog = "=2.8.4"
 tauri-plugin-single-instance = "=2.5.5"
 
 [dev-dependencies]
+# Modo de fallo de los simuladores en los recorridos (D53).
+nestadmin-simulators = { path = "../simulators" }
 # Runtime simulado de Tauri para los recorridos desde la ventana (D53); no añade paquetes.
 tauri = { version = "=2.12.5", features = ["tray-icon", "test"] }
 tempfile = "3"

@@ -618,6 +618,70 @@ fn correo_simulado_borrador_editado_se_envia_una_sola_vez() {
     s.close();
 }
 
+/// R02, R07 y D50: el envío aprobado falla porque el correo no está disponible; nada se marca
+/// como enviado. «Reintentar» devuelve la tarea a revisión con el mismo texto y versión, sin
+/// volver a llamar a la IA. «No se envió» (`confirm_not_sent`) prepara una versión nueva, sin
+/// enviar nada, y aprobarla envía una sola vez.
+#[test]
+fn envio_fallido_se_confirma_como_no_enviado_y_se_envia_una_vez() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = data_dir_for(&dir);
+    let ai = FakeOllama::start(Mode::Answer);
+    select_local(&data, &ai.url);
+    let s = Session::open(test_deps(&data, &ai.url));
+
+    s.ok("fetch_mail", json!({}));
+    let target = s
+        .tasks()
+        .into_iter()
+        .filter(|t| t["kind"] == "email")
+        .map(|t| s.wait_state(id(&t), "awaiting_review"))
+        .find(|t| {
+            t["result"]["message"]["id"]
+                .as_str()
+                .is_some_and(|id| id.ends_with("M-0002"))
+        })
+        .expect("mensaje M-0002 en revisión");
+    let chats = ai.chats();
+    // Sin ningún intento anterior no hay nada que confirmar.
+    assert!(s
+        .call("confirm_not_sent", json!({ "id": id(&target) }))
+        .is_err());
+
+    let set_failure = |failure| {
+        let shared = s.app.state::<SharedState>();
+        let app = shared.app().unwrap();
+        app.simulators().0.set_failure(failure);
+    };
+    set_failure(Some(nestadmin_simulators::FailureMode::Unavailable));
+    let failed = s.ok("approve", json!({ "id": id(&target), "version": 1 }));
+    assert_eq!(failed["state"], "failed", "{failed}");
+    assert_eq!(failed["error"]["code"], "unavailable");
+    set_failure(None);
+    assert_eq!(s.sent(), 0, "un fallo nunca cuenta como envío");
+
+    s.ok("retry", json!({ "id": id(&target) }));
+    let review = s.wait_state(id(&target), "awaiting_review");
+    assert_eq!(version(&review), 1, "{review}");
+    assert!(review["result"]["recovery"].is_object(), "{review}");
+    assert_eq!(ai.chats(), chats, "reprocesar no vuelve a llamar a la IA");
+
+    let confirmed = s.ok("confirm_not_sent", json!({ "id": id(&target) }));
+    assert_eq!(confirmed["state"], "awaiting_review", "{confirmed}");
+    assert_eq!(version(&confirmed), 2);
+    assert!(confirmed["result"].get("recovery").is_none(), "{confirmed}");
+    assert_eq!(s.sent(), 0, "confirmar no envía nada");
+    assert!(s
+        .call("approve", json!({ "id": id(&target), "version": 1 }))
+        .is_err());
+
+    let done = s.ok("approve", json!({ "id": id(&target), "version": 2 }));
+    assert_eq!(done["state"], "completed", "{done}");
+    assert_eq!(s.sent(), 1);
+    assert_eq!(ai.chats(), chats);
+    s.close();
+}
+
 /// R07: una regla expresa creada desde la ventana empieza inactiva; activa, automatiza la
 /// factura limpia que coincide; desactivada, la siguiente vuelve a revisión. Cada cambio queda
 /// como versión nueva y la acción automatizada guarda la regla y su versión.
