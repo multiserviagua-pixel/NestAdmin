@@ -35,9 +35,9 @@ $s = Start-Process target\debug\nestadmin.exe -PassThru; Start-Sleep 5; $s.HasEx
 | Segunda ejecución | Termina con código 0; la ventana de la primera vuelve a ser visible; queda un único proceso. |
 | Interfaz en navegador con datos simulados (solo desarrollo) | Vistas de pendientes, factura con incidencias, correo con borrador, reglas y configuración renderizadas sin errores. |
 
-## Parte automatizada desde la capa de comandos (2026-11-05, D48)
+## Parte automatizada desde la capa de comandos (2026-11-05, D53)
 
-`cargo test -p nestadmin-desktop --locked` ejecuta la aplicación con el runtime simulado de Tauri (ver [T07](t07-revision-reglas.md#recorrido-desde-la-ventana-d48)). Para R01 cubre:
+`cargo test -p nestadmin-desktop --locked` ejecuta la aplicación con el runtime simulado de Tauri (ver [T07](t07-revision-reglas.md#recorrido-desde-la-ventana-d53)). Para R01 cubre:
 
 - `salir_por_completo_conserva_la_cola_y_reabrir_la_retoma`: la misma parada que usa «Salir de NestAdmin por completo» (`stop_worker`) detiene la cola; una importación posterior queda en cola sin llamar al modelo y, al volver a abrir, se procesa sin repetir el registro ya hecho.
 - `interrumpir_el_proceso_no_repite_efectos`: el proceso se termina con una tarea en curso (llamada al modelo sin responder); al reabrir, la tarea vuelve a la cola con el intento contado. Es lo que ocurre al salir desde la bandeja con trabajo en marcha.

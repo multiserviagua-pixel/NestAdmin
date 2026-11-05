@@ -1,4 +1,4 @@
-//! Recorridos de extremo a extremo desde la ventana (T02, T06, T07 y parte de T01; D48).
+//! Recorridos de extremo a extremo desde la ventana (T02, T06, T07 y parte de T01; D53).
 //!
 //! Cada prueba arranca la aplicación de escritorio real —`configure` registra los mismos
 //! comandos y eventos de ventana que `main`, y `start` abre los datos, la cola y su hilo— con el
@@ -474,6 +474,15 @@ fn documento_importado_se_revisa_y_se_registra_una_sola_vez() {
     assert_eq!(clean["result"]["issues"], json!([]));
     assert_eq!(clean["result"]["fields"]["total"], "121.00");
     assert_eq!(clean["result"]["provider"], "ollama");
+    // Origen del documento (D49): archivo importado por la ventana, con tamaño y huella.
+    let origin = &clean["result"]["origin"];
+    assert_eq!(origin["kind"], "file", "{origin}");
+    assert_eq!(
+        origin["sha256"].as_str().map(str::len),
+        Some(64),
+        "{origin}"
+    );
+    assert!(origin["size"].as_u64().is_some_and(|n| n > 0), "{origin}");
     assert_eq!(
         clean["result"]["review_reason"],
         "ninguna regla activa coincide"
@@ -578,6 +587,11 @@ fn correo_simulado_borrador_editado_se_envia_una_sola_vez() {
     assert_eq!(
         target["result"]["draft"]["to"],
         json!(["cliente.beta@ejemplo.test"])
+    );
+    // Origen del correo (D48): la cuenta simulada que lo recibió.
+    assert_eq!(
+        target["result"]["origin"]["account"], "simulador",
+        "{target}"
     );
     assert_eq!(s.sent(), 0);
 

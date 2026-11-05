@@ -50,9 +50,9 @@ cargo test -p nestadmin-simulators
 - Los destinatarios desconocidos de un mensaje son `None`. Un borrador exige destinatarios y cuerpo porque sin ellos no se puede enviar, y guarda su fecha de creación en UTC (`None` si el reloj no la da).
 - El modo de fallo es configuración en memoria para pruebas y no se guarda en el archivo.
 
-## Desde la capa de comandos de la ventana (2026-11-05, D48)
+## Desde la capa de comandos de la ventana (2026-11-05, D53)
 
-`cargo test -p nestadmin-desktop --locked recorrido::` consulta el correo simulado, revisa y envía borradores y registra facturas con los comandos de la ventana, en Windows; ver [T07](t07-revision-reglas.md#recorrido-desde-la-ventana-d48).
+`cargo test -p nestadmin-desktop --locked recorrido::` consulta el correo simulado, revisa y envía borradores y registra facturas con los comandos de la ventana, en Windows; ver [T07](t07-revision-reglas.md#recorrido-desde-la-ventana-d53).
 
 ## Pendiente para completar T06
 

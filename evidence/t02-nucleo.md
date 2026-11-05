@@ -28,9 +28,9 @@ cargo test -p nestadmin-core --test recovery
 | `audit_log_does_not_store_action_content` | El historial no guarda el contenido de la acción. |
 | `newer_schema_is_refused` | No se abre una base con un esquema más reciente que el soportado. |
 
-## Reinicio de la aplicación de escritorio (2026-11-05, D48)
+## Reinicio de la aplicación de escritorio (2026-11-05, D53)
 
-`cargo test -p nestadmin-desktop --locked recorrido::` termina procesos reales de la aplicación (comandos y cola de `crates/desktop` con el runtime simulado de Tauri) con la tarea en curso, en revisión y justo tras aprobar, y comprueba al reabrir la recuperación sin efectos duplicados; también la salida completa con tareas en cola, y que los comandos `tasks` y `audit_log` devuelven estado, incidencias, errores y pendientes. Detalle y resultados en [T07](t07-revision-reglas.md#recorrido-desde-la-ventana-d48).
+`cargo test -p nestadmin-desktop --locked recorrido::` termina procesos reales de la aplicación (comandos y cola de `crates/desktop` con el runtime simulado de Tauri) con la tarea en curso, en revisión y justo tras aprobar, y comprueba al reabrir la recuperación sin efectos duplicados; también la salida completa con tareas en cola, y que los comandos `tasks` y `audit_log` devuelven estado, incidencias, errores y pendientes. Detalle y resultados en [T07](t07-revision-reglas.md#recorrido-desde-la-ventana-d53).
 
 ## Pendiente para completar T02
 
