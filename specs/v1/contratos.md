@@ -22,7 +22,7 @@ Estos contratos son independientes del transporte y no afirman que existan imple
 
 ## Correo
 
-`list_messages(cursor) -> page`, `create_draft(message_id, draft, idempotency_key) -> draft_id`, `send_draft(draft_id, idempotency_key) -> receipt`. Los mensajes y borradores tienen ID estable, asunto, remitente/destinatarios, cuerpo y fecha cuando estén disponibles. El envío es una acción sujeta a revisión o regla. El simulador conserva y expone sus acciones sin conexión a cuentas reales.
+`list_messages(cursor) -> page`, `create_draft(message_id, draft, idempotency_key) -> draft_id`, `send_draft(draft_id, idempotency_key) -> receipt`. Los mensajes y borradores tienen ID estable, asunto, remitente/destinatarios, cuerpo y fecha cuando estén disponibles. Un borrador puede llevar adjuntos (`name`, `mime`, `size`, `sha256`, `content`; D76); el conector rechaza con `invalid_input` uno que el proveedor no admite. El envío es una acción sujeta a revisión o regla. El simulador conserva y expone sus acciones sin conexión a cuentas reales.
 
 - Errores: `not_found` (mensaje o borrador inexistente), `conflict` (clave de idempotencia reutilizada con contenido distinto), `unavailable` (conector no accesible), `unauthorized` (credenciales inválidas o ausentes) y `invalid_input`. Un error nunca se registra como envío realizado.
 - `send_draft` con una clave ya usada para el mismo borrador devuelve el recibo original sin volver a enviar.
@@ -33,6 +33,28 @@ Estos contratos son independientes del transporte y no afirman que existan imple
 ## Administración
 
 `find_invoices(criteria) -> matches`, `register_invoice(invoice, idempotency_key) -> receipt`. La factura incluye proveedor, número, fecha, moneda, base, impuestos y total; cada campo puede faltar y debe conservar su evidencia. La comparación de importes es decimal y la detección de duplicados devuelve candidatos y motivos, no una decisión destructiva. El registro está sujeto a revisión o regla. La clave de idempotencia identifica una única intención y reutilizarla devuelve el resultado previo sin volver a ejecutarla. Los errores siguen la misma clasificación que el correo (`not_found`, `conflict`, `unavailable`, `unauthorized`, `invalid_input`).
+
+## Facturación
+
+Presupuestos, albaranes, facturas y cobros (R15–R20, D70–D90) viven en tablas propias de la base local; lo que no tiene efectos externos es síncrono y no pasa por la cola.
+
+- Empresa y datos maestros: `company() / set_company(data)`; `customers()`, `create_customer(data)`, `update_customer(id, data)`; `products()`, `create_product(data)`, `update_product(id, data)`, `retire_product(id)`. Cada dato puede ser `null` salvo los que D79 exige para emitir.
+- Documentos de venta: `save_draft(kind, id?, document) -> document`, `discard_draft(id)`, `issue(id) -> document` (asigna `number`, fija el contenido y, en facturas, añade el registro Verifactu en la misma transacción), `revise(id, document)` (presupuesto o albarán, revisión `n+1`), `set_status(id, revision, status)`, `convert(ids, to_kind) -> document`, `correct(invoice_id, kind_r, method, document) -> document` (rectificativa, D80), `void(invoice_id, reason)` (D81), `render_pdf(id, revision) -> path`. El documento lleva `kind`, `number`, `revision`, `status`, `customer` e `issuer` copiados al emitir, `date`, `operation_date`, `valid_until`, `due_date`, `lines` (`description`, `quantity`, `unit_price`, `discount`, `tax_rate`, `exemption`, `amount`), `totals` por tipo (`base`, `tax`), `total`, `withholding`, `amount_due`, `currency`, `notes`, `links` y, en facturas, `verifactu` (`record_id`, `hash`, `qr_url`, `status`).
+- Recurrentes: `templates()`, `save_template(data)`, `set_template_active(id, active)`; los borradores generados llevan `template_id` y `period`.
+- Cobros: `add_payment(invoice_id, date, amount, method)`, `remove_payment(id)`; el documento expone `payment_status` y `paid`.
+- Albaranes recibidos: `import_document(path, kind)` con `kind` `invoice` (por defecto) o `delivery_note`; resultado con `supplier`, `number`, `date`, `order_ref` y `lines`, `null` si falta, y `origin` y `sources` (D49). `link_candidates(id)`, `link(id, invoice_task_id)` y `unlink(...)` solo los invoca el usuario.
+- Informes: `ledger(kind, from, to)`, `vat_summary(year, quarter)`, `export(report, format)` con `csv` o `xlsx`.
+- Errores: `not_found`, `invalid_input` (dato obligatorio ausente, línea sin descripción, cantidad no positiva, tipo de IVA no admitido, exención sin causa, simplificada por encima del límite), `invalid_transition` (estado no permitido, editar algo emitido, rectificar un presupuesto), `conflict` (revisión no actual) y `chain_broken` (D82). Un error no consume número, no añade registro ni cambia el estado.
+- Envío: `send_sales_document` es una acción de la cola con la clave, revisión, reglas y reproceso de `send_draft`; el borrador lleva el PDF de la revisión aprobada como adjunto.
+
+## Verifactu
+
+`build_record(invoice, previous) -> record`, `build_void(invoice, reason, previous) -> record`, `verify_chain(records) -> ok | break`, `qr_url(record)`, `submit(batch, certificate, environment) -> response` (D82–D84).
+
+- Registro: tipo (alta o anulación), emisor, número y serie, fecha de expedición, tipo de factura, desglose, cuota total, importe total, referencia al registro anterior (o primer registro), fecha y hora con huso de generación, huella y datos del sistema informático. Los campos y el formato exactos son los de la documentación técnica vigente de la AEAT.
+- Estado por registro: `pending`, `accepted`, `accepted_with_errors`, `rejected` (con código y descripción de la AEAT). `pending` se reintenta respetando el tiempo de espera; `rejected` espera subsanación del usuario.
+- Errores: `unauthorized` (certificado ausente, caducado o rechazado), `unavailable` (sin red o servicio caído; reintentable), `invalid_response` y `rate_limited` (con el tiempo que indica la AEAT). Ninguno borra ni modifica registros, y el certificado nunca aparece en un error.
+- Entornos: `simulador`, `preproduccion` y `produccion` (D84). El simulador conserva lo recibido, acepta, rechaza o devuelve errores según su configuración y reconoce duplicados por huella.
 
 ## Cola, revisión y auditoría
 
