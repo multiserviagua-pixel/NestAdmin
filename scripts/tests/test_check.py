@@ -20,7 +20,8 @@ class CheckTests(unittest.TestCase):
             shutil.copy(check.ROOT / name, target)
         # Destinos enlazados desde los documentos copiados.
         for name in ('evaluation/README.md', '.github/workflows/verify.yml', 'sitio/README.md',
-                     'THIRD_PARTY_NOTICES.md'):
+                     'THIRD_PARTY_NOTICES.md', 'specs/v1/redistribucion-tesseract.md',
+                     'docs/pruebas-en-windows.md', 'docs/guia-microsoft-365.pdf'):
             target = self.root / name
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text('x', encoding='utf-8')
