@@ -633,3 +633,63 @@ fn mail_attachments_become_documents_once_and_failures_are_retried() {
         0
     );
 }
+
+#[test]
+fn a_document_with_several_invoices_gives_one_review_per_invoice() {
+    let dir = tempfile::tempdir().unwrap();
+    let provider = FakeProvider::new();
+    let mut app = open(&dir, Arc::clone(&provider));
+    // Aunque una regla activa coincida, las facturas separadas pasan por revisión.
+    app.create_rule(
+        "alfa",
+        "register_invoice",
+        &json!({ "supplier": "alfa sl" }),
+    )
+    .unwrap();
+    app.set_rule_active("alfa", true).unwrap();
+
+    let mut both: Value = serde_json::from_str(&invoice("Alfa SL", "F-3", "121.00")).unwrap();
+    both["other_invoices"] = json!([
+        serde_json::from_str::<Value>(&invoice("Alfa SL", "F-4", "121.00")).unwrap(),
+        // Un elemento vacío no es una factura y no crea tarea.
+        { "supplier": null, "invoice_number": null, "date": null,
+          "subtotal": null, "tax": null, "total": null },
+    ]);
+    app.import_document("foto-dos-facturas.txt", &both.to_string())
+        .unwrap();
+
+    let first = app.process_next().unwrap().unwrap();
+    assert_eq!(first.state, TaskState::AwaitingReview);
+    let result = first.result.unwrap();
+    assert_eq!(result["fields"]["invoice_number"], "F-3");
+    assert_eq!(result["part"], json!({ "index": 1, "of": 2 }));
+    assert!(result["review_reason"]
+        .as_str()
+        .unwrap()
+        .contains("varias facturas"));
+
+    // La segunda reutiliza la extracción: si se llamara otra vez a la IA, fallaría.
+    *provider.fail.lock().unwrap() = true;
+    let second = app.process_next().unwrap().unwrap();
+    assert_eq!(
+        second.state,
+        TaskState::AwaitingReview,
+        "{:?}",
+        second.error
+    );
+    let result = second.result.unwrap();
+    assert_eq!(result["fields"]["invoice_number"], "F-4");
+    assert_eq!(result["fields"]["supplier"], "Alfa SL");
+    assert_eq!(result["part"]["index"], 2);
+    assert_eq!(result["part"]["of"], 2);
+    assert_eq!(result["part"]["split_from"], first.id);
+    assert_eq!(result["document"], "foto-dos-facturas.txt");
+    assert_eq!(result["origin"]["kind"], "file");
+    assert!(app.process_next().unwrap().is_none(), "solo dos facturas");
+    // La IA no se llamó para la segunda: el fallo forzado sigue pendiente.
+    assert!(*provider.fail.lock().unwrap());
+    assert_eq!(
+        app.document_file(second.id).unwrap(),
+        app.document_file(first.id).unwrap()
+    );
+}

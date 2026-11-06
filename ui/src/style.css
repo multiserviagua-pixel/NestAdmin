@@ -386,6 +386,12 @@ h3 {
   margin: 4px 0;
 }
 
+.meta.warn {
+  color: inherit;
+  border-left: 3px solid var(--warn);
+  padding-left: 8px;
+}
+
 .reason {
   font-size: 0.9rem;
   border-left: 3px solid var(--accent);

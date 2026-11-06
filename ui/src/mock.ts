@@ -454,7 +454,7 @@ const handlers: Record<string, (a: any, options?: any) => unknown> = {
   tasks: () => structuredClone(tasks),
   import_file: (bytes: Uint8Array, options?: { headers: Record<string, string> }) => {
     const name = decodeURIComponent(options?.headers["x-nestadmin-name"] ?? "");
-    if (!/\.(txt|pdf)$/i.test(name)) throw `«${name}»: solo se admiten archivos .txt y .pdf`;
+    if (!/\.(txt|pdf|jpe?g|png|tiff?|bmp|webp)$/i.test(name)) throw `«${name}»: solo se admiten texto (.txt), PDF e imágenes (.jpg, .png, .tif, .bmp, .webp)`;
     if (bytes.length === 0) throw `«${name}» está vacío`;
     // El navegador no da la ruta original: queda como «no consta», igual que en la aplicación.
     return task("invoice", { document: name, origin: { ...fileOrigin(name, null, 0), size: bytes.length } }, "queued", null);

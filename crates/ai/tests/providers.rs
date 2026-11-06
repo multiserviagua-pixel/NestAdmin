@@ -159,7 +159,8 @@ fn ollama_extraction_sends_schema_without_reasoning_and_reports_model() {
     assert_eq!(body["stream"], false);
     assert_eq!(body["think"], false);
     assert_eq!(body["options"]["temperature"], 0);
-    assert_eq!(body["format"]["required"].as_array().unwrap().len(), 6);
+    // Los seis campos más la lista de las demás facturas del documento (D68).
+    assert_eq!(body["format"]["required"].as_array().unwrap().len(), 7);
     assert_eq!(body["messages"][1]["content"], "texto sintético");
 
     let raw = parse_extraction(&result.output).unwrap();
@@ -388,4 +389,45 @@ fn rate_limit_beyond_the_deadline_is_reported_without_waiting() {
     assert!(started.elapsed() < Duration::from_secs(2));
     assert_eq!(seen.lock().unwrap().len(), 1);
     assert!(!format!("{error}").contains(FAKE_KEY));
+}
+
+#[test]
+fn other_invoices_are_read_strictly_and_requested_in_the_schema() {
+    use nestadmin_ai::tasks::{parse_other_invoices, OTHER_INVOICES};
+    let request = extraction_request("x", "t");
+    let schema = request.schema.unwrap();
+    assert!(schema["required"]
+        .as_array()
+        .unwrap()
+        .contains(&json!(OTHER_INVOICES)));
+    assert_eq!(
+        schema["properties"][OTHER_INVOICES]["items"]["required"],
+        json!([
+            "supplier",
+            "invoice_number",
+            "date",
+            "subtotal",
+            "tax",
+            "total"
+        ])
+    );
+
+    let one = json!({ "supplier": "A", "invoice_number": "1", "date": null,
+                      "subtotal": null, "tax": null, "total": "10.00" });
+    assert!(
+        parse_other_invoices(&one).unwrap().is_empty(),
+        "sin la clave"
+    );
+    let empty = json!({ "supplier": null, "invoice_number": null, "date": null,
+                        "subtotal": null, "tax": null, "total": null });
+    let output = json!({ "other_invoices": [one.clone(), empty] });
+    assert_eq!(parse_other_invoices(&output).unwrap(), vec![one.clone()]);
+    assert!(matches!(
+        parse_other_invoices(&json!({ "other_invoices": "dos" })),
+        Err(AiError::InvalidResponse(_))
+    ));
+    assert!(matches!(
+        parse_other_invoices(&json!({ "other_invoices": [{ "total": 10.0 }] })),
+        Err(AiError::InvalidResponse(_))
+    ));
 }

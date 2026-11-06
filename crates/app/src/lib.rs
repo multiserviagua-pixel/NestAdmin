@@ -16,7 +16,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use nestadmin_ai::tasks::{email_request, extraction_request, parse_email, parse_extraction};
+use nestadmin_ai::tasks::{
+    email_request, extraction_request, parse_email, parse_extraction, parse_other_invoices,
+};
 use nestadmin_ai::{GenerateRequest, GenerateResult, Provider, ProviderKind};
 use nestadmin_core::{
     ActionRecord, ActionRequest, AuditEntry, Authorization, Connector, ConnectorError, CoreError,
@@ -116,6 +118,9 @@ pub struct App {
 enum Prepared {
     Request(GenerateRequest),
     Document(PathBuf),
+    /// Una factura más de un documento con varias (D68): sus campos ya los dio la IA al
+    /// procesar la primera; solo se vuelve a leer el documento para localizar cada campo.
+    Split(PathBuf, GenerateResult),
     Resume(Value),
 }
 
@@ -133,6 +138,23 @@ enum Previous {
     Done { version: i64, receipt: Value },
     /// Un intento no se pudo comprobar: el conector falló o el borrador ya no existe.
     Unknown { version: i64, error: ConnectorError },
+}
+
+/// Motivo de revisión de las facturas de un documento con varias (D68).
+const SPLIT_REASON: &str =
+    "el documento contiene varias facturas; la IA las separó y cada una se revisa por separado";
+
+/// Campos ya extraídos de una factura separada de un documento con varias (D68).
+fn split_preset(input: &Value) -> Option<GenerateResult> {
+    let preset = input.get("preset")?;
+    Some(GenerateResult {
+        request_id: String::new(),
+        provider: serde_json::from_value(preset["provider"].clone()).ok()?,
+        model: preset["model"].as_str().unwrap_or("").to_owned(),
+        output: preset["output"].clone(),
+        latency_ms: 0,
+        usage: Default::default(),
+    })
 }
 
 /// Motivo de revisión de una tarea cuyo intento anterior no se confirmó.
@@ -171,6 +193,10 @@ impl Job {
         let outcome = prepared.and_then(|prepared| {
             let request = match prepared {
                 Prepared::Resume(result) => return Ok(Outcome::Resumed(result)),
+                Prepared::Split(path, generated) => {
+                    extracted = extractor.extract(&path).ok();
+                    return Ok(Outcome::Generated(generated));
+                }
                 Prepared::Request(request) => request,
                 Prepared::Document(path) => {
                     let extraction = extractor
@@ -751,7 +777,10 @@ impl App {
         }
         let prepared = match task.kind.as_str() {
             INVOICE => match input["path"].as_str() {
-                Some(path) => Ok(Prepared::Document(PathBuf::from(path))),
+                Some(path) => match split_preset(&input) {
+                    Some(generated) => Ok(Prepared::Split(PathBuf::from(path), generated)),
+                    None => Ok(Prepared::Document(PathBuf::from(path))),
+                },
                 None => Err(task_error(
                     "document_unreadable",
                     "la tarea no indica el documento",
@@ -810,8 +839,21 @@ impl App {
             Ok(result) => result,
             Err(error) => return Ok(self.store.fail(task.id, &error)?),
         };
+        if task.kind == INVOICE {
+            if let Err(error) = self.enqueue_other_invoices(&task, &generated, &mut result) {
+                return Ok(self.store.fail(task.id, &error)?);
+            }
+        }
         let kind = action_kind(&task);
-        match decide(&self.store.rules()?, kind, &result) {
+        let several = result["part"]["of"].as_u64().is_some_and(|n| n > 1);
+        let decision = if several {
+            // Una regla nunca registra sola una factura separada de un documento con varias:
+            // la separación la hizo el modelo y la revisa una persona.
+            RuleDecision::Review(SPLIT_REASON.into())
+        } else {
+            decide(&self.store.rules()?, kind, &result)
+        };
+        match decision {
             RuleDecision::Automate {
                 rule_id,
                 rule_version,
@@ -828,6 +870,58 @@ impl App {
                 Ok(self.store.await_review(task.id, &result)?)
             }
         }
+    }
+
+    /// Si la IA vio más facturas en el documento, encola una tarea por cada una con el mismo
+    /// documento y origen, y marca `part` («factura k de n») en el resultado. Al reprocesar
+    /// la tarea (recuperación tras un corte) no se encolan otra vez las que ya existen.
+    fn enqueue_other_invoices(
+        &mut self,
+        task: &Task,
+        generated: &GenerateResult,
+        result: &mut Value,
+    ) -> Result<(), TaskError> {
+        let input: Value = serde_json::from_str(&task.input_ref).unwrap_or(Value::Null);
+        if input.get("part").is_some() {
+            result["part"] = input["part"].clone();
+            return Ok(());
+        }
+        let others = parse_other_invoices(&generated.output)
+            .map_err(|e| task_error(e.code(), e.to_string(), true))?;
+        if others.is_empty() {
+            return Ok(());
+        }
+        let of = others.len() + 1;
+        result["part"] = json!({ "index": 1, "of": of });
+        let existing: HashSet<u64> = self
+            .store
+            .all_tasks()
+            .map_err(|e| task_error("unavailable", e.to_string(), true))?
+            .into_iter()
+            .filter_map(|t| {
+                let i: Value = serde_json::from_str(&t.input_ref).ok()?;
+                (i["part"]["split_from"].as_i64() == Some(task.id))
+                    .then(|| i["part"]["index"].as_u64())
+                    .flatten()
+            })
+            .collect();
+        for (offset, output) in others.into_iter().enumerate() {
+            let index = offset as u64 + 2;
+            if existing.contains(&index) {
+                continue;
+            }
+            let mut part_input = input.clone();
+            part_input["part"] = json!({ "index": index, "of": of, "split_from": task.id });
+            part_input["preset"] = json!({
+                "output": output,
+                "provider": generated.provider,
+                "model": generated.model,
+            });
+            self.store
+                .enqueue(INVOICE, &part_input.to_string())
+                .map_err(|e| task_error("unavailable", e.to_string(), true))?;
+        }
+        Ok(())
     }
 
     /// Procesa una tarea completa en el hilo actual. `None` si no había trabajo.
@@ -1295,6 +1389,9 @@ fn attachment_name(attachment: &nestadmin_simulators::Attachment) -> String {
     {
         Some("application/pdf") => "pdf",
         Some("text/plain") => "txt",
+        Some("image/jpeg") => "jpg",
+        Some("image/png") => "png",
+        Some("image/tiff") => "tif",
         _ => "bin",
     };
     format!(
@@ -1303,8 +1400,10 @@ fn attachment_name(attachment: &nestadmin_simulators::Attachment) -> String {
     )
 }
 
-/// Extensiones que NestAdmin procesa como documento.
-const DOCUMENT_EXTENSIONS: &[&str] = &["txt", "pdf"];
+/// Texto y PDF; además, las imágenes que el extractor pasa por OCR.
+fn is_document_extension(extension: &str) -> bool {
+    matches!(extension, "txt" | "pdf") || nestadmin_extract::IMAGE_EXTENSIONS.contains(&extension)
+}
 
 fn document_extension(name: &str) -> String {
     Path::new(name)
@@ -1315,14 +1414,14 @@ fn document_extension(name: &str) -> String {
 }
 
 fn supported_document(name: &str) -> bool {
-    DOCUMENT_EXTENSIONS.contains(&document_extension(name).as_str())
+    is_document_extension(&document_extension(name))
 }
 
 fn check_document(name: &str, bytes: &[u8]) -> AppResult<String> {
     let extension = document_extension(name);
-    if !DOCUMENT_EXTENSIONS.contains(&extension.as_str()) {
+    if !is_document_extension(&extension) {
         return Err(AppError::Invalid(format!(
-            "«{name}»: solo se admiten archivos .txt y .pdf"
+            "«{name}»: solo se admiten texto (.txt), PDF e imágenes (.jpg, .png, .tif, .bmp, .webp)"
         )));
     }
     if bytes.is_empty() {

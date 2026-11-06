@@ -260,7 +260,7 @@ function header() {
   const active = state.settings?.active;
   const fileInput = h("input", {
     type: "file",
-    accept: ".txt,.pdf,text/plain,application/pdf",
+    accept: ".txt,.pdf,.jpg,.jpeg,.png,.tif,.tiff,.bmp,.webp,text/plain,application/pdf,image/*",
     multiple: true,
     hidden: true,
     onchange: (event) => {
@@ -445,6 +445,13 @@ function invoiceDetail(task: Task) {
     h("h2", {}, title(task)),
     provenance(r),
     documentOrigin(task, origin),
+    r.part && r.part.of > 1
+      ? h(
+          "p",
+          { class: "meta warn" },
+          `Factura ${r.part.index} de ${r.part.of} de este documento: la IA separó las facturas que contiene. Compruebe con el original que los datos de cada una no se mezclan.`,
+        )
+      : null,
     pages.length
       ? h(
           "p",
