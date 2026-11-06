@@ -47,6 +47,35 @@ fn handler(req: &Req, w: &mut World) -> Resp {
                 Resp::Empty(202)
             }
         }
+        ("GET", ["me", "messages", id, "attachments"]) => {
+            let Some(m) = w.messages.iter().find(|m| m["id"] == *id) else {
+                return Resp::Json(404, json!({ "error": { "code": "ErrorItemNotFound" } }));
+            };
+            // Como Graph con `$select`: sin `contentBytes`.
+            let list: Vec<Value> = m["_attachments"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default()
+                .into_iter()
+                .map(|mut a| {
+                    a.as_object_mut().unwrap().remove("contentBytes");
+                    a
+                })
+                .collect();
+            Resp::Json(200, json!({ "value": list }))
+        }
+        ("GET", ["me", "messages", id, "attachments", aid]) => {
+            let found = w
+                .messages
+                .iter()
+                .find(|m| m["id"] == *id)
+                .and_then(|m| m["_attachments"].as_array())
+                .and_then(|list| list.iter().find(|a| a["id"] == *aid).cloned());
+            match found {
+                Some(a) => Resp::Json(200, a),
+                None => Resp::Json(404, json!({ "error": { "code": "ErrorItemNotFound" } })),
+            }
+        }
         ("GET", ["me", "messages", id]) => match w.drafts.iter().find(|d| d.0 == *id) {
             Some(draft) => Resp::Json(200, json!({ "id": id, "isDraft": draft.2["isDraft"] })),
             None => Resp::Json(404, json!({ "error": { "code": "ErrorItemNotFound" } })),
@@ -392,4 +421,84 @@ fn local_record_survives_a_restart() {
     assert!(mailbox.lookup("k-send").unwrap().is_some());
     assert_eq!(count(&world, "POST", "/createReply"), 1);
     assert_eq!(world.lock().unwrap().sent.len(), 1);
+}
+
+fn with_attachments(world: &common::Shared) {
+    let mut w = world.lock().unwrap();
+    w.messages[0]["hasAttachments"] = json!(true);
+    w.messages[0]["_attachments"] = json!([
+        {
+            "@odata.type": "#microsoft.graph.fileAttachment",
+            "id": "adj=1",
+            "name": "factura-octubre.pdf",
+            "contentType": "application/pdf",
+            "size": 9,
+            "isInline": false,
+            "contentBytes": base64::Engine::encode(&base64::engine::general_purpose::STANDARD, b"%PDF-sint"),
+        },
+        {
+            "@odata.type": "#microsoft.graph.fileAttachment",
+            "id": "adj=2",
+            "name": "logo.png",
+            "contentType": "image/png",
+            "size": 3,
+            "isInline": true,
+            "contentBytes": "AAAA",
+        },
+        {
+            "@odata.type": "#microsoft.graph.itemAttachment",
+            "id": "adj=3",
+            "name": "Mensaje reenviado",
+            "isInline": false,
+        },
+    ]);
+}
+
+#[test]
+fn file_attachments_are_listed_without_inline_images_and_downloaded() {
+    let (mailbox, world) = mailbox();
+    with_attachments(&world);
+    let page = mailbox.list_messages(None).unwrap();
+    let list = &page.messages[0].attachments;
+    assert_eq!(
+        list.len(),
+        1,
+        "sin incrustados ni elementos de Outlook: {list:?}"
+    );
+    assert_eq!(list[0].id, "adj=1");
+    assert_eq!(list[0].name.as_deref(), Some("factura-octubre.pdf"));
+    assert_eq!(list[0].mime.as_deref(), Some("application/pdf"));
+    assert_eq!(list[0].size, Some(9));
+    assert!(page.messages[1].attachments.is_empty());
+    {
+        let w = world.lock().unwrap();
+        let listing = w
+            .requests
+            .iter()
+            .filter(|r| r.url.path().ends_with("/attachments"))
+            .collect::<Vec<_>>();
+        assert_eq!(listing.len(), 1, "solo se piden los adjuntos de m-1");
+        assert!(listing[0].query("$select").unwrap().contains("isInline"));
+    }
+
+    assert_eq!(
+        mailbox.fetch_attachment("m-1", "adj=1").unwrap(),
+        b"%PDF-sint"
+    );
+    let other = mailbox.fetch_attachment("m-1", "adj=3").unwrap_err();
+    assert_eq!(
+        other.code, "invalid_input",
+        "un elemento de Outlook no se descarga"
+    );
+    assert_eq!(
+        mailbox
+            .fetch_attachment("m-1", "no-existe")
+            .unwrap_err()
+            .code,
+        "not_found"
+    );
+    assert_eq!(
+        mailbox.fetch_attachment("m-1", " ").unwrap_err().code,
+        "invalid_input"
+    );
 }

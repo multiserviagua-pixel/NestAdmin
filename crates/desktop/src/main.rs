@@ -152,7 +152,12 @@ async fn import_dialog(
             .dialog()
             .file()
             .set_title("Importar documentos")
-            .add_filter("Facturas en PDF o texto", &["pdf", "txt"])
+            .add_filter(
+                "Facturas (PDF, imagen o texto)",
+                &[
+                    "pdf", "jpg", "jpeg", "png", "tif", "tiff", "bmp", "webp", "txt",
+                ],
+            )
             .blocking_pick_files()
             .unwrap_or_default();
         let mut report = ImportReport {

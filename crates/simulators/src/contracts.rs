@@ -8,6 +8,9 @@ use nestadmin_core::{Connector, ConnectorError};
 use crate::admin::{Invoice, InvoiceCriteria, InvoiceMatch, InvoiceReceipt};
 use crate::mail::{MessagePage, NewDraft, SendReceipt};
 
+/// Tamaño máximo de un adjunto que se descarga (igual que el de un documento importado).
+pub const MAX_ATTACHMENT_BYTES: u64 = 50_000_000;
+
 /// Contrato de correo. Los errores usan los códigos de [`crate::codes`].
 pub trait MailConnector: Connector {
     /// Página de mensajes en orden estable; `cursor` es el devuelto por la página anterior.
@@ -21,6 +24,15 @@ pub trait MailConnector: Connector {
         draft: &NewDraft,
         idempotency_key: &str,
     ) -> Result<String, ConnectorError>;
+
+    /// Contenido de un adjunto de [`Message::attachments`](crate::Message). `not_found` si
+    /// el mensaje o el adjunto ya no existen; `invalid_input` si supera
+    /// [`MAX_ATTACHMENT_BYTES`]. No tiene efectos en el buzón.
+    fn fetch_attachment(
+        &self,
+        message_id: &str,
+        attachment_id: &str,
+    ) -> Result<Vec<u8>, ConnectorError>;
 
     /// Envía un borrador una sola vez; repetir la clave devuelve el recibo original.
     fn send_draft(

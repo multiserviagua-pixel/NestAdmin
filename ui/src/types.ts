@@ -140,6 +140,14 @@ export interface AccountFetch {
   read: number;
   added: number;
   error: MailIssue | null;
+  attachments: AttachmentFetch;
+}
+
+/** Adjuntos tratados en una consulta; los fallidos se reintentan en la siguiente. */
+export interface AttachmentFetch {
+  imported: number;
+  skipped: string[];
+  failed: { name: string; code: string; message: string }[];
 }
 
 export interface FetchReport {

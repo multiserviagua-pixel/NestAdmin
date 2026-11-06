@@ -1,7 +1,9 @@
 //! Microsoft 365 / Outlook mediante Microsoft Graph v1.0 (D30). Se piden IDs inmutables,
 //! que no cambian al enviar el borrador, y el cuerpo en texto.
 
-use nestadmin_simulators::{codes, Message, MessagePage, NewDraft};
+use base64::engine::general_purpose::STANDARD;
+use base64::Engine;
+use nestadmin_simulators::{codes, Attachment, Message, MessagePage, NewDraft};
 use serde_json::{json, Value};
 
 use crate::http::{Api, Method};
@@ -12,7 +14,8 @@ use crate::{error, MailResult};
 
 pub const DEFAULT_BASE: &str = "https://graph.microsoft.com/v1.0";
 const PREFER: &str = "IdType=\"ImmutableId\", outlook.body-content-type=\"text\"";
-const SELECT: &str = "id,subject,from,toRecipients,receivedDateTime,body";
+const SELECT: &str = "id,subject,from,toRecipients,receivedDateTime,body,hasAttachments";
+const FILE_ATTACHMENT: &str = "#microsoft.graph.fileAttachment";
 
 pub struct Graph {
     api: Api,
@@ -86,10 +89,76 @@ fn message(value: &Value) -> Option<Message> {
             .map(|list| list.iter().filter_map(address).collect()),
         body,
         date: non_empty(value.get("receivedDateTime")),
+        attachments: Vec::new(),
     })
 }
 
+/// Solo archivos (`fileAttachment`) no incrustados en el cuerpo. Los mensajes o elementos
+/// adjuntos (`itemAttachment`) y los enlaces a la nube (`referenceAttachment`) no son
+/// documentos que se puedan procesar y no se listan.
+fn attachment(value: &Value) -> Option<Attachment> {
+    if value.get("@odata.type").and_then(Value::as_str) != Some(FILE_ATTACHMENT)
+        || value.get("isInline").and_then(Value::as_bool) == Some(true)
+    {
+        return None;
+    }
+    Some(Attachment {
+        id: value.get("id").and_then(Value::as_str)?.to_owned(),
+        name: non_empty(value.get("name")),
+        mime: non_empty(value.get("contentType")),
+        size: value.get("size").and_then(Value::as_u64),
+    })
+}
+
+impl Graph {
+    fn attachments(&self, message_id: &str) -> MailResult<Vec<Attachment>> {
+        let url = self.api.url(
+            &["me", "messages", message_id, "attachments"],
+            &[("$select", "id,name,contentType,size,isInline")],
+        );
+        let body = self.api.call(Method::Get, &url, None)?;
+        Ok(body
+            .get("value")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(attachment)
+            .collect())
+    }
+}
+
 impl MailProvider for Graph {
+    fn attachment(&self, message_id: &str, attachment_id: &str) -> MailResult<Vec<u8>> {
+        let url = self.api.url(
+            &["me", "messages", message_id, "attachments", attachment_id],
+            &[],
+        );
+        let body =
+            self.api
+                .call_limited(Method::Get, &url, None, crate::ATTACHMENT_RESPONSE_LIMIT)?;
+        if body.get("@odata.type").and_then(Value::as_str) != Some(FILE_ATTACHMENT) {
+            return Err(error(
+                codes::INVALID_INPUT,
+                "el adjunto no es un archivo que se pueda descargar",
+            ));
+        }
+        let data = body
+            .get("contentBytes")
+            .and_then(Value::as_str)
+            .ok_or_else(|| {
+                error(
+                    codes::UNAVAILABLE,
+                    "Graph no devolvió el contenido del adjunto",
+                )
+            })?;
+        STANDARD.decode(data).map_err(|_| {
+            error(
+                codes::UNAVAILABLE,
+                "el adjunto de Graph no es base64 válido",
+            )
+        })
+    }
+
     fn list(&self, cursor: Option<&str>) -> MailResult<MessagePage> {
         let url = match cursor {
             Some(link) => self.api.same_origin(link)?,
@@ -113,8 +182,17 @@ impl MailProvider for Graph {
                 )
             })?
             .iter()
-            .filter_map(message)
-            .collect();
+            .filter_map(|value| {
+                let has = value.get("hasAttachments").and_then(Value::as_bool) == Some(true);
+                message(value).map(|m| (m, has))
+            })
+            .map(|(mut m, has)| {
+                if has {
+                    m.attachments = self.attachments(&m.id)?;
+                }
+                Ok(m)
+            })
+            .collect::<MailResult<Vec<_>>>()?;
         Ok(MessagePage {
             messages,
             next_cursor: non_empty(body.get("@odata.nextLink")),

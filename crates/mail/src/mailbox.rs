@@ -40,6 +40,8 @@ pub trait MailProvider {
     fn send(&self, draft_id: &str) -> MailResult<String>;
     /// Si el borrador ya no existe ni consta como enviado, `not_found`: no se reenvía.
     fn status(&self, draft: &CreatedDraft) -> MailResult<DraftStatus>;
+    /// Contenido de un adjunto anunciado en la lista de mensajes.
+    fn attachment(&self, message_id: &str, attachment_id: &str) -> MailResult<Vec<u8>>;
 }
 
 /// Una cuenta de correo con su proveedor y su registro local.
@@ -185,6 +187,23 @@ impl<P: MailProvider> MailConnector for Mailbox<P> {
         };
         self.state.mutate(|d| d.drafts.push(record))?;
         Ok(created.draft_id)
+    }
+
+    /// Solo lectura: no anota nada en el registro local ni en el buzón.
+    fn fetch_attachment(
+        &self,
+        message_id: &str,
+        attachment_id: &str,
+    ) -> Result<Vec<u8>, ConnectorError> {
+        if attachment_id.trim().is_empty() {
+            return Err(error(
+                codes::INVALID_INPUT,
+                "falta el identificador del adjunto",
+            ));
+        }
+        let content = self.provider.attachment(message_id, attachment_id)?;
+        crate::check_attachment_size(content.len() as u64)?;
+        Ok(content)
     }
 
     /// Envía una sola vez por clave. El envío queda anotado como pendiente antes de llamar al
