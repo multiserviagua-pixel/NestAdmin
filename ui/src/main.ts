@@ -260,7 +260,7 @@ function header() {
   const active = state.settings?.active;
   const fileInput = h("input", {
     type: "file",
-    accept: ".txt,.pdf,text/plain,application/pdf",
+    accept: ".txt,.pdf,.jpg,.jpeg,.png,.tif,.tiff,.bmp,.webp,text/plain,application/pdf,image/*",
     multiple: true,
     hidden: true,
     onchange: (event) => {
@@ -445,6 +445,13 @@ function invoiceDetail(task: Task) {
     h("h2", {}, title(task)),
     provenance(r),
     documentOrigin(task, origin),
+    r.part && r.part.of > 1
+      ? h(
+          "p",
+          { class: "meta warn" },
+          `Factura ${r.part.index} de ${r.part.of} de este documento: la IA separó las facturas que contiene. Compruebe con el original que los datos de cada una no se mezclan.`,
+        )
+      : null,
     pages.length
       ? h(
           "p",
@@ -903,17 +910,33 @@ function issueText(error: { code: string; message: string }) {
 function fetchNotice(report: FetchReport): { kind: "ok" | "error"; text: string } {
   if (report.accounts.length === 0) return { kind: "error", text: "No hay cuentas de correo. Añada una en la sección Correo." };
   const failed = report.accounts.filter((a) => a.error);
-  const added = report.added ? `${report.added} mensajes nuevos en cola` : "No hay mensajes nuevos";
-  if (!failed.length) return { kind: "ok", text: added };
-  const names = failed.map((a) => `${state.mail?.accounts.find((m) => m.id === a.account)?.label ?? a.account} — ${issueText(a.error!)}`);
-  return { kind: "error", text: `${added}. No se pudo consultar: ${names.join("; ")}` };
+  const imported = report.accounts.reduce((sum, a) => sum + (a.attachments?.imported ?? 0), 0);
+  const skipped = report.accounts.flatMap((a) => a.attachments?.skipped ?? []);
+  const attachmentErrors = report.accounts.flatMap((a) => a.attachments?.failed ?? []);
+  let added = report.added ? `${report.added} mensajes nuevos en cola` : "No hay mensajes nuevos";
+  if (imported) added += `; ${imported} adjuntos importados como documentos`;
+  if (skipped.length) added += `; adjuntos no procesables omitidos: ${skipped.join(", ")}`;
+  const problems: string[] = failed.map(
+    (a) => `no se pudo consultar ${state.mail?.accounts.find((m) => m.id === a.account)?.label ?? a.account} — ${issueText(a.error!)}`,
+  );
+  if (attachmentErrors.length) {
+    problems.push(
+      `adjuntos sin importar (se reintentarán en la próxima consulta): ${attachmentErrors.map((e) => `${e.name} — ${issueText(e)}`).join("; ")}`,
+    );
+  }
+  if (!problems.length) return { kind: "ok", text: added };
+  return { kind: "error", text: `${added}. ${problems.join(". ")}` };
 }
 
 function lastFetch(account: MailAccount) {
   const f = account.last_fetch;
   if (!f) return h("span", { class: "missing" }, "Sin consultar en esta sesión");
   if (f.error) return h("span", { class: "error-text" }, issueText(f.error));
-  return `${f.read} leídos, ${f.added} nuevos`;
+  const a = f.attachments;
+  const parts = [`${f.read} leídos, ${f.added} nuevos`];
+  if (a?.imported) parts.push(`${a.imported} adjuntos importados`);
+  if (a?.failed.length) return h("span", { class: "error-text" }, `${parts.join(", ")}; ${a.failed.length} adjuntos sin importar`);
+  return parts.join(", ");
 }
 
 function signIn(provider: MailProviderKind, label: string, account?: MailAccount) {
@@ -1037,7 +1060,7 @@ Déjelo vacío para volver al predeterminado.`,
       h(
         "p",
         { class: "intro" },
-        "Se abrirá el navegador para que inicie sesión y conceda permiso de lectura, borradores y envío. NestAdmin espera la respuesta en este equipo (127.0.0.1) durante 5 minutos.",
+        "Se abrirá el navegador para que inicie sesión y conceda permiso de lectura, borradores y envío. NestAdmin espera la respuesta en este equipo (dirección de bucle local: localhost o 127.0.0.1) durante 5 minutos.",
       ),
       h("div", { class: "row" }, h("label", {}, "Nombre de la cuenta (opcional)", label)),
       h(

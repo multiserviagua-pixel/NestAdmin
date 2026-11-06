@@ -7,12 +7,21 @@
 #   powershell -NoProfile -ExecutionPolicy Bypass -File t08-registro.ps1 -Accion Estado   # solo el estado actual
 #   powershell -NoProfile -ExecutionPolicy Bypass -File t08-registro.ps1 -Accion Desinstalar
 #
+# Espera solo al proceso del instalador, no a sus descendientes: `Start-Process -Wait` de Windows
+# PowerShell espera a todo el árbol, y el instalador deja en marcha `ollama serve` (lo arranca
+# `nestadmin.exe --preparar`) y, si se marca al terminar, NestAdmin en el área de notificación.
+# Con -Wait el script no volvía nunca y no anotaba el estado «Después».
+#
 # No anota el nombre del equipo ni del usuario: las rutas personales se escriben como %USERPROFILE%.
 param(
     [ValidateSet('Instalar', 'Desinstalar', 'Estado')]
     [string]$Accion = 'Instalar',
     [string]$Instalador = 'C:\Instalador\NestAdmin_0.1.0_x64-setup.exe',
-    [switch]$Silencioso
+    [switch]$Silencioso,
+    # Plazo para el instalador o desinstalador; la descarga del modelo (5,2 GB) va incluida.
+    [int]$PlazoMinutos = 120,
+    # Modelo que se comprueba con una respuesta real al final.
+    [string]$Modelo = 'qwen3:8b'
 )
 $ErrorActionPreference = 'Continue'
 
@@ -131,18 +140,59 @@ function Invoke-Timed([string]$file, [string[]]$arguments, [string]$label) {
     Write-Log ''
     Write-Log "== $label =="
     Write-Log "Orden: `"$file`" $($arguments -join ' ')"
+    $before = @(Get-Process | ForEach-Object { $_.Id })
     $watch = [Diagnostics.Stopwatch]::StartNew()
-    $p = if ($arguments) { Start-Process $file -ArgumentList $arguments -Wait -PassThru } else { Start-Process $file -Wait -PassThru }
+    $p = if ($arguments) { Start-Process $file -ArgumentList $arguments -PassThru } else { Start-Process $file -PassThru }
+    # Sin leer Handle antes de esperar, ExitCode queda vacío en Windows PowerShell.
+    $null = $p.Handle
+    $finished = $p.WaitForExit($PlazoMinutos * 60 * 1000)
     $watch.Stop()
-    Write-Log ("Código de salida: {0}; duración {1:N1} s ({2:mm\:ss})" -f $p.ExitCode, $watch.Elapsed.TotalSeconds, $watch.Elapsed)
+    if ($finished) {
+        Write-Log ("Código de salida: {0}; duración {1:N1} s ({2:mm\:ss})" -f $p.ExitCode, $watch.Elapsed.TotalSeconds, $watch.Elapsed)
+    } else {
+        Write-Log "SIN TERMINAR tras $PlazoMinutos min: el proceso sigue abierto (¿un diálogo esperando respuesta?). Se anota el estado igualmente."
+    }
+    $spawned = @(Get-Process | Where-Object { $before -notcontains $_.Id -and $_.Id -ne $p.Id } |
+        Where-Object { $_.ProcessName -like 'ollama*' -or $_.ProcessName -eq 'nestadmin' -or $_.ProcessName -like '*setup*' } |
+        ForEach-Object { "$($_.ProcessName) ($($_.Id))" })
+    Write-Log "Procesos que siguen en marcha tras $($label.ToLower()): $(if ($spawned.Count) { $spawned -join ', ' } else { 'ninguno' })"
 }
 
+function Test-Model {
+    Write-Log ''
+    Write-Log "== Comprobación de la IA local ($Modelo) =="
+    if (-not (Get-Json '/api/version')) { Write-Log 'Resultado: Ollama no responde en 127.0.0.1:11434'; return }
+    $body = @{
+        model    = $Modelo
+        stream   = $false
+        think    = $false
+        options  = @{ temperature = 0 }
+        messages = @(@{ role = 'user'; content = 'Responde solo con la palabra: listo' })
+    } | ConvertTo-Json -Depth 5
+    $watch = [Diagnostics.Stopwatch]::StartNew()
+    try {
+        $r = Invoke-RestMethod 'http://127.0.0.1:11434/api/chat' -Method Post -Body ([Text.Encoding]::UTF8.GetBytes($body)) `
+            -ContentType 'application/json; charset=utf-8' -TimeoutSec 300
+        $watch.Stop()
+        $answer = ("$($r.message.content)".Trim() -replace '\s+', ' ')
+        if ($answer.Length -gt 60) { $answer = $answer.Substring(0, 60) + '…' }
+        $state = if ($answer) { 'OK' } else { 'FALLO (respuesta vacía)' }
+        Write-Log ("Resultado: {0}; {1:N1} s; respuesta «{2}»" -f $state, $watch.Elapsed.TotalSeconds, $answer)
+    } catch {
+        $watch.Stop()
+        Write-Log ("Resultado: FALLO tras {0:N1} s: {1}" -f $watch.Elapsed.TotalSeconds, $_.Exception.Message)
+    }
+}
+
+Write-Host "El registro se escribe en $(Hide-Personal $Log)"
 Write-Log "Registro T08 — acción: $Accion$(if ($Silencioso) { ' (silenciosa)' })"
 Write-State 'Antes'
 
+$exitCode = 0
+try {
 switch ($Accion) {
     'Instalar' {
-        if (-not (Test-Path $Instalador)) { Write-Log "No existe el instalador $Instalador"; exit 2 }
+        if (-not (Test-Path $Instalador)) { Write-Log "No existe el instalador $Instalador (use -Instalador RUTA)"; $exitCode = 2; break }
         $item = Get-Item $Instalador
         Write-Log ''
         Write-Log "Instalador: $($item.Name), $($item.Length) bytes, SHA-256 $((Get-FileHash $Instalador -Algorithm SHA256).Hash)"
@@ -152,14 +202,21 @@ switch ($Accion) {
     }
     'Desinstalar' {
         $uninstaller = Join-Path (Get-InstallDir) 'uninstall.exe'
-        if (-not (Test-Path $uninstaller)) { Write-Log 'NestAdmin no está instalado'; exit 2 }
+        if (-not (Test-Path $uninstaller)) { Write-Log 'NestAdmin no está instalado'; $exitCode = 2; break }
         $arguments = if ($Silencioso) { @('/S') } else { @() }
         Invoke-Timed $uninstaller $arguments 'Desinstalación'
         Start-Sleep -Seconds 3   # el desinstalador de NSIS termina de borrar en otro proceso
     }
 }
-
-if ($Accion -ne 'Estado') { Write-State 'Después' }
+} catch {
+    Write-Log "ERROR del script: $($_.Exception.Message)"
+    $exitCode = 1
+} finally {
+    # También tras Ctrl+C o un error: lo anotado hasta aquí no se pierde.
+    if ($Accion -ne 'Estado' -and $exitCode -ne 2) { Write-State 'Después' }
+    if ($Accion -ne 'Desinstalar') { Test-Model }
+}
 Write-Log ''
 Write-Log "Registro guardado en $Log"
 Write-Log 'Añada a mano lo que vio: ventanas del asistente, avisos (SmartScreen, WebView2), errores y reintentos.'
+exit $exitCode

@@ -33,6 +33,9 @@ pub struct OAuthConfig {
     pub client_secret: Option<String>,
     pub scopes: Vec<String>,
     pub extra_auth_params: Vec<(String, String)>,
+    /// Nombre de la redirección de bucle local: `127.0.0.1` o `localhost` (D70). NestAdmin
+    /// escucha siempre en `127.0.0.1` y, con `localhost`, también en `[::1]` si se puede.
+    pub redirect_host: String,
 }
 
 impl fmt::Debug for OAuthConfig {
@@ -59,6 +62,9 @@ impl OAuthConfig {
                 .map(String::from)
                 .to_vec(),
             extra_auth_params: Vec::new(),
+            // Microsoft solo garantiza que ignora el puerto con `http://localhost`, la URI que
+            // se registra en Entra ID sin editar el manifiesto (D70).
+            redirect_host: "localhost".into(),
         }
     }
 
@@ -75,6 +81,8 @@ impl OAuthConfig {
                 ("access_type".into(), "offline".into()),
                 ("prompt".into(), "consent".into()),
             ],
+            // Google admite cualquier puerto de 127.0.0.1 para clientes de escritorio.
+            redirect_host: "127.0.0.1".into(),
         }
     }
 }
@@ -134,7 +142,8 @@ pub struct PendingAuthorization {
     redirect_uri: String,
     state: String,
     verifier: String,
-    listener: TcpListener,
+    /// `127.0.0.1` y, con `localhost`, también `[::1]` en el mismo puerto.
+    listeners: Vec<TcpListener>,
 }
 
 impl fmt::Debug for PendingAuthorization {
@@ -155,7 +164,19 @@ impl PendingAuthorization {
             .local_addr()
             .map_err(|e| error(codes::UNAVAILABLE, e.to_string()))?
             .port();
-        let redirect_uri = format!("http://127.0.0.1:{port}/");
+        let mut listeners = vec![listener];
+        let host = match config.redirect_host.as_str() {
+            "localhost" => {
+                // El navegador puede resolver `localhost` a IPv6; si el equipo no tiene IPv6
+                // de bucle local, basta con IPv4.
+                if let Ok(v6) = TcpListener::bind(("::1", port)) {
+                    listeners.push(v6);
+                }
+                "localhost"
+            }
+            _ => "127.0.0.1",
+        };
+        let redirect_uri = format!("http://{host}:{port}/");
         let state = random_token(24)?;
         let verifier = random_token(48)?;
         {
@@ -177,7 +198,7 @@ impl PendingAuthorization {
             redirect_uri,
             state,
             verifier,
-            listener,
+            listeners,
         })
     }
 
@@ -197,28 +218,31 @@ impl PendingAuthorization {
     }
 
     fn wait_for_code(&self, timeout: Duration) -> MailResult<String> {
-        self.listener
-            .set_nonblocking(true)
-            .map_err(|e| error(codes::UNAVAILABLE, e.to_string()))?;
+        for listener in &self.listeners {
+            listener
+                .set_nonblocking(true)
+                .map_err(|e| error(codes::UNAVAILABLE, e.to_string()))?;
+        }
         let deadline = Instant::now() + timeout;
         loop {
-            match self.listener.accept() {
-                Ok((stream, _)) => {
-                    if let Some(result) = self.handle_redirect(stream) {
-                        return result;
+            for listener in &self.listeners {
+                match listener.accept() {
+                    Ok((stream, _)) => {
+                        if let Some(result) = self.handle_redirect(stream) {
+                            return result;
+                        }
                     }
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
+                    Err(e) => return Err(error(codes::UNAVAILABLE, e.to_string())),
                 }
-                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                    if Instant::now() >= deadline {
-                        return Err(error(
-                            codes::UNAUTHORIZED,
-                            "no se completó el inicio de sesión a tiempo",
-                        ));
-                    }
-                    thread::sleep(Duration::from_millis(100));
-                }
-                Err(e) => return Err(error(codes::UNAVAILABLE, e.to_string())),
             }
+            if Instant::now() >= deadline {
+                return Err(error(
+                    codes::UNAUTHORIZED,
+                    "no se completó el inicio de sesión a tiempo",
+                ));
+            }
+            thread::sleep(Duration::from_millis(100));
         }
     }
 
