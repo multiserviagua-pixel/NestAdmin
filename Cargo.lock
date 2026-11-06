@@ -2406,6 +2406,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "nestadmin-sales"
+version = "0.1.0"
+dependencies = [
+ "nestadmin-documents",
+ "rust_decimal",
+ "serde",
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "nestadmin-setup"
 version = "0.1.0"
 dependencies = [
