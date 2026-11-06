@@ -58,7 +58,7 @@ const mailAccounts: MailAccount[] = params.has("sin-cuentas")
         label: "Oficina",
         address: "oficina@empresa.test",
         status: clientsConfigured ? "connected" : "not_configured",
-        last_fetch: { account: "microsoft-1", read: 25, added: 3, error: null },
+        last_fetch: { account: "microsoft-1", read: 25, added: 3, error: null, attachments: { imported: 2, skipped: [], failed: [] } },
       },
       {
         id: "google-1",
@@ -71,6 +71,7 @@ const mailAccounts: MailAccount[] = params.has("sin-cuentas")
           read: 0,
           added: 0,
           error: { code: "unauthorized", message: "la sesión caducó; vuelva a iniciar sesión" },
+          attachments: { imported: 0, skipped: [], failed: [] },
         },
       },
     ];
@@ -122,11 +123,18 @@ function fetchMail(): FetchReport {
   const accounts: AccountFetch[] = mailAccounts.map((a) => {
     const fetch: AccountFetch =
       a.status === "connected"
-        ? { account: a.id, read: Math.min(mailLimit, a.provider === "simulator" ? 5 : 2), added: 0, error: null }
+        ? {
+            account: a.id,
+            read: Math.min(mailLimit, a.provider === "simulator" ? 5 : 2),
+            added: 0,
+            error: null,
+            attachments: { imported: 0, skipped: [], failed: [] },
+          }
         : {
             account: a.id,
             read: 0,
             added: 0,
+            attachments: { imported: 0, skipped: [], failed: [] },
             error:
               a.status === "not_configured"
                 ? { code: "unavailable", message: "esta instalación no tiene configurado el cliente OAuth" }

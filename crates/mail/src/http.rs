@@ -10,6 +10,9 @@ use url::Url;
 use crate::oauth::TokenSource;
 use crate::{checked_url, error, provider_code, MailResult};
 
+/// Tamaño máximo de una respuesta corriente (listas, mensajes, perfiles).
+pub(crate) const DEFAULT_LIMIT: u64 = 10 * 1024 * 1024;
+
 pub(crate) enum Method {
     Get,
     Post,
@@ -92,8 +95,21 @@ impl Api {
         url: &Url,
         body: Option<&Value>,
     ) -> MailResult<Value> {
-        match self.attempt(&method, url, body, false) {
-            Err(e) if e.code == "retry_unauthorized" => self.attempt(&method, url, body, true),
+        self.call_limited(method, url, body, DEFAULT_LIMIT)
+    }
+
+    /// Como [`Api::call`], con otro tamaño máximo de respuesta (adjuntos en base64).
+    pub(crate) fn call_limited(
+        &self,
+        method: Method,
+        url: &Url,
+        body: Option<&Value>,
+        limit: u64,
+    ) -> MailResult<Value> {
+        match self.attempt(&method, url, body, false, limit) {
+            Err(e) if e.code == "retry_unauthorized" => {
+                self.attempt(&method, url, body, true, limit)
+            }
             other => other,
         }
     }
@@ -104,6 +120,7 @@ impl Api {
         url: &Url,
         body: Option<&Value>,
         refreshed: bool,
+        limit: u64,
     ) -> MailResult<Value> {
         let token = self.tokens.access_token(refreshed)?;
         let bearer = format!("Bearer {}", token.expose());
@@ -139,7 +156,26 @@ impl Api {
             )
         })?;
         let status = response.status().as_u16();
-        let text = response.body_mut().read_to_string().unwrap_or_default();
+        // Una respuesta correcta que no se puede leer entera (cortada o mayor que el límite)
+        // es un error, nunca una respuesta vacía.
+        let text = match response
+            .body_mut()
+            .with_config()
+            .limit(limit)
+            .read_to_string()
+        {
+            Ok(text) => text,
+            Err(_) if (200..300).contains(&status) => {
+                return Err(error(
+                    codes::UNAVAILABLE,
+                    format!(
+                        "la respuesta del proveedor no se pudo leer entera (máximo {} MB)",
+                        limit / 1_000_000
+                    ),
+                ))
+            }
+            Err(_) => String::new(),
+        };
         let json = if text.trim().is_empty() {
             Value::Null
         } else {

@@ -74,6 +74,7 @@ fn list_messages_pages_with_stable_ids_and_explicit_absences() {
         to: None,
         body: None,
         date: None,
+        attachments: Vec::new(),
     }]);
     let page = unknown.list_messages(None).unwrap();
     assert_eq!(page.messages[0].to, None);
@@ -630,4 +631,38 @@ fn an_older_sample_state_gets_the_synthetic_senders_without_touching_other_messa
     // Abrirlo otra vez no cambia nada más.
     let again = MailSimulator::open(&path).unwrap();
     assert_eq!(again.list_messages(None).unwrap().messages, messages);
+}
+
+#[test]
+fn sample_invoice_attachment_is_listed_and_downloadable_without_effects() {
+    let sim = MailSimulator::in_memory();
+    let page = sim.list_messages(None).unwrap();
+    let m1 = page.messages.iter().find(|m| m.id == "M-0001").unwrap();
+    assert_eq!(m1.attachments.len(), 1);
+    let attachment = &m1.attachments[0];
+    assert_eq!(attachment.name.as_deref(), Some("factura-FS-2026-014.txt"));
+    let content = sim.fetch_attachment("M-0001", &attachment.id).unwrap();
+    assert_eq!(Some(content.len() as u64), attachment.size);
+    assert!(String::from_utf8(content)
+        .unwrap()
+        .contains("Total: 145.20 EUR"));
+    assert!(page
+        .messages
+        .iter()
+        .filter(|m| m.id != "M-0001")
+        .all(|m| m.attachments.is_empty()));
+
+    assert_eq!(
+        sim.fetch_attachment("M-0001", "A-9").unwrap_err().code,
+        "not_found"
+    );
+    sim.set_attachment_failure(Some(FailureMode::Unavailable));
+    assert_eq!(
+        sim.fetch_attachment("M-0001", &attachment.id)
+            .unwrap_err()
+            .code,
+        "unavailable"
+    );
+    // La lista no se ve afectada por el fallo de descarga.
+    assert!(sim.list_messages(None).is_ok());
 }

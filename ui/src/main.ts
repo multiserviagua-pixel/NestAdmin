@@ -903,17 +903,33 @@ function issueText(error: { code: string; message: string }) {
 function fetchNotice(report: FetchReport): { kind: "ok" | "error"; text: string } {
   if (report.accounts.length === 0) return { kind: "error", text: "No hay cuentas de correo. Añada una en la sección Correo." };
   const failed = report.accounts.filter((a) => a.error);
-  const added = report.added ? `${report.added} mensajes nuevos en cola` : "No hay mensajes nuevos";
-  if (!failed.length) return { kind: "ok", text: added };
-  const names = failed.map((a) => `${state.mail?.accounts.find((m) => m.id === a.account)?.label ?? a.account} — ${issueText(a.error!)}`);
-  return { kind: "error", text: `${added}. No se pudo consultar: ${names.join("; ")}` };
+  const imported = report.accounts.reduce((sum, a) => sum + (a.attachments?.imported ?? 0), 0);
+  const skipped = report.accounts.flatMap((a) => a.attachments?.skipped ?? []);
+  const attachmentErrors = report.accounts.flatMap((a) => a.attachments?.failed ?? []);
+  let added = report.added ? `${report.added} mensajes nuevos en cola` : "No hay mensajes nuevos";
+  if (imported) added += `; ${imported} adjuntos importados como documentos`;
+  if (skipped.length) added += `; adjuntos no procesables omitidos: ${skipped.join(", ")}`;
+  const problems: string[] = failed.map(
+    (a) => `no se pudo consultar ${state.mail?.accounts.find((m) => m.id === a.account)?.label ?? a.account} — ${issueText(a.error!)}`,
+  );
+  if (attachmentErrors.length) {
+    problems.push(
+      `adjuntos sin importar (se reintentarán en la próxima consulta): ${attachmentErrors.map((e) => `${e.name} — ${issueText(e)}`).join("; ")}`,
+    );
+  }
+  if (!problems.length) return { kind: "ok", text: added };
+  return { kind: "error", text: `${added}. ${problems.join(". ")}` };
 }
 
 function lastFetch(account: MailAccount) {
   const f = account.last_fetch;
   if (!f) return h("span", { class: "missing" }, "Sin consultar en esta sesión");
   if (f.error) return h("span", { class: "error-text" }, issueText(f.error));
-  return `${f.read} leídos, ${f.added} nuevos`;
+  const a = f.attachments;
+  const parts = [`${f.read} leídos, ${f.added} nuevos`];
+  if (a?.imported) parts.push(`${a.imported} adjuntos importados`);
+  if (a?.failed.length) return h("span", { class: "error-text" }, `${parts.join(", ")}; ${a.failed.length} adjuntos sin importar`);
+  return parts.join(", ");
 }
 
 function signIn(provider: MailProviderKind, label: string, account?: MailAccount) {

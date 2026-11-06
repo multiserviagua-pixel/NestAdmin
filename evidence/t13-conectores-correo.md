@@ -125,3 +125,17 @@ En `tests/mail_accounts.rs`, la prueba de respuesta perdida en Graph termina aho
 - Gmail: provocar con la cuenta real un corte entre el envío y el recibo y comprobar que la reconciliación por `Message-ID` propio (D41) lo confirma; en particular, que Gmail mantiene esa cabecera al enviar. La parte simulada está hecha.
 - Recorrido con una cuenta real desde la ventana: añadir la cuenta, consultar, aprobar un envío y desconectar. Requiere `correo-oauth.json` con los clientes del editor (D43).
 - Calidad de clasificación y borradores con correo real: sin medir.
+
+## 2026-11-06 — Adjuntos (D66)
+
+Contenedor Linux, Rust 1.99.1, `cargo test --workspace`: 180 pruebas superadas y 0 fallidas. También pasan `cargo clippy --workspace --all-targets -D warnings` (incluido `nestadmin-desktop`), `tsc` y `vite build`. Pruebas nuevas, todas con datos sintéticos:
+
+| Prueba | Qué comprueba |
+| --- | --- |
+| `graph::file_attachments_are_listed_without_inline_images_and_downloaded` | Graph simulado: solo pide la lista de adjuntos de los mensajes con `hasAttachments`; lista los `fileAttachment` y no los incrustados ni los `itemAttachment`; descarga y decodifica `contentBytes`; `not_found` e `invalid_input`. |
+| `gmail::named_parts_are_attachments_except_embedded_images_and_download_decodes_them` | Gmail simulado: partes con nombre anidadas, imagen con `Content-ID` excluida, adjunto por `attachmentId` y adjunto pequeño dentro del mensaje (`part:<partId>`); errores `not_found`. |
+| `simulators::sample_invoice_attachment_is_listed_and_downloadable_without_effects` | Factura sintética adjunta a M-0001, tamaño coherente, fallo de descarga sin afectar a la lista. |
+| `flows::mail_attachments_become_documents_once_and_failures_are_retried` | La consulta importa el adjunto con el origen del correo una sola vez, omite y anuncia un `.docx`, informa de una descarga fallida y la importa en la consulta siguiente sin duplicar. |
+
+Pendiente: adjuntos reales de Microsoft 365 y Gmail, y el recorrido desde la aplicación instalada.
+

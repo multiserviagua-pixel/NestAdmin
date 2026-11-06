@@ -122,6 +122,10 @@ Numeración desde D50: D48 y D49 son el origen de correos y documentos.
 
 - **D65 `rate_limited`.** Un HTTP 429 de Groq es el error `rate_limited` del contrato de IA, distinto de `unavailable`. El adaptador espera lo que indica `Retry-After` (2 s si no lo da, 30 s como máximo) y reintenta con el mismo proveedor, hasta 10 veces y solo si la espera cabe en el plazo de la petición; si no, devuelve el error sin esperar y la tarea queda fallida y recuperable. Nunca se cambia de proveedor. *Motivo:* con el plan gratuito (1000 tokens de salida por minuto) el corpus sintético daba 16 fallos de 30 que se presentaban como proveedor caído ([evidencia](../../evidence/t10-groq.md)).
 
+## 2026-11-06 — Adjuntos del correo como documentos (concreta R05 y R13)
+
+- **D66 Adjuntos.** El contrato de correo lista los adjuntos de cada mensaje y permite descargarlos (`fetch_attachment`). Gmail: partes con nombre, salvo las que llevan `Content-ID` sin disposición `attachment` (imágenes incrustadas); se descargan con `messages.attachments.get` o, si vienen dentro del mensaje, por su `partId`. Graph: se piden solo para los mensajes con `hasAttachments`, se listan los `fileAttachment` no incrustados (los `itemAttachment` y `referenceAttachment` no son documentos) y se descargan con su `contentBytes`. Una respuesta del proveedor que no se puede leer entera es un error, nunca una respuesta vacía; el límite es de 10 MB para las respuestas corrientes y el de un adjunto de 50 MB en base64 para las descargas. Al consultar el correo, la aplicación importa como documentos los adjuntos de los tipos que procesa, con el origen del correo y la clave `<mensaje>#<nombre>#<tamaño>` (el identificador de Gmail puede cambiar entre consultas). Un adjunto ya importado no se vuelve a importar; uno que falla queda en el informe con su código y se reintenta en la consulta siguiente; uno de otro tipo se omite y se dice. Los permisos de D31 (`gmail.modify`, `Mail.ReadWrite`) ya cubren la lectura de adjuntos. El simulador lleva una factura sintética adjunta en M-0001.
+
 ## Versiones de desarrollo fijadas
 
 | Componente | Versión | Licencia | Dónde se fija |

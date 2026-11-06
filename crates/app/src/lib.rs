@@ -10,7 +10,7 @@
 pub mod accounts;
 pub mod rules;
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -31,8 +31,8 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
 use crate::accounts::{
-    split_id, AccountFetch, AccountView, Accounts, FetchReport, MailAccountsView, MailEnv,
-    MailIssue, MailProviderKind,
+    split_id, AccountFetch, AccountView, Accounts, AttachmentFetch, AttachmentIssue, FetchReport,
+    MailAccountsView, MailEnv, MailIssue, MailProviderKind,
 };
 use crate::rules::{decide, RuleDecision, REGISTER_INVOICE, SEND_DRAFT};
 
@@ -493,6 +493,17 @@ impl App {
         name: &str,
         bytes: &[u8],
     ) -> AppResult<Task> {
+        self.import_attachment_keyed(message_task, name, bytes, "", "")
+    }
+
+    fn import_attachment_keyed(
+        &mut self,
+        message_task: i64,
+        name: &str,
+        bytes: &[u8],
+        attachment_key: &str,
+        attachment_id: &str,
+    ) -> AppResult<Task> {
         let task = self.store.task(message_task)?;
         if task.kind != EMAIL {
             return Err(AppError::Invalid(format!(
@@ -517,6 +528,11 @@ impl App {
             "subject": message["subject"],
             "attachment": name,
         });
+        let mut origin = origin;
+        if !attachment_key.is_empty() {
+            origin["attachment_key"] = json!(attachment_key);
+            origin["attachment_id"] = json!(attachment_id);
+        }
         self.store_document(name, &extension, bytes, origin)
     }
 
@@ -574,17 +590,24 @@ impl App {
     /// pedirlo al proveedor. El fallo de una cuenta queda en el informe y no detiene a las
     /// demás.
     pub fn fetch_mail(&mut self) -> AppResult<FetchReport> {
-        let mut known: HashSet<String> = HashSet::new();
-        for task in self
-            .store
-            .all_tasks()?
-            .into_iter()
-            .filter(|t| t.kind == EMAIL)
-        {
+        // Mensajes con tarea (ID con cuenta → tarea) y adjuntos ya importados.
+        let mut known: HashMap<String, i64> = HashMap::new();
+        let mut imported: HashSet<String> = HashSet::new();
+        for task in self.store.all_tasks()? {
             let input: Value = serde_json::from_str(&task.input_ref).unwrap_or(Value::Null);
-            if let Some(id) = input["message_id"].as_str() {
-                let (account, inner) = split_id(id);
-                known.insert(accounts::join_id(account, inner));
+            match task.kind.as_str() {
+                EMAIL => {
+                    if let Some(id) = input["message_id"].as_str() {
+                        let (account, inner) = split_id(id);
+                        known.insert(accounts::join_id(account, inner), task.id);
+                    }
+                }
+                INVOICE => {
+                    if let Some(key) = input["origin"]["attachment_key"].as_str() {
+                        imported.insert(key.to_owned());
+                    }
+                }
+                _ => {}
             }
         }
         let mut report = FetchReport {
@@ -596,23 +619,31 @@ impl App {
             let fetch = match outcome {
                 Ok(messages) => {
                     let mut added = 0;
+                    let mut attachments = AttachmentFetch::default();
                     for message in &messages {
-                        if known.insert(message.id.clone()) {
-                            let input = json!({
-                                "message_id": message.id,
-                                "account": account,
-                                "origin": self.mail.origin(&account),
-                                "message": message,
-                            });
-                            self.store.enqueue(EMAIL, &input.to_string())?;
-                            added += 1;
-                        }
+                        let task_id = match known.get(&message.id) {
+                            Some(id) => *id,
+                            None => {
+                                let input = json!({
+                                    "message_id": message.id,
+                                    "account": account,
+                                    "origin": self.mail.origin(&account),
+                                    "message": message,
+                                });
+                                let task = self.store.enqueue(EMAIL, &input.to_string())?;
+                                known.insert(message.id.clone(), task.id);
+                                added += 1;
+                                task.id
+                            }
+                        };
+                        self.import_attachments(task_id, message, &mut imported, &mut attachments)?;
                     }
                     AccountFetch {
                         account,
                         read: messages.len(),
                         added,
                         error: None,
+                        attachments,
                     }
                 }
                 Err(error) => AccountFetch {
@@ -620,6 +651,7 @@ impl App {
                     read: 0,
                     added: 0,
                     error: Some(MailIssue::from(&error)),
+                    attachments: AttachmentFetch::default(),
                 },
             };
             report.added += fetch.added;
@@ -627,6 +659,69 @@ impl App {
             report.accounts.push(fetch);
         }
         Ok(report)
+    }
+
+    /// Importa como documentos los adjuntos admitidos de un mensaje que aún no se importaron.
+    /// La clave de un adjunto es el mensaje, su nombre y su tamaño, que no cambian entre
+    /// consultas (el identificador de Gmail sí puede cambiar). Un fallo de descarga queda en
+    /// el informe y se reintenta en la consulta siguiente; nunca se pierde en silencio.
+    fn import_attachments(
+        &mut self,
+        message_task: i64,
+        message: &Message,
+        imported: &mut HashSet<String>,
+        report: &mut AttachmentFetch,
+    ) -> AppResult<()> {
+        for attachment in &message.attachments {
+            let name = attachment_name(attachment);
+            let key = format!(
+                "{}#{}#{}",
+                message.id,
+                name,
+                attachment.size.map(|s| s.to_string()).unwrap_or_default()
+            );
+            if imported.contains(&key) {
+                continue;
+            }
+            if !supported_document(&name) {
+                report.skipped.push(name);
+                continue;
+            }
+            let fail = |code: &str, message: String| AttachmentIssue {
+                name: name.clone(),
+                code: code.to_owned(),
+                message,
+            };
+            if attachment
+                .size
+                .is_some_and(|s| s > MAX_DOCUMENT_BYTES as u64)
+            {
+                report.failed.push(fail(
+                    "invalid_input",
+                    format!(
+                        "supera el tamaño máximo de {} MB",
+                        MAX_DOCUMENT_BYTES / 1_000_000
+                    ),
+                ));
+                continue;
+            }
+            let bytes = match self.mail.fetch_attachment(&message.id, &attachment.id) {
+                Ok(bytes) => bytes,
+                Err(e) => {
+                    report.failed.push(fail(&e.code, e.message));
+                    continue;
+                }
+            };
+            match self.import_attachment_keyed(message_task, &name, &bytes, &key, &attachment.id) {
+                Ok(_) => {
+                    imported.insert(key);
+                    report.imported += 1;
+                }
+                Err(AppError::Invalid(reason)) => report.failed.push(fail("invalid_input", reason)),
+                Err(other) => return Err(other),
+            }
+        }
+        Ok(())
     }
 
     /// Mensaje de una tarea de correo: el guardado al encolarla o, en tareas anteriores a las
@@ -1181,13 +1276,51 @@ fn check_rule(action_kind: &str, conditions: &Value) -> AppResult<()> {
 }
 
 /// Comprueba nombre, tamaño y contenido de un documento; devuelve su extensión.
-fn check_document(name: &str, bytes: &[u8]) -> AppResult<String> {
-    let extension = Path::new(name)
+/// Nombre con el que se guarda un adjunto: el suyo o, si no lo trae, uno deducido del tipo.
+fn attachment_name(attachment: &nestadmin_simulators::Attachment) -> String {
+    if let Some(name) = attachment
+        .name
+        .as_deref()
+        .map(str::trim)
+        .filter(|n| !n.is_empty())
+    {
+        // Sin rutas: solo el último componente, por si el remitente puso barras.
+        return name.rsplit(['/', '\\']).next().unwrap_or(name).to_owned();
+    }
+    let extension = match attachment
+        .mime
+        .as_deref()
+        .map(str::to_ascii_lowercase)
+        .as_deref()
+    {
+        Some("application/pdf") => "pdf",
+        Some("text/plain") => "txt",
+        _ => "bin",
+    };
+    format!(
+        "adjunto-{}.{extension}",
+        attachment.id.chars().take(12).collect::<String>()
+    )
+}
+
+/// Extensiones que NestAdmin procesa como documento.
+const DOCUMENT_EXTENSIONS: &[&str] = &["txt", "pdf"];
+
+fn document_extension(name: &str) -> String {
+    Path::new(name)
         .extension()
         .and_then(|e| e.to_str())
         .map(str::to_ascii_lowercase)
-        .unwrap_or_default();
-    if extension != "txt" && extension != "pdf" {
+        .unwrap_or_default()
+}
+
+fn supported_document(name: &str) -> bool {
+    DOCUMENT_EXTENSIONS.contains(&document_extension(name).as_str())
+}
+
+fn check_document(name: &str, bytes: &[u8]) -> AppResult<String> {
+    let extension = document_extension(name);
+    if !DOCUMENT_EXTENSIONS.contains(&extension.as_str()) {
         return Err(AppError::Invalid(format!(
             "«{name}»: solo se admiten archivos .txt y .pdf"
         )));

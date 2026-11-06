@@ -11,6 +11,7 @@ use nestadmin_ai::{
 use nestadmin_app::{App, AppError, AppPaths, EMAIL, INVOICE};
 use nestadmin_core::TaskState;
 use nestadmin_extract::{ExtractError, Extractor, Ocr};
+use nestadmin_simulators::FailureMode;
 use serde_json::{json, Value};
 
 /// Devuelve el JSON incluido en el documento (extracción) o una respuesta fija (correo).
@@ -39,7 +40,18 @@ impl Provider for FakeProvider {
             return Err(AiError::Unavailable("sin conexión".into()));
         }
         let output = match request.task {
-            AiTask::Extraction => serde_json::from_str(&request.content).unwrap(),
+            // Las facturas de las pruebas son JSON; la del adjunto sintético de M-0001 es texto.
+            AiTask::Extraction => serde_json::from_str(&request.content).unwrap_or_else(|_| {
+                assert!(
+                    request.content.contains("FS-2026-014"),
+                    "{}",
+                    request.content
+                );
+                json!({
+                    "supplier": "Proveedor Alfa Suministros SL", "invoice_number": "FS-2026-014",
+                    "date": "2026-10-01", "subtotal": "120.00", "tax": "25.20", "total": "145.20",
+                })
+            }),
             _ => {
                 json!({ "category": "solicitud_factura", "draft": "Adjuntamos la factura solicitada." })
             }
@@ -315,7 +327,10 @@ fn a_draft_without_sender_is_never_sent_by_a_rule() {
     let mut states = Vec::new();
     while let Some(task) = app.process_next().unwrap() {
         let result = task.result.clone().unwrap();
-        states.push((result["draft"]["to"].as_array().unwrap().len(), task.state));
+        // La factura adjunta a M-0001 también se procesa; aquí solo cuentan los correos.
+        if let Some(to) = result["draft"]["to"].as_array() {
+            states.push((to.len(), task.state));
+        }
     }
     assert!(states.contains(&(1, TaskState::Completed)));
     assert!(
@@ -550,4 +565,71 @@ fn mail_origin_is_kept_in_mail_tasks_and_their_attachments() {
         .import_attachment(attachment.id, "x.txt", b"texto")
         .is_err());
     assert!(app.document_file(mail_task.id).is_err());
+}
+
+#[test]
+fn mail_attachments_become_documents_once_and_failures_are_retried() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = open(&dir, FakeProvider::new());
+    let invoices = |app: &mut App| -> Vec<Value> {
+        app.tasks()
+            .unwrap()
+            .into_iter()
+            .filter(|t| t.kind == INVOICE)
+            .map(|t| serde_json::from_str::<Value>(&t.input_ref).unwrap()["origin"].clone())
+            .collect()
+    };
+
+    // M-0001 trae una factura sintética en texto: se importa con el origen del correo.
+    let report = app.fetch_mail().unwrap();
+    assert_eq!(report.accounts[0].attachments.imported, 1);
+    let first = invoices(&mut app);
+    assert_eq!(first.len(), 1);
+    assert_eq!(first[0]["kind"], "email");
+    assert_eq!(first[0]["message_id"], "simulador:M-0001");
+    assert_eq!(first[0]["attachment"], "factura-FS-2026-014.txt");
+    assert_eq!(first[0]["from"], "facturas@proveedor-alfa.test");
+
+    // Volver a consultar no la duplica.
+    let again = app.fetch_mail().unwrap();
+    assert_eq!(again.accounts[0].attachments.imported, 0);
+    assert_eq!(invoices(&mut app).len(), 1);
+
+    // Un tipo no admitido se omite y se dice; uno que no se puede descargar falla visible
+    // y se importa en la consulta siguiente.
+    let sim = app.simulators().0;
+    sim.add_attachment("M-0002", "contrato.docx", "application/msword", b"x")
+        .unwrap();
+    sim.add_attachment(
+        "M-0002",
+        "pedido-2231.pdf",
+        "application/pdf",
+        b"%PDF-1.4 sintetico",
+    )
+    .unwrap();
+    sim.set_attachment_failure(Some(FailureMode::Unavailable));
+    let failed = app.fetch_mail().unwrap();
+    let fetch = &failed.accounts[0].attachments;
+    assert_eq!(fetch.imported, 0);
+    assert_eq!(fetch.skipped, ["contrato.docx"]);
+    assert_eq!(fetch.failed.len(), 1);
+    assert_eq!(fetch.failed[0].name, "pedido-2231.pdf");
+    assert_eq!(fetch.failed[0].code, "unavailable");
+    assert_eq!(invoices(&mut app).len(), 1);
+
+    app.simulators().0.set_attachment_failure(None);
+    let retried = app.fetch_mail().unwrap();
+    assert_eq!(retried.accounts[0].attachments.imported, 1);
+    assert!(retried.accounts[0].attachments.failed.is_empty());
+    let all = invoices(&mut app);
+    assert_eq!(all.len(), 2);
+    let pdf = all
+        .iter()
+        .find(|o| o["attachment"] == "pedido-2231.pdf")
+        .unwrap();
+    assert_eq!(pdf["subject"], "Consulta sobre el pedido 2231");
+    assert_eq!(
+        app.fetch_mail().unwrap().accounts[0].attachments.imported,
+        0
+    );
 }
