@@ -92,7 +92,7 @@ const mailAccounts: MailAccount[] = params.has("sin-cuentas")
         label: "Oficina",
         address: "oficina@empresa.test",
         status: clientsConfigured ? "connected" : "not_configured",
-        last_fetch: { account: "microsoft-1", read: 25, added: 3, error: null },
+        last_fetch: { account: "microsoft-1", read: 25, added: 3, error: null, attachments: { imported: 2, skipped: [], failed: [] } },
       },
       {
         id: "google-1",
@@ -105,6 +105,7 @@ const mailAccounts: MailAccount[] = params.has("sin-cuentas")
           read: 0,
           added: 0,
           error: { code: "unauthorized", message: "la sesión caducó; vuelva a iniciar sesión" },
+          attachments: { imported: 0, skipped: [], failed: [] },
         },
       },
     ];
@@ -156,11 +157,18 @@ function fetchMail(): FetchReport {
   const accounts: AccountFetch[] = mailAccounts.map((a) => {
     const fetch: AccountFetch =
       a.status === "connected"
-        ? { account: a.id, read: Math.min(mailLimit, a.provider === "simulator" ? 5 : 2), added: 0, error: null }
+        ? {
+            account: a.id,
+            read: Math.min(mailLimit, a.provider === "simulator" ? 5 : 2),
+            added: 0,
+            error: null,
+            attachments: { imported: 0, skipped: [], failed: [] },
+          }
         : {
             account: a.id,
             read: 0,
             added: 0,
+            attachments: { imported: 0, skipped: [], failed: [] },
             error:
               a.status === "not_configured"
                 ? { code: "unavailable", message: "esta instalación no tiene configurado el cliente OAuth" }
@@ -480,7 +488,7 @@ const handlers: Record<string, (a: any, options?: any) => unknown> = {
   tasks: () => structuredClone(tasks),
   import_file: (bytes: Uint8Array, options?: { headers: Record<string, string> }) => {
     const name = decodeURIComponent(options?.headers["x-nestadmin-name"] ?? "");
-    if (!/\.(txt|pdf)$/i.test(name)) throw `«${name}»: solo se admiten archivos .txt y .pdf`;
+    if (!/\.(txt|pdf|jpe?g|png|tiff?|bmp|webp)$/i.test(name)) throw `«${name}»: solo se admiten texto (.txt), PDF e imágenes (.jpg, .png, .tif, .bmp, .webp)`;
     if (bytes.length === 0) throw `«${name}» está vacío`;
     // El navegador no da la ruta original: queda como «no consta», igual que en la aplicación.
     return task("invoice", { document: name, origin: { ...fileOrigin(name, null, 0), size: bytes.length } }, "queued", null);

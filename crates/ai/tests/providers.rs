@@ -27,6 +27,7 @@ struct Reply {
     status: u16,
     body: String,
     delay: Duration,
+    headers: String,
 }
 
 fn reply(status: u16, body: Value) -> Reply {
@@ -34,6 +35,7 @@ fn reply(status: u16, body: Value) -> Reply {
         status,
         body: body.to_string(),
         delay: Duration::ZERO,
+        headers: String::new(),
     }
 }
 
@@ -69,8 +71,9 @@ fn serve(replies: Vec<Reply>) -> (String, Arc<Mutex<Vec<String>>>) {
             thread::sleep(reply.delay);
             let _ = write!(
                 stream,
-                "HTTP/1.1 {} X\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                "HTTP/1.1 {} X\r\nContent-Type: application/json\r\n{}Content-Length: {}\r\nConnection: close\r\n\r\n{}",
                 reply.status,
+                reply.headers,
                 reply.body.len(),
                 reply.body
             );
@@ -186,7 +189,8 @@ fn ollama_extraction_sends_schema_without_reasoning_and_reports_model() {
     assert_eq!(body["stream"], false);
     assert_eq!(body["think"], false);
     assert_eq!(body["options"]["temperature"], 0);
-    assert_eq!(body["format"]["required"].as_array().unwrap().len(), 6);
+    // Los seis campos más la lista de las demás facturas del documento (D68).
+    assert_eq!(body["format"]["required"].as_array().unwrap().len(), 7);
     assert_eq!(body["messages"][1]["content"], "texto sintético");
 
     let raw = parse_extraction(&result.output).unwrap();
@@ -212,6 +216,7 @@ fn contract_errors_from_the_local_provider() {
             status: 200,
             body: "{}".into(),
             delay: Duration::from_millis(1500),
+            headers: String::new(),
         },
     ]);
     let provider = OllamaProvider::new(&url, "m", timeout).unwrap();
@@ -494,6 +499,7 @@ fn ollama_cloud_contract_errors() {
             status: 200,
             body: "{}".into(),
             delay: Duration::from_millis(1500),
+            headers: String::new(),
         },
     ]);
     let provider = OllamaCloudProvider::with_endpoint(&url, "m", Secret::new(CLOUD_KEY), timeout);
@@ -622,6 +628,7 @@ fn local_provider_fails_closed_when_api_show_fails() {
             status: 200,
             body: "{}".into(),
             delay: Duration::from_millis(1500),
+            headers: String::new(),
         },
         ollama_ok("{}"),
     ]);
@@ -1095,6 +1102,7 @@ fn openai_compatible_errors_follow_the_contract_and_hide_the_key() {
             status: 200,
             body: "{}".into(),
             delay: Duration::from_millis(1500),
+            headers: String::new(),
         },
     ]);
     let provider =
@@ -1104,7 +1112,7 @@ fn openai_compatible_errors_follow_the_contract_and_hide_the_key() {
     for expected in [
         "unauthorized",
         "unauthorized",
-        "unavailable",
+        "rate_limited",
         "unavailable",
         "invalid_response",
         "invalid_response",
@@ -1383,6 +1391,7 @@ fn anthropic_http_errors_follow_the_contract_and_hide_the_key() {
             status: 200,
             body: "{}".into(),
             delay: Duration::from_millis(1500),
+            headers: String::new(),
         },
     ]);
     let provider = AnthropicProvider::with_endpoint(&url, "m", Secret::new(ANTHROPIC_KEY), timeout);
@@ -1391,7 +1400,7 @@ fn anthropic_http_errors_follow_the_contract_and_hide_the_key() {
     for expected in [
         "unauthorized",
         "unauthorized",
-        "unavailable",
+        "rate_limited",
         "unavailable",
         "unavailable",
         "invalid_response",
@@ -1490,6 +1499,7 @@ fn anthropic_4xx_reports_only_the_short_error_type() {
             status: 400,
             body: format!("no es JSON {MARK}"),
             delay: Duration::ZERO,
+            headers: String::new(),
         },
     ]);
     let provider = AnthropicProvider::with_endpoint(&url, "m", Secret::new(ANTHROPIC_KEY), timeout);
@@ -1582,4 +1592,99 @@ fn code_fence_normalization_removes_only_one_wrapping_block() {
             "{bad}"
         );
     }
+}
+
+fn groq_ok(content: Value) -> Reply {
+    reply(
+        200,
+        json!({
+            "model": "m",
+            "choices": [{ "message": { "content": content.to_string() } }],
+        }),
+    )
+}
+
+fn rate_limited(retry_after: &str) -> Reply {
+    let mut r = reply(429, json!({ "error": { "message": "rate limit" } }));
+    if !retry_after.is_empty() {
+        r.headers = format!("Retry-After: {retry_after}\r\n");
+    }
+    r
+}
+
+#[test]
+fn rate_limit_waits_what_the_provider_asks_and_retries_the_same_provider() {
+    let content = json!({ "category": "otros", "draft": "Gracias por su mensaje." });
+    let (url, seen) = serve(vec![
+        rate_limited("0.2"),
+        rate_limited("0"),
+        groq_ok(content),
+    ]);
+    let provider =
+        GroqProvider::with_endpoint(&url, "m", Secret::new(FAKE_KEY), Duration::from_secs(5));
+    let started = std::time::Instant::now();
+    let result = provider.generate(&email_request("E01", "t")).unwrap();
+    assert_eq!(result.provider, ProviderKind::Groq);
+    assert!(started.elapsed() >= Duration::from_millis(200));
+    assert_eq!(seen.lock().unwrap().len(), 3);
+}
+
+#[test]
+fn rate_limit_beyond_the_deadline_is_reported_without_waiting() {
+    let (url, seen) = serve(vec![rate_limited("60")]);
+    let provider =
+        GroqProvider::with_endpoint(&url, "m", Secret::new(FAKE_KEY), Duration::from_secs(5));
+    let started = std::time::Instant::now();
+    let error = provider.generate(&email_request("E01", "t")).unwrap_err();
+    assert_eq!(
+        error,
+        AiError::RateLimited {
+            retry_after_ms: Some(60_000)
+        }
+    );
+    assert_eq!(error.code(), "rate_limited");
+    assert!(started.elapsed() < Duration::from_secs(2));
+    assert_eq!(seen.lock().unwrap().len(), 1);
+    assert!(!format!("{error}").contains(FAKE_KEY));
+}
+
+#[test]
+fn other_invoices_are_read_strictly_and_requested_in_the_schema() {
+    use nestadmin_ai::tasks::{parse_other_invoices, OTHER_INVOICES};
+    let request = extraction_request("x", "t");
+    let schema = request.schema.unwrap();
+    assert!(schema["required"]
+        .as_array()
+        .unwrap()
+        .contains(&json!(OTHER_INVOICES)));
+    assert_eq!(
+        schema["properties"][OTHER_INVOICES]["items"]["required"],
+        json!([
+            "supplier",
+            "invoice_number",
+            "date",
+            "subtotal",
+            "tax",
+            "total"
+        ])
+    );
+
+    let one = json!({ "supplier": "A", "invoice_number": "1", "date": null,
+                      "subtotal": null, "tax": null, "total": "10.00" });
+    assert!(
+        parse_other_invoices(&one).unwrap().is_empty(),
+        "sin la clave"
+    );
+    let empty = json!({ "supplier": null, "invoice_number": null, "date": null,
+                        "subtotal": null, "tax": null, "total": null });
+    let output = json!({ "other_invoices": [one.clone(), empty] });
+    assert_eq!(parse_other_invoices(&output).unwrap(), vec![one.clone()]);
+    assert!(matches!(
+        parse_other_invoices(&json!({ "other_invoices": "dos" })),
+        Err(AiError::InvalidResponse(_))
+    ));
+    assert!(matches!(
+        parse_other_invoices(&json!({ "other_invoices": [{ "total": 10.0 }] })),
+        Err(AiError::InvalidResponse(_))
+    ));
 }

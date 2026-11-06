@@ -47,7 +47,7 @@ Licencia del proyecto original de cada DLL de `tesseract\`. JBIG-KIT (GPL) y lib
 | `libzstd.dll` | Zstandard | BSD-3-Clause OR GPL-2.0-only |
 | `zlib1.dll` | zlib | Zlib |
 
-## Crates de Rust enlazados en `nestadmin.exe` (286)
+## Crates de Rust enlazados en `nestadmin.exe` (293)
 
 Dependencias normales de `nestadmin-desktop` para `x86_64-pc-windows-msvc`; se excluyen las de compilación y pruebas.
 
@@ -116,6 +116,7 @@ Dependencias normales de `nestadmin-desktop` para `x86_64-pc-windows-msvc`; se e
 | fallible-iterator | 0.3.0 | MIT/Apache-2.0 | https://github.com/sfackler/rust-fallible-iterator |
 | fallible-streaming-iterator | 0.1.9 | MIT/Apache-2.0 | https://github.com/sfackler/fallible-streaming-iterator |
 | fastrand | 2.5.0 | Apache-2.0 OR MIT | https://github.com/smol-rs/fastrand |
+| fax | 0.2.7 | MIT | https://github.com/pdf-rs/fax |
 | fdeflate | 0.3.7 | MIT OR Apache-2.0 | https://github.com/image-rs/fdeflate |
 | flate2 | 1.1.10 | MIT OR Apache-2.0 | https://github.com/rust-lang/flate2-rs |
 | fnv | 1.0.7 | Apache-2.0 / MIT | https://github.com/servo/rust-fnv |
@@ -126,6 +127,7 @@ Dependencias normales de `nestadmin-desktop` para `x86_64-pc-windows-msvc`; se e
 | getrandom | 0.3.4 | MIT OR Apache-2.0 | https://github.com/rust-random/getrandom |
 | getrandom | 0.4.3 | MIT OR Apache-2.0 | https://github.com/rust-random/getrandom |
 | glob | 0.3.4 | MIT OR Apache-2.0 | https://github.com/rust-lang/glob |
+| half | 2.7.1 | MIT OR Apache-2.0 | https://github.com/VoidStarKat/half-rs |
 | hashbrown | 0.12.3 | MIT OR Apache-2.0 | https://github.com/rust-lang/hashbrown |
 | hashbrown | 0.17.1 | MIT OR Apache-2.0 | https://github.com/rust-lang/hashbrown |
 | hashlink | 0.12.2 | MIT OR Apache-2.0 | https://github.com/djc/hashlink |
@@ -146,6 +148,7 @@ Dependencias normales de `nestadmin-desktop` para `x86_64-pc-windows-msvc`; se e
 | idna | 1.1.0 | MIT OR Apache-2.0 | https://github.com/servo/rust-url/ |
 | idna_adapter | 1.2.2 | Apache-2.0 OR MIT | https://github.com/hsivonen/idna_adapter |
 | image | 0.25.10 | MIT OR Apache-2.0 | https://github.com/image-rs/image |
+| image-webp | 0.2.4 | MIT OR Apache-2.0 | https://github.com/image-rs/image-webp |
 | indexmap | 1.9.3 | Apache-2.0 OR MIT | https://github.com/bluss/indexmap |
 | indexmap | 2.14.2 | Apache-2.0 OR MIT | https://github.com/indexmap-rs/indexmap |
 | infer | 0.22.0 | MIT | https://github.com/bojand/infer |
@@ -199,6 +202,7 @@ Dependencias normales de `nestadmin-desktop` para `x86_64-pc-windows-msvc`; se e
 | proc-macro-crate | 3.5.0 | MIT OR Apache-2.0 | https://github.com/bkchr/proc-macro-crate |
 | proc-macro2 | 1.0.107 | MIT OR Apache-2.0 | https://github.com/dtolnay/proc-macro2 |
 | pxfm | 0.1.30 | BSD-3-Clause OR Apache-2.0 | https://github.com/awxkee/pxfm |
+| quick-error | 2.0.1 | MIT/Apache-2.0 | http://github.com/tailhook/quick-error |
 | quick-xml | 0.42.0 | MIT | https://github.com/tafia/quick-xml |
 | quote | 1.0.47 | MIT OR Apache-2.0 | https://github.com/dtolnay/quote |
 | rand | 0.8.8 | MIT OR Apache-2.0 | https://github.com/rust-random/rand |
@@ -269,6 +273,7 @@ Dependencias normales de `nestadmin-desktop` para `x86_64-pc-windows-msvc`; se e
 | tendril | 0.5.1 | MIT OR Apache-2.0 | https://github.com/servo/html5ever |
 | thiserror | 2.0.21 | MIT OR Apache-2.0 | https://github.com/dtolnay/thiserror |
 | thiserror-impl | 2.0.21 | MIT OR Apache-2.0 | https://github.com/dtolnay/thiserror |
+| tiff | 0.11.3 | MIT | https://github.com/image-rs/image-tiff |
 | time | 0.3.55 | MIT OR Apache-2.0 | https://github.com/time-rs/time |
 | time-core | 0.1.9 | MIT OR Apache-2.0 | https://github.com/time-rs/time |
 | time-macros | 0.2.32 | MIT OR Apache-2.0 | https://github.com/time-rs/time |
@@ -306,6 +311,7 @@ Dependencias normales de `nestadmin-desktop` para `x86_64-pc-windows-msvc`; se e
 | webview2-com | 0.39.1 | MIT | https://github.com/wravery/webview2-rs |
 | webview2-com-macros | 0.8.1 | MIT | https://github.com/wravery/webview2-rs |
 | webview2-com-sys | 0.39.1 | MIT | https://github.com/wravery/webview2-rs |
+| weezl | 0.1.12 | MIT OR Apache-2.0 | https://github.com/image-rs/weezl |
 | winapi | 0.3.9 | MIT/Apache-2.0 | https://github.com/retep998/winapi-rs |
 | winapi-util | 0.1.11 | Unlicense OR MIT | https://github.com/BurntSushi/winapi-util |
 | window-vibrancy | 0.8.1 | Apache-2.0 OR MIT | https://github.com/tauri-apps/tauri-plugin-vibrancy |
@@ -329,6 +335,7 @@ Dependencias normales de `nestadmin-desktop` para `x86_64-pc-windows-msvc`; se e
 | yoke | 0.8.4 | Unicode-3.0 | https://github.com/unicode-org/icu4x |
 | yoke-derive | 0.8.4 | Unicode-3.0 | https://github.com/unicode-org/icu4x |
 | zerocopy | 0.8.63 | BSD-2-Clause OR Apache-2.0 OR MIT | https://github.com/google/zerocopy |
+| zerocopy-derive | 0.8.63 | BSD-2-Clause OR Apache-2.0 OR MIT | https://github.com/google/zerocopy |
 | zerofrom | 0.1.8 | Unicode-3.0 | https://github.com/unicode-org/icu4x |
 | zerofrom-derive | 0.1.8 | Unicode-3.0 | https://github.com/unicode-org/icu4x |
 | zeroize | 1.9.1 | Apache-2.0 OR MIT | https://github.com/RustCrypto/utils |

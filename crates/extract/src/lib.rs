@@ -5,12 +5,14 @@
 
 mod ocr;
 mod pdf;
+mod picture;
 
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
 pub use ocr::{Ocr, Tesseract};
+pub use picture::IMAGE_EXTENSIONS;
 
 /// Una página con menos caracteres visibles que este umbral se considera escaneada (D10).
 /// Valor inicial; se ajustará con pruebas sobre facturas.
@@ -131,7 +133,8 @@ impl Extractor {
         self
     }
 
-    /// Extrae el texto según la extensión del archivo: `.txt` o `.pdf`.
+    /// Extrae el texto según la extensión del archivo: `.txt`, `.pdf` o una imagen
+    /// ([`IMAGE_EXTENSIONS`]), que pasa entera por OCR.
     pub fn extract(&self, path: &Path) -> Result<Extraction, ExtractError> {
         let extension = path
             .extension()
@@ -141,7 +144,11 @@ impl Extractor {
         match extension.as_str() {
             "txt" => plain_text(path),
             "pdf" => pdf::extract(&self.pdfium_dir, self.ocr.as_ref(), self.min_chars, path),
+            ext if IMAGE_EXTENSIONS.contains(&ext) => picture::extract(self.ocr.as_ref(), path),
             "" => Err(ExtractError::Unsupported("archivo sin extensión".into())),
+            "heic" | "heif" => Err(ExtractError::Unsupported(
+                "fotos HEIC: expórtelas como JPG desde el móvil o el visor de fotos".into(),
+            )),
             other => Err(ExtractError::Unsupported(format!(".{other}"))),
         }
     }

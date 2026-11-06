@@ -578,6 +578,7 @@ fn oauth(base: &str) -> OAuthConfig {
         client_secret: Some(CLIENT_SECRET.into()),
         scopes: vec!["https://www.googleapis.com/auth/gmail.modify".into()],
         extra_auth_params: Vec::new(),
+        redirect_host: "127.0.0.1".into(),
     }
 }
 

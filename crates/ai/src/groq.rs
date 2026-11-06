@@ -22,7 +22,8 @@ impl GroqProvider {
     #[doc(hidden)]
     pub fn with_endpoint(endpoint: &str, model: &str, api_key: Secret, timeout: Duration) -> Self {
         Self {
-            client: ChatClient::with_timeout(endpoint, model, api_key, timeout),
+            client: ChatClient::with_timeout(endpoint, model, api_key, timeout)
+                .retrying_rate_limits(timeout),
         }
     }
 }

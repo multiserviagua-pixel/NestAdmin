@@ -20,7 +20,8 @@ use serde_json::{json, Value};
 
 const USAGE: &str =
     "uso: nestadmin-predict --provider ollama|groq|ollama-cloud|openai-compatible|anthropic \
---out ARCHIVO.jsonl [--model MODELO] [--url URL_OLLAMA] [--base-url URL_HTTPS] [--inputs DIR] \
+--out ARCHIVO.jsonl [--model MODELO] [--url URL_OLLAMA] [--base-url URL_HTTPS] \
+[--groq-endpoint URL_BUCLE_LOCAL] [--inputs DIR] \
 [--timeout-secs N]";
 
 struct Args {
@@ -28,6 +29,7 @@ struct Args {
     out: PathBuf,
     inputs: PathBuf,
     timeout: Duration,
+    groq_endpoint: Option<String>,
 }
 
 fn parse_args() -> Result<Args, String> {
@@ -35,6 +37,7 @@ fn parse_args() -> Result<Args, String> {
     let mut model = None;
     let mut url = None;
     let mut base_url = None;
+    let mut groq_endpoint: Option<String> = None;
     let mut out = None;
     let mut inputs = PathBuf::from("evaluation/data/inputs");
     let mut timeout = 300;
@@ -49,10 +52,23 @@ fn parse_args() -> Result<Args, String> {
             "--model" => model = Some(value()?),
             "--url" => url = Some(value()?),
             "--base-url" => base_url = Some(value()?),
+            "--groq-endpoint" => groq_endpoint = Some(value()?),
             "--out" => out = Some(PathBuf::from(value()?)),
             "--inputs" => inputs = PathBuf::from(value()?),
             "--timeout-secs" => timeout = value()?.parse().map_err(|_| "timeout inválido")?,
             other => return Err(format!("argumento desconocido: {other}")),
+        }
+    }
+    // Solo para medir desde un entorno que exige un reenvío local hacia la API (por ejemplo,
+    // un contenedor con proxy obligatorio): el adaptador sigue sin proxy (D12) y el destino
+    // tiene que ser de bucle local.
+    if let Some(endpoint) = &groq_endpoint {
+        let local = ["http://127.0.0.1:", "http://localhost:", "http://[::1]:"];
+        if !local.iter().any(|p| endpoint.starts_with(p)) {
+            return Err("--groq-endpoint solo admite un reenvío en 127.0.0.1".into());
+        }
+        if provider.as_deref() != Some("groq") {
+            return Err("--groq-endpoint solo tiene sentido con --provider groq".into());
         }
     }
     if inputs.components().any(|c| c.as_os_str() == "expected") {
@@ -98,6 +114,7 @@ fn parse_args() -> Result<Args, String> {
         out: out.ok_or("--out es obligatorio")?,
         inputs,
         timeout: Duration::from_secs(timeout),
+        groq_endpoint,
     })
 }
 
@@ -110,7 +127,21 @@ fn credentials() -> Result<Box<dyn CredentialStore>, String> {
     }
     #[cfg(not(windows))]
     {
-        Ok(Box::new(MemoryCredentialStore::default()))
+        // Fuera de Windows (CI o un entorno de evaluación con proxy que inyecta la clave) se
+        // admite `NESTADMIN_GROQ_API_KEY` solo en esta herramienta de evaluación; la aplicación
+        // sigue exigiendo el almacén protegido del sistema (R09).
+        let store = MemoryCredentialStore::default();
+        if let Ok(value) = std::env::var("NESTADMIN_GROQ_API_KEY") {
+            if !value.trim().is_empty() {
+                store
+                    .set(
+                        nestadmin_ai::credentials::GROQ_API_KEY,
+                        &nestadmin_ai::credentials::Secret::new(value),
+                    )
+                    .map_err(|e| e.to_string())?;
+            }
+        }
+        Ok(Box::new(store))
     }
 }
 
@@ -159,8 +190,23 @@ fn run() -> Result<(), String> {
         | ProviderChoice::Anthropic { .. } => credentials()?,
         ProviderChoice::Ollama { .. } => Box::new(MemoryCredentialStore::default()),
     };
-    let provider =
-        build_provider(&args.choice, store.as_ref(), args.timeout).map_err(|e| e.to_string())?;
+    let provider: Box<dyn nestadmin_ai::Provider> = match (&args.choice, &args.groq_endpoint) {
+        (ProviderChoice::Groq { model }, Some(endpoint)) => {
+            let key = store
+                .get(nestadmin_ai::credentials::GROQ_API_KEY)
+                .map_err(|e| e.to_string())?
+                .ok_or_else(|| AiError::Unauthorized.to_string())?;
+            Box::new(nestadmin_ai::groq::GroqProvider::with_endpoint(
+                endpoint,
+                model,
+                key,
+                args.timeout,
+            ))
+        }
+        _ => {
+            build_provider(&args.choice, store.as_ref(), args.timeout).map_err(|e| e.to_string())?
+        }
+    };
     let mut out =
         fs::File::create(&args.out).map_err(|e| format!("{}: {e}", args.out.display()))?;
     let started_unix = SystemTime::now()

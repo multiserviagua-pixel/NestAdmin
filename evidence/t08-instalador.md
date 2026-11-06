@@ -105,3 +105,9 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-clean.ps1   # 
 - Instalación con interfaz (no silenciosa): ver el asistente lanzado por el instalador y sus mensajes.
 - Firma del instalador de NestAdmin y revisión de la redistribución de PDFium, Tesseract y sus DLL (riesgo abierto).
 - Las ejecuciones registradas arriba son de la versión anterior a D52, que instalaba el programa en la carpeta de datos (`%LOCALAPPDATA%\NestAdmin`). D52 los separa; falta ensayarlo (T08-10 a T08-12).
+
+## 2026-11-06 — `t08-registro.ps1` no anotaba el resultado
+
+Síntoma comunicado por el usuario: la instalación terminaba, pero el archivo de registro no tenía el estado «Después». Causa: `Start-Process -Wait` de Windows PowerShell 5.1 espera a todos los descendientes del proceso, no solo a él. El gancho `NSIS_HOOK_POSTINSTALL` ejecuta `nestadmin.exe --preparar`, que arranca `ollama serve` sin ventana (`crates/setup/src/system.rs`), y la página final puede abrir NestAdmin. Ninguno de los dos termina, así que el script se quedaba esperando indefinidamente.
+
+Corrección: el script espera solo al instalador (`WaitForExit` con plazo `-PlazoMinutos`), anota los procesos que siguen en marcha, escribe el estado final en un bloque `finally` (también tras un error o Ctrl+C) y termina con una respuesta real de `qwen3:8b` (`/api/chat`, temperatura 0, sin razonamiento), con su duración. Comprobado fuera de Windows: el script se analiza sin errores con PowerShell 7.4.6, y la espera devuelve al momento el código de salida de un proceso que deja un hijo vivo. **Falta ejecutarlo en Windows**, con el instalador real.

@@ -307,6 +307,7 @@ fn oauth(base: &str) -> OAuthConfig {
         client_secret: None,
         scopes: vec!["correo".into()],
         extra_auth_params: Vec::new(),
+        redirect_host: "127.0.0.1".into(),
     }
 }
 

@@ -22,6 +22,25 @@ pub use oauth::{OAuthConfig, PendingAuthorization, TokenSource, Tokens};
 
 pub(crate) type MailResult<T> = Result<T, ConnectorError>;
 
+/// Límite de lectura de la respuesta que trae un adjunto: su tamaño máximo en base64 más el
+/// envoltorio JSON.
+pub(crate) const ATTACHMENT_RESPONSE_LIMIT: u64 =
+    nestadmin_simulators::MAX_ATTACHMENT_BYTES / 3 * 4 + 1024 * 1024;
+
+/// Comprueba el tamaño de un adjunto descargado o anunciado.
+pub(crate) fn check_attachment_size(size: u64) -> MailResult<()> {
+    if size > nestadmin_simulators::MAX_ATTACHMENT_BYTES {
+        return Err(error(
+            nestadmin_simulators::codes::INVALID_INPUT,
+            format!(
+                "el adjunto supera el tamaño máximo de {} MB",
+                nestadmin_simulators::MAX_ATTACHMENT_BYTES / 1_000_000
+            ),
+        ));
+    }
+    Ok(())
+}
+
 pub(crate) fn error(code: &str, message: impl Into<String>) -> ConnectorError {
     ConnectorError {
         code: code.to_owned(),

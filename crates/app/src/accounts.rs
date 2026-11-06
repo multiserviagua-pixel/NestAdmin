@@ -177,6 +177,27 @@ pub struct AccountFetch {
     /// Mensajes nuevos encolados.
     pub added: usize,
     pub error: Option<MailIssue>,
+    /// Adjuntos de los mensajes leídos.
+    pub attachments: AttachmentFetch,
+}
+
+/// Adjuntos tratados en una consulta. Un adjunto que falla se vuelve a intentar en la
+/// siguiente consulta; uno ya importado no se importa otra vez.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct AttachmentFetch {
+    /// Adjuntos importados como documentos en esta consulta.
+    pub imported: usize,
+    /// Adjuntos de un tipo que NestAdmin no procesa (por ejemplo `.docx` o `.zip`).
+    pub skipped: Vec<String>,
+    /// Adjuntos que no se pudieron descargar o importar.
+    pub failed: Vec<AttachmentIssue>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct AttachmentIssue {
+    pub name: String,
+    pub code: String,
+    pub message: String,
 }
 
 /// Resultado de consultar todas las cuentas: el fallo de una no detiene a las demás.
@@ -291,6 +312,13 @@ impl MailConnector for SharedSimulator {
         idempotency_key: &str,
     ) -> Result<SendReceipt, ConnectorError> {
         self.0.send_draft(draft_id, idempotency_key)
+    }
+    fn fetch_attachment(
+        &self,
+        message_id: &str,
+        attachment_id: &str,
+    ) -> Result<Vec<u8>, ConnectorError> {
+        self.0.fetch_attachment(message_id, attachment_id)
     }
 }
 
@@ -681,6 +709,17 @@ impl Accounts {
             join_id(account, id)
         };
         Ok(self.recent(account)?.into_iter().find(|m| m.id == wanted))
+    }
+
+    /// Contenido de un adjunto de un mensaje con ID de cuenta (`<cuenta>:<mensaje>`).
+    pub(crate) fn fetch_attachment(
+        &self,
+        message_id: &str,
+        attachment_id: &str,
+    ) -> Result<Vec<u8>, ConnectorError> {
+        let (account, inner) = split_id(message_id);
+        self.connector(account)?
+            .fetch_attachment(inner, attachment_id)
     }
 
     /// Crea el borrador en la cuenta del mensaje; devuelve `<cuenta>:<borrador>`.

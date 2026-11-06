@@ -42,6 +42,17 @@ fn handler(req: &Req, w: &mut World) -> Resp {
                 )
             }
         }
+        ("GET", ["messages", id, "attachments", aid]) => {
+            let data = w
+                .messages
+                .iter()
+                .find(|m| m["id"] == *id)
+                .and_then(|m| m["_attachments"][*aid].as_str().map(str::to_owned));
+            match data {
+                Some(data) => Resp::Json(200, json!({ "size": 9, "data": data })),
+                None => not_found(),
+            }
+        }
         ("GET", ["messages", id]) => {
             if let Some(m) = w.messages.iter().find(|m| m["id"] == *id) {
                 return Resp::Json(200, m.clone());
@@ -513,4 +524,118 @@ fn sign_in_times_out_when_the_browser_never_returns() {
         .finish(&config, Duration::from_millis(300))
         .unwrap_err();
     assert_eq!(error.code, "unauthorized");
+}
+
+#[test]
+fn named_parts_are_attachments_except_embedded_images_and_download_decodes_them() {
+    let (base, world) = serve(handler);
+    let small = URL_SAFE.encode(b"Factura en texto");
+    world.lock().unwrap().messages = vec![
+        json!({
+            "id": "g-1",
+            "internalDate": "1793990000000",
+            "payload": {
+                "mimeType": "multipart/mixed",
+                "headers": [{ "name": "Subject", "value": "Facturas" }],
+                "parts": [
+                    {
+                        "partId": "0",
+                        "mimeType": "multipart/related",
+                        "parts": [
+                            { "partId": "0.0", "mimeType": "text/html", "filename": "",
+                              "body": { "data": URL_SAFE.encode(b"<p>Hola</p>") } },
+                            { "partId": "0.1", "mimeType": "image/png", "filename": "logo.png",
+                              "headers": [
+                                  { "name": "Content-ID", "value": "<logo@x>" },
+                                  { "name": "Content-Disposition", "value": "inline; filename=logo.png" }
+                              ],
+                              "body": { "attachmentId": "ATT-LOGO", "size": 3 } }
+                        ]
+                    },
+                    { "partId": "1", "mimeType": "application/pdf", "filename": "f-1.pdf",
+                      "headers": [{ "name": "Content-Disposition", "value": "attachment; filename=f-1.pdf" }],
+                      "body": { "attachmentId": "ATT-1", "size": 9 } },
+                    { "partId": "2", "mimeType": "text/plain", "filename": "f-2.txt",
+                      "body": { "data": small, "size": 16 } }
+                ]
+            },
+            "_attachments": { "ATT-1": URL_SAFE.encode(b"%PDF-sint") }
+        }),
+        json!({ "id": "g-2", "payload": { "mimeType": "text/plain", "body": { "data": URL_SAFE.encode(b"x") } } }),
+    ];
+    let (source, _) = tokens(&base, now() + 3600);
+    let gmail = Gmail::new(&format!("{base}/gmail/v1/users/me"), source, 1).unwrap();
+    let mailbox = Mailbox::in_memory(gmail);
+
+    let page = mailbox.list_messages(None).unwrap();
+    let list = &page.messages[0].attachments;
+    let names: Vec<_> = list.iter().map(|a| a.name.as_deref().unwrap()).collect();
+    assert_eq!(names, ["f-1.pdf", "f-2.txt"], "sin la imagen incrustada");
+    assert_eq!(list[0].id, "ATT-1");
+    assert_eq!(list[0].size, Some(9));
+    assert_eq!(list[1].id, "part:2", "adjunto pequeño dentro del mensaje");
+    assert_eq!(page.messages[0].body.as_deref(), Some("Hola"));
+
+    assert_eq!(
+        mailbox.fetch_attachment("g-1", "ATT-1").unwrap(),
+        b"%PDF-sint"
+    );
+    assert_eq!(
+        mailbox.fetch_attachment("g-1", "part:2").unwrap(),
+        b"Factura en texto"
+    );
+    assert_eq!(
+        mailbox.fetch_attachment("g-1", "part:9").unwrap_err().code,
+        "not_found"
+    );
+    assert_eq!(
+        mailbox.fetch_attachment("g-1", "ATT-X").unwrap_err().code,
+        "not_found"
+    );
+}
+
+/// Microsoft (D70): `http://localhost:<puerto>/`, con el navegador llegando por IPv4 o por IPv6.
+#[test]
+fn localhost_redirect_is_accepted_over_ipv4_and_ipv6() {
+    let (base, _) = serve(handler);
+    let config = common::oauth_localhost(&base);
+    let ipv6 = std::net::TcpListener::bind("[::1]:0").is_ok();
+    for host in ["127.0.0.1", "[::1]"] {
+        if host == "[::1]" && !ipv6 {
+            eprintln!("sin IPv6 de bucle local: se omite ese caso");
+            continue;
+        }
+        let pending = PendingAuthorization::begin(&config).unwrap();
+        let url = pending.url().to_owned();
+        let redirect = pending.redirect_uri().to_owned();
+        assert!(redirect.starts_with("http://localhost:") && redirect.ends_with('/'));
+        assert_eq!(param(&url, "redirect_uri"), redirect);
+        let port = Url::parse(&redirect).unwrap().port().unwrap();
+        let state = param(&url, "state");
+        let target = format!("http://{host}:{port}/");
+        let browser = thread::spawn(move || {
+            browser_redirect(&target, &format!("code=codigo-sintetico&state={state}"))
+        });
+        let tokens = pending.finish(&config, Duration::from_secs(10)).unwrap();
+        assert!(
+            browser
+                .join()
+                .unwrap()
+                .contains("Inicio de sesión completado"),
+            "{host}"
+        );
+        assert_eq!(tokens.access_token, "access-1");
+    }
+}
+
+#[test]
+fn microsoft_uses_localhost_and_google_the_ip_literal() {
+    assert_eq!(
+        nestadmin_mail::OAuthConfig::microsoft("x").redirect_host,
+        "localhost"
+    );
+    assert_eq!(
+        nestadmin_mail::OAuthConfig::google("x", "y").redirect_host,
+        "127.0.0.1"
+    );
 }

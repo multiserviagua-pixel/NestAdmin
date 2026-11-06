@@ -10,13 +10,15 @@
 pub mod accounts;
 pub mod rules;
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use nestadmin_ai::tasks::{email_request, extraction_request, parse_email, parse_extraction};
+use nestadmin_ai::tasks::{
+    email_request, extraction_request, parse_email, parse_extraction, parse_other_invoices,
+};
 use nestadmin_ai::{GenerateRequest, GenerateResult, Provider, ProviderKind};
 use nestadmin_core::{
     ActionRecord, ActionRequest, AuditEntry, Authorization, Connector, ConnectorError, CoreError,
@@ -31,8 +33,8 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
 use crate::accounts::{
-    split_id, AccountFetch, AccountView, Accounts, FetchReport, MailAccountsView, MailEnv,
-    MailIssue, MailProviderKind,
+    split_id, AccountFetch, AccountView, Accounts, AttachmentFetch, AttachmentIssue, FetchReport,
+    MailAccountsView, MailEnv, MailIssue, MailProviderKind,
 };
 use crate::rules::{decide, RuleDecision, REGISTER_INVOICE, SEND_DRAFT};
 
@@ -109,6 +111,23 @@ pub struct App {
     documents: PathBuf,
     registry: DuplicateRegistry,
     extractor: Arc<Extractor>,
+    /// Mientras sea `true`, no empieza ninguna tarea nueva (actualización pendiente, D63).
+    paused: bool,
+}
+
+/// Si se puede instalar una actualización sin cortar trabajo (actualizaciones.md, paso 5).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct UpdateReadiness {
+    /// No hay ninguna tarea ejecutándose: instalar no corta nada.
+    pub ready: bool,
+    /// Tareas ejecutándose (la IA, el OCR o un envío en curso).
+    pub running: usize,
+    /// Tareas en cola: se conservan y se procesan tras actualizar (R02).
+    pub queued: usize,
+    /// Tareas pendientes de revisión: se conservan.
+    pub awaiting_review: usize,
+    /// Si la cola está en pausa: no empieza ninguna tarea nueva.
+    pub paused: bool,
 }
 
 /// Trabajo de una tarea: una solicitud lista, un documento del que extraer el texto o, si ya
@@ -116,6 +135,9 @@ pub struct App {
 enum Prepared {
     Request(GenerateRequest),
     Document(PathBuf),
+    /// Una factura más de un documento con varias (D68): sus campos ya los dio la IA al
+    /// procesar la primera; solo se vuelve a leer el documento para localizar cada campo.
+    Split(PathBuf, GenerateResult),
     Resume(Value),
 }
 
@@ -133,6 +155,23 @@ enum Previous {
     Done { version: i64, receipt: Value },
     /// Un intento no se pudo comprobar: el conector falló o el borrador ya no existe.
     Unknown { version: i64, error: ConnectorError },
+}
+
+/// Motivo de revisión de las facturas de un documento con varias (D68).
+const SPLIT_REASON: &str =
+    "el documento contiene varias facturas; la IA las separó y cada una se revisa por separado";
+
+/// Campos ya extraídos de una factura separada de un documento con varias (D68).
+fn split_preset(input: &Value) -> Option<GenerateResult> {
+    let preset = input.get("preset")?;
+    Some(GenerateResult {
+        request_id: String::new(),
+        provider: serde_json::from_value(preset["provider"].clone()).ok()?,
+        model: preset["model"].as_str().unwrap_or("").to_owned(),
+        output: preset["output"].clone(),
+        latency_ms: 0,
+        usage: Default::default(),
+    })
 }
 
 /// Motivo de revisión de una tarea cuyo intento anterior no se confirmó.
@@ -171,6 +210,10 @@ impl Job {
         let outcome = prepared.and_then(|prepared| {
             let request = match prepared {
                 Prepared::Resume(result) => return Ok(Outcome::Resumed(result)),
+                Prepared::Split(path, generated) => {
+                    extracted = extractor.extract(&path).ok();
+                    return Ok(Outcome::Generated(generated));
+                }
                 Prepared::Request(request) => request,
                 Prepared::Document(path) => {
                     let extraction = extractor
@@ -235,6 +278,7 @@ impl App {
             documents: paths.documents(),
             registry: DuplicateRegistry::new(),
             extractor,
+            paused: false,
         };
         app.store.recover()?;
         app.store.reconcile_actions(SEND_DRAFT, &app.mail)?;
@@ -493,6 +537,17 @@ impl App {
         name: &str,
         bytes: &[u8],
     ) -> AppResult<Task> {
+        self.import_attachment_keyed(message_task, name, bytes, "", "")
+    }
+
+    fn import_attachment_keyed(
+        &mut self,
+        message_task: i64,
+        name: &str,
+        bytes: &[u8],
+        attachment_key: &str,
+        attachment_id: &str,
+    ) -> AppResult<Task> {
         let task = self.store.task(message_task)?;
         if task.kind != EMAIL {
             return Err(AppError::Invalid(format!(
@@ -517,6 +572,11 @@ impl App {
             "subject": message["subject"],
             "attachment": name,
         });
+        let mut origin = origin;
+        if !attachment_key.is_empty() {
+            origin["attachment_key"] = json!(attachment_key);
+            origin["attachment_id"] = json!(attachment_id);
+        }
         self.store_document(name, &extension, bytes, origin)
     }
 
@@ -574,17 +634,24 @@ impl App {
     /// pedirlo al proveedor. El fallo de una cuenta queda en el informe y no detiene a las
     /// demás.
     pub fn fetch_mail(&mut self) -> AppResult<FetchReport> {
-        let mut known: HashSet<String> = HashSet::new();
-        for task in self
-            .store
-            .all_tasks()?
-            .into_iter()
-            .filter(|t| t.kind == EMAIL)
-        {
+        // Mensajes con tarea (ID con cuenta → tarea) y adjuntos ya importados.
+        let mut known: HashMap<String, i64> = HashMap::new();
+        let mut imported: HashSet<String> = HashSet::new();
+        for task in self.store.all_tasks()? {
             let input: Value = serde_json::from_str(&task.input_ref).unwrap_or(Value::Null);
-            if let Some(id) = input["message_id"].as_str() {
-                let (account, inner) = split_id(id);
-                known.insert(accounts::join_id(account, inner));
+            match task.kind.as_str() {
+                EMAIL => {
+                    if let Some(id) = input["message_id"].as_str() {
+                        let (account, inner) = split_id(id);
+                        known.insert(accounts::join_id(account, inner), task.id);
+                    }
+                }
+                INVOICE => {
+                    if let Some(key) = input["origin"]["attachment_key"].as_str() {
+                        imported.insert(key.to_owned());
+                    }
+                }
+                _ => {}
             }
         }
         let mut report = FetchReport {
@@ -596,23 +663,31 @@ impl App {
             let fetch = match outcome {
                 Ok(messages) => {
                     let mut added = 0;
+                    let mut attachments = AttachmentFetch::default();
                     for message in &messages {
-                        if known.insert(message.id.clone()) {
-                            let input = json!({
-                                "message_id": message.id,
-                                "account": account,
-                                "origin": self.mail.origin(&account),
-                                "message": message,
-                            });
-                            self.store.enqueue(EMAIL, &input.to_string())?;
-                            added += 1;
-                        }
+                        let task_id = match known.get(&message.id) {
+                            Some(id) => *id,
+                            None => {
+                                let input = json!({
+                                    "message_id": message.id,
+                                    "account": account,
+                                    "origin": self.mail.origin(&account),
+                                    "message": message,
+                                });
+                                let task = self.store.enqueue(EMAIL, &input.to_string())?;
+                                known.insert(message.id.clone(), task.id);
+                                added += 1;
+                                task.id
+                            }
+                        };
+                        self.import_attachments(task_id, message, &mut imported, &mut attachments)?;
                     }
                     AccountFetch {
                         account,
                         read: messages.len(),
                         added,
                         error: None,
+                        attachments,
                     }
                 }
                 Err(error) => AccountFetch {
@@ -620,6 +695,7 @@ impl App {
                     read: 0,
                     added: 0,
                     error: Some(MailIssue::from(&error)),
+                    attachments: AttachmentFetch::default(),
                 },
             };
             report.added += fetch.added;
@@ -627,6 +703,69 @@ impl App {
             report.accounts.push(fetch);
         }
         Ok(report)
+    }
+
+    /// Importa como documentos los adjuntos admitidos de un mensaje que aún no se importaron.
+    /// La clave de un adjunto es el mensaje, su nombre y su tamaño, que no cambian entre
+    /// consultas (el identificador de Gmail sí puede cambiar). Un fallo de descarga queda en
+    /// el informe y se reintenta en la consulta siguiente; nunca se pierde en silencio.
+    fn import_attachments(
+        &mut self,
+        message_task: i64,
+        message: &Message,
+        imported: &mut HashSet<String>,
+        report: &mut AttachmentFetch,
+    ) -> AppResult<()> {
+        for attachment in &message.attachments {
+            let name = attachment_name(attachment);
+            let key = format!(
+                "{}#{}#{}",
+                message.id,
+                name,
+                attachment.size.map(|s| s.to_string()).unwrap_or_default()
+            );
+            if imported.contains(&key) {
+                continue;
+            }
+            if !supported_document(&name) {
+                report.skipped.push(name);
+                continue;
+            }
+            let fail = |code: &str, message: String| AttachmentIssue {
+                name: name.clone(),
+                code: code.to_owned(),
+                message,
+            };
+            if attachment
+                .size
+                .is_some_and(|s| s > MAX_DOCUMENT_BYTES as u64)
+            {
+                report.failed.push(fail(
+                    "invalid_input",
+                    format!(
+                        "supera el tamaño máximo de {} MB",
+                        MAX_DOCUMENT_BYTES / 1_000_000
+                    ),
+                ));
+                continue;
+            }
+            let bytes = match self.mail.fetch_attachment(&message.id, &attachment.id) {
+                Ok(bytes) => bytes,
+                Err(e) => {
+                    report.failed.push(fail(&e.code, e.message));
+                    continue;
+                }
+            };
+            match self.import_attachment_keyed(message_task, &name, &bytes, &key, &attachment.id) {
+                Ok(_) => {
+                    imported.insert(key);
+                    report.imported += 1;
+                }
+                Err(AppError::Invalid(reason)) => report.failed.push(fail("invalid_input", reason)),
+                Err(other) => return Err(other),
+            }
+        }
+        Ok(())
     }
 
     /// Mensaje de una tarea de correo: el guardado al encolarla o, en tareas anteriores a las
@@ -641,6 +780,9 @@ impl App {
 
     /// Toma la siguiente tarea y prepara su solicitud. `None` si la cola está vacía.
     pub fn begin_next(&mut self) -> AppResult<Option<Job>> {
+        if self.paused {
+            return Ok(None);
+        }
         let Some(task) = self.store.claim_next()? else {
             return Ok(None);
         };
@@ -656,7 +798,10 @@ impl App {
         }
         let prepared = match task.kind.as_str() {
             INVOICE => match input["path"].as_str() {
-                Some(path) => Ok(Prepared::Document(PathBuf::from(path))),
+                Some(path) => match split_preset(&input) {
+                    Some(generated) => Ok(Prepared::Split(PathBuf::from(path), generated)),
+                    None => Ok(Prepared::Document(PathBuf::from(path))),
+                },
                 None => Err(task_error(
                     "document_unreadable",
                     "la tarea no indica el documento",
@@ -715,8 +860,21 @@ impl App {
             Ok(result) => result,
             Err(error) => return Ok(self.store.fail(task.id, &error)?),
         };
+        if task.kind == INVOICE {
+            if let Err(error) = self.enqueue_other_invoices(&task, &generated, &mut result) {
+                return Ok(self.store.fail(task.id, &error)?);
+            }
+        }
         let kind = action_kind(&task);
-        match decide(&self.store.rules()?, kind, &result) {
+        let several = result["part"]["of"].as_u64().is_some_and(|n| n > 1);
+        let decision = if several {
+            // Una regla nunca registra sola una factura separada de un documento con varias:
+            // la separación la hizo el modelo y la revisa una persona.
+            RuleDecision::Review(SPLIT_REASON.into())
+        } else {
+            decide(&self.store.rules()?, kind, &result)
+        };
+        match decision {
             RuleDecision::Automate {
                 rule_id,
                 rule_version,
@@ -733,6 +891,81 @@ impl App {
                 Ok(self.store.await_review(task.id, &result)?)
             }
         }
+    }
+
+    /// Si la IA vio más facturas en el documento, encola una tarea por cada una con el mismo
+    /// documento y origen, y marca `part` («factura k de n») en el resultado. Al reprocesar
+    /// la tarea (recuperación tras un corte) no se encolan otra vez las que ya existen.
+    fn enqueue_other_invoices(
+        &mut self,
+        task: &Task,
+        generated: &GenerateResult,
+        result: &mut Value,
+    ) -> Result<(), TaskError> {
+        let input: Value = serde_json::from_str(&task.input_ref).unwrap_or(Value::Null);
+        if input.get("part").is_some() {
+            result["part"] = input["part"].clone();
+            return Ok(());
+        }
+        let others = parse_other_invoices(&generated.output)
+            .map_err(|e| task_error(e.code(), e.to_string(), true))?;
+        if others.is_empty() {
+            return Ok(());
+        }
+        let of = others.len() + 1;
+        result["part"] = json!({ "index": 1, "of": of });
+        let existing: HashSet<u64> = self
+            .store
+            .all_tasks()
+            .map_err(|e| task_error("unavailable", e.to_string(), true))?
+            .into_iter()
+            .filter_map(|t| {
+                let i: Value = serde_json::from_str(&t.input_ref).ok()?;
+                (i["part"]["split_from"].as_i64() == Some(task.id))
+                    .then(|| i["part"]["index"].as_u64())
+                    .flatten()
+            })
+            .collect();
+        for (offset, output) in others.into_iter().enumerate() {
+            let index = offset as u64 + 2;
+            if existing.contains(&index) {
+                continue;
+            }
+            let mut part_input = input.clone();
+            part_input["part"] = json!({ "index": index, "of": of, "split_from": task.id });
+            part_input["preset"] = json!({
+                "output": output,
+                "provider": generated.provider,
+                "model": generated.model,
+            });
+            self.store
+                .enqueue(INVOICE, &part_input.to_string())
+                .map_err(|e| task_error("unavailable", e.to_string(), true))?;
+        }
+        Ok(())
+    }
+
+    /// Detiene o reanuda el inicio de tareas nuevas. Las que ya se ejecutan terminan; las
+    /// que esperan en la cola no se pierden. La pausa no se guarda: tras reiniciar (por
+    /// ejemplo, al instalar la versión nueva) la cola sigue sola.
+    pub fn set_queue_paused(&mut self, paused: bool) {
+        self.paused = paused;
+    }
+
+    /// Estado de la cola para decidir si se instala una actualización: solo se instala sin
+    /// tareas ejecutándose (actualizaciones.md, paso 5). Quien instala pausa la cola, espera a
+    /// que `ready` sea `true` y entonces cierra la aplicación como en una salida completa.
+    pub fn update_readiness(&self) -> AppResult<UpdateReadiness> {
+        let tasks = self.store.all_tasks()?;
+        let count = |state: TaskState| tasks.iter().filter(|t| t.state == state).count();
+        let running = count(TaskState::Running);
+        Ok(UpdateReadiness {
+            ready: running == 0,
+            running,
+            queued: count(TaskState::Queued),
+            awaiting_review: count(TaskState::AwaitingReview),
+            paused: self.paused,
+        })
     }
 
     /// Procesa una tarea completa en el hilo actual. `None` si no había trabajo.
@@ -1181,15 +1414,58 @@ fn check_rule(action_kind: &str, conditions: &Value) -> AppResult<()> {
 }
 
 /// Comprueba nombre, tamaño y contenido de un documento; devuelve su extensión.
-fn check_document(name: &str, bytes: &[u8]) -> AppResult<String> {
-    let extension = Path::new(name)
+/// Nombre con el que se guarda un adjunto: el suyo o, si no lo trae, uno deducido del tipo.
+fn attachment_name(attachment: &nestadmin_simulators::Attachment) -> String {
+    if let Some(name) = attachment
+        .name
+        .as_deref()
+        .map(str::trim)
+        .filter(|n| !n.is_empty())
+    {
+        // Sin rutas: solo el último componente, por si el remitente puso barras.
+        return name.rsplit(['/', '\\']).next().unwrap_or(name).to_owned();
+    }
+    let extension = match attachment
+        .mime
+        .as_deref()
+        .map(str::to_ascii_lowercase)
+        .as_deref()
+    {
+        Some("application/pdf") => "pdf",
+        Some("text/plain") => "txt",
+        Some("image/jpeg") => "jpg",
+        Some("image/png") => "png",
+        Some("image/tiff") => "tif",
+        _ => "bin",
+    };
+    format!(
+        "adjunto-{}.{extension}",
+        attachment.id.chars().take(12).collect::<String>()
+    )
+}
+
+/// Texto y PDF; además, las imágenes que el extractor pasa por OCR.
+fn is_document_extension(extension: &str) -> bool {
+    matches!(extension, "txt" | "pdf") || nestadmin_extract::IMAGE_EXTENSIONS.contains(&extension)
+}
+
+fn document_extension(name: &str) -> String {
+    Path::new(name)
         .extension()
         .and_then(|e| e.to_str())
         .map(str::to_ascii_lowercase)
-        .unwrap_or_default();
-    if extension != "txt" && extension != "pdf" {
+        .unwrap_or_default()
+}
+
+fn supported_document(name: &str) -> bool {
+    is_document_extension(&document_extension(name))
+}
+
+fn check_document(name: &str, bytes: &[u8]) -> AppResult<String> {
+    let extension = document_extension(name);
+    if !is_document_extension(&extension) {
         return Err(AppError::Invalid(format!(
-            "«{name}»: solo se admiten archivos .txt y .pdf"
+            "«{name}»: solo se admiten texto (.txt), PDF e imágenes (.jpg, .png, .tif, .bmp, .webp)"
         )));
     }
     if bytes.is_empty() {

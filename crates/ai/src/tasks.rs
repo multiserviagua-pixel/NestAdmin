@@ -27,7 +27,11 @@ const EXTRACTION_INSTRUCTIONS: &str = "Extrae los datos de la factura del texto 
 Devuelve exactamente los campos supplier (proveedor), invoice_number (número de factura), date, \
 subtotal (base imponible), tax (IVA) y total. Copia los valores que aparecen en el texto; si un \
 dato no aparece, usa null. No calcules ni deduzcas valores ausentes a partir de otros. Importes \
-con punto decimal y dos decimales, sin símbolo de moneda. Fechas en formato AAAA-MM-DD.";
+con punto decimal y dos decimales, sin símbolo de moneda. Fechas en formato AAAA-MM-DD. \
+Si el texto contiene varias facturas distintas (por ejemplo, una foto con dos facturas), pon la \
+primera en esos campos y cada una de las demás en other_invoices, con los mismos seis campos y las \
+mismas reglas; no mezcles datos de una factura con los de otra. Si solo hay una factura, \
+other_invoices es una lista vacía.";
 
 const EMAIL_INSTRUCTIONS: &str = "Clasifica el correo del usuario y propone un borrador de \
 respuesta en español. Categorías: solicitud_factura (piden una factura o su copia), consulta_pago \
@@ -42,6 +46,19 @@ pub fn extraction_request(request_id: &str, text: &str) -> GenerateRequest {
         .iter()
         .map(|f| ((*f).to_owned(), nullable.clone()))
         .collect();
+    let invoice = json!({
+        "type": "object",
+        "properties": properties,
+        "required": INVOICE_FIELDS,
+        "additionalProperties": false,
+    });
+    let mut top = properties.clone();
+    top.insert(
+        OTHER_INVOICES.into(),
+        json!({ "type": "array", "items": invoice }),
+    );
+    let mut required: Vec<&str> = INVOICE_FIELDS.to_vec();
+    required.push(OTHER_INVOICES);
     GenerateRequest {
         request_id: request_id.to_owned(),
         task: Task::Extraction,
@@ -49,8 +66,8 @@ pub fn extraction_request(request_id: &str, text: &str) -> GenerateRequest {
         content: text.to_owned(),
         schema: Some(json!({
             "type": "object",
-            "properties": properties,
-            "required": INVOICE_FIELDS,
+            "properties": top,
+            "required": required,
             "additionalProperties": false,
         })),
     }
@@ -104,6 +121,41 @@ pub fn parse_extraction(output: &Value) -> Result<RawInvoice, AiError> {
         total: field("total")?,
     })
 }
+
+/// Facturas del mismo documento además de la primera (D68), como objetos de salida que
+/// [`parse_extraction`] acepta. Sin la clave (un modelo que no la devuelve) o con la lista
+/// vacía, ninguna. Un elemento que no es una factura válida hace inválida la respuesta: no se
+/// descarta en silencio una factura que el modelo dijo ver.
+pub fn parse_other_invoices(output: &Value) -> Result<Vec<Value>, AiError> {
+    let list = match output.get(OTHER_INVOICES) {
+        None | Some(Value::Null) => return Ok(Vec::new()),
+        Some(Value::Array(list)) => list,
+        Some(_) => {
+            return Err(AiError::InvalidResponse(format!(
+                "{OTHER_INVOICES} no es una lista"
+            )))
+        }
+    };
+    list.iter()
+        .map(|item| {
+            parse_extraction(item)?;
+            Ok(item.clone())
+        })
+        // Un elemento sin ningún dato no es una factura.
+        .filter(|item: &Result<Value, AiError>| match item {
+            Ok(value) => INVOICE_FIELDS.iter().any(|f| {
+                value
+                    .get(*f)
+                    .and_then(Value::as_str)
+                    .is_some_and(|s| !s.trim().is_empty())
+            }),
+            Err(_) => true,
+        })
+        .collect()
+}
+
+/// Clave de la salida de extracción con las demás facturas del documento.
+pub const OTHER_INVOICES: &str = "other_invoices";
 
 /// Categoría y borrador. Una categoría fuera de la lista es respuesta inválida.
 pub fn parse_email(output: &Value) -> Result<(String, String), AiError> {

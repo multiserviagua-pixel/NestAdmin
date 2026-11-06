@@ -11,6 +11,7 @@ use nestadmin_ai::{
 use nestadmin_app::{App, AppError, AppPaths, EMAIL, INVOICE};
 use nestadmin_core::TaskState;
 use nestadmin_extract::{ExtractError, Extractor, Ocr};
+use nestadmin_simulators::FailureMode;
 use serde_json::{json, Value};
 
 /// Devuelve el JSON incluido en el documento (extracción) o una respuesta fija (correo).
@@ -39,7 +40,18 @@ impl Provider for FakeProvider {
             return Err(AiError::Unavailable("sin conexión".into()));
         }
         let output = match request.task {
-            AiTask::Extraction => serde_json::from_str(&request.content).unwrap(),
+            // Las facturas de las pruebas son JSON; la del adjunto sintético de M-0001 es texto.
+            AiTask::Extraction => serde_json::from_str(&request.content).unwrap_or_else(|_| {
+                assert!(
+                    request.content.contains("FS-2026-014"),
+                    "{}",
+                    request.content
+                );
+                json!({
+                    "supplier": "Proveedor Alfa Suministros SL", "invoice_number": "FS-2026-014",
+                    "date": "2026-10-01", "subtotal": "120.00", "tax": "25.20", "total": "145.20",
+                })
+            }),
             _ => {
                 json!({ "category": "solicitud_factura", "draft": "Adjuntamos la factura solicitada." })
             }
@@ -315,7 +327,10 @@ fn a_draft_without_sender_is_never_sent_by_a_rule() {
     let mut states = Vec::new();
     while let Some(task) = app.process_next().unwrap() {
         let result = task.result.clone().unwrap();
-        states.push((result["draft"]["to"].as_array().unwrap().len(), task.state));
+        // La factura adjunta a M-0001 también se procesa; aquí solo cuentan los correos.
+        if let Some(to) = result["draft"]["to"].as_array() {
+            states.push((to.len(), task.state));
+        }
     }
     assert!(states.contains(&(1, TaskState::Completed)));
     assert!(
@@ -550,4 +565,166 @@ fn mail_origin_is_kept_in_mail_tasks_and_their_attachments() {
         .import_attachment(attachment.id, "x.txt", b"texto")
         .is_err());
     assert!(app.document_file(mail_task.id).is_err());
+}
+
+#[test]
+fn mail_attachments_become_documents_once_and_failures_are_retried() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = open(&dir, FakeProvider::new());
+    let invoices = |app: &mut App| -> Vec<Value> {
+        app.tasks()
+            .unwrap()
+            .into_iter()
+            .filter(|t| t.kind == INVOICE)
+            .map(|t| serde_json::from_str::<Value>(&t.input_ref).unwrap()["origin"].clone())
+            .collect()
+    };
+
+    // M-0001 trae una factura sintética en texto: se importa con el origen del correo.
+    let report = app.fetch_mail().unwrap();
+    assert_eq!(report.accounts[0].attachments.imported, 1);
+    let first = invoices(&mut app);
+    assert_eq!(first.len(), 1);
+    assert_eq!(first[0]["kind"], "email");
+    assert_eq!(first[0]["message_id"], "simulador:M-0001");
+    assert_eq!(first[0]["attachment"], "factura-FS-2026-014.txt");
+    assert_eq!(first[0]["from"], "facturas@proveedor-alfa.test");
+
+    // Volver a consultar no la duplica.
+    let again = app.fetch_mail().unwrap();
+    assert_eq!(again.accounts[0].attachments.imported, 0);
+    assert_eq!(invoices(&mut app).len(), 1);
+
+    // Un tipo no admitido se omite y se dice; uno que no se puede descargar falla visible
+    // y se importa en la consulta siguiente.
+    let sim = app.simulators().0;
+    sim.add_attachment("M-0002", "contrato.docx", "application/msword", b"x")
+        .unwrap();
+    sim.add_attachment(
+        "M-0002",
+        "pedido-2231.pdf",
+        "application/pdf",
+        b"%PDF-1.4 sintetico",
+    )
+    .unwrap();
+    sim.set_attachment_failure(Some(FailureMode::Unavailable));
+    let failed = app.fetch_mail().unwrap();
+    let fetch = &failed.accounts[0].attachments;
+    assert_eq!(fetch.imported, 0);
+    assert_eq!(fetch.skipped, ["contrato.docx"]);
+    assert_eq!(fetch.failed.len(), 1);
+    assert_eq!(fetch.failed[0].name, "pedido-2231.pdf");
+    assert_eq!(fetch.failed[0].code, "unavailable");
+    assert_eq!(invoices(&mut app).len(), 1);
+
+    app.simulators().0.set_attachment_failure(None);
+    let retried = app.fetch_mail().unwrap();
+    assert_eq!(retried.accounts[0].attachments.imported, 1);
+    assert!(retried.accounts[0].attachments.failed.is_empty());
+    let all = invoices(&mut app);
+    assert_eq!(all.len(), 2);
+    let pdf = all
+        .iter()
+        .find(|o| o["attachment"] == "pedido-2231.pdf")
+        .unwrap();
+    assert_eq!(pdf["subject"], "Consulta sobre el pedido 2231");
+    assert_eq!(
+        app.fetch_mail().unwrap().accounts[0].attachments.imported,
+        0
+    );
+}
+
+#[test]
+fn a_document_with_several_invoices_gives_one_review_per_invoice() {
+    let dir = tempfile::tempdir().unwrap();
+    let provider = FakeProvider::new();
+    let mut app = open(&dir, Arc::clone(&provider));
+    // Aunque una regla activa coincida, las facturas separadas pasan por revisión.
+    app.create_rule(
+        "alfa",
+        "register_invoice",
+        &json!({ "supplier": "alfa sl" }),
+    )
+    .unwrap();
+    app.set_rule_active("alfa", true).unwrap();
+
+    let mut both: Value = serde_json::from_str(&invoice("Alfa SL", "F-3", "121.00")).unwrap();
+    both["other_invoices"] = json!([
+        serde_json::from_str::<Value>(&invoice("Alfa SL", "F-4", "121.00")).unwrap(),
+        // Un elemento vacío no es una factura y no crea tarea.
+        { "supplier": null, "invoice_number": null, "date": null,
+          "subtotal": null, "tax": null, "total": null },
+    ]);
+    app.import_document("foto-dos-facturas.txt", &both.to_string())
+        .unwrap();
+
+    let first = app.process_next().unwrap().unwrap();
+    assert_eq!(first.state, TaskState::AwaitingReview);
+    let result = first.result.unwrap();
+    assert_eq!(result["fields"]["invoice_number"], "F-3");
+    assert_eq!(result["part"], json!({ "index": 1, "of": 2 }));
+    assert!(result["review_reason"]
+        .as_str()
+        .unwrap()
+        .contains("varias facturas"));
+
+    // La segunda reutiliza la extracción: si se llamara otra vez a la IA, fallaría.
+    *provider.fail.lock().unwrap() = true;
+    let second = app.process_next().unwrap().unwrap();
+    assert_eq!(
+        second.state,
+        TaskState::AwaitingReview,
+        "{:?}",
+        second.error
+    );
+    let result = second.result.unwrap();
+    assert_eq!(result["fields"]["invoice_number"], "F-4");
+    assert_eq!(result["fields"]["supplier"], "Alfa SL");
+    assert_eq!(result["part"]["index"], 2);
+    assert_eq!(result["part"]["of"], 2);
+    assert_eq!(result["part"]["split_from"], first.id);
+    assert_eq!(result["document"], "foto-dos-facturas.txt");
+    assert_eq!(result["origin"]["kind"], "file");
+    assert!(app.process_next().unwrap().is_none(), "solo dos facturas");
+    // La IA no se llamó para la segunda: el fallo forzado sigue pendiente.
+    assert!(*provider.fail.lock().unwrap());
+    assert_eq!(
+        app.document_file(second.id).unwrap(),
+        app.document_file(first.id).unwrap()
+    );
+}
+
+#[test]
+fn an_update_waits_for_running_work_and_keeps_the_queue() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = open(&dir, FakeProvider::new());
+    app.import_document("1.txt", &invoice("Alfa SL", "F-1", "121.00"))
+        .unwrap();
+    app.import_document("2.txt", &invoice("Beta SL", "F-2", "121.00"))
+        .unwrap();
+
+    // Una tarea en marcha: no se puede instalar.
+    let job = app.begin_next().unwrap().unwrap();
+    app.set_queue_paused(true);
+    let busy = app.update_readiness().unwrap();
+    assert!(!busy.ready);
+    assert_eq!((busy.running, busy.queued, busy.paused), (1, 1, true));
+
+    // En pausa no empieza la siguiente, pero la que estaba en marcha termina.
+    assert!(app.begin_next().unwrap().is_none());
+    app.finish(job.run()).unwrap();
+    let ready = app.update_readiness().unwrap();
+    assert!(ready.ready);
+    assert_eq!(
+        (ready.running, ready.queued, ready.awaiting_review),
+        (0, 1, 1)
+    );
+
+    // Tras «instalar» (reabrir), la pausa no persiste y la tarea en cola sigue.
+    drop(app);
+    let mut app = open(&dir, FakeProvider::new());
+    assert!(!app.update_readiness().unwrap().paused);
+    let next = app.process_next().unwrap().unwrap();
+    assert_eq!(next.state, TaskState::AwaitingReview);
+    assert_eq!(next.result.unwrap()["fields"]["invoice_number"], "F-2");
 }

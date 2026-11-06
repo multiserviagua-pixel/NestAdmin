@@ -7,7 +7,7 @@
 
 use base64::engine::general_purpose::{URL_SAFE, URL_SAFE_NO_PAD};
 use base64::Engine;
-use nestadmin_simulators::{codes, Message, MessagePage, NewDraft};
+use nestadmin_simulators::{codes, Attachment, Message, MessagePage, NewDraft};
 use serde_json::{json, Value};
 
 use crate::http::{Api, Method};
@@ -69,14 +69,89 @@ fn header<'a>(message: &'a Value, name: &str) -> Option<&'a str> {
         .and_then(|h| h.get("value").and_then(Value::as_str))
 }
 
-fn part_data(part: &Value) -> Option<String> {
-    let data = part.pointer("/body/data").and_then(Value::as_str)?;
-    // Gmail usa base64 URL; según el mensaje, con o sin relleno.
-    let bytes = URL_SAFE
+/// Gmail usa base64 URL; según el mensaje, con o sin relleno.
+fn decode_b64url(data: &str) -> Option<Vec<u8>> {
+    URL_SAFE
         .decode(data)
         .or_else(|_| URL_SAFE_NO_PAD.decode(data.trim_end_matches('=')))
-        .ok()?;
-    Some(decode_text(&bytes))
+        .ok()
+}
+
+fn part_data(part: &Value) -> Option<String> {
+    let data = part.pointer("/body/data").and_then(Value::as_str)?;
+    Some(decode_text(&decode_b64url(data)?))
+}
+
+fn part_header<'a>(part: &'a Value, name: &str) -> Option<&'a str> {
+    part.get("headers")
+        .and_then(Value::as_array)?
+        .iter()
+        .find(|h| {
+            h.get("name")
+                .and_then(Value::as_str)
+                .is_some_and(|n| n.eq_ignore_ascii_case(name))
+        })
+        .and_then(|h| h.get("value").and_then(Value::as_str))
+}
+
+/// Prefijo del identificador de un adjunto que Gmail entrega dentro del propio mensaje (sin
+/// `attachmentId`); le sigue el `partId`.
+const INLINE_PART: &str = "part:";
+
+/// Adjuntos con nombre, en orden, sin las imágenes incrustadas en el cuerpo (con
+/// `Content-ID` y sin disposición `attachment`).
+fn collect_attachments(part: &Value, out: &mut Vec<Attachment>) {
+    let name = part
+        .get("filename")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|f| !f.is_empty());
+    if let Some(name) = name {
+        let disposition = part_header(part, "Content-Disposition").unwrap_or("");
+        let embedded = part_header(part, "Content-ID").is_some()
+            && !disposition
+                .trim_start()
+                .to_ascii_lowercase()
+                .starts_with("attachment");
+        let id = match part.pointer("/body/attachmentId").and_then(Value::as_str) {
+            Some(id) => Some(id.to_owned()),
+            None => part
+                .get("partId")
+                .and_then(Value::as_str)
+                .filter(|_| part.pointer("/body/data").is_some())
+                .map(|p| format!("{INLINE_PART}{p}")),
+        };
+        if let (false, Some(id)) = (embedded, id) {
+            out.push(Attachment {
+                id,
+                name: Some(name.to_owned()),
+                mime: part
+                    .get("mimeType")
+                    .and_then(Value::as_str)
+                    .filter(|m| !m.is_empty())
+                    .map(str::to_owned),
+                size: part.pointer("/body/size").and_then(Value::as_u64),
+            });
+        }
+    }
+    for child in part
+        .get("parts")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        collect_attachments(child, out);
+    }
+}
+
+fn find_part_by_id<'a>(part: &'a Value, id: &str) -> Option<&'a Value> {
+    if part.get("partId").and_then(Value::as_str) == Some(id) {
+        return Some(part);
+    }
+    part.get("parts")
+        .and_then(Value::as_array)?
+        .iter()
+        .find_map(|p| find_part_by_id(p, id))
 }
 
 /// Primera parte del tipo pedido, recorriendo las partes anidadas en orden.
@@ -114,6 +189,13 @@ fn message(value: &Value) -> Option<Message> {
         from: header(value, "From").and_then(|h| header_addresses(h).into_iter().next()),
         to: header(value, "To").map(header_addresses),
         body: body(value),
+        attachments: {
+            let mut list = Vec::new();
+            if let Some(payload) = value.get("payload") {
+                collect_attachments(payload, &mut list);
+            }
+            list
+        },
         date: value
             .get("internalDate")
             .and_then(Value::as_str)
@@ -235,6 +317,35 @@ impl Gmail {
 }
 
 impl MailProvider for Gmail {
+    fn attachment(&self, message_id: &str, attachment_id: &str) -> MailResult<Vec<u8>> {
+        let data = if let Some(part_id) = attachment_id.strip_prefix(INLINE_PART) {
+            let full = self.get_message(message_id, &[("format", "full")])?;
+            full.get("payload")
+                .and_then(|p| find_part_by_id(p, part_id))
+                .and_then(|p| p.pointer("/body/data"))
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+                .ok_or_else(|| error(codes::NOT_FOUND, "el mensaje ya no tiene ese adjunto"))?
+        } else {
+            let url = self
+                .api
+                .url(&["messages", message_id, "attachments", attachment_id], &[]);
+            let body =
+                self.api
+                    .call_limited(Method::Get, &url, None, crate::ATTACHMENT_RESPONSE_LIMIT)?;
+            body.get("data")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+                .ok_or_else(|| error(codes::UNAVAILABLE, "Gmail no devolvió el adjunto"))?
+        };
+        decode_b64url(&data).ok_or_else(|| {
+            error(
+                codes::UNAVAILABLE,
+                "el adjunto de Gmail no es base64 válido",
+            )
+        })
+    }
+
     fn list(&self, cursor: Option<&str>) -> MailResult<MessagePage> {
         let size = self.page_size.to_string();
         let mut query = vec![("labelIds", "INBOX"), ("maxResults", size.as_str())];

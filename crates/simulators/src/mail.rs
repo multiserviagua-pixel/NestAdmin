@@ -2,6 +2,7 @@
 //! No envía nada fuera del proceso; un "envío" es un recibo guardado en su estado.
 
 use std::path::Path;
+use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use nestadmin_core::{Connector, ConnectorError};
@@ -22,6 +23,33 @@ pub struct Message {
     pub to: Option<Vec<String>>,
     pub body: Option<String>,
     pub date: Option<String>,
+    /// Adjuntos descargables del mensaje, sin los incrustados en el cuerpo (logotipos,
+    /// firmas). Lista vacía: el mensaje no tiene adjuntos. Los mensajes guardados antes de
+    /// los adjuntos se leen con la lista vacía.
+    #[serde(default)]
+    pub attachments: Vec<Attachment>,
+}
+
+/// Adjunto de un mensaje. El contenido se pide aparte con
+/// [`MailConnector::fetch_attachment`](crate::MailConnector::fetch_attachment).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Attachment {
+    /// Identificador del adjunto dentro de su mensaje.
+    pub id: String,
+    /// Nombre del archivo; `None` si el proveedor no lo da.
+    pub name: Option<String>,
+    /// Tipo MIME declarado por el remitente; puede no corresponder al contenido.
+    pub mime: Option<String>,
+    /// Tamaño en bytes según el proveedor; `None` si no lo da.
+    pub size: Option<u64>,
+}
+
+/// Contenido de un adjunto en el simulador.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct SimFile {
+    message_id: String,
+    attachment_id: String,
+    content: Vec<u8>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -65,11 +93,15 @@ struct MailState {
     messages: Vec<Message>,
     drafts: Vec<Draft>,
     sent: Vec<SendReceipt>,
+    #[serde(default)]
+    files: Vec<SimFile>,
 }
 
 pub struct MailSimulator {
     state: SimState<MailState>,
     page_size: usize,
+    /// Fallo forzado solo en la descarga de adjuntos (la lista sigue respondiendo).
+    attachment_failure: Mutex<Option<FailureMode>>,
 }
 
 const DEFAULT_PAGE_SIZE: usize = 20;
@@ -85,7 +117,27 @@ impl MailSimulator {
         Self {
             state: SimState::in_memory(MailState::new(messages)),
             page_size: DEFAULT_PAGE_SIZE,
+            attachment_failure: Mutex::new(None),
         }
+    }
+
+    /// Para pruebas: la descarga de adjuntos falla con ese modo mientras esté activo.
+    pub fn set_attachment_failure(&self, failure: Option<FailureMode>) {
+        *self.attachment_failure.lock().expect("mutex") = failure;
+    }
+
+    /// Añade un adjunto sintético a un mensaje existente y devuelve su identificador.
+    pub fn add_attachment(
+        &self,
+        message_id: &str,
+        name: &str,
+        mime: &str,
+        content: &[u8],
+    ) -> SimResult<String> {
+        self.state.mutate(|s| {
+            let id = s.attach(message_id, name, mime, content)?;
+            Ok((id, true))
+        })
     }
 
     /// Abre o crea el archivo de estado; si no existe, parte de los mensajes de ejemplo. Un
@@ -95,6 +147,7 @@ impl MailSimulator {
         let simulator = Self {
             state: SimState::open(path, || MailState::new(sample_messages()))?,
             page_size: DEFAULT_PAGE_SIZE,
+            attachment_failure: Mutex::new(None),
         };
         simulator.state.mutate(|s| Ok(((), s.refresh_samples())))?;
         Ok(simulator)
@@ -194,6 +247,24 @@ impl MailConnector for MailSimulator {
         })
     }
 
+    fn fetch_attachment(&self, message_id: &str, attachment_id: &str) -> SimResult<Vec<u8>> {
+        if let Some(mode) = *self.attachment_failure.lock().expect("mutex") {
+            return Err(error(mode.code(), "fallo simulado al descargar el adjunto"));
+        }
+        self.state.read(|s| {
+            s.files
+                .iter()
+                .find(|f| f.message_id == message_id && f.attachment_id == attachment_id)
+                .map(|f| f.content.clone())
+                .ok_or_else(|| {
+                    error(
+                        codes::NOT_FOUND,
+                        format!("el mensaje {message_id} no tiene el adjunto {attachment_id}"),
+                    )
+                })
+        })
+    }
+
     /// Envía un borrador una sola vez. La misma clave para el mismo borrador devuelve el
     /// recibo original; otra clave para un borrador ya enviado es `conflict`.
     fn send_draft(&self, draft_id: &str, idempotency_key: &str) -> SimResult<SendReceipt> {
@@ -255,11 +326,69 @@ impl Connector for MailSimulator {
 
 impl MailState {
     fn new(messages: Vec<Message>) -> Self {
-        Self {
+        let mut state = Self {
             messages,
             drafts: Vec::new(),
             sent: Vec::new(),
-        }
+            files: Vec::new(),
+        };
+        state.sample_attachments();
+        state
+    }
+
+    fn attach(
+        &mut self,
+        message_id: &str,
+        name: &str,
+        mime: &str,
+        content: &[u8],
+    ) -> SimResult<String> {
+        let message = self
+            .messages
+            .iter_mut()
+            .find(|m| m.id == message_id)
+            .ok_or_else(|| {
+                error(
+                    codes::NOT_FOUND,
+                    format!("mensaje {message_id} inexistente"),
+                )
+            })?;
+        let id = format!("A-{}", message.attachments.len() + 1);
+        message.attachments.push(Attachment {
+            id: id.clone(),
+            name: Some(name.to_owned()),
+            mime: Some(mime.to_owned()),
+            size: Some(content.len() as u64),
+        });
+        self.files.push(SimFile {
+            message_id: message_id.to_owned(),
+            attachment_id: id.clone(),
+            content: content.to_vec(),
+        });
+        Ok(id)
+    }
+
+    /// El ejemplo M-0001 anuncia una factura adjunta: la lleva, sintética. Un estado anterior
+    /// la recibe si su M-0001 sigue siendo el ejemplo y aún no tiene adjuntos.
+    fn sample_attachments(&mut self) -> bool {
+        let Some(sample) = sample_messages().into_iter().find(|m| m.id == "M-0001") else {
+            return false;
+        };
+        let untouched = self.messages.iter().any(|m| {
+            m.id == sample.id
+                && m.attachments.is_empty()
+                && m.subject == sample.subject
+                && m.body == sample.body
+        });
+        untouched
+            && self
+                .attach(
+                    "M-0001",
+                    SAMPLE_INVOICE_NAME,
+                    "text/plain",
+                    SAMPLE_INVOICE.as_bytes(),
+                )
+                .is_ok()
     }
 
     /// Completa los ejemplos de un estado anterior. Devuelve si cambió algo.
@@ -284,9 +413,20 @@ impl MailState {
                 }
             }
         }
-        changed
+        self.sample_attachments() || changed
     }
 }
+
+const SAMPLE_INVOICE_NAME: &str = "factura-FS-2026-014.txt";
+/// Factura sintética del ejemplo M-0001 (proveedor y NIF ficticios).
+const SAMPLE_INVOICE: &str = "Proveedor Alfa Suministros SL (sintético)\n\
+NIF B00000000\n\
+Factura FS-2026-014\n\
+Fecha: 2026-10-01\n\
+Material de oficina\n\
+Base imponible: 120.00 EUR\n\
+IVA 21%: 25.20 EUR\n\
+Total: 145.20 EUR\n";
 
 fn validate_draft(draft: &NewDraft) -> SimResult<()> {
     if draft.to.is_empty() {
@@ -365,6 +505,7 @@ pub fn sample_messages() -> Vec<Message> {
                 to: Some(vec!["administracion@nestadmin.test".to_owned()]),
                 body: Some(body.to_owned()),
                 date: date.map(str::to_owned),
+                attachments: Vec::new(),
             }
         };
     vec![
