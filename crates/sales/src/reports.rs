@@ -22,6 +22,10 @@
 //!   cual. **Por sustitución**: el efecto fiscal es la diferencia con la factura sustituida,
 //!   por lo que la entrada lleva [`IssuedEntry::replaced`] (desglose de la original) y el
 //!   resumen resta ese desglose; el libro lista los importes tal como se emitieron.
+//! * **Calificación (D99)**: el resumen agrupa por tipo y por calificación de la operación
+//!   (`S2`, `N1`, `N2`, `E1`–`E6`; los gravados no llevan), de modo que exenta, no sujeta e
+//!   inversión del sujeto pasivo no se mezclan en el mismo 0 %. Las facturas recibidas no
+//!   traen calificación (la extracción no la da) y van sin ella.
 //! * El periodo se filtra por fecha de expedición (emitidas) y por fecha de la factura
 //!   (recibidas), ambas inclusivas; no se modela la fecha de devengo ni la de contabilización.
 //! * El resumen no aplica prorrata, deducibilidad, recargo de equivalencia ni compensaciones:
@@ -34,7 +38,7 @@ use std::io::Write;
 use nestadmin_documents::IsoDate;
 use rust_decimal::Decimal;
 
-use crate::calc::{round_money, TaxBreakdown};
+use crate::calc::{round_money, TaxBreakdown, TaxQualification};
 use crate::csv::{Cell, CsvError, CsvOptions, CsvWriter};
 use crate::dates;
 use crate::series::{DocumentKind, DocumentNumber};
@@ -147,6 +151,8 @@ impl ReceivedEntry {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VatLine {
     pub percent: Decimal,
+    /// `None` en los gravados y en lo soportado.
+    pub qualification: Option<TaxQualification>,
     pub base: Decimal,
     pub tax: Decimal,
 }
@@ -235,33 +241,37 @@ fn received_in_range<'a>(
 
 fn sorted_breakdown(breakdown: &[TaxBreakdown]) -> Vec<&TaxBreakdown> {
     let mut rows: Vec<&TaxBreakdown> = breakdown.iter().collect();
-    rows.sort_by(|a, b| (a.tax_rate, &a.exemption).cmp(&(b.tax_rate, &b.exemption)));
+    rows.sort_by_key(|b| (b.tax_rate, b.qualification));
     rows
 }
 
+type VatKey = (Decimal, Option<TaxQualification>);
+
 fn add_to(
-    map: &mut BTreeMap<Decimal, (Decimal, Decimal)>,
+    map: &mut BTreeMap<VatKey, (Decimal, Decimal)>,
     percent: Decimal,
+    qualification: Option<TaxQualification>,
     base: Decimal,
     tax: Decimal,
 ) {
     let slot = map
-        .entry(percent.normalize())
+        .entry((percent.normalize(), qualification))
         .or_insert((Decimal::ZERO, Decimal::ZERO));
     slot.0 += base;
     slot.1 += tax;
 }
 
-fn finish_lines(map: BTreeMap<Decimal, (Decimal, Decimal)>) -> (Vec<VatLine>, Decimal, Decimal) {
+fn finish_lines(map: BTreeMap<VatKey, (Decimal, Decimal)>) -> (Vec<VatLine>, Decimal, Decimal) {
     let mut base_total = Decimal::ZERO;
     let mut tax_total = Decimal::ZERO;
     let lines = map
         .into_iter()
-        .map(|(percent, (base, tax))| {
+        .map(|((percent, qualification), (base, tax))| {
             base_total += base;
             tax_total += tax;
             VatLine {
                 percent,
+                qualification,
                 base: round_money(base),
                 tax: round_money(tax),
             }
@@ -282,16 +292,28 @@ pub fn vat_summary(
             continue;
         }
         for b in &e.breakdown {
-            add_to(&mut output, b.tax_rate.percent(), b.base, b.tax);
+            add_to(
+                &mut output,
+                b.tax_rate.percent(),
+                b.qualification,
+                b.base,
+                b.tax,
+            );
         }
         for b in &e.replaced {
-            add_to(&mut output, b.tax_rate.percent(), -b.base, -b.tax);
+            add_to(
+                &mut output,
+                b.tax_rate.percent(),
+                b.qualification,
+                -b.base,
+                -b.tax,
+            );
         }
     }
     let mut input = BTreeMap::new();
     for e in received_in_range(received, &range)? {
         for l in &e.lines {
-            add_to(&mut input, l.percent, l.base, l.tax);
+            add_to(&mut input, l.percent, None, l.base, l.tax);
         }
     }
     let (output, output_base, output_tax) = finish_lines(output);
@@ -365,7 +387,8 @@ pub fn write_issued_book<W: Write>(
             "Cliente",
             "Estado",
             "Tipo de IVA (%)",
-            "Causa de exención",
+            "Calificación",
+            "Descripción de la exención",
             "Base imponible",
             "Cuota IVA",
             "Total",
@@ -387,6 +410,7 @@ pub fn write_issued_book<W: Write>(
             row.extend([
                 Cell::Empty,
                 Cell::Empty,
+                Cell::Empty,
                 Cell::Amount(Decimal::ZERO),
                 Cell::Amount(Decimal::ZERO),
                 Cell::Amount(Decimal::ZERO),
@@ -398,7 +422,8 @@ pub fn write_issued_book<W: Write>(
             let mut row = head("emitida");
             row.extend([
                 Cell::Number(b.tax_rate.percent()),
-                Cell::opt_text(b.exemption.as_ref().map(|x| x.cause.as_str())),
+                Cell::opt_text(b.qualification.map(TaxQualification::as_str)),
+                Cell::opt_text(Some(b.descriptions.join(" / ").as_str())),
                 Cell::Amount(b.base),
                 Cell::Amount(b.tax),
                 Cell::Amount(b.base + b.tax),
@@ -461,7 +486,13 @@ pub fn write_vat_summary<W: Write>(
     let mut w = CsvWriter::new(
         out,
         options,
-        &["Concepto", "Tipo de IVA (%)", "Base imponible", "Cuota IVA"],
+        &[
+            "Concepto",
+            "Tipo de IVA (%)",
+            "Calificación",
+            "Base imponible",
+            "Cuota IVA",
+        ],
     )?;
     let mut section = |label: &str,
                        total_label: &str,
@@ -473,12 +504,14 @@ pub fn write_vat_summary<W: Write>(
             w.row(&[
                 Cell::text(label),
                 Cell::Number(l.percent),
+                Cell::opt_text(l.qualification.map(TaxQualification::as_str)),
                 Cell::Amount(l.base),
                 Cell::Amount(l.tax),
             ])?;
         }
         w.row(&[
             Cell::text(total_label),
+            Cell::Empty,
             Cell::Empty,
             Cell::Amount(base),
             Cell::Amount(tax),
@@ -500,6 +533,7 @@ pub fn write_vat_summary<W: Write>(
     )?;
     w.row(&[
         Cell::text("Resultado (repercutido menos soportado)"),
+        Cell::Empty,
         Cell::Empty,
         Cell::Empty,
         Cell::Amount(summary.balance),
@@ -532,7 +566,7 @@ pub fn write_expenses<W: Write>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::calc::{Exemption, ExemptionKind, TaxRate};
+    use crate::calc::TaxRate;
     use std::str::FromStr;
 
     fn dec(s: &str) -> Decimal {
@@ -550,7 +584,8 @@ mod tests {
     fn row(rate: TaxRate, base: &str, tax: &str) -> TaxBreakdown {
         TaxBreakdown {
             tax_rate: rate,
-            exemption: None,
+            qualification: None,
+            descriptions: Vec::new(),
             base: dec(base),
             tax: dec(tax),
         }
@@ -713,13 +748,13 @@ mod tests {
             CsvOptions { bom: false },
         )
         .unwrap();
-        let expected = "Número;Fecha de expedición;Tipo de documento;NIF cliente;Cliente;Estado;Tipo de IVA (%);Causa de exención;Base imponible;Cuota IVA;Total\r\n\
-F-2026-0001;2026-01-15;invoice;B00000001;Cliente Uno SL;emitida;10;;50,00;5,00;55,00\r\n\
-F-2026-0001;2026-01-15;invoice;B00000001;Cliente Uno SL;emitida;21;;100,00;21,00;121,00\r\n\
-F-2026-0002;2026-02-10;invoice;B00000002;\"Cliente Dos; S.L.\";emitida;21;;200,00;42,00;242,00\r\n\
-FS-2026-0001;2026-02-11;simplified_invoice;;;emitida;21;;10,00;2,10;12,10\r\n\
-F-2026-0003;2026-03-01;invoice;B00000001;Cliente Uno SL;anulada;;;0,00;0,00;0,00\r\n\
-FR-2026-0001;2026-03-20;corrective_invoice;B00000001;Cliente Uno SL;emitida;21;;-20,00;-4,20;-24,20\r\n";
+        let expected = "Número;Fecha de expedición;Tipo de documento;NIF cliente;Cliente;Estado;Tipo de IVA (%);Calificación;Descripción de la exención;Base imponible;Cuota IVA;Total\r\n\
+F-2026-0001;2026-01-15;invoice;B00000001;Cliente Uno SL;emitida;10;;;50,00;5,00;55,00\r\n\
+F-2026-0001;2026-01-15;invoice;B00000001;Cliente Uno SL;emitida;21;;;100,00;21,00;121,00\r\n\
+F-2026-0002;2026-02-10;invoice;B00000002;\"Cliente Dos; S.L.\";emitida;21;;;200,00;42,00;242,00\r\n\
+FS-2026-0001;2026-02-11;simplified_invoice;;;emitida;21;;;10,00;2,10;12,10\r\n\
+F-2026-0003;2026-03-01;invoice;B00000001;Cliente Uno SL;anulada;;;;0,00;0,00;0,00\r\n\
+FR-2026-0001;2026-03-20;corrective_invoice;B00000001;Cliente Uno SL;emitida;21;;;-20,00;-4,20;-24,20\r\n";
         assert_eq!(utf8(out), expected);
     }
 
@@ -735,7 +770,7 @@ FR-2026-0001;2026-03-20;corrective_invoice;B00000001;Cliente Uno SL;emitida;21;;
     }
 
     #[test]
-    fn d89_issued_book_shows_exemption_cause() {
+    fn d99_issued_book_shows_qualification_and_description() {
         let mut e = issued(
             "F-2026-0001",
             DocumentKind::Invoice,
@@ -743,10 +778,8 @@ FR-2026-0001;2026-03-20;corrective_invoice;B00000001;Cliente Uno SL;emitida;21;;
             Some(("Cliente", "B00000001")),
             vec![TaxBreakdown {
                 tax_rate: TaxRate::Zero,
-                exemption: Some(Exemption {
-                    kind: ExemptionKind::Exempt,
-                    cause: "Exenta art. sintético".into(),
-                }),
+                qualification: Some(TaxQualification::E1),
+                descriptions: vec!["Exenta art. sintético".into()],
                 base: dec("30.00"),
                 tax: dec("0.00"),
             }],
@@ -754,7 +787,7 @@ FR-2026-0001;2026-03-20;corrective_invoice;B00000001;Cliente Uno SL;emitida;21;;
         e.replaced = Vec::new();
         let out = write_issued_book(Vec::new(), &[e], q1(), CsvOptions { bom: false }).unwrap();
         assert!(utf8(out).ends_with(
-            "F-2026-0001;2026-01-05;invoice;B00000001;Cliente;emitida;0;Exenta art. sintético;30,00;0,00;30,00\r\n"
+            "F-2026-0001;2026-01-05;invoice;B00000001;Cliente;emitida;0;E1;Exenta art. sintético;30,00;0,00;30,00\r\n"
         ));
     }
 
@@ -848,11 +881,13 @@ FR-2026-0001;2026-03-20;corrective_invoice;B00000001;Cliente Uno SL;emitida;21;;
             vec![
                 VatLine {
                     percent: dec("10"),
+                    qualification: None,
                     base: dec("50.00"),
                     tax: dec("5.00")
                 },
                 VatLine {
                     percent: dec("21"),
+                    qualification: None,
                     base: dec("290.00"),
                     tax: dec("60.90")
                 },
@@ -871,14 +906,14 @@ FR-2026-0001;2026-03-20;corrective_invoice;B00000001;Cliente Uno SL;emitida;21;;
     fn d89_vat_summary_csv_golden() {
         let s = vat_summary(&sample_issued(), &sample_received(), q1()).unwrap();
         let out = write_vat_summary(Vec::new(), &s, CsvOptions { bom: false }).unwrap();
-        let expected = "Concepto;Tipo de IVA (%);Base imponible;Cuota IVA\r\n\
-IVA repercutido;10;50,00;5,00\r\n\
-IVA repercutido;21;290,00;60,90\r\n\
-Total IVA repercutido;;340,00;65,90\r\n\
-IVA soportado;10;10,00;1,00\r\n\
-IVA soportado;21;100,00;21,00\r\n\
-Total IVA soportado;;110,00;22,00\r\n\
-Resultado (repercutido menos soportado);;;43,90\r\n";
+        let expected = "Concepto;Tipo de IVA (%);Calificación;Base imponible;Cuota IVA\r\n\
+IVA repercutido;10;;50,00;5,00\r\n\
+IVA repercutido;21;;290,00;60,90\r\n\
+Total IVA repercutido;;;340,00;65,90\r\n\
+IVA soportado;10;;10,00;1,00\r\n\
+IVA soportado;21;;100,00;21,00\r\n\
+Total IVA soportado;;;110,00;22,00\r\n\
+Resultado (repercutido menos soportado);;;;43,90\r\n";
         assert_eq!(utf8(out), expected);
     }
 
@@ -903,6 +938,53 @@ Resultado (repercutido menos soportado);;;43,90\r\n";
         // 100 (original) + (120 - 100) = 120; cuota 21 + 4,20 = 25,20.
         assert_eq!(s.output_base.to_string(), "120.00");
         assert_eq!(s.output_tax.to_string(), "25.20");
+    }
+
+    #[test]
+    fn d99_vat_summary_does_not_mix_exempt_not_subject_and_reverse_charge() {
+        let zero = |q, base: &str| TaxBreakdown {
+            tax_rate: TaxRate::Zero,
+            qualification: Some(q),
+            descriptions: Vec::new(),
+            base: dec(base),
+            tax: dec("0.00"),
+        };
+        let a = issued(
+            "F-2026-0001",
+            DocumentKind::Invoice,
+            date(2026, 1, 10),
+            Some(("C", "B00000001")),
+            vec![
+                zero(TaxQualification::E1, "100.00"),
+                zero(TaxQualification::N1, "40.00"),
+                zero(TaxQualification::S2, "25.00"),
+                row(TaxRate::TwentyOne, "10.00", "2.10"),
+            ],
+        );
+        let b = issued(
+            "F-2026-0002",
+            DocumentKind::Invoice,
+            date(2026, 1, 11),
+            Some(("C", "B00000001")),
+            vec![zero(TaxQualification::E1, "50.00")],
+        );
+        let s = vat_summary(&[a, b], &[], q1()).unwrap();
+        let rows: Vec<(String, Option<TaxQualification>, String)> = s
+            .output
+            .iter()
+            .map(|l| (l.percent.to_string(), l.qualification, l.base.to_string()))
+            .collect();
+        assert_eq!(
+            rows,
+            vec![
+                ("0".into(), Some(TaxQualification::S2), "25.00".into()),
+                ("0".into(), Some(TaxQualification::N1), "40.00".into()),
+                ("0".into(), Some(TaxQualification::E1), "150.00".into()),
+                ("21".into(), None, "10.00".into()),
+            ]
+        );
+        let out = write_vat_summary(Vec::new(), &s, CsvOptions { bom: false }).unwrap();
+        assert!(utf8(out).contains("IVA repercutido;0;E1;150,00;0,00\r\n"));
     }
 
     #[test]

@@ -16,7 +16,7 @@
 
 use rust_decimal::Decimal;
 
-use crate::calc::{Exemption, LineInput, TaxRate};
+use crate::calc::{Exemption, LineInput, TaxQualification, TaxRate};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Product {
@@ -57,7 +57,7 @@ impl Product {
         }
         match (&self.exemption, self.tax_rate) {
             (None, TaxRate::Zero) => Err(CatalogError::ExemptionRequired),
-            (Some(e), TaxRate::Zero) if e.cause.trim().is_empty() => {
+            (Some(e), TaxRate::Zero) if e.qualification == TaxQualification::S1 => {
                 Err(CatalogError::ExemptionRequired)
             }
             (Some(_), r) if r != TaxRate::Zero => Err(CatalogError::ExemptionNotAllowed),
@@ -96,7 +96,7 @@ impl Product {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::calc::{calculate, ExemptionKind, LineMode};
+    use crate::calc::{calculate, LineMode};
     use std::str::FromStr;
 
     fn dec(s: &str) -> Decimal {
@@ -163,15 +163,15 @@ mod tests {
         let p = Product {
             tax_rate: TaxRate::Zero,
             exemption: Some(Exemption {
-                kind: ExemptionKind::Exempt,
-                cause: "Exenta (causa sintética)".into(),
+                qualification: TaxQualification::E1,
+                description: Some("Exenta (causa sintética)".into()),
             }),
             ..product()
         };
         let line = p.to_line(dec("1"), Decimal::ZERO).unwrap();
         assert_eq!(
-            line.exemption.as_ref().unwrap().cause,
-            "Exenta (causa sintética)"
+            line.exemption.as_ref().unwrap().description.as_deref(),
+            Some("Exenta (causa sintética)")
         );
         assert!(calculate(&[line], None, LineMode::Standard).is_ok());
     }
@@ -187,16 +187,10 @@ mod tests {
         let mut p = product();
         p.tax_rate = TaxRate::Zero;
         assert_eq!(p.validate().unwrap_err(), CatalogError::ExemptionRequired);
-        p.exemption = Some(Exemption {
-            kind: ExemptionKind::Exempt,
-            cause: " ".into(),
-        });
+        p.exemption = Some(Exemption::new(TaxQualification::S1));
         assert_eq!(p.validate().unwrap_err(), CatalogError::ExemptionRequired);
         let mut p = product();
-        p.exemption = Some(Exemption {
-            kind: ExemptionKind::Exempt,
-            cause: "x".into(),
-        });
+        p.exemption = Some(Exemption::new(TaxQualification::E1));
         assert_eq!(p.validate().unwrap_err(), CatalogError::ExemptionNotAllowed);
     }
 

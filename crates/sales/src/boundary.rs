@@ -11,6 +11,7 @@
 //! que la prevea.
 
 use nestadmin_documents::IsoDate;
+use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 
 use crate::calc::{TaxBreakdown, Totals};
@@ -45,12 +46,16 @@ impl InvoiceTypeCode {
     }
 }
 
+/// Factura rectificada. Por sustitución lleva además la base y la cuota rectificadas, que el
+/// registro de la AEAT exige en ese caso (D99); por diferencias son `None`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RectifiedRef {
     pub number: DocumentNumber,
     pub issue_date: IsoDate,
     pub kind: RectificationKind,
     pub method: RectificationMethod,
+    pub base: Option<Decimal>,
+    pub tax: Option<Decimal>,
 }
 
 /// Datos de una factura emitida que consume `verifactu::build_record`.
@@ -65,8 +70,8 @@ pub struct InvoiceRecordInput {
     pub recipient_tax_id: Option<String>,
     pub rectifies: Option<RectifiedRef>,
     pub breakdown: Vec<TaxBreakdown>,
-    pub tax_total: rust_decimal::Decimal,
-    pub total: rust_decimal::Decimal,
+    pub tax_total: Decimal,
+    pub total: Decimal,
 }
 
 fn normalize(id: &str) -> String {
@@ -97,7 +102,18 @@ pub fn record_input(
             problem: Problem::Invalid("los totales no corresponden al contenido".into()),
         }]);
     }
-    let issue_date = content.issue_date.ok_or_else(Vec::new)?;
+    let issue_date = content.issue_date.ok_or_else(|| {
+        vec![FieldIssue {
+            field: "issue_date".into(),
+            problem: Problem::Missing,
+        }]
+    })?;
+    let incomplete = |field: &str| {
+        vec![FieldIssue {
+            field: field.into(),
+            problem: Problem::Missing,
+        }]
+    };
     if number.series.kind != content.kind {
         return Err(invalid("la serie no corresponde al tipo de documento"));
     }
@@ -109,13 +125,29 @@ pub fn record_input(
     let rectifies = match (&content.rectification, content.kind) {
         (Some(r), DocumentKind::CorrectiveInvoice) => {
             match (r.rectified_number, r.rectified_date, r.kind, r.method) {
-                (Some(number), Some(issue_date), Some(kind), Some(method)) => Some(RectifiedRef {
-                    number,
-                    issue_date,
-                    kind,
-                    method,
-                }),
-                _ => return Err(vec![]),
+                (Some(number), Some(issue_date), Some(kind), Some(method)) => {
+                    let (base, tax) = match method {
+                        RectificationMethod::Substitution => {
+                            let base = r
+                                .rectified_base
+                                .ok_or_else(|| incomplete("rectification.rectified_base"))?;
+                            let tax = r
+                                .rectified_tax
+                                .ok_or_else(|| incomplete("rectification.rectified_tax"))?;
+                            (Some(base), Some(tax))
+                        }
+                        RectificationMethod::Differences => (None, None),
+                    };
+                    Some(RectifiedRef {
+                        number,
+                        issue_date,
+                        kind,
+                        method,
+                        base,
+                        tax,
+                    })
+                }
+                _ => return Err(incomplete("rectification")),
             }
         }
         _ => None,
@@ -130,7 +162,11 @@ pub fn record_input(
             RectificationKind::R4 => InvoiceTypeCode::R4,
             RectificationKind::R5 => InvoiceTypeCode::R5,
         },
-        _ => return Err(vec![]),
+        _ => {
+            return Err(invalid(
+                "el tipo de documento no genera un registro de factura",
+            ))
+        }
     };
     let text = |v: &Option<String>| {
         v.as_deref()
@@ -241,12 +277,55 @@ mod tests {
             }),
             kind: Some(RectificationKind::R4),
             method: Some(RectificationMethod::Substitution),
+            rectified_base: Some(Decimal::from(80)),
+            rectified_tax: Some(Decimal::new(1680, 2)),
         });
         let t = prepare_issue(&c).unwrap();
         let r = record_input(&c, number(DocumentKind::CorrectiveInvoice, 2026), &t).unwrap();
         assert_eq!(r.invoice_type, InvoiceTypeCode::R4);
         assert_eq!(r.invoice_type.as_str(), "R4");
-        assert_eq!(r.rectifies.unwrap().number.to_string(), "F-2026-0007");
+        let rectified = r.rectifies.unwrap();
+        assert_eq!(rectified.number.to_string(), "F-2026-0007");
+        // Por sustitución constan la base y la cuota rectificadas (D99).
+        assert_eq!(rectified.base, Some(Decimal::from(80)));
+        assert_eq!(rectified.tax, Some(Decimal::new(1680, 2)));
+    }
+
+    #[test]
+    fn d99_differences_carry_no_rectified_amounts() {
+        let mut c = content(DocumentKind::CorrectiveInvoice);
+        c.rectification = Some(Rectification {
+            rectified_number: Some(number(DocumentKind::Invoice, 2026)),
+            rectified_date: Some(IsoDate {
+                year: 2026,
+                month: 10,
+                day: 1,
+            }),
+            kind: Some(RectificationKind::R1),
+            method: Some(RectificationMethod::Differences),
+            rectified_base: None,
+            rectified_tax: None,
+        });
+        c.lines[0].quantity = Decimal::from(-1);
+        let t = prepare_issue(&c).unwrap();
+        let r = record_input(&c, number(DocumentKind::CorrectiveInvoice, 2026), &t).unwrap();
+        let rectified = r.rectifies.unwrap();
+        assert_eq!((rectified.base, rectified.tax), (None, None));
+    }
+
+    #[test]
+    fn d83_incomplete_corrective_reports_a_field_not_an_empty_list() {
+        let mut c = content(DocumentKind::CorrectiveInvoice);
+        c.rectification = Some(Rectification::default());
+        // El contenido ya se rechaza antes con la lista completa de campos.
+        let t = prepare_issue(&content(DocumentKind::Invoice)).unwrap();
+        let err = record_input(&c, number(DocumentKind::CorrectiveInvoice, 2026), &t).unwrap_err();
+        assert!(!err.is_empty());
+        // Un presupuesto no genera registro y lo dice.
+        let mut q = content(DocumentKind::Invoice);
+        q.kind = DocumentKind::Quote;
+        let err = record_input(&q, number(DocumentKind::Quote, 2026), &t).unwrap_err();
+        assert!(!err.is_empty());
     }
 
     #[test]

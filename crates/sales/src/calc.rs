@@ -16,12 +16,16 @@
 //!   convierte desde porcentaje.
 //! * La retención se calcula sobre la suma de bases (todas las líneas, exentas incluidas),
 //!   en porcentaje `[0, 100]`, redondeada igual que la cuota.
-//! * El 0 % se desglosa por causa: dos causas distintas son dos filas del desglose.
+//! * El 0 % se desglosa por **calificación de la operación** ([`TaxQualification`], los valores
+//!   que la AEAT define para Verifactu: `S2`, `N1`, `N2`, `E1`–`E6`); dos calificaciones
+//!   distintas son dos filas del desglose y nunca se mezclan exenta, no sujeta e inversión del
+//!   sujeto pasivo en la misma fila. La descripción libre es un texto aparte que no agrupa.
+//!   Un tipo gravado (4, 10, 21 %) es `S1` implícita y no lleva calificación.
 //! * Cantidad > 0 y precio ≥ 0 en documentos normales; en una rectificativa por diferencias
 //!   (`LineMode::Difference`) la cantidad puede ser negativa (distinta de 0) y el precio
 //!   también, porque solo se informa la variación.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use rust_decimal::{Decimal, RoundingStrategy};
 use serde::{Deserialize, Serialize};
@@ -57,19 +61,107 @@ impl TaxRate {
     }
 }
 
+/// Calificación de la operación según los valores de la AEAT para el registro de facturación
+/// (`CalificacionOperacion` y `OperacionExenta`, D99): sujeta no exenta (`S1`, `S2`), no sujeta
+/// (`N1`, `N2`) y exenta por causa (`E1`–`E6`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-pub enum ExemptionKind {
-    Exempt,
-    NotSubject,
-    /// Inversión del sujeto pasivo: mención obligatoria en la factura (D80).
-    ReverseCharge,
+pub enum TaxQualification {
+    /// Sujeta y no exenta, sin inversión del sujeto pasivo. Es la de los tipos gravados y no
+    /// se admite como calificación de una línea al 0 %.
+    S1,
+    /// Sujeta y no exenta con inversión del sujeto pasivo (mención obligatoria, D80).
+    S2,
+    /// No sujeta por los artículos 7 y 14 u otros.
+    N1,
+    /// No sujeta por reglas de localización.
+    N2,
+    /// Exenta por el artículo 20.
+    E1,
+    /// Exenta por el artículo 21.
+    E2,
+    /// Exenta por el artículo 22.
+    E3,
+    /// Exenta por los artículos 23 y 24.
+    E4,
+    /// Exenta por el artículo 25.
+    E5,
+    /// Exenta por otros motivos.
+    E6,
 }
 
-/// Causa de exención o no sujeción, en texto libre del usuario (la spec no fija un catálogo).
+impl TaxQualification {
+    pub const ALL: [TaxQualification; 10] = [
+        Self::S1,
+        Self::S2,
+        Self::N1,
+        Self::N2,
+        Self::E1,
+        Self::E2,
+        Self::E3,
+        Self::E4,
+        Self::E5,
+        Self::E6,
+    ];
+
+    /// Código de la AEAT.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::S1 => "S1",
+            Self::S2 => "S2",
+            Self::N1 => "N1",
+            Self::N2 => "N2",
+            Self::E1 => "E1",
+            Self::E2 => "E2",
+            Self::E3 => "E3",
+            Self::E4 => "E4",
+            Self::E5 => "E5",
+            Self::E6 => "E6",
+        }
+    }
+
+    pub fn parse(text: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|q| q.as_str() == text)
+    }
+
+    pub fn is_exempt(self) -> bool {
+        matches!(
+            self,
+            Self::E1 | Self::E2 | Self::E3 | Self::E4 | Self::E5 | Self::E6
+        )
+    }
+
+    pub fn is_not_subject(self) -> bool {
+        matches!(self, Self::N1 | Self::N2)
+    }
+
+    pub fn is_reverse_charge(self) -> bool {
+        self == Self::S2
+    }
+}
+
+/// Exención, no sujeción o inversión del sujeto pasivo de una línea al 0 %: la calificación
+/// codificada y, opcionalmente, un texto descriptivo para la factura (D99).
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct Exemption {
-    pub kind: ExemptionKind,
-    pub cause: String,
+    pub qualification: TaxQualification,
+    pub description: Option<String>,
+}
+
+impl Exemption {
+    pub fn new(qualification: TaxQualification) -> Self {
+        Self {
+            qualification,
+            description: None,
+        }
+    }
+
+    /// Descripción sin espacios sobrantes; `None` si está en blanco.
+    pub fn description_text(&self) -> Option<&str> {
+        self.description
+            .as_deref()
+            .map(str::trim)
+            .filter(|d| !d.is_empty())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -80,7 +172,7 @@ pub struct LineInput {
     /// Fracción entre 0 y 1 (0 = sin descuento).
     pub discount: Decimal,
     pub tax_rate: TaxRate,
-    /// Obligatoria con 0 %; prohibida con otro tipo.
+    /// Obligatoria con 0 % (y distinta de `S1`); prohibida con otro tipo.
     pub exemption: Option<Exemption>,
 }
 
@@ -95,7 +187,10 @@ pub enum LineMode {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TaxBreakdown {
     pub tax_rate: TaxRate,
-    pub exemption: Option<Exemption>,
+    /// `None` en los tipos gravados (`S1` implícita).
+    pub qualification: Option<TaxQualification>,
+    /// Descripciones distintas de las líneas del grupo, ordenadas; no agrupan.
+    pub descriptions: Vec<String>,
     pub base: Decimal,
     pub tax: Decimal,
 }
@@ -131,9 +226,9 @@ pub enum CalcError {
     NegativePrice { line: usize },
     #[error("línea {line}: el descuento debe estar entre 0 y 1")]
     DiscountOutOfRange { line: usize },
-    #[error("línea {line}: el tipo 0 % exige la causa de exención o no sujeción")]
+    #[error("línea {line}: el tipo 0 % exige una calificación (S2, N1, N2 o E1 a E6)")]
     ExemptionRequired { line: usize },
-    #[error("línea {line}: la causa de exención solo procede con el tipo 0 %")]
+    #[error("línea {line}: la calificación de exención solo procede con el tipo 0 %")]
     ExemptionNotAllowed { line: usize },
     #[error("tipo de IVA no admitido: {percent}")]
     UnsupportedTaxRate { percent: Decimal },
@@ -180,7 +275,7 @@ fn line_amount(index: usize, line: &LineInput, mode: LineMode) -> Result<Decimal
     }
     match (&line.exemption, line.tax_rate) {
         (None, TaxRate::Zero) => return Err(CalcError::ExemptionRequired { line: n }),
-        (Some(e), TaxRate::Zero) if e.cause.trim().is_empty() => {
+        (Some(e), TaxRate::Zero) if e.qualification == TaxQualification::S1 => {
             return Err(CalcError::ExemptionRequired { line: n })
         }
         (Some(_), r) if r != TaxRate::Zero => {
@@ -213,19 +308,29 @@ pub fn calculate(
         }
     }
     let mut line_amounts = Vec::with_capacity(lines.len());
-    let mut groups: BTreeMap<(TaxRate, Option<Exemption>), Decimal> = BTreeMap::new();
+    type Group = (Decimal, BTreeSet<String>);
+    let mut groups: BTreeMap<(TaxRate, Option<TaxQualification>), Group> = BTreeMap::new();
     for (i, line) in lines.iter().enumerate() {
         let amount = line_amount(i, line, mode)?;
         line_amounts.push(amount);
-        let base = groups
-            .entry((line.tax_rate, line.exemption.clone()))
-            .or_insert(Decimal::ZERO);
-        *base = base.checked_add(amount).ok_or(CalcError::Overflow)?;
+        let key = (
+            line.tax_rate,
+            line.exemption.as_ref().map(|e| e.qualification),
+        );
+        let group = groups.entry(key).or_default();
+        group.0 = group.0.checked_add(amount).ok_or(CalcError::Overflow)?;
+        if let Some(text) = line
+            .exemption
+            .as_ref()
+            .and_then(Exemption::description_text)
+        {
+            group.1.insert(text.to_owned());
+        }
     }
     let mut breakdown = Vec::with_capacity(groups.len());
     let mut base_total = Decimal::ZERO;
     let mut tax_total = Decimal::ZERO;
-    for ((tax_rate, exemption), base) in groups {
+    for ((tax_rate, qualification), (base, descriptions)) in groups {
         let tax = round_money(
             base.checked_mul(tax_rate.percent())
                 .ok_or(CalcError::Overflow)?
@@ -235,7 +340,8 @@ pub fn calculate(
         tax_total = tax_total.checked_add(tax).ok_or(CalcError::Overflow)?;
         breakdown.push(TaxBreakdown {
             tax_rate,
-            exemption,
+            qualification,
+            descriptions: descriptions.into_iter().collect(),
             base: round_money(base),
             tax,
         });
@@ -287,8 +393,8 @@ mod tests {
     fn exempt(qty: &str, price: &str, cause: &str) -> LineInput {
         LineInput {
             exemption: Some(Exemption {
-                kind: ExemptionKind::Exempt,
-                cause: cause.into(),
+                qualification: TaxQualification::E1,
+                description: Some(cause.into()),
             }),
             ..line(qty, price, "0", TaxRate::Zero)
         }
@@ -405,23 +511,21 @@ mod tests {
             calculate(&[l.clone()], None, LineMode::Standard),
             Err(CalcError::ExemptionRequired { line: 1 })
         );
-        l.exemption = Some(Exemption {
-            kind: ExemptionKind::NotSubject,
-            cause: "   ".into(),
-        });
+        // S1 no es una calificación válida para el 0 %.
+        l.exemption = Some(Exemption::new(TaxQualification::S1));
         assert_eq!(
-            calculate(&[l], None, LineMode::Standard),
+            calculate(&[l.clone()], None, LineMode::Standard),
             Err(CalcError::ExemptionRequired { line: 1 })
         );
+        // Con calificación basta: el texto descriptivo es opcional.
+        l.exemption = Some(Exemption::new(TaxQualification::N1));
+        assert!(calculate(&[l], None, LineMode::Standard).is_ok());
     }
 
     #[test]
     fn d75_cause_with_taxed_rate_is_rejected() {
         let mut l = line("1", "10", "0", TaxRate::TwentyOne);
-        l.exemption = Some(Exemption {
-            kind: ExemptionKind::Exempt,
-            cause: "x".into(),
-        });
+        l.exemption = Some(Exemption::new(TaxQualification::E1));
         assert_eq!(
             calculate(&[l], None, LineMode::Standard),
             Err(CalcError::ExemptionNotAllowed { line: 1 })
@@ -429,16 +533,50 @@ mod tests {
     }
 
     #[test]
-    fn d75_zero_rate_groups_by_cause() {
+    fn d99_zero_rate_groups_by_qualification_not_by_text() {
+        let q = |qualification, price: &str| LineInput {
+            exemption: Some(Exemption::new(qualification)),
+            ..line("1", price, "0", TaxRate::Zero)
+        };
         let t = calc(&[
-            exempt("1", "10", "Causa A"),
-            exempt("1", "5", "Causa B"),
-            exempt("1", "2", "Causa A"),
+            exempt("1", "10", "Texto A"),
+            q(TaxQualification::N1, "5"),
+            exempt("1", "2", "Texto B"),
+            q(TaxQualification::S2, "7"),
+            q(TaxQualification::E4, "1"),
         ]);
-        assert_eq!(t.breakdown.len(), 2);
-        assert_eq!(t.breakdown[0].base.to_string(), "12.00");
-        assert_eq!(t.breakdown[1].base.to_string(), "5.00");
+        // Exenta, no sujeta e ISP no se mezclan aunque todas sean 0 %.
+        let rows: Vec<(Option<TaxQualification>, String)> = t
+            .breakdown
+            .iter()
+            .map(|b| (b.qualification, b.base.to_string()))
+            .collect();
+        assert_eq!(
+            rows,
+            vec![
+                (Some(TaxQualification::S2), "7.00".into()),
+                (Some(TaxQualification::N1), "5.00".into()),
+                (Some(TaxQualification::E1), "12.00".into()),
+                (Some(TaxQualification::E4), "1.00".into()),
+            ]
+        );
+        // Las descripciones de un mismo grupo se conservan, sin repetir, aparte.
+        assert_eq!(t.breakdown[2].descriptions, vec!["Texto A", "Texto B"]);
+        assert!(t.breakdown[0].descriptions.is_empty());
         assert_eq!(t.tax_total.to_string(), "0.00");
+    }
+
+    #[test]
+    fn d99_qualification_codes_round_trip() {
+        for q in TaxQualification::ALL {
+            assert_eq!(TaxQualification::parse(q.as_str()), Some(q));
+        }
+        assert_eq!(TaxQualification::parse("E7"), None);
+        assert_eq!(TaxQualification::parse("e1"), None);
+        assert!(TaxQualification::E6.is_exempt() && !TaxQualification::N2.is_exempt());
+        assert!(TaxQualification::N2.is_not_subject());
+        assert!(TaxQualification::S2.is_reverse_charge());
+        assert!(!TaxQualification::S1.is_reverse_charge());
     }
 
     #[test]

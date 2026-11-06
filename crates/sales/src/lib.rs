@@ -30,8 +30,8 @@ pub mod tax_id;
 
 pub use boundary::{record_input, InvoiceRecordInput, InvoiceTypeCode, RectifiedRef};
 pub use calc::{
-    calculate, round_money, CalcError, Exemption, ExemptionKind, LineInput, LineMode, TaxBreakdown,
-    TaxRate, Totals,
+    calculate, round_money, CalcError, Exemption, LineInput, LineMode, TaxBreakdown,
+    TaxQualification, TaxRate, Totals,
 };
 pub use catalog::{CatalogError, Product};
 pub use content::{
@@ -41,8 +41,8 @@ pub use content::{
 };
 pub use csv::{Cell, CsvError, CsvOptions, CsvWriter};
 pub use payments::{
-    add_payment, due_date, remove_payment, summarize, CollectionState, CollectionSummary, Payment,
-    PaymentError, PaymentMethod, Receivable,
+    add_payment, due_date, remove_payment, summarize, CollectionState, CollectionSummary,
+    LinkedCorrective, Payment, PaymentError, PaymentMethod, Receivable,
 };
 pub use recurring::{
     due_drafts, issue_mode, DraftPlan, Frequency, IssueMode, PeriodKey, RecurringError,

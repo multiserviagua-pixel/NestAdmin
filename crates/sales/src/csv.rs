@@ -88,10 +88,12 @@ pub fn format_number(value: Decimal) -> String {
 /// Escapa una celda de texto según las reglas del módulo.
 pub fn escape_text(text: &str) -> String {
     let mut value = text.to_owned();
-    if matches!(
-        value.chars().next(),
-        Some('=' | '+' | '-' | '@' | '\t' | '\r')
-    ) {
+    // El primer carácter significativo es el primero que no sea espacio ni tabulación: una hoja
+    // de cálculo interpreta como fórmula `  =1+1` igual que `=1+1`.
+    let significant = value.trim_start_matches([' ', '\t']).chars().next();
+    if matches!(significant, Some('=' | '+' | '-' | '@' | '\t' | '\r'))
+        || matches!(value.chars().next(), Some('\t' | '\r'))
+    {
         value.insert(0, '\'');
     }
     let needs_quotes =
@@ -211,6 +213,13 @@ mod tests {
         assert_eq!(escape_text("@cmd"), "'@cmd");
         // Con separador, además se entrecomilla.
         assert_eq!(escape_text("=a;b"), "\"'=a;b\"");
+        // Espacios o tabulaciones iniciales no esconden la fórmula.
+        assert_eq!(escape_text(" =1+1"), "' =1+1");
+        assert_eq!(escape_text("  @cmd"), "'  @cmd");
+        assert_eq!(escape_text("\t-x"), "'\t-x");
+        assert_eq!(escape_text(" \t+34"), "' \t+34");
+        // Un espacio inicial sin fórmula sigue sin apóstrofo.
+        assert_eq!(escape_text(" hola"), "\" hola\"");
         // Los importes negativos no se tocan.
         let s = write(
             CsvOptions { bom: false },

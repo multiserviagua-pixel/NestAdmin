@@ -7,8 +7,8 @@
 //!   y destinatario, líneas con descripción, desglose por tipo con base y cuota, total y la
 //!   causa de exención (o mención de inversión del sujeto pasivo) en las líneas al 0 %.
 //! * Simplificada (art. 7): hasta 400 € con IVA, o 3.000 € si el usuario declara una de las
-//!   actividades del art. 4.2; sin NIF del destinatario salvo que lo pida (entonces se exige
-//!   y se valida).
+//!   actividades del art. 4.2; sin NIF del destinatario salvo que lo pida (entonces se exigen
+//!   y se validan su NIF y su domicilio, art. 7.2 RD 1619/2012).
 //! * Rectificativa (D81): referencia a la factura rectificada (número y fecha), tipo R1–R5 y
 //!   método. R5 si y solo si se rectifica una simplificada, y entonces rige el contenido de la
 //!   simplificada. Por diferencias, las líneas pueden ser negativas.
@@ -73,6 +73,11 @@ pub struct Rectification {
     pub rectified_date: Option<IsoDate>,
     pub kind: Option<RectificationKind>,
     pub method: Option<RectificationMethod>,
+    /// Base imponible de la factura rectificada. Obligatoria por sustitución (D99); no se
+    /// admite por diferencias.
+    pub rectified_base: Option<Decimal>,
+    /// Cuota de la factura rectificada. Misma regla que la base.
+    pub rectified_tax: Option<Decimal>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -238,8 +243,24 @@ fn check_rectification(content: &InvoiceContent, out: &mut Vec<FieldIssue>) {
             }
         }
     }
-    if r.method.is_none() {
-        out.push(FieldIssue::missing("rectification.method"));
+    match r.method {
+        None => out.push(FieldIssue::missing("rectification.method")),
+        Some(RectificationMethod::Substitution) => {
+            if r.rectified_base.is_none() {
+                out.push(FieldIssue::missing("rectification.rectified_base"));
+            }
+            if r.rectified_tax.is_none() {
+                out.push(FieldIssue::missing("rectification.rectified_tax"));
+            }
+        }
+        Some(RectificationMethod::Differences) => {
+            if r.rectified_base.is_some() || r.rectified_tax.is_some() {
+                out.push(FieldIssue::invalid(
+                    "rectification.rectified_base",
+                    "la base y la cuota rectificadas solo constan en la rectificación por sustitución",
+                ));
+            }
+        }
     }
 }
 
@@ -276,8 +297,12 @@ fn check(content: &InvoiceContent) -> (Vec<FieldIssue>, Option<Totals>) {
                 content.recipient_requested_tax_id,
                 &mut out,
             );
+            if content.recipient_requested_tax_id && present(&recipient.address).is_none() {
+                out.push(FieldIssue::missing("recipient.address"));
+            }
         } else if content.recipient_requested_tax_id {
             out.push(FieldIssue::missing("recipient.tax_id"));
+            out.push(FieldIssue::missing("recipient.address"));
         }
     } else {
         match &content.recipient {
@@ -347,7 +372,7 @@ pub fn prepare_issue(content: &InvoiceContent) -> Result<Totals, Vec<FieldIssue>
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::calc::{Exemption, ExemptionKind, TaxRate};
+    use crate::calc::{Exemption, TaxQualification, TaxRate};
     use crate::series::SeriesKey;
     use std::str::FromStr;
 
@@ -385,8 +410,8 @@ mod tests {
     fn exempt_line(price: &str) -> LineInput {
         LineInput {
             exemption: Some(Exemption {
-                kind: ExemptionKind::Exempt,
-                cause: "Exenta (causa sintética)".into(),
+                qualification: TaxQualification::E1,
+                description: Some("Exenta (causa sintética)".into()),
             }),
             ..line(price, TaxRate::Zero)
         }
@@ -435,6 +460,8 @@ mod tests {
                 rectified_date: Some(date(2026, 10, 1)),
                 kind: Some(kind_r),
                 method: Some(RectificationMethod::Substitution),
+                rectified_base: Some(dec("100.00")),
+                rectified_tax: Some(dec("21.00")),
             }),
             ..full()
         }
@@ -531,20 +558,21 @@ mod tests {
     }
 
     #[test]
-    fn d80_exemption_cause_is_the_mention_for_zero_rate() {
+    fn d80_exemption_qualification_is_the_mention_for_zero_rate() {
         let mut c = full();
         c.lines = vec![LineInput {
             exemption: Some(Exemption {
-                kind: ExemptionKind::ReverseCharge,
-                cause: "Inversión del sujeto pasivo (sintética)".into(),
+                qualification: TaxQualification::S2,
+                description: Some("Inversión del sujeto pasivo (sintética)".into()),
             }),
             ..line("50", TaxRate::Zero)
         }];
         let t = prepare_issue(&c).unwrap();
         assert_eq!(t.total.to_string(), "50.00");
+        assert_eq!(t.breakdown[0].qualification, Some(TaxQualification::S2));
         assert_eq!(
-            t.breakdown[0].exemption.as_ref().unwrap().kind,
-            ExemptionKind::ReverseCharge
+            t.breakdown[0].descriptions,
+            vec!["Inversión del sujeto pasivo (sintética)"]
         );
     }
 
@@ -615,10 +643,28 @@ mod tests {
         let mut c = simplified("0");
         c.lines = vec![line("10", TaxRate::Ten)];
         c.recipient_requested_tax_id = true;
-        assert_eq!(fields(&validate_for_issue(&c)), vec!["recipient.tax_id"]);
+        assert_eq!(
+            fields(&validate_for_issue(&c)),
+            vec!["recipient.tax_id", "recipient.address"]
+        );
         c.recipient = Some(party("Cliente Inventado", "12345678A"));
         assert_eq!(fields(&validate_for_issue(&c)), vec!["recipient.tax_id"]);
         c.recipient = Some(party("Cliente Inventado", "12345678Z"));
+        assert!(prepare_issue(&c).is_ok());
+        // Art. 7.2: si pide su NIF, también consta su domicilio.
+        c.recipient.as_mut().unwrap().address = None;
+        assert_eq!(fields(&validate_for_issue(&c)), vec!["recipient.address"]);
+        c.recipient.as_mut().unwrap().address = Some("  ".into());
+        assert_eq!(fields(&validate_for_issue(&c)), vec!["recipient.address"]);
+        c.recipient = None;
+        assert_eq!(
+            fields(&validate_for_issue(&c)),
+            vec!["recipient.tax_id", "recipient.address"]
+        );
+        c.recipient = Some(party("Cliente Inventado", "12345678Z"));
+        // Sin pedir el NIF no se exige el domicilio.
+        c.recipient_requested_tax_id = false;
+        c.recipient.as_mut().unwrap().address = None;
         assert!(prepare_issue(&c).is_ok());
         // Un NIF aportado sin pedirlo también se valida.
         c.recipient_requested_tax_id = false;
@@ -659,6 +705,25 @@ mod tests {
                 "rectification.kind",
                 "rectification.method"
             ]
+        );
+    }
+
+    #[test]
+    fn d99_substitution_requires_rectified_base_and_tax() {
+        let mut c = corrective(RectificationKind::R1, DocumentKind::Invoice);
+        let r = c.rectification.as_mut().unwrap();
+        r.rectified_base = None;
+        r.rectified_tax = None;
+        assert_eq!(
+            fields(&validate_for_issue(&c)),
+            vec![
+                "rectification.rectified_base",
+                "rectification.rectified_tax"
+            ]
+        );
+        assert!(
+            validate_for_issue(&corrective(RectificationKind::R1, DocumentKind::Invoice))
+                .is_empty()
         );
     }
 
@@ -713,6 +778,14 @@ mod tests {
         c.lines = negative.clone();
         assert_eq!(fields(&validate_for_issue(&c)), vec!["lines[1].quantity"]);
         c.rectification.as_mut().unwrap().method = Some(RectificationMethod::Differences);
+        // Por diferencias no constan la base ni la cuota rectificadas.
+        assert_eq!(
+            fields(&validate_for_issue(&c)),
+            vec!["rectification.rectified_base"]
+        );
+        let r = c.rectification.as_mut().unwrap();
+        r.rectified_base = None;
+        r.rectified_tax = None;
         assert_eq!(prepare_issue(&c).unwrap().total.to_string(), "-121.00");
         // Una factura normal con líneas negativas sigue rechazada.
         let mut f = full();
@@ -731,7 +804,10 @@ mod tests {
     fn d81_r5_simplified_limit_applies_to_absolute_total() {
         let mut c = corrective(RectificationKind::R5, DocumentKind::SimplifiedInvoice);
         c.recipient = None;
-        c.rectification.as_mut().unwrap().method = Some(RectificationMethod::Differences);
+        let r = c.rectification.as_mut().unwrap();
+        r.method = Some(RectificationMethod::Differences);
+        r.rectified_base = None;
+        r.rectified_tax = None;
         c.lines = vec![LineInput {
             quantity: dec("-1"),
             ..line("500", TaxRate::TwentyOne)

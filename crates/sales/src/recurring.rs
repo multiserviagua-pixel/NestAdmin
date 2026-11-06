@@ -17,8 +17,13 @@
 //!   desplaza los índices; la persistencia debe crear una plantilla nueva en ese caso.
 //! * `fin` es inclusivo: no se genera un periodo cuyo inicio sea posterior al fin.
 //! * Tras un corte largo se generan **todos** los periodos vencidos que falten, uno por
-//!   periodo (el borrador lleva la fecha de su periodo). Un tope de [`MAX_PERIODS`] evita
-//!   bucles sobre plantillas con fechas absurdas.
+//!   periodo. El inicio del periodo es la **fecha de operación** (`period_start`); la **fecha
+//!   de expedición** del borrador es la fecha real de la generación (`hoy`), nunca una fecha
+//!   pasada. Un tope de [`MAX_PERIODS`] evita bucles sobre plantillas con fechas absurdas.
+//! * Con la regla expresa activa solo se puede emitir automáticamente el **periodo actual**
+//!   (el que contiene a hoy). Los periodos atrasados se generan siempre como borradores que
+//!   requieren revisión ([`IssueMode::RequiresReview`]), porque emitirlos sin ver sería
+//!   expedir facturas de fechas pasadas.
 //! * Las líneas de la plantilla se validan con `calc` (D75) al crearla, y cada borrador lleva
 //!   una copia de ellas.
 //! * Los borradores no llevan número (D73); su emisión es otra operación y exige revisión salvo
@@ -95,8 +100,12 @@ impl fmt::Display for PeriodKey {
 pub struct DraftPlan {
     pub key: PeriodKey,
     pub customer_id: u64,
-    /// Fecha del borrador = inicio del periodo.
-    pub date: IsoDate,
+    /// Fecha de operación: inicio del periodo.
+    pub period_start: IsoDate,
+    /// Fecha de expedición del borrador: la fecha real de generación (`hoy`).
+    pub issue_date: IsoDate,
+    /// Cómo se puede emitir este borrador concreto (D87).
+    pub mode: IssueMode,
     pub lines: Vec<LineInput>,
 }
 
@@ -145,6 +154,17 @@ impl RecurringTemplate {
         Ok(())
     }
 
+    /// `true` si `period` es el periodo actual: empieza hoy o antes y el siguiente empieza
+    /// después de hoy (o se sale del calendario). No depende de `end`.
+    pub fn is_current(&self, period: u32, today: IsoDate) -> bool {
+        let started = self.period_start(period).is_some_and(|s| s <= today);
+        let next_later = period
+            .checked_add(1)
+            .and_then(|n| self.period_start(n))
+            .is_none_or(|s| s > today);
+        started && next_later
+    }
+
     /// Inicio del periodo `period`; `None` si se sale del calendario soportado.
     pub fn period_start(&self, period: u32) -> Option<IsoDate> {
         let months = period.checked_mul(self.frequency.months())?;
@@ -154,11 +174,13 @@ impl RecurringTemplate {
 
 /// Borradores que faltan en la fecha `today`: cada periodo vencido (inicio ≤ hoy y ≤ fin) cuyo
 /// índice no esté en `existing` (D87). Orden cronológico. Llamarla dos veces con los mismos
-/// `existing` actualizados no produce duplicados.
+/// `existing` actualizados no produce duplicados. `express_rule_active` indica la regla expresa
+/// «emitir recurrente» de la plantilla: solo el periodo actual sale como `AutoIssueByRule`.
 pub fn due_drafts(
     template: &RecurringTemplate,
     today: IsoDate,
     existing: &BTreeSet<u32>,
+    express_rule_active: bool,
 ) -> Result<Vec<DraftPlan>, RecurringError> {
     template.validate()?;
     if !dates::is_valid(today) {
@@ -181,7 +203,13 @@ pub fn due_drafts(
                 period,
             },
             customer_id: template.customer_id,
-            date: start,
+            period_start: start,
+            issue_date: today,
+            mode: if template.is_current(period, today) {
+                issue_mode(express_rule_active)
+            } else {
+                IssueMode::RequiresReview
+            },
             lines: template.lines.clone(),
         });
     }
@@ -228,13 +256,13 @@ mod tests {
     }
 
     fn dates_of(plans: &[DraftPlan]) -> Vec<IsoDate> {
-        plans.iter().map(|p| p.date).collect()
+        plans.iter().map(|p| p.period_start).collect()
     }
 
     #[test]
     fn d87_monthly_generates_one_draft_per_due_period() {
         let t = template(Frequency::Monthly, date(2026, 1, 15), None);
-        let plans = due_drafts(&t, date(2026, 3, 20), &BTreeSet::new()).unwrap();
+        let plans = due_drafts(&t, date(2026, 3, 20), &BTreeSet::new(), false).unwrap();
         assert_eq!(
             dates_of(&plans),
             vec![date(2026, 1, 15), date(2026, 2, 15), date(2026, 3, 15)]
@@ -248,11 +276,11 @@ mod tests {
     #[test]
     fn d87_period_starting_today_is_due_and_future_is_not() {
         let t = template(Frequency::Monthly, date(2026, 1, 15), None);
-        let plans = due_drafts(&t, date(2026, 2, 15), &BTreeSet::new()).unwrap();
+        let plans = due_drafts(&t, date(2026, 2, 15), &BTreeSet::new(), false).unwrap();
         assert_eq!(plans.len(), 2);
-        let plans = due_drafts(&t, date(2026, 2, 14), &BTreeSet::new()).unwrap();
+        let plans = due_drafts(&t, date(2026, 2, 14), &BTreeSet::new(), false).unwrap();
         assert_eq!(plans.len(), 1);
-        let plans = due_drafts(&t, date(2025, 12, 31), &BTreeSet::new()).unwrap();
+        let plans = due_drafts(&t, date(2025, 12, 31), &BTreeSet::new(), false).unwrap();
         assert!(plans.is_empty());
     }
 
@@ -260,25 +288,25 @@ mod tests {
     fn d87_no_duplicates_after_a_cut() {
         let t = template(Frequency::Monthly, date(2026, 1, 1), None);
         let today = date(2026, 4, 10);
-        let first = due_drafts(&t, today, &BTreeSet::new()).unwrap();
+        let first = due_drafts(&t, today, &BTreeSet::new(), false).unwrap();
         assert_eq!(first.len(), 4);
         // Corte tras guardar solo los dos primeros: se generan los dos que faltan.
         let existing: BTreeSet<u32> = first.iter().take(2).map(|p| p.key.period).collect();
-        let rest = due_drafts(&t, today, &existing).unwrap();
+        let rest = due_drafts(&t, today, &existing, false).unwrap();
         assert_eq!(
             rest.iter().map(|p| p.key.period).collect::<Vec<_>>(),
             [2, 3]
         );
         // Con todos guardados no hay nada que crear.
         let all: BTreeSet<u32> = first.iter().map(|p| p.key.period).collect();
-        assert!(due_drafts(&t, today, &all).unwrap().is_empty());
+        assert!(due_drafts(&t, today, &all, false).unwrap().is_empty());
     }
 
     #[test]
     fn d87_existing_gap_in_the_middle_is_filled_only_for_missing() {
         let t = template(Frequency::Monthly, date(2026, 1, 1), None);
         let existing: BTreeSet<u32> = [0, 2].into_iter().collect();
-        let plans = due_drafts(&t, date(2026, 4, 1), &existing).unwrap();
+        let plans = due_drafts(&t, date(2026, 4, 1), &existing, false).unwrap();
         assert_eq!(
             plans.iter().map(|p| p.key.period).collect::<Vec<_>>(),
             [1, 3]
@@ -288,7 +316,7 @@ mod tests {
     #[test]
     fn d87_quarterly_and_annual_steps() {
         let q = template(Frequency::Quarterly, date(2026, 1, 31), None);
-        let plans = due_drafts(&q, date(2026, 12, 31), &BTreeSet::new()).unwrap();
+        let plans = due_drafts(&q, date(2026, 12, 31), &BTreeSet::new(), false).unwrap();
         assert_eq!(
             dates_of(&plans),
             vec![
@@ -299,7 +327,7 @@ mod tests {
             ]
         );
         let a = template(Frequency::Annual, date(2024, 2, 29), None);
-        let plans = due_drafts(&a, date(2028, 3, 1), &BTreeSet::new()).unwrap();
+        let plans = due_drafts(&a, date(2028, 3, 1), &BTreeSet::new(), false).unwrap();
         assert_eq!(
             dates_of(&plans),
             vec![
@@ -315,7 +343,7 @@ mod tests {
     #[test]
     fn d87_monthly_end_of_month_has_no_drift() {
         let t = template(Frequency::Monthly, date(2026, 1, 31), None);
-        let plans = due_drafts(&t, date(2026, 4, 30), &BTreeSet::new()).unwrap();
+        let plans = due_drafts(&t, date(2026, 4, 30), &BTreeSet::new(), false).unwrap();
         assert_eq!(
             dates_of(&plans),
             vec![
@@ -330,14 +358,14 @@ mod tests {
     #[test]
     fn d87_end_date_is_inclusive_and_stops_generation() {
         let t = template(Frequency::Monthly, date(2026, 1, 1), Some(date(2026, 3, 1)));
-        let plans = due_drafts(&t, date(2027, 1, 1), &BTreeSet::new()).unwrap();
+        let plans = due_drafts(&t, date(2027, 1, 1), &BTreeSet::new(), false).unwrap();
         assert_eq!(plans.len(), 3);
         let t = template(
             Frequency::Monthly,
             date(2026, 1, 1),
             Some(date(2026, 2, 28)),
         );
-        let plans = due_drafts(&t, date(2027, 1, 1), &BTreeSet::new()).unwrap();
+        let plans = due_drafts(&t, date(2027, 1, 1), &BTreeSet::new(), false).unwrap();
         assert_eq!(plans.len(), 2);
     }
 
@@ -356,7 +384,7 @@ mod tests {
         assert_eq!(t.validate(), Err(RecurringError::Lines(CalcError::NoLines)));
         t = template(Frequency::Monthly, date(2026, 5, 1), None);
         assert_eq!(
-            due_drafts(&t, date(2026, 13, 1), &BTreeSet::new()).unwrap_err(),
+            due_drafts(&t, date(2026, 13, 1), &BTreeSet::new(), false).unwrap_err(),
             RecurringError::InvalidToday
         );
     }
@@ -365,9 +393,35 @@ mod tests {
     fn d87_runaway_template_is_capped() {
         let t = template(Frequency::Monthly, date(1900, 1, 1), None);
         assert_eq!(
-            due_drafts(&t, date(2026, 1, 1), &BTreeSet::new()).unwrap_err(),
+            due_drafts(&t, date(2026, 1, 1), &BTreeSet::new(), false).unwrap_err(),
             RecurringError::TooManyPeriods
         );
+    }
+
+    #[test]
+    fn d87_long_cut_with_express_rule_only_current_period_auto_issues() {
+        let t = template(Frequency::Monthly, date(2026, 1, 15), None);
+        let today = date(2026, 5, 20);
+        let plans = due_drafts(&t, today, &BTreeSet::new(), true).unwrap();
+        assert_eq!(plans.len(), 5);
+        for p in &plans[..4] {
+            assert_eq!(p.mode, IssueMode::RequiresReview, "{:?}", p.period_start);
+        }
+        assert_eq!(plans[4].period_start, date(2026, 5, 15));
+        assert_eq!(plans[4].mode, IssueMode::AutoIssueByRule);
+        // La fecha de expedición es la real, no la del periodo.
+        assert!(plans.iter().all(|p| p.issue_date == today));
+        // Sin regla expresa todo requiere revisión.
+        let plans = due_drafts(&t, today, &BTreeSet::new(), false).unwrap();
+        assert!(plans.iter().all(|p| p.mode == IssueMode::RequiresReview));
+    }
+
+    #[test]
+    fn d87_ended_template_has_no_auto_issue_for_stale_periods() {
+        let t = template(Frequency::Monthly, date(2026, 1, 1), Some(date(2026, 3, 1)));
+        let plans = due_drafts(&t, date(2027, 1, 1), &BTreeSet::new(), true).unwrap();
+        assert_eq!(plans.len(), 3);
+        assert!(plans.iter().all(|p| p.mode == IssueMode::RequiresReview));
     }
 
     #[test]
@@ -388,7 +442,7 @@ mod tests {
     #[test]
     fn d87_calendar_end_does_not_error() {
         let t = template(Frequency::Annual, date(9998, 6, 1), None);
-        let plans = due_drafts(&t, date(9999, 12, 31), &BTreeSet::new()).unwrap();
+        let plans = due_drafts(&t, date(9999, 12, 31), &BTreeSet::new(), false).unwrap();
         assert_eq!(plans.len(), 2);
     }
 }

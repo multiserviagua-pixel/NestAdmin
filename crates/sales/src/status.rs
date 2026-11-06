@@ -6,15 +6,17 @@
 //! * Albarán emitido: `draft → issued → sent → delivered`; `issued → delivered`;
 //!   `→ invoiced` al convertirse en factura.
 //! * Factura (completa, simplificada y rectificativa): `draft → issued → sent`; `voided` solo
-//!   por D82. Nunca hay revisiones de una factura (D81).
+//!   por D82 y solo desde `issued`. Nunca hay revisiones de una factura (D81).
 //! * Albarán recibido: `received → reviewed`.
 //!
 //! Interpretaciones conservadoras (la spec no las fija):
 //! * `invoiced` solo se alcanza desde `delivered`, y convertir un albarán exige `delivered`.
 //! * Un presupuesto o albarán solo se revisa en `issued` o `sent`; la revisión `n+1` nace en
 //!   `issued` (contenido fijo, pendiente de nuevo envío) y la anterior queda sustituida.
-//! * Se anula una factura en `issued` o `sent`: D82 cita «emitida por error y no entregada»
-//!   como ejemplo, no como límite. Una anulada es final.
+//! * Solo se anula una factura en `issued` (emitida y **no enviada ni entregada**): es lo que
+//!   D82 describe («emitida por error y no entregada»). Una factura en `sent` ya salió de la
+//!   aplicación: se corrige con una rectificativa (D81), y `void` devuelve un error explícito
+//!   que lo indica. Una anulada es final.
 //! * Solo se rectifica una factura completa o simplificada en `issued` o `sent`, no una
 //!   rectificativa ni una anulada, ni un presupuesto o albarán (`invalid_transition`).
 //! * Un presupuesto se convierte en albarán o factura de uno en uno; varios albaranes del
@@ -113,6 +115,8 @@ pub enum StatusError {
     NotCorrectable { kind: DocumentKind, status: Status },
     #[error("{kind:?} en estado {status:?} no se puede anular")]
     NotVoidable { kind: DocumentKind, status: Status },
+    #[error("una factura enviada no se anula: use una rectificativa (D81)")]
+    SentUseCorrective { kind: DocumentKind },
     #[error("conversión no permitida: {0}")]
     InvalidConversion(&'static str),
 }
@@ -147,7 +151,6 @@ fn allowed(kind: DocumentKind, from: Status) -> &'static [Status] {
         _ => match from {
             Draft => &[Issued],
             Issued => &[Sent, Voided],
-            Sent => &[Voided],
             _ => &[],
         },
     }
@@ -162,6 +165,8 @@ pub fn transition(kind: DocumentKind, from: Status, to: Status) -> Result<(), St
     }
     if allowed(kind, from).contains(&to) {
         Ok(())
+    } else if kind.is_invoice() && (from, to) == (Status::Sent, Status::Voided) {
+        Err(StatusError::SentUseCorrective { kind })
     } else {
         Err(StatusError::InvalidTransition { kind, from, to })
     }
@@ -208,12 +213,12 @@ pub fn can_correct(kind: DocumentKind, status: Status) -> Result<(), StatusError
     }
 }
 
-/// `void` (D82): cualquier factura emitida que no esté ya anulada.
+/// `void` (D82): solo una factura emitida y no enviada. Una enviada se rectifica.
 pub fn can_void(kind: DocumentKind, status: Status) -> Result<(), StatusError> {
-    if kind.is_invoice() && matches!(status, Status::Issued | Status::Sent) {
-        Ok(())
-    } else {
-        Err(StatusError::NotVoidable { kind, status })
+    match (kind.is_invoice(), status) {
+        (true, Status::Issued) => Ok(()),
+        (true, Status::Sent) => Err(StatusError::SentUseCorrective { kind }),
+        _ => Err(StatusError::NotVoidable { kind, status }),
     }
 }
 
@@ -337,12 +342,7 @@ mod tests {
 
     #[test]
     fn d74_invoice_kinds_share_the_same_machine() {
-        let expected = vec![
-            (Draft, Issued),
-            (Issued, Sent),
-            (Issued, Voided),
-            (Sent, Voided),
-        ];
+        let expected = vec![(Draft, Issued), (Issued, Sent), (Issued, Voided)];
         for kind in [Invoice, SimplifiedInvoice, CorrectiveInvoice] {
             assert_eq!(allowed_pairs(kind), expected, "{kind:?}");
         }
@@ -454,12 +454,28 @@ mod tests {
     }
 
     #[test]
-    fn d82_void_only_issued_invoices() {
+    fn d82_void_only_issued_not_sent_invoices() {
         for kind in [Invoice, SimplifiedInvoice, CorrectiveInvoice] {
             assert!(can_void(kind, Issued).is_ok());
-            assert!(can_void(kind, Sent).is_ok());
             assert!(can_void(kind, Draft).is_err());
             assert!(can_void(kind, Voided).is_err());
+            // Enviada: error explícito que remite a la rectificativa, también por transición.
+            assert_eq!(
+                can_void(kind, Sent),
+                Err(StatusError::SentUseCorrective { kind })
+            );
+            assert_eq!(
+                transition(kind, Sent, Voided),
+                Err(StatusError::SentUseCorrective { kind })
+            );
+            assert!(can_void(kind, Sent)
+                .unwrap_err()
+                .to_string()
+                .contains("rectificativa"));
+            assert_eq!(
+                can_void(kind, Sent).unwrap_err().code(),
+                "invalid_transition"
+            );
         }
         assert!(can_void(Quote, Issued).is_err());
         assert!(can_void(DeliveryNote, Issued).is_err());

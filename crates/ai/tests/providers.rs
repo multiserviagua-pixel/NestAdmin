@@ -516,6 +516,32 @@ fn ollama_cloud_contract_errors() {
 }
 
 #[test]
+fn ollama_cloud_rate_limit_is_reported_without_waiting_or_retrying() {
+    // Solo Groq espera y reintenta (D65): Ollama cloud devuelve `rate_limited` a la primera,
+    // aunque `Retry-After` pida poco, y no hace una segunda petición.
+    let limited = rate_limited("0");
+    let (url, seen) = serve(vec![limited, ollama_ok("{}")]);
+    let provider = OllamaCloudProvider::with_endpoint(
+        &url,
+        "m",
+        Secret::new(CLOUD_KEY),
+        Duration::from_secs(5),
+    );
+    let started = std::time::Instant::now();
+    let error = provider.generate(&email_request("E01", "t")).unwrap_err();
+    assert_eq!(error.code(), "rate_limited", "{error}");
+    assert!(started.elapsed() < Duration::from_secs(2));
+    assert_eq!(seen.lock().unwrap().len(), 1, "no hay reintento");
+    for text in [
+        format!("{error}"),
+        format!("{error:?}"),
+        format!("{provider:?}"),
+    ] {
+        assert!(!text.contains(CLOUD_KEY), "la clave aparece en: {text}");
+    }
+}
+
+#[test]
 fn local_failure_never_reaches_ollama_cloud() {
     let (_cloud_url, cloud_seen) = serve(vec![ollama_ok("{}")]);
     let credentials = SpyStore::default();
