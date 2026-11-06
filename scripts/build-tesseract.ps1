@@ -10,7 +10,9 @@
 # vendor/tesseract-min: tesseract.exe y las licencias de cada componente. No toca
 # vendor/tesseract (la build de UB Mannheim) mientras D69 sea una propuesta.
 param(
-    [string]$Salida = (Join-Path (Split-Path -Parent $PSScriptRoot) 'vendor\tesseract-min')
+    [string]$Salida = (Join-Path (Split-Path -Parent $PSScriptRoot) 'vendor\tesseract-min'),
+    # Conserva la carpeta temporal de compilación para diagnosticar un fallo.
+    [switch]$Conservar
 )
 $ErrorActionPreference = 'Stop'
 
@@ -20,6 +22,62 @@ $Sources = [ordered]@{
     libpng    = @{ Repo = 'https://github.com/pnggroup/libpng'; Tag = 'v1.6.44'; Commit = 'f5e92d76973a7a53f517579bc95d61483bf108c0'; License = 'LICENSE' }
     leptonica = @{ Repo = 'https://github.com/DanBloomberg/leptonica'; Tag = '1.85.0'; Commit = '63aef18d98432b8582a1565e241f7bd2ee9cc8d9'; License = 'leptonica-license.txt' }
     tesseract = @{ Repo = 'https://github.com/tesseract-ocr/tesseract'; Tag = '5.5.0'; Commit = '64eab6c457b2337dd690746a5fde5c222b40d5f8'; License = 'LICENSE' }
+}
+
+# Build Tools 2022 trae su propio CMake («Herramientas de CMake de C++»), pero no lo añade al PATH:
+# se usa ese si no hay otro.
+$vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+$vs = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+if (-not (Get-Command cmake -ErrorAction SilentlyContinue)) {
+    $vsCmake = Join-Path $vs 'Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin'
+    if (-not (Test-Path (Join-Path $vsCmake 'cmake.exe'))) {
+        throw 'No se encuentra CMake: instale CMake 3.21+ o el componente «Herramientas de CMake de C++» de Build Tools 2022'
+    }
+    $env:Path = "$vsCmake;$env:Path"
+}
+
+# DLL que importa un ejecutable PE32+ (importaciones normales y diferidas), leídas del propio
+# archivo, como hace `dumpbin /dependents`. No se lanza dumpbin: hay equipos donde Windows deniega
+# crear un proceso cuya línea de órdenes nombra un ejecutable recién compilado y sin firmar.
+function Get-PeDependencies([string]$path) {
+    $b = [IO.File]::ReadAllBytes($path)
+    $u16 = { param($o) [BitConverter]::ToUInt16($b, $o) }
+    $u32 = { param($o) [BitConverter]::ToUInt32($b, $o) }
+    $pe = [int](& $u32 0x3C)
+    if ((& $u32 $pe) -ne 0x4550) { throw "$path no es un ejecutable PE" }
+    $optional = $pe + 24
+    if ((& $u16 $optional) -ne 0x20B) { throw "$path no es PE32+ (x64)" }
+    $sectionCount = & $u16 ($pe + 6)
+    $sections = $optional + (& $u16 ($pe + 20))
+    $directories = $optional + 112
+    $offset = {
+        param($rva)
+        for ($i = 0; $i -lt $sectionCount; $i++) {
+            $h = $sections + 40 * $i
+            $va = & $u32 ($h + 12)
+            $size = [Math]::Max((& $u32 ($h + 8)), (& $u32 ($h + 16)))
+            if ($rva -ge $va -and $rva -lt $va + $size) { return [int]($rva - $va + (& $u32 ($h + 20))) }
+        }
+        throw ("RVA 0x{0:X} fuera de las secciones de {1}" -f $rva, $path)
+    }
+    $result = New-Object System.Collections.Generic.List[string]
+    # Directorio 1: importaciones (descriptores de 20 bytes, nombre en +12).
+    # Directorio 13: importaciones diferidas (descriptores de 32 bytes, nombre en +4).
+    foreach ($table in @(@{ Index = 1; Size = 20; Name = 12 }, @{ Index = 13; Size = 32; Name = 4 })) {
+        $rva = & $u32 ($directories + 8 * $table.Index)
+        if (-not $rva) { continue }
+        $d = & $offset $rva
+        while ($true) {
+            $nameRva = & $u32 ($d + $table.Name)
+            if (-not $nameRva) { break }
+            $start = & $offset $nameRva
+            $end = $start
+            while ($b[$end] -ne 0) { $end++ }
+            $result.Add([Text.Encoding]::ASCII.GetString($b, $start, $end - $start))
+            $d += $table.Size
+        }
+    }
+    $result | Select-Object -Unique
 }
 
 $Work = Join-Path ([IO.Path]::GetTempPath()) "nestadmin-tesseract-$([guid]::NewGuid().ToString('N').Substring(0, 8))"
@@ -75,11 +133,7 @@ try {
     if (-not (Test-Path $exe)) { throw 'No se generó tesseract.exe' }
 
     # Solo DLL del sistema: ninguna de terceros ni del runtime de Visual C++ o de GCC.
-    $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
-    $vs = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
-    $dumpbin = Get-ChildItem (Join-Path $vs 'VC\Tools\MSVC') -Recurse -Filter dumpbin.exe |
-        Where-Object { $_.FullName -like '*Hostx64\x64*' } | Select-Object -First 1
-    $deps = @(& $dumpbin.FullName /dependents $exe | Where-Object { $_ -match '^\s+\S+\.dll\s*$' } | ForEach-Object { $_.Trim() })
+    $deps = @(Get-PeDependencies $exe)
     Write-Host "==> Dependencias: $($deps -join ', ')"
     $system = '^(KERNEL32|ADVAPI32|USER32|GDI32|SHELL32|OLE32|OLEAUT32|WS2_32|SHLWAPI|bcrypt|api-ms-win-.*)\.dll$'
     $foreign = @($deps | Where-Object { $_ -notmatch $system })
@@ -104,5 +158,6 @@ try {
     }
     Write-Host "==> Listo en $Salida. Pruebas: `$env:NESTADMIN_TESSERACT='$out'; cargo test -p nestadmin-extract -- --include-ignored"
 } finally {
-    Remove-Item $Work -Recurse -Force -ErrorAction SilentlyContinue
+    if ($Conservar) { Write-Host "==> Carpeta de compilación conservada en $Work" }
+    else { Remove-Item $Work -Recurse -Force -ErrorAction SilentlyContinue }
 }
