@@ -118,6 +118,10 @@ Numeración desde D50: D48 y D49 son el origen de correos y documentos.
 - **D63 Actualizador de NestAdmin (propuesta).** `tauri-plugin-updater` con versiones completas del instalador firmadas con minisign y publicadas como *releases* de GitHub con `latest.json`; comprobación al abrir, aviso con aceptación o aplazamiento, instalación solo con la cola sin tareas en curso, migración con copia (D61) y vuelta atrás instalando la versión anterior y restaurando la copia. La clave privada la genera y custodia el editor fuera del repositorio; en el repositorio solo irá la pública. No se implementa hasta tener esa clave y un origen de *releases* accesible sin credenciales (el repositorio es privado). Pasos en [actualizaciones.md](actualizaciones.md).
 - **D64 Componentes externos.** Ollama no se actualiza desde NestAdmin; la versión mínima se comprueba al abrir (ya en D39) y por debajo de ella el usuario decide en el asistente. WebView2 lo actualiza Windows. PDFium, Tesseract y los datos de idioma solo cambian con una versión nueva de NestAdmin.
 
+## 2026-11-06 — Límite de peticiones del proveedor externo (amplía D07)
+
+- **D65 `rate_limited`.** Un HTTP 429 de Groq es el error `rate_limited` del contrato de IA, distinto de `unavailable`. El adaptador espera lo que indica `Retry-After` (2 s si no lo da, 30 s como máximo) y reintenta con el mismo proveedor, hasta 10 veces y solo si la espera cabe en el plazo de la petición; si no, devuelve el error sin esperar y la tarea queda fallida y recuperable. Nunca se cambia de proveedor. *Motivo:* con el plan gratuito (1000 tokens de salida por minuto) el corpus sintético daba 16 fallos de 30 que se presentaban como proveedor caído ([evidencia](../../evidence/t10-groq.md)).
+
 ## Versiones de desarrollo fijadas
 
 | Componente | Versión | Licencia | Dónde se fija |

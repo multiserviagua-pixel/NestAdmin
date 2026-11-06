@@ -39,9 +39,23 @@ pub(crate) fn post_json(
             .read_json::<Value>()
             .map_err(|_| AiError::InvalidResponse("cuerpo de respuesta no es JSON".into())),
         401 | 403 => Err(AiError::Unauthorized),
+        429 => Err(AiError::RateLimited {
+            retry_after_ms: response
+                .headers()
+                .get("retry-after")
+                .and_then(|v| v.to_str().ok())
+                .and_then(retry_after_ms),
+        }),
         408 | 504 => Err(AiError::Timeout),
         _ => Err(AiError::Unavailable(format!("estado HTTP {status}"))),
     }
+}
+
+/// `Retry-After` en segundos (entero o decimal). La forma de fecha HTTP no se interpreta:
+/// sin espera conocida, quien reintenta usa la suya.
+pub(crate) fn retry_after_ms(value: &str) -> Option<u64> {
+    let seconds: f64 = value.trim().parse().ok()?;
+    (seconds.is_finite() && seconds >= 0.0).then(|| (seconds * 1000.0).ceil() as u64)
 }
 
 fn map_error(error: ureq::Error) -> AiError {

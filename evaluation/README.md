@@ -32,7 +32,9 @@ Los tiempos y memorias son valores comunicados por el proceso que obtiene las pr
 cargo run --release -p nestadmin-ai --bin nestadmin-predict -- --provider ollama --out evaluation/predictions/ollama.jsonl
 ```
 
-Groq solo se usa con `--provider groq --model <id>` y una clave guardada en el administrador de credenciales de Windows (servicio `NestAdmin`, nombre `groq_api_key`). Un fallo de un proveedor nunca se reintenta con el otro.
+Groq solo se usa con `--provider groq --model <id>` y una clave guardada en el administrador de credenciales de Windows (servicio `NestAdmin`, nombre `groq_api_key`). Un fallo de un proveedor nunca se reintenta con el otro. Un límite de peticiones (HTTP 429) se reintenta con el mismo proveedor y, si no cabe en el plazo, queda como `rate_limited`.
+
+Fuera de Windows no hay Administrador de credenciales: la herramienta acepta entonces `NESTADMIN_GROQ_API_KEY`. En un entorno con proxy obligatorio (el adaptador no usa proxy, D12) se puede pasar `--groq-endpoint http://127.0.0.1:PUERTO`, un reenvío local hacia la API. Solo se admiten destinos de bucle local y la aplicación no tiene esta opción. Las latencias medidas así no son comparables con las del equipo objetivo.
 
 ## Ejecución
 

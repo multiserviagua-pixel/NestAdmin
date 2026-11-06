@@ -24,6 +24,7 @@ struct Reply {
     status: u16,
     body: String,
     delay: Duration,
+    headers: String,
 }
 
 fn reply(status: u16, body: Value) -> Reply {
@@ -31,6 +32,7 @@ fn reply(status: u16, body: Value) -> Reply {
         status,
         body: body.to_string(),
         delay: Duration::ZERO,
+        headers: String::new(),
     }
 }
 
@@ -66,8 +68,9 @@ fn serve(replies: Vec<Reply>) -> (String, Arc<Mutex<Vec<String>>>) {
             thread::sleep(reply.delay);
             let _ = write!(
                 stream,
-                "HTTP/1.1 {} X\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                "HTTP/1.1 {} X\r\nContent-Type: application/json\r\n{}Content-Length: {}\r\nConnection: close\r\n\r\n{}",
                 reply.status,
+                reply.headers,
                 reply.body.len(),
                 reply.body
             );
@@ -181,6 +184,7 @@ fn contract_errors_from_the_local_provider() {
             status: 200,
             body: "{}".into(),
             delay: Duration::from_millis(1500),
+            headers: String::new(),
         },
     ]);
     let provider = OllamaProvider::new(&url, "m", timeout).unwrap();
@@ -330,4 +334,58 @@ fn model_output_outside_the_contract_is_invalid() {
         parse_email(&json!({ "category": "otros" })),
         Err(AiError::InvalidResponse(_))
     ));
+}
+
+fn groq_ok(content: Value) -> Reply {
+    reply(
+        200,
+        json!({
+            "model": "m",
+            "choices": [{ "message": { "content": content.to_string() } }],
+        }),
+    )
+}
+
+fn rate_limited(retry_after: &str) -> Reply {
+    let mut r = reply(429, json!({ "error": { "message": "rate limit" } }));
+    if !retry_after.is_empty() {
+        r.headers = format!("Retry-After: {retry_after}\r\n");
+    }
+    r
+}
+
+#[test]
+fn rate_limit_waits_what_the_provider_asks_and_retries_the_same_provider() {
+    let content = json!({ "category": "otros", "draft": "Gracias por su mensaje." });
+    let (url, seen) = serve(vec![
+        rate_limited("0.2"),
+        rate_limited("0"),
+        groq_ok(content),
+    ]);
+    let provider =
+        GroqProvider::with_endpoint(&url, "m", Secret::new(FAKE_KEY), Duration::from_secs(5));
+    let started = std::time::Instant::now();
+    let result = provider.generate(&email_request("E01", "t")).unwrap();
+    assert_eq!(result.provider, ProviderKind::Groq);
+    assert!(started.elapsed() >= Duration::from_millis(200));
+    assert_eq!(seen.lock().unwrap().len(), 3);
+}
+
+#[test]
+fn rate_limit_beyond_the_deadline_is_reported_without_waiting() {
+    let (url, seen) = serve(vec![rate_limited("60")]);
+    let provider =
+        GroqProvider::with_endpoint(&url, "m", Secret::new(FAKE_KEY), Duration::from_secs(5));
+    let started = std::time::Instant::now();
+    let error = provider.generate(&email_request("E01", "t")).unwrap_err();
+    assert_eq!(
+        error,
+        AiError::RateLimited {
+            retry_after_ms: Some(60_000)
+        }
+    );
+    assert_eq!(error.code(), "rate_limited");
+    assert!(started.elapsed() < Duration::from_secs(2));
+    assert_eq!(seen.lock().unwrap().len(), 1);
+    assert!(!format!("{error}").contains(FAKE_KEY));
 }
