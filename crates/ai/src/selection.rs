@@ -56,7 +56,7 @@ impl Default for ProviderChoice {
 
 /// Construye únicamente el proveedor elegido. Sin credencial, los externos fallan con
 /// `unauthorized` y no se crea ningún cliente. La clave del proveedor compatible con OpenAI
-/// es la del host de su URL (D94): la de otro host no se pide ni se envía.
+/// es la del host de su URL (D95): la de otro host no se pide ni se envía.
 pub fn build_provider(
     choice: &ProviderChoice,
     credentials: &dyn CredentialStore,

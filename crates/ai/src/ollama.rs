@@ -12,7 +12,7 @@ use crate::provider::{
 pub const DEFAULT_URL: &str = "http://127.0.0.1:11434";
 pub const DEFAULT_MODEL: &str = "qwen3:8b";
 /// Modelo prefijado en la interfaz para Ollama cloud: elección del usuario (2026-11-06,
-/// D93), pendiente de medir en T12. Es el nombre para la API directa de ollama.com
+/// D94), pendiente de medir en T12. Es el nombre para la API directa de ollama.com
 /// (`https://ollama.com/api/tags`).
 pub const DEFAULT_CLOUD_MODEL: &str = "gemma4:31b";
 /// Digest del manifiesto de `qwen3:8b` evaluado (T10, D62): el SHA-256 que Ollama muestra en
@@ -27,7 +27,7 @@ pub struct OllamaProvider {
     base_url: String,
     model: String,
     agent: Agent,
-    /// El modelo ya se comprobó como local con `/api/show` (D92); se cachea por proveedor.
+    /// El modelo ya se comprobó como local con `/api/show` (D93); se cachea por proveedor.
     verified_local: AtomicBool,
 }
 
@@ -38,7 +38,7 @@ impl OllamaProvider {
                 "Ollama solo se admite en una dirección de bucle local".into(),
             ));
         }
-        // D92: el daemon local reenviaría a la nube los modelos `-cloud` / `:cloud`.
+        // D93: el daemon local reenviaría a la nube los modelos `-cloud` / `:cloud`.
         if is_cloud_model(model) {
             return Err(AiError::Unavailable(
                 "el modelo es de la nube de Ollama y el proveedor local lo reenviaría fuera del \
@@ -54,7 +54,7 @@ impl OllamaProvider {
         })
     }
 
-    /// D92, segunda guarda: un alias local (`ollama cp x-cloud alias`, `FROM x-cloud`) no
+    /// D93, segunda guarda: un alias local (`ollama cp x-cloud alias`, `FROM x-cloud`) no
     /// delata su destino por el nombre; el daemon lo declara en `/api/show` con
     /// `remote_host` / `remote_model`. Falla cerrado: sin respuesta válida no se genera.
     fn ensure_local_model(&self) -> Result<(), AiError> {

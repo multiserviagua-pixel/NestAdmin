@@ -105,7 +105,7 @@ export const api = {
   deleteOllamaCloudKey: () => invoke<void>("delete_ollama_cloud_key"),
   saveAnthropicKey: (key: string) => invoke<void>("save_anthropic_key", { key }),
   deleteAnthropicKey: () => invoke<void>("delete_anthropic_key"),
-  // La clave del proveedor compatible con OpenAI queda ligada al host de la URL base (D94).
+  // La clave del proveedor compatible con OpenAI queda ligada al host de la URL base (D95).
   saveOpenAiCompatibleKey: (baseUrl: string, key: string) => invoke<void>("save_openai_compatible_key", { baseUrl, key }),
   deleteOpenAiCompatibleKey: (baseUrl: string) => invoke<void>("delete_openai_compatible_key", { baseUrl }),
   openAiCompatibleKeySaved: (baseUrl: string) => invoke<boolean>("openai_compatible_key_saved", { baseUrl }),

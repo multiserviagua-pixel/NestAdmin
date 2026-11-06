@@ -421,11 +421,11 @@ function reviewView() {
   );
 }
 
-// Modelos para Ollama cloud (D93). El prefijado viene del backend (`default_cloud_model`,
+// Modelos para Ollama cloud (D94). El prefijado viene del backend (`default_cloud_model`,
 // `DEFAULT_CLOUD_MODEL`); aquí solo van las sugerencias adicionales. Nombres de la API directa
 // de ollama.com.
 const CLOUD_MODEL_EXTRA_SUGGESTIONS = ["gpt-oss:120b", "mistral-large-4", "deepseek-v4.1-flash"];
-// Modelos de Claude (D95): ids sin sufijo de fecha; el modelo es configurable.
+// Modelos de Claude (D96): ids sin sufijo de fecha; el modelo es configurable.
 const CLAUDE_MODEL_SUGGESTIONS = ["claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5"];
 const CLAUDE_MODEL_DEFAULT = CLAUDE_MODEL_SUGGESTIONS[0];
 

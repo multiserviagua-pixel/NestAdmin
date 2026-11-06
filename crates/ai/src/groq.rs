@@ -8,7 +8,7 @@ pub const ENDPOINT: &str = "https://api.groq.com/openai/v1";
 
 /// Adaptador externo (D07). Solo se construye tras la selección explícita del usuario y
 /// con una credencial presente; nunca se usa como respaldo del proveedor local. Es un caso
-/// de la API compatible con OpenAI con endpoint fijo (D94).
+/// de la API compatible con OpenAI con endpoint fijo (D95).
 pub struct GroqProvider {
     client: ChatClient,
 }

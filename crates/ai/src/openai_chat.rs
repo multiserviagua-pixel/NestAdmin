@@ -1,5 +1,5 @@
 //! Cliente común de la API de chat compatible con OpenAI (`POST {base}/chat/completions`).
-//! Lo usan Groq (endpoint fijo) y el adaptador genérico (D94, URL validada).
+//! Lo usan Groq (endpoint fijo) y el adaptador genérico (D95, URL validada).
 
 use std::time::{Duration, Instant};
 

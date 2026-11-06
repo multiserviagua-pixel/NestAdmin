@@ -1,4 +1,4 @@
-//! Adaptador genérico de la API de chat compatible con OpenAI (D94): OpenRouter, Mistral,
+//! Adaptador genérico de la API de chat compatible con OpenAI (D95): OpenRouter, Mistral,
 //! DeepSeek, OpenAI, Together, etc. Es un proveedor externo con el mismo estatus que Groq:
 //! solo por selección explícita y con una credencial ligada al host de la URL base.
 //!
@@ -45,7 +45,7 @@ fn reject(reason: &str) -> AiError {
     AiError::Unavailable(format!("URL base no admitida: {reason}"))
 }
 
-/// Valida la URL base de un proveedor compatible con OpenAI (D94). Exige `https://`, rechaza
+/// Valida la URL base de un proveedor compatible con OpenAI (D95). Exige `https://`, rechaza
 /// credenciales, query, fragmento y cualquier host local o privado.
 pub fn parse_base_url(raw: &str) -> Result<BaseUrl, AiError> {
     let raw = raw.trim();
@@ -197,7 +197,7 @@ fn local_only() -> AiError {
     )
 }
 
-/// Clasificación única de direcciones no públicas (D94): la usan la validación sintáctica de
+/// Clasificación única de direcciones no públicas (D95): la usan la validación sintáctica de
 /// la URL y el resolvedor que filtra el DNS al conectar.
 pub(crate) fn is_blocked_ip(ip: &IpAddr) -> bool {
     match ip {
@@ -247,14 +247,14 @@ fn blocked_v6(ip: &Ipv6Addr) -> bool {
         || (s[0] == 0x2001 && s[1] == 0x0db8) // 2001:db8::/32 (documentación)
 }
 
-/// Adaptador externo (D94). Solo se construye tras la selección explícita del usuario y con
+/// Adaptador externo (D95). Solo se construye tras la selección explícita del usuario y con
 /// la credencial de ese host; nunca se usa como respaldo de otro proveedor.
 pub struct OpenAiCompatibleProvider {
     client: ChatClient,
 }
 
 impl OpenAiCompatibleProvider {
-    /// Valida la URL base (D94). Sin redirecciones: la clave solo viaja al host validado.
+    /// Valida la URL base (D95). Sin redirecciones: la clave solo viaja al host validado.
     pub fn new(
         base_url: &str,
         model: &str,

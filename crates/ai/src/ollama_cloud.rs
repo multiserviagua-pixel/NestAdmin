@@ -9,7 +9,7 @@ use crate::provider::{AiError, GenerateRequest, GenerateResult, Provider, Provid
 
 pub const ENDPOINT: &str = "https://ollama.com/api";
 
-/// Adaptador externo (D91). Llama directamente a la API de Ollama en la nube, sin pasar por
+/// Adaptador externo (D92). Llama directamente a la API de Ollama en la nube, sin pasar por
 /// el daemon local. Solo se construye tras la selección explícita del usuario y con una
 /// credencial presente; nunca se usa como respaldo de otro proveedor.
 pub struct OllamaCloudProvider {

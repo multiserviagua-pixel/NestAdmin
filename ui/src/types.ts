@@ -53,9 +53,9 @@ export interface SettingsView {
   groq_key_saved: boolean;
   ollama_cloud_key_saved: boolean;
   anthropic_key_saved: boolean;
-  /** Clave guardada para el host de la URL compatible con OpenAI configurada (D94). */
+  /** Clave guardada para el host de la URL compatible con OpenAI configurada (D95). */
   openai_compatible_key_saved: boolean;
-  /** Modelo prefijado de Ollama cloud: `DEFAULT_CLOUD_MODEL` del backend (D93). */
+  /** Modelo prefijado de Ollama cloud: `DEFAULT_CLOUD_MODEL` del backend (D94). */
   default_cloud_model: string;
   data_dir: string;
 }
