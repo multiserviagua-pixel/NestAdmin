@@ -1060,7 +1060,7 @@ Déjelo vacío para volver al predeterminado.`,
       h(
         "p",
         { class: "intro" },
-        "Se abrirá el navegador para que inicie sesión y conceda permiso de lectura, borradores y envío. NestAdmin espera la respuesta en este equipo (127.0.0.1) durante 5 minutos.",
+        "Se abrirá el navegador para que inicie sesión y conceda permiso de lectura, borradores y envío. NestAdmin espera la respuesta en este equipo (dirección de bucle local: localhost o 127.0.0.1) durante 5 minutos.",
       ),
       h("div", { class: "row" }, h("label", {}, "Nombre de la cuenta (opcional)", label)),
       h(

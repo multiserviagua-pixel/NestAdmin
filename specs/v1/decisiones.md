@@ -135,6 +135,10 @@ Numeración desde D50: D48 y D49 son el origen de correos y documentos.
 
 - **D69 Tesseract mínimo (propuesta en curso).** Como Tesseract solo recibe PNG generados por NestAdmin (D67), se compila desde fuentes fijadas por commit (Tesseract 5.5.0, Leptonica 1.85.0, libpng 1.6.44 y zlib 1.3.1), sin libtiff, JBIG-KIT, libjpeg, libwebp, giflib, OpenJPEG, libarchive, libiconv, curl ni OpenMP, y en estático con el runtime de MSVC: un solo `tesseract.exe` con licencias Apache-2.0, BSD-2-Clause, libpng-2.0 y Zlib, sin ninguna DLL GPL o LGPL. `scripts/build-tesseract.ps1` lo genera en `vendor/tesseract-min` y falla si el ejecutable depende de alguna DLL que no sea del sistema. Validado en Linux: misma configuración, 4 de 4 pruebas de imágenes y texto idéntico al de Tesseract completo. Falta compilarlo y compararlo en Windows antes de sustituir la compilación de UB Mannheim en el paquete. Plan, pasos y alternativa en [redistribucion-tesseract.md](redistribucion-tesseract.md).
 
+## 2026-11-06 — Redirección de Microsoft a `localhost` (revisa D31)
+
+- **D70 `http://localhost` para Microsoft.** La documentación de Microsoft Entra solo garantiza que se ignora el puerto con `http://localhost`, y el portal no permite registrar `http://127.0.0.1` sin editar el manifiesto. Con la redirección anterior (`http://127.0.0.1:<puerto>/`), el inicio de sesión con cuentas reales de Microsoft 365 corría el riesgo de fallar con AADSTS50011. Para Microsoft, la redirección es ahora `http://localhost:<puerto>/` y se registra como `http://localhost` en la plataforma «Aplicaciones móviles y de escritorio». NestAdmin escucha en `127.0.0.1` y, si el equipo lo permite, también en `[::1]` en el mismo puerto, porque el navegador puede resolver `localhost` a cualquiera de los dos. Google conserva `127.0.0.1`, probado con una cuenta real (T13). Pasos de registro en la [guía de Microsoft 365](../../docs/guia-microsoft-365.pdf).
+
 ## Versiones de desarrollo fijadas
 
 | Componente | Versión | Licencia | Dónde se fija |

@@ -139,3 +139,7 @@ Contenedor Linux, Rust 1.99.1, `cargo test --workspace`: 180 pruebas superadas y
 
 Pendiente: adjuntos reales de Microsoft 365 y Gmail, y el recorrido desde la aplicación instalada.
 
+## 2026-11-06 — Redirección de Microsoft (D70)
+
+La documentación de Entra solo garantiza que se ignora el puerto con `http://localhost`, y el portal no deja registrar `http://127.0.0.1` sin editar el manifiesto. Microsoft usa ahora `http://localhost:<puerto>/`. Pruebas `gmail::localhost_redirect_is_accepted_over_ipv4_and_ipv6` (en este contenedor solo hay IPv4 de bucle local; el caso IPv6 se omite y lo dice) y `gmail::microsoft_uses_localhost_and_google_the_ip_literal`. Google sigue con `127.0.0.1`. Guía para el registro y el recorrido real: [docs/guia-microsoft-365.pdf](../docs/guia-microsoft-365.pdf), que se genera con `python docs/guia-microsoft-365.py`. Pendiente: el inicio de sesión real con Microsoft 365.
+

@@ -593,3 +593,49 @@ fn named_parts_are_attachments_except_embedded_images_and_download_decodes_them(
         "not_found"
     );
 }
+
+/// Microsoft (D70): `http://localhost:<puerto>/`, con el navegador llegando por IPv4 o por IPv6.
+#[test]
+fn localhost_redirect_is_accepted_over_ipv4_and_ipv6() {
+    let (base, _) = serve(handler);
+    let config = common::oauth_localhost(&base);
+    let ipv6 = std::net::TcpListener::bind("[::1]:0").is_ok();
+    for host in ["127.0.0.1", "[::1]"] {
+        if host == "[::1]" && !ipv6 {
+            eprintln!("sin IPv6 de bucle local: se omite ese caso");
+            continue;
+        }
+        let pending = PendingAuthorization::begin(&config).unwrap();
+        let url = pending.url().to_owned();
+        let redirect = pending.redirect_uri().to_owned();
+        assert!(redirect.starts_with("http://localhost:") && redirect.ends_with('/'));
+        assert_eq!(param(&url, "redirect_uri"), redirect);
+        let port = Url::parse(&redirect).unwrap().port().unwrap();
+        let state = param(&url, "state");
+        let target = format!("http://{host}:{port}/");
+        let browser = thread::spawn(move || {
+            browser_redirect(&target, &format!("code=codigo-sintetico&state={state}"))
+        });
+        let tokens = pending.finish(&config, Duration::from_secs(10)).unwrap();
+        assert!(
+            browser
+                .join()
+                .unwrap()
+                .contains("Inicio de sesión completado"),
+            "{host}"
+        );
+        assert_eq!(tokens.access_token, "access-1");
+    }
+}
+
+#[test]
+fn microsoft_uses_localhost_and_google_the_ip_literal() {
+    assert_eq!(
+        nestadmin_mail::OAuthConfig::microsoft("x").redirect_host,
+        "localhost"
+    );
+    assert_eq!(
+        nestadmin_mail::OAuthConfig::google("x", "y").redirect_host,
+        "127.0.0.1"
+    );
+}
