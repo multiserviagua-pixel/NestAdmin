@@ -111,6 +111,23 @@ pub struct App {
     documents: PathBuf,
     registry: DuplicateRegistry,
     extractor: Arc<Extractor>,
+    /// Mientras sea `true`, no empieza ninguna tarea nueva (actualización pendiente, D63).
+    paused: bool,
+}
+
+/// Si se puede instalar una actualización sin cortar trabajo (actualizaciones.md, paso 5).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct UpdateReadiness {
+    /// No hay ninguna tarea ejecutándose: instalar no corta nada.
+    pub ready: bool,
+    /// Tareas ejecutándose (la IA, el OCR o un envío en curso).
+    pub running: usize,
+    /// Tareas en cola: se conservan y se procesan tras actualizar (R02).
+    pub queued: usize,
+    /// Tareas pendientes de revisión: se conservan.
+    pub awaiting_review: usize,
+    /// Si la cola está en pausa: no empieza ninguna tarea nueva.
+    pub paused: bool,
 }
 
 /// Trabajo de una tarea: una solicitud lista, un documento del que extraer el texto o, si ya
@@ -261,6 +278,7 @@ impl App {
             documents: paths.documents(),
             registry: DuplicateRegistry::new(),
             extractor,
+            paused: false,
         };
         app.store.recover()?;
         app.store.reconcile_actions(SEND_DRAFT, &app.mail)?;
@@ -762,6 +780,9 @@ impl App {
 
     /// Toma la siguiente tarea y prepara su solicitud. `None` si la cola está vacía.
     pub fn begin_next(&mut self) -> AppResult<Option<Job>> {
+        if self.paused {
+            return Ok(None);
+        }
         let Some(task) = self.store.claim_next()? else {
             return Ok(None);
         };
@@ -922,6 +943,29 @@ impl App {
                 .map_err(|e| task_error("unavailable", e.to_string(), true))?;
         }
         Ok(())
+    }
+
+    /// Detiene o reanuda el inicio de tareas nuevas. Las que ya se ejecutan terminan; las
+    /// que esperan en la cola no se pierden. La pausa no se guarda: tras reiniciar (por
+    /// ejemplo, al instalar la versión nueva) la cola sigue sola.
+    pub fn set_queue_paused(&mut self, paused: bool) {
+        self.paused = paused;
+    }
+
+    /// Estado de la cola para decidir si se instala una actualización: solo se instala sin
+    /// tareas ejecutándose (actualizaciones.md, paso 5). Quien instala pausa la cola, espera a
+    /// que `ready` sea `true` y entonces cierra la aplicación como en una salida completa.
+    pub fn update_readiness(&self) -> AppResult<UpdateReadiness> {
+        let tasks = self.store.all_tasks()?;
+        let count = |state: TaskState| tasks.iter().filter(|t| t.state == state).count();
+        let running = count(TaskState::Running);
+        Ok(UpdateReadiness {
+            ready: running == 0,
+            running,
+            queued: count(TaskState::Queued),
+            awaiting_review: count(TaskState::AwaitingReview),
+            paused: self.paused,
+        })
     }
 
     /// Procesa una tarea completa en el hilo actual. `None` si no había trabajo.

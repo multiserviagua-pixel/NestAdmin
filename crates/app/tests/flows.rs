@@ -693,3 +693,38 @@ fn a_document_with_several_invoices_gives_one_review_per_invoice() {
         app.document_file(first.id).unwrap()
     );
 }
+
+#[test]
+fn an_update_waits_for_running_work_and_keeps_the_queue() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = open(&dir, FakeProvider::new());
+    app.import_document("1.txt", &invoice("Alfa SL", "F-1", "121.00"))
+        .unwrap();
+    app.import_document("2.txt", &invoice("Beta SL", "F-2", "121.00"))
+        .unwrap();
+
+    // Una tarea en marcha: no se puede instalar.
+    let job = app.begin_next().unwrap().unwrap();
+    app.set_queue_paused(true);
+    let busy = app.update_readiness().unwrap();
+    assert!(!busy.ready);
+    assert_eq!((busy.running, busy.queued, busy.paused), (1, 1, true));
+
+    // En pausa no empieza la siguiente, pero la que estaba en marcha termina.
+    assert!(app.begin_next().unwrap().is_none());
+    app.finish(job.run()).unwrap();
+    let ready = app.update_readiness().unwrap();
+    assert!(ready.ready);
+    assert_eq!(
+        (ready.running, ready.queued, ready.awaiting_review),
+        (0, 1, 1)
+    );
+
+    // Tras «instalar» (reabrir), la pausa no persiste y la tarea en cola sigue.
+    drop(app);
+    let mut app = open(&dir, FakeProvider::new());
+    assert!(!app.update_readiness().unwrap().paused);
+    let next = app.process_next().unwrap().unwrap();
+    assert_eq!(next.state, TaskState::AwaitingReview);
+    assert_eq!(next.result.unwrap()["fields"]["invoice_number"], "F-2");
+}
