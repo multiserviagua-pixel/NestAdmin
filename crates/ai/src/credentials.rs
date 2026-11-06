@@ -7,6 +7,12 @@ use std::sync::Mutex;
 
 pub const SERVICE: &str = "NestAdmin";
 pub const GROQ_API_KEY: &str = "groq_api_key";
+pub const OLLAMA_CLOUD_API_KEY: &str = "ollama_cloud_api_key";
+pub const ANTHROPIC_API_KEY: &str = "anthropic_api_key";
+/// Prefijo de la clave del proveedor compatible con OpenAI (D94): el nombre completo es
+/// `openai_compatible_api_key:<host en minúsculas>`, de modo que una clave nunca se envía a
+/// otro host.
+pub const OPENAI_COMPATIBLE_API_KEY_PREFIX: &str = "openai_compatible_api_key:";
 
 /// Secreto que no se imprime: `Debug` y `Display` muestran solo asteriscos.
 #[derive(Clone, PartialEq, Eq)]

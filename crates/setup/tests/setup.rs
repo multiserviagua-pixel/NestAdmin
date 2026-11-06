@@ -10,7 +10,9 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
-use nestadmin_ai::{AiError, GenerateRequest, GenerateResult, Provider, ProviderKind, Task};
+use nestadmin_ai::{
+    AiError, GenerateRequest, GenerateResult, Provider, ProviderChoice, ProviderKind, Task,
+};
 use nestadmin_setup::{
     explain_timeouts, parse_version, Cancel, Check, Config, ErrorCode, Event, Memory, MemoryLevel,
     Missing, Pinned, Setup, SetupError, Startup, Status, Step, StepState, System,
@@ -173,6 +175,7 @@ fn fake_ollama(state: SharedOllama) -> String {
                     &format!("{progress}{{\"status\":\"pulling a1\",\"total\":5200,\"completed\":5200}}\n{{\"status\":\"success\"}}\n"),
                 )
             }
+            ("POST", "/api/show") => json("200 OK", "{\"details\":{\"family\":\"qwen3\"}}"),
             ("POST", "/api/chat") => {
                 let delay = s.chat_delay;
                 if !delay.is_zero() {
@@ -789,7 +792,7 @@ fn t08b_14_memory_is_classified_against_16_and_8_gb() {
         "{warning}"
     );
     assert!(
-        warning.contains("Groq") && !warning.contains("probablemente no"),
+        warning.contains("proveedor externo") && !warning.contains("probablemente no"),
         "{warning}"
     );
 
@@ -915,6 +918,12 @@ fn t08b_17_task_timeouts_on_low_memory_keep_the_code_and_explain_the_cause() {
     let groq = explain_timeouts(Arc::new(Slow(ProviderKind::Groq)), &eight);
     assert_eq!(groq.kind(), ProviderKind::Groq);
     assert_eq!(groq.generate(&request).unwrap_err(), AiError::Timeout);
+    // Los externos nuevos tampoco atribuyen su tiempo agotado a la memoria local (D94, D95).
+    for kind in [ProviderKind::OpenAiCompatible, ProviderKind::Anthropic] {
+        let external = explain_timeouts(Arc::new(Slow(kind)), &eight);
+        assert_eq!(external.kind(), kind);
+        assert_eq!(external.generate(&request).unwrap_err(), AiError::Timeout);
+    }
 }
 
 #[test]
@@ -951,6 +960,45 @@ fn t08c_03_groq_selected_checks_nothing_local() {
     assert_eq!(s.setup.startup(false), Startup::NotLocal);
     assert!(s.calls().is_empty());
     assert_eq!(s.ollama.lock().unwrap().requests, 0);
+}
+
+/// Un proveedor externo no comprueba, arranca ni descarga nada local. El booleano de la
+/// ventana se deriva del `ProviderChoice` concreto, igual que en `crates/desktop`.
+fn assert_external_checks_nothing_local(choice: &ProviderChoice) {
+    let local_provider = choice.is_local();
+    assert!(!local_provider, "{choice:?} debería ser externo");
+    let s = scenario(false, false, "", false);
+    assert_eq!(s.setup.startup(local_provider), Startup::NotLocal);
+    assert!(s.calls().is_empty());
+    assert_eq!(s.ollama.lock().unwrap().requests, 0);
+    assert_eq!(s.ollama.lock().unwrap().pulls, 0);
+}
+
+#[test]
+fn t08c_03c_openai_compatible_selected_checks_nothing_local() {
+    // Igual que Groq y Ollama cloud (D94).
+    assert_external_checks_nothing_local(&ProviderChoice::OpenAiCompatible {
+        base_url: "https://api.example.com/v1".into(),
+        model: "m".into(),
+    });
+}
+
+#[test]
+fn t08c_03d_anthropic_selected_checks_nothing_local() {
+    // Igual que Groq y Ollama cloud (D95).
+    assert_external_checks_nothing_local(&ProviderChoice::Anthropic { model: "m".into() });
+}
+
+#[test]
+fn t08c_03b_ollama_cloud_selected_checks_nothing_local() {
+    // Ollama cloud es externo como Groq (D91).
+    assert_external_checks_nothing_local(&ProviderChoice::OllamaCloud { model: "m".into() });
+}
+
+#[test]
+fn t08c_03e_groq_is_external_and_ollama_is_local() {
+    assert_external_checks_nothing_local(&ProviderChoice::Groq { model: "m".into() });
+    assert!(ProviderChoice::default().is_local());
 }
 
 #[test]

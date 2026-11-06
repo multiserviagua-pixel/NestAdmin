@@ -1,6 +1,6 @@
 # Evaluación sintética inicial
 
-Este harness **no implementa ni ejecuta el producto, los modelos, OCR ni servicios**. Compara salidas ya obtenidas frente a 10 facturas y 20 correos artificiales. No hay resultados medidos de proveedores en el repositorio. Para comparar Ollama y Groq hay que producir dos archivos de predicciones con el mismo corpus y la misma configuración; la selección y el envío a Groq requieren una decisión explícita. El evaluador no tiene código de red.
+Este harness **no implementa ni ejecuta el producto, los modelos, OCR ni servicios**. Compara salidas ya obtenidas frente a 10 facturas y 20 correos artificiales. No hay resultados medidos de proveedores en el repositorio. Para comparar Ollama, Groq, Ollama cloud, un servicio compatible con OpenAI y Claude hay que producir un archivo de predicciones por proveedor con el mismo corpus y la misma configuración; la selección y el envío a cualquier proveedor externo requieren una decisión explícita. El evaluador no tiene código de red.
 
 ## Corpus y preparación
 
@@ -32,7 +32,7 @@ Los tiempos y memorias son valores comunicados por el proceso que obtiene las pr
 cargo run --release -p nestadmin-ai --bin nestadmin-predict -- --provider ollama --out evaluation/predictions/ollama.jsonl
 ```
 
-Groq solo se usa con `--provider groq --model <id>` y una clave guardada en el administrador de credenciales de Windows (servicio `NestAdmin`, nombre `groq_api_key`). Un fallo de un proveedor nunca se reintenta con el otro.
+Los proveedores externos solo se usan con una elección expresa y una clave guardada en el administrador de credenciales de Windows (servicio `NestAdmin`): `--provider groq --model <id>` (nombre `groq_api_key`) y `--provider ollama-cloud --model <id>` (nombre `ollama_cloud_api_key`; llamada directa a `https://ollama.com/api`, sin pasar por el daemon local; el contenido sale del equipo). Además: `--provider openai-compatible --base-url <https://…> --model <id>` (cualquier API compatible con OpenAI; la URL debe ser `https://` pública, sin credenciales, query ni fragmento; la clave se busca como `openai_compatible_api_key:<host>` (`:<puerto>` si no es el 443) y la de otro host o puerto no se usa) y `--provider anthropic --model <id>` (nombre `anthropic_api_key`; llamada directa a `https://api.anthropic.com/v1/messages`; el contenido sale del equipo). El almacén solo se abre con proveedores externos. Un fallo de un proveedor nunca se reintenta con otro.
 
 ## Ejecución
 

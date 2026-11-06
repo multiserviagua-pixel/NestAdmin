@@ -1,8 +1,10 @@
 //! Genera predicciones JSONL para `evaluation/evaluate.py` con el proveedor elegido.
 //!
 //! Lee solo `evaluation/data/inputs/`: las expectativas nunca llegan al modelo. Las facturas
-//! se procesan en orden con un registro de duplicados vacío, como exige el protocolo. Groq
-//! requiere `--provider groq` y una credencial guardada; un fallo nunca cambia de proveedor.
+//! se procesan en orden con un registro de duplicados vacío, como exige el protocolo. Los
+//! externos (`groq`, `ollama-cloud`, `openai-compatible` con `--base-url` y `anthropic`)
+//! requieren elegirlos con `--provider` y una credencial guardada; un fallo nunca cambia de
+//! proveedor.
 
 use std::fs;
 use std::io::Write;
@@ -16,8 +18,10 @@ use nestadmin_ai::{
 use nestadmin_documents::{process_invoice, DuplicateRegistry, Invoice};
 use serde_json::{json, Value};
 
-const USAGE: &str = "uso: nestadmin-predict --provider ollama|groq --out ARCHIVO.jsonl \
-[--model MODELO] [--url URL_OLLAMA] [--inputs DIR] [--timeout-secs N]";
+const USAGE: &str =
+    "uso: nestadmin-predict --provider ollama|groq|ollama-cloud|openai-compatible|anthropic \
+--out ARCHIVO.jsonl [--model MODELO] [--url URL_OLLAMA] [--base-url URL_HTTPS] [--inputs DIR] \
+[--timeout-secs N]";
 
 struct Args {
     choice: ProviderChoice,
@@ -30,6 +34,7 @@ fn parse_args() -> Result<Args, String> {
     let mut provider = None;
     let mut model = None;
     let mut url = None;
+    let mut base_url = None;
     let mut out = None;
     let mut inputs = PathBuf::from("evaluation/data/inputs");
     let mut timeout = 300;
@@ -43,6 +48,7 @@ fn parse_args() -> Result<Args, String> {
             "--provider" => provider = Some(value()?),
             "--model" => model = Some(value()?),
             "--url" => url = Some(value()?),
+            "--base-url" => base_url = Some(value()?),
             "--out" => out = Some(PathBuf::from(value()?)),
             "--inputs" => inputs = PathBuf::from(value()?),
             "--timeout-secs" => timeout = value()?.parse().map_err(|_| "timeout inválido")?,
@@ -69,9 +75,21 @@ fn parse_args() -> Result<Args, String> {
         Some("groq") => ProviderChoice::Groq {
             model: model.ok_or("--model es obligatorio con groq")?,
         },
+        Some("ollama-cloud") => ProviderChoice::OllamaCloud {
+            model: model.ok_or("--model es obligatorio con ollama-cloud")?,
+        },
+        Some("openai-compatible") => ProviderChoice::OpenAiCompatible {
+            base_url: base_url.ok_or("--base-url es obligatorio con openai-compatible")?,
+            model: model.ok_or("--model es obligatorio con openai-compatible")?,
+        },
+        Some("anthropic") => ProviderChoice::Anthropic {
+            model: model.ok_or("--model es obligatorio con anthropic")?,
+        },
         _ => {
             return Err(
-                "--provider debe ser ollama o groq (sin valor por defecto implícito)".into(),
+                "--provider debe ser ollama, groq, ollama-cloud, openai-compatible o \
+                     anthropic (sin valor por defecto implícito)"
+                    .into(),
             )
         }
     };
@@ -135,7 +153,10 @@ fn run() -> Result<(), String> {
     let emails = load_inputs(&args.inputs, "emails.json")?;
     // El almacén del sistema solo se abre si se eligió el proveedor externo.
     let store: Box<dyn CredentialStore> = match args.choice {
-        ProviderChoice::Groq { .. } => credentials()?,
+        ProviderChoice::Groq { .. }
+        | ProviderChoice::OllamaCloud { .. }
+        | ProviderChoice::OpenAiCompatible { .. }
+        | ProviderChoice::Anthropic { .. } => credentials()?,
         ProviderChoice::Ollama { .. } => Box::new(MemoryCredentialStore::default()),
     };
     let provider =

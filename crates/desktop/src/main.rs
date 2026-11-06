@@ -14,7 +14,8 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread;
 use std::time::Duration;
 
-use nestadmin_ai::credentials::GROQ_API_KEY;
+use nestadmin_ai::credentials::{ANTHROPIC_API_KEY, GROQ_API_KEY, OLLAMA_CLOUD_API_KEY};
+use nestadmin_ai::openai_compatible::credential_name_for;
 use nestadmin_ai::{CredentialStore, ProviderChoice, Secret};
 use nestadmin_app::accounts::{
     AccountView, FetchReport, MailAccountsView, MailEnv, MailProviderKind,
@@ -510,27 +511,54 @@ struct SettingsView {
     choice: ProviderChoice,
     active: ProviderInfo,
     groq_key_saved: bool,
+    ollama_cloud_key_saved: bool,
+    anthropic_key_saved: bool,
+    /// Clave del host de la URL compatible con OpenAI configurada (D94); `false` si la
+    /// selección actual no es ese proveedor o su URL no es válida.
+    openai_compatible_key_saved: bool,
+    /// Modelo prefijado para Ollama cloud (D93): la interfaz lo toma de aquí.
+    default_cloud_model: &'static str,
     data_dir: PathBuf,
 }
 
 #[tauri::command]
 fn settings(shared: State<'_, SharedState>) -> CmdResult<SettingsView> {
     let choice = shared.settings.lock().map_err(text)?.provider.clone();
+    let ollama_cloud_key_saved = shared
+        .credentials
+        .get(OLLAMA_CLOUD_API_KEY)
+        .map_err(text)?
+        .is_some();
     let groq_key_saved = shared
         .credentials
         .get(GROQ_API_KEY)
         .map_err(text)?
         .is_some();
+    let anthropic_key_saved = shared
+        .credentials
+        .get(ANTHROPIC_API_KEY)
+        .map_err(text)?
+        .is_some();
+    let openai_compatible_key_saved = match &choice {
+        ProviderChoice::OpenAiCompatible { base_url, .. } => {
+            openai_compatible_key_present(&shared, base_url)?
+        }
+        _ => false,
+    };
     Ok(SettingsView {
         choice,
         active: shared.app()?.provider(),
         groq_key_saved,
+        ollama_cloud_key_saved,
+        anthropic_key_saved,
+        openai_compatible_key_saved,
+        default_cloud_model: nestadmin_ai::ollama::DEFAULT_CLOUD_MODEL,
         data_dir: shared.data_dir.clone(),
     })
 }
 
-/// Cambio explícito de proveedor. Si el elegido no se puede preparar (por ejemplo, Groq sin
-/// clave), se informa y se mantiene la selección anterior.
+/// Cambio explícito de proveedor. Si el elegido no se puede preparar (por ejemplo, un
+/// proveedor externo sin clave), se informa y se mantiene la selección anterior.
 #[tauri::command]
 fn select_provider(
     shared: State<'_, SharedState>,
@@ -565,6 +593,88 @@ fn save_groq_key(shared: State<'_, SharedState>, key: String) -> CmdResult<()> {
 #[tauri::command]
 fn delete_groq_key(shared: State<'_, SharedState>) -> CmdResult<()> {
     shared.credentials.delete(GROQ_API_KEY).map_err(text)
+}
+
+/// Igual que la de Groq (D91): va directa al almacén del sistema y nunca se devuelve.
+#[tauri::command]
+fn save_ollama_cloud_key(shared: State<'_, SharedState>, key: String) -> CmdResult<()> {
+    let key = key.trim();
+    if key.is_empty() {
+        return Err("la clave está vacía".into());
+    }
+    shared
+        .credentials
+        .set(OLLAMA_CLOUD_API_KEY, &Secret::new(key))
+        .map_err(text)
+}
+
+#[tauri::command]
+fn delete_ollama_cloud_key(shared: State<'_, SharedState>) -> CmdResult<()> {
+    shared
+        .credentials
+        .delete(OLLAMA_CLOUD_API_KEY)
+        .map_err(text)
+}
+
+/// Claves de los proveedores externos nuevos (D94, D95): como las demás, van directas al
+/// almacén del sistema y nunca se devuelven ni se guardan en `configuracion.json`.
+#[tauri::command]
+fn save_anthropic_key(shared: State<'_, SharedState>, key: String) -> CmdResult<()> {
+    let key = key.trim();
+    if key.is_empty() {
+        return Err("la clave está vacía".into());
+    }
+    shared
+        .credentials
+        .set(ANTHROPIC_API_KEY, &Secret::new(key))
+        .map_err(text)
+}
+
+#[tauri::command]
+fn delete_anthropic_key(shared: State<'_, SharedState>) -> CmdResult<()> {
+    shared.credentials.delete(ANTHROPIC_API_KEY).map_err(text)
+}
+
+/// La clave queda ligada al host de `base_url` (acepta la URL base o solo el host): al cambiar
+/// de host la anterior no se envía.
+#[tauri::command]
+fn save_openai_compatible_key(
+    shared: State<'_, SharedState>,
+    base_url: String,
+    key: String,
+) -> CmdResult<()> {
+    let key = key.trim();
+    if key.is_empty() {
+        return Err("la clave está vacía".into());
+    }
+    let name = credential_name_for(&base_url).map_err(text)?;
+    shared
+        .credentials
+        .set(&name, &Secret::new(key))
+        .map_err(text)
+}
+
+#[tauri::command]
+fn delete_openai_compatible_key(shared: State<'_, SharedState>, base_url: String) -> CmdResult<()> {
+    let name = credential_name_for(&base_url).map_err(text)?;
+    shared.credentials.delete(&name).map_err(text)
+}
+
+/// Si hay clave para el host de `base_url` (para una URL aún sin seleccionar).
+#[tauri::command]
+fn openai_compatible_key_saved(
+    shared: State<'_, SharedState>,
+    base_url: String,
+) -> CmdResult<bool> {
+    openai_compatible_key_present(&shared, &base_url)
+}
+
+fn openai_compatible_key_present(shared: &SharedState, base_url: &str) -> CmdResult<bool> {
+    // Una URL no válida no tiene clave asociada.
+    let Ok(name) = credential_name_for(base_url) else {
+        return Ok(false);
+    };
+    Ok(shared.credentials.get(&name).map_err(text)?.is_some())
 }
 
 #[derive(Serialize)]
@@ -834,7 +944,7 @@ fn setup(handle: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
     std::fs::create_dir_all(&data_dir)?;
     let credentials = credential_store();
     let settings = Settings::load(&data_dir);
-    let local_provider = matches!(settings.provider, ProviderChoice::Ollama { .. });
+    let local_provider = settings.provider.is_local();
     let provider = provider_for(&settings.provider, credentials.as_ref());
     let (profiles, mail_clients_error) = mail_clients::load(&data_dir);
     let mail = MailEnv {
@@ -969,6 +1079,13 @@ fn main() {
             select_provider,
             save_groq_key,
             delete_groq_key,
+            save_ollama_cloud_key,
+            delete_ollama_cloud_key,
+            save_anthropic_key,
+            delete_anthropic_key,
+            save_openai_compatible_key,
+            delete_openai_compatible_key,
+            openai_compatible_key_saved,
             launch_mode,
             setup_check,
             setup_prepare,

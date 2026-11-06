@@ -37,10 +37,13 @@ export interface AuditEntry {
 
 export type ProviderChoice =
   | { provider: "ollama"; base_url: string; model: string }
-  | { provider: "groq"; model: string };
+  | { provider: "groq"; model: string }
+  | { provider: "ollama_cloud"; model: string }
+  | { provider: "openai_compatible"; base_url: string; model: string }
+  | { provider: "anthropic"; model: string };
 
 export interface ProviderInfo {
-  provider: "ollama" | "groq";
+  provider: "ollama" | "groq" | "ollama_cloud" | "openai_compatible" | "anthropic";
   model: string;
 }
 
@@ -48,6 +51,12 @@ export interface SettingsView {
   choice: ProviderChoice;
   active: ProviderInfo;
   groq_key_saved: boolean;
+  ollama_cloud_key_saved: boolean;
+  anthropic_key_saved: boolean;
+  /** Clave guardada para el host de la URL compatible con OpenAI configurada (D94). */
+  openai_compatible_key_saved: boolean;
+  /** Modelo prefijado de Ollama cloud: `DEFAULT_CLOUD_MODEL` del backend (D93). */
+  default_cloud_model: string;
   data_dir: string;
 }
 
