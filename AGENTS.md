@@ -6,7 +6,7 @@
 - Evite efectos duplicados al recuperar trabajos y cubra los fallos de modelos, OCR, red y credenciales. La ausencia de datos debe ser explícita.
 - Ejecute `python scripts/check.py` al modificar la documentación. Ejecute además las pruebas y comprobaciones pertinentes del código que se implemente. El verificador documental no acredita que exista o funcione la aplicación.
 - No marque criterios de aceptación como cumplidos sin evidencia reproducible. Las pruebas de instalador, escritorio y rendimiento requieren Windows y, cuando corresponda, el hardware objetivo.
-- No construya el instalador (`scripts/build-clean.ps1`, `tauri build`, NSIS) salvo que una prueba concreta lo necesite: es lento y costoso. Valide los cambios con pruebas, clippy, formato, `check.py` y comprobaciones baratas; el instalador se compila una sola vez al final de cada etapa o para una prueba de instalación acordada. Esta regla vale para todos los agentes y subagentes.
+- Construya el instalador (`scripts/build-clean.ps1`, `tauri build`, NSIS) solo cuando el flujo de trabajo lo necesite: al cerrar una etapa, para una prueba de instalación o cuando una prueba concreta dependa de él. Está autorizado en esos casos sin pedir confirmación; no lo compile para validar cambios corrientes, que se comprueban con pruebas, clippy, formato y `check.py`. Esta regla vale para todos los agentes y subagentes.
 
 ## Enrutado de modelos (ahorro de créditos)
 
@@ -22,4 +22,16 @@ La sesión principal usa Opus para coordinar y decidir; el trabajo mecánico se 
 - Delegue las lecturas amplias y las ejecuciones de pruebas en lugar de hacerlas en la sesión principal.
 - No asigne Opus a un subagente salvo para diseño o revisión.
 - Workflows: como máximo unos 5 agentes salvo petición expresa. `/code-review` en nivel `low` o `medium` por defecto.
-- Todo brief a un subagente repite la regla de no compilar el instalador.
+- Todo brief a un subagente repite la regla del instalador: solo cuando el flujo lo necesite.
+
+### Flujo automático
+
+La sesión principal encadena los agentes sin pedir confirmación entre pasos:
+
+1. `explorador` localiza el código, las specs y las pruebas afectadas.
+2. `implementador` aplica el cambio con un brief concreto.
+3. `verificador` ejecuta las comprobaciones. Si fallan, vuelve a `implementador` con la salida literal (como máximo 3 ciclos); después se informa al usuario.
+4. `arquitecto` revisa solo si el cambio toca alcance, credenciales, OAuth, envío o registro automáticos.
+5. Si el flujo cierra una etapa o requiere una prueba de instalación, se construye el instalador.
+
+La automatización del flujo de desarrollo no cambia las reglas de la aplicación: sin respaldo automático a una IA externa y con revisión de envíos y registros salvo regla expresa activa.

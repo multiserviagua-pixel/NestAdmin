@@ -26,6 +26,7 @@ Thumbs.db
 # Binarios descargados por scripts/setup-ocr.ps1.
 vendor/
 
-# Estado local de Claude Code (los agentes y settings.json sí se versionan).
-.claude/worktrees/
-.claude/settings.local.json
+# Claude Code: solo se versionan los agentes y la configuración compartida.
+.claude/*
+!.claude/agents/
+!.claude/settings.json
