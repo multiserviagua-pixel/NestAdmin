@@ -58,3 +58,7 @@ Con la corrección se registraron 32 respuestas 429 recuperadas, sin ningún err
 - Falta la memoria del proceso local en ambas ejecuciones (T12).
 - El corpus es pequeño y limpio, y no permite extrapolar a documentos reales.
 - Los modelos son distintos (27B remoto frente a 8B local). La comparación describe las dos opciones disponibles, no el mismo modelo.
+
+## 2026-11-07 — Fuera del diseño
+
+El usuario ha sacado Groq del diseño. No se ha repetido esta ejecución en el equipo objetivo. La comparación de T12 con un proveedor externo se ha hecho con Ollama cloud: [t10-ollama-cloud.md](t10-ollama-cloud.md).
