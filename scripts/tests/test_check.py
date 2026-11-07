@@ -1,4 +1,5 @@
 import importlib.util
+import re
 from pathlib import Path
 import shutil
 import tempfile
@@ -18,15 +19,20 @@ class CheckTests(unittest.TestCase):
             target = self.root / name
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy(check.ROOT / name, target)
-        # Destinos enlazados desde los documentos copiados.
-        for name in ('evaluation/README.md', '.github/workflows/verify.yml', 'sitio/README.md',
-                     'THIRD_PARTY_NOTICES.md', 'specs/v1/redistribucion-tesseract.md',
-                     'docs/guia-microsoft-365.pdf', 'docs/pruebas-en-windows.md'):
-            target = self.root / name
-            target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_text('x', encoding='utf-8')
         if (check.ROOT / 'evidence').is_dir():
             shutil.copytree(check.ROOT / 'evidence', self.root / 'evidence')
+        # Destinos enlazados desde los documentos copiados que existen en el repositorio: se
+        # sustituyen por un archivo mínimo, así la prueba no depende de una lista a mano.
+        for name in check.REQUIRED:
+            for target in check.LINK.findall((self.root / name).read_text(encoding='utf-8')):
+                if re.match(r'^[a-z]+:', target) or target.startswith('#'):
+                    continue
+                rel = (Path(name).parent / target.split('#', 1)[0])
+                real = (check.ROOT / rel).resolve()
+                copy = (self.root / rel).resolve()
+                if real.is_file() and not copy.exists():
+                    copy.parent.mkdir(parents=True, exist_ok=True)
+                    copy.write_text('x', encoding='utf-8')
         self.matrix = self.root / 'specs/v1/trazabilidad.md'
 
     def tearDown(self):
@@ -42,7 +48,7 @@ class CheckTests(unittest.TestCase):
         self.assertEqual(check.check(self.root), [])
 
     def test_extra_test_row_for_a_requirement_is_allowed(self):
-        self.edit_matrix('| R03 |', '| R03 | T03b: caso adicional. | Pendiente |\n| R03 |')
+        self.edit_matrix('| R03 |', '| R03 | T03z: caso adicional. | Pendiente |\n| R03 |')
         self.assertEqual(check.check(self.root), [])
 
     def test_requirement_without_row_fails(self):
