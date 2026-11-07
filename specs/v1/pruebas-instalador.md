@@ -1,6 +1,6 @@
 # Casos de prueba del instalador v1
 
-Especificación de las pruebas de R08 (decisiones D36–D40, D46, D51 y D52, contrato «Preparación de componentes locales»). Un caso descrito aquí no es una prueba superada: la [matriz](trazabilidad.md) recoge el estado y la evidencia.
+Especificación de las pruebas de R08 (decisiones D36–D40, D46, D51, D52 y D103, contrato «Preparación de componentes locales»). Desde D103 (2026-11-07) el instalador ya no prepara la IA local: T08b sigue valiendo para la preparación local cuando el usuario la pide, T08c solo se aplica con la IA local elegida, y en T08 la IA verificada al terminar el instalador (T08-01 a T08-05 y T08-08) pasa a verificarse en el asistente de primer uso o en la preparación local elegida; los casos nuevos están en T08e. Un caso descrito aquí no es una prueba superada: la [matriz](trazabilidad.md) recoge el estado y la evidencia.
 
 Reglas comunes:
 
@@ -36,8 +36,18 @@ Reglas comunes:
 | --- | --- | --- |
 | T08c-01 | Proveedor Ollama, servicio detenido, todo instalado. | Se arranca sin intervención y la ventana principal se abre; abrir de nuevo no lo vuelve a arrancar. |
 | T08c-02 | Proveedor Ollama, falta el modelo. | No descarga en segundo plano: la ventana muestra el asistente. |
-| T08c-03 | Proveedor Groq elegido. | No se comprueba ni se arranca nada local. |
+| T08c-03 | Proveedor externo elegido (antes Groq; desde D100, Ollama cloud u otro externo). | No se comprueba ni se arranca nada local. |
 | T08c-04 | La comprobación tarda (servicio lento al arrancar). | La ventana no se bloquea mientras espera. |
+
+## T08e — Instalador sin IA local y primer arranque (D100, D101, D103)
+
+| Caso | Situación inicial | Resultado esperado |
+| --- | --- | --- |
+| T08e-01 | Windows limpio, sin Ollama, con Internet. | El instalador termina sin ejecutar `--preparar`, sin descargar Ollama ni el modelo y sin pedir la IA; el programa, el OCR y WebView2 quedan instalados. La duración se registra para compararla con T08-01. |
+| T08e-02 | Primer arranque tras T08e-01, sin clave guardada. | La ventana abre el asistente de primer uso con Ollama cloud preseleccionado y el destino explicado; un documento sintético importado queda en `queued` con «Falta configurar la IA»; no sale ninguna petición a un proveedor de IA (registro de red o servidor simulado). |
+| T08e-03 | Guardar una clave de prueba y confirmar el destino. | La clave queda solo en el Administrador de credenciales; `configuracion.json` guarda la elección y la confirmación sin la clave; la prueba con texto sintético responde y las tareas en espera se procesan. |
+| T08e-04 | Elegir «Instalar IA local» desde el asistente o Configuración. | Se ejecuta la preparación de T08b (con progreso, firmas, reintentos y aviso de memoria); al terminar, el respaldo local figura como disponible y la selección principal no cambia salvo que el usuario elija la IA local. |
+| T08e-05 | Instalar encima de una versión anterior con la IA local elegida y preparada. | Se conserva la elección local, Ollama y el modelo no se tocan, la comprobación al abrir de D39 sigue actuando y la ventana ofrece una sola vez pasar al externo sin cambiar nada por sí misma. |
 
 ## T08d — Construcción del paquete (D51, D52)
 
