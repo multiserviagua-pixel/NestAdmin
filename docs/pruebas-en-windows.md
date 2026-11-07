@@ -65,7 +65,7 @@ Con interfaz hay que completar el asistente (el script espera hasta 120 min). Si
 
 ## 7. Medición en el equipo objetivo (T12) — `evidence/t10-ollama-qwen3.md` y `evidence/t10-ollama-cloud.md`
 
-Con el equipo libre (otra IA o aplicaciones pesadas falsean memoria y tiempo) y el modelo local descargado de la memoria. Groq queda fuera del diseño (2026-11-07). Ollama cloud se mide desde la rama de los proveedores externos, como explica `evidence/t10-ollama-cloud.md`, con la clave en el Administrador de credenciales (servicio `NestAdmin`, nombre `ollama_cloud_api_key`).
+Con el equipo libre (otra IA o aplicaciones pesadas falsean memoria y tiempo) y el modelo local descargado de la memoria. Groq queda fuera del diseño (2026-11-07). Ollama cloud se mide desde `main` (los proveedores externos ya están integrados), como explica `evidence/t10-ollama-cloud.md`, con la clave en el Administrador de credenciales (servicio `NestAdmin`, nombre `ollama_cloud_api_key`).
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts\t12-medir.ps1 -Proveedor ollama

@@ -1,7 +1,7 @@
 ﻿# T12: ejecuta el corpus sintético con un proveedor y mide la memoria en el equipo objetivo.
 #
 #   powershell -NoProfile -ExecutionPolicy Bypass -File scripts/t12-medir.ps1 -Proveedor ollama
-#   powershell -NoProfile -ExecutionPolicy Bypass -File scripts/t12-medir.ps1 -Proveedor groq -Modelo qwen/qwen3.8-27b
+#   powershell -NoProfile -ExecutionPolicy Bypass -File scripts/t12-medir.ps1 -Proveedor ollama-cloud -Modelo gemma4:31b
 #
 # Mientras corre nestadmin-predict, cada medio segundo suma el conjunto de trabajo de los
 # procesos de Ollama (ollama* y llama-server*, que es el que carga el modelo desde Ollama 0.40)
@@ -11,7 +11,7 @@
 # resumen en evaluation/results/t12-<proveedor>-<fecha>.txt, todo fuera de Git. No anota datos
 # personales: equipo y usuario no constan.
 param(
-    [Parameter(Mandatory = $true)][ValidateSet('ollama', 'groq')][string]$Proveedor,
+    [Parameter(Mandatory = $true)][ValidateSet('ollama', 'groq', 'ollama-cloud')][string]$Proveedor,
     [string]$Modelo = '',
     [int]$PlazoSegundos = 300
 )
@@ -19,7 +19,7 @@ $ErrorActionPreference = 'Stop'
 $Root = Split-Path -Parent $PSScriptRoot
 Set-Location $Root
 
-if ($Proveedor -eq 'groq' -and -not $Modelo) { throw 'Con groq indique -Modelo (por ejemplo qwen/qwen3.8-27b)' }
+if ($Proveedor -ne 'ollama' -and -not $Modelo) { throw 'Con un proveedor externo indique -Modelo (por ejemplo gemma4:31b con ollama-cloud)' }
 $name = if ($Modelo) { "$Proveedor-$($Modelo -replace '[^A-Za-z0-9.-]', '_')" } else { $Proveedor }
 $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
 $out = "evaluation/predictions/t12-$name-$stamp.jsonl"
@@ -85,7 +85,7 @@ $summary = @(
     "Informe: evaluation/results/$report (fuera de Git)",
     'Método: conjunto de trabajo (WorkingSet64) y memoria privada (PrivateMemorySize64) muestreados cada 500 ms; no incluye memoria compartida de la GPU.'
 )
-if ($Proveedor -eq 'groq') { $summary += 'Groq: la memoria del servidor remoto no es observable; el pico de Ollama es el de procesos ajenos a la prueba.' }
+if ($Proveedor -ne 'ollama') { $summary += 'Proveedor remoto: la memoria del servidor no es observable; el pico de Ollama es el de procesos ajenos a la prueba.' }
 $summaryPath = "evaluation/results/t12-$name-$stamp.txt"
 Set-Content -Path $summaryPath -Value $summary -Encoding UTF8
 $summary | ForEach-Object { Write-Host $_ }
