@@ -97,6 +97,8 @@ class CheckTests(unittest.TestCase):
     def test_dangling_reference_fails_unless_reserved(self):
         self.append('PLAN.md', '\nVer D900.\n')
         self.assertIn('PLAN.md: cita la decisión inexistente D900.', check.check(self.root))
+        self.append('PLAN.md', '\nAntes `D901`.\n')
+        self.assertNotIn('PLAN.md: cita la decisión inexistente D901.', check.check(self.root))
         self.append('specs/v1/numeracion.md', '| D900–D909 | `rama-de-prueba` | Reservado |\n')
         self.assertEqual(check.check(self.root), [])
 
