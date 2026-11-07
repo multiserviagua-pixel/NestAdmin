@@ -5,6 +5,7 @@ pub mod actions;
 pub mod error;
 pub mod queue;
 pub mod rules;
+pub mod sales;
 pub mod store;
 
 pub use actions::{

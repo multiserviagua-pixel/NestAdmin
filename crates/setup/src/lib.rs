@@ -191,7 +191,8 @@ pub struct Report {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "outcome", rename_all = "snake_case")]
 pub enum Startup {
-    /// Groq elegido: no se comprueba nada local.
+    /// Proveedor externo elegido (Groq, Ollama cloud, compatible con OpenAI o Claude): no se
+    /// comprueba nada local.
     NotLocal,
     Ready,
     /// Ollama estaba detenido y se arrancó.

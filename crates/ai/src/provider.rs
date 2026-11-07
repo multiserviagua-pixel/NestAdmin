@@ -16,6 +16,10 @@ pub enum Task {
 pub enum ProviderKind {
     Ollama,
     Groq,
+    OllamaCloud,
+    #[serde(rename = "openai_compatible")]
+    OpenAiCompatible,
+    Anthropic,
 }
 
 impl fmt::Display for ProviderKind {
@@ -23,6 +27,9 @@ impl fmt::Display for ProviderKind {
         f.write_str(match self {
             Self::Ollama => "ollama",
             Self::Groq => "groq",
+            Self::OllamaCloud => "ollama_cloud",
+            Self::OpenAiCompatible => "openai_compatible",
+            Self::Anthropic => "anthropic",
         })
     }
 }
@@ -101,7 +108,7 @@ pub(crate) fn parse_output(request: &GenerateRequest, text: &str) -> Result<Valu
     if request.schema.is_none() {
         return Ok(Value::String(text.to_owned()));
     }
-    match serde_json::from_str::<Value>(text.trim()) {
+    match serde_json::from_str::<Value>(strip_code_fence(text)) {
         Ok(value @ Value::Object(_)) => Ok(value),
         Ok(_) => Err(AiError::InvalidResponse(
             "la salida no es un objeto JSON".into(),
@@ -110,4 +117,27 @@ pub(crate) fn parse_output(request: &GenerateRequest, text: &str) -> Result<Valu
             "la salida no es JSON válido".into(),
         )),
     }
+}
+
+/// Quita UN solo bloque de código ```` ``` ```` o ```` ```json ```` que envuelva todo el
+/// texto (con espacios alrededor), sin tocar el contenido interior. Algunos modelos
+/// envuelven así el JSON aunque se pida solo el objeto. Si el texto no es exactamente un
+/// bloque, se devuelve recortado y sin más cambios.
+pub(crate) fn strip_code_fence(text: &str) -> &str {
+    let trimmed = text.trim();
+    let Some(rest) = trimmed.strip_prefix("```") else {
+        return trimmed;
+    };
+    let Some(inner) = rest.strip_suffix("```") else {
+        return trimmed;
+    };
+    let inner = match inner.strip_prefix("json") {
+        Some(after) if after.starts_with(char::is_whitespace) => after,
+        _ => inner,
+    };
+    // Un cierre ``` dentro significa más de un bloque: no se toca.
+    if inner.contains("```") {
+        return trimmed;
+    }
+    inner.trim()
 }

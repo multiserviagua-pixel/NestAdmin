@@ -1,6 +1,6 @@
 //! Configuración local: la selección de proveedor y el límite de mensajes leídos por cuenta
-//! en cada consulta. La clave de Groq y los tokens de correo nunca se guardan aquí, sino en el
-//! almacén de credenciales del sistema (R09, D13, D31).
+//! en cada consulta. Las claves de los proveedores externos y los tokens de correo nunca se
+//! guardan aquí, sino en el almacén de credenciales del sistema (R09, D13, D31).
 
 use std::fs;
 use std::io;
@@ -81,6 +81,11 @@ pub fn provider_for(
         let (kind, model) = match choice {
             ProviderChoice::Ollama { model, .. } => (ProviderKind::Ollama, model.clone()),
             ProviderChoice::Groq { model } => (ProviderKind::Groq, model.clone()),
+            ProviderChoice::OllamaCloud { model } => (ProviderKind::OllamaCloud, model.clone()),
+            ProviderChoice::OpenAiCompatible { model, .. } => {
+                (ProviderKind::OpenAiCompatible, model.clone())
+            }
+            ProviderChoice::Anthropic { model } => (ProviderKind::Anthropic, model.clone()),
         };
         Arc::new(Unprepared { kind, model, error })
     })
@@ -192,5 +197,133 @@ mod tests {
         assert_eq!(provider.kind(), ProviderKind::Groq, "sin respaldo a Ollama");
         assert_eq!(provider.generate(&request()), Err(AiError::Unauthorized));
         assert!(build(&choice, &store).is_err());
+    }
+
+    #[test]
+    fn missing_ollama_cloud_key_at_startup_fails_explicitly_and_keeps_the_selection() {
+        let store = MemoryCredentialStore::default();
+        // Con la clave de Groq presente, la de Ollama cloud sigue ausente.
+        store.set(GROQ_API_KEY, &Secret::new(KEY)).unwrap();
+        let choice = ProviderChoice::OllamaCloud {
+            model: "modelo-t09".into(),
+        };
+        let provider = provider_for(&choice, &store);
+        assert_eq!(
+            provider.kind(),
+            ProviderKind::OllamaCloud,
+            "sin respaldo a Ollama local ni a Groq"
+        );
+        assert_eq!(provider.model(), "modelo-t09");
+        assert_eq!(provider.generate(&request()), Err(AiError::Unauthorized));
+        assert!(build(&choice, &store).is_err());
+    }
+
+    #[test]
+    fn missing_key_for_new_external_providers_fails_explicitly_and_keeps_the_selection() {
+        let store = MemoryCredentialStore::default();
+        // Con todas las demás claves presentes (y la de otro host), la elegida sigue ausente.
+        store.set(GROQ_API_KEY, &Secret::new(KEY)).unwrap();
+        store
+            .set(
+                nestadmin_ai::credentials::OLLAMA_CLOUD_API_KEY,
+                &Secret::new(KEY),
+            )
+            .unwrap();
+        store
+            .set(
+                "openai_compatible_api_key:otro-host.example.org",
+                &Secret::new(KEY),
+            )
+            .unwrap();
+        let compat = ProviderChoice::OpenAiCompatible {
+            base_url: "https://api.example.com/v1".into(),
+            model: "modelo-t09".into(),
+        };
+        let provider = provider_for(&compat, &store);
+        assert_eq!(provider.kind(), ProviderKind::OpenAiCompatible);
+        assert_eq!(provider.model(), "modelo-t09");
+        assert_eq!(provider.generate(&request()), Err(AiError::Unauthorized));
+        assert!(build(&compat, &store).is_err());
+
+        store
+            .set(
+                nestadmin_ai::credentials::ANTHROPIC_API_KEY,
+                &Secret::new(KEY),
+            )
+            .unwrap();
+        store
+            .delete(nestadmin_ai::credentials::ANTHROPIC_API_KEY)
+            .unwrap();
+        let claude = ProviderChoice::Anthropic {
+            model: "claude-opus-5-5".into(),
+        };
+        let provider = provider_for(&claude, &store);
+        assert_eq!(provider.kind(), ProviderKind::Anthropic, "sin respaldo");
+        assert_eq!(provider.generate(&request()), Err(AiError::Unauthorized));
+        assert!(build(&claude, &store).is_err());
+
+        // Una URL no válida también falla explícito, sin leer claves ni caer a otro proveedor.
+        let local = ProviderChoice::OpenAiCompatible {
+            base_url: "https://localhost/v1".into(),
+            model: "modelo-t09".into(),
+        };
+        let provider = provider_for(&local, &store);
+        assert_eq!(provider.kind(), ProviderKind::OpenAiCompatible);
+        assert!(matches!(
+            provider.generate(&request()),
+            Err(AiError::Unavailable(_))
+        ));
+    }
+
+    #[test]
+    fn saved_settings_with_new_external_providers_never_contain_the_key() {
+        let dir = std::env::temp_dir().join(format!("nestadmin-t09-ext-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        for provider in [
+            ProviderChoice::OpenAiCompatible {
+                base_url: "https://api.example.com/v1".into(),
+                model: "modelo-t09".into(),
+            },
+            ProviderChoice::Anthropic {
+                model: "claude-opus-5-5".into(),
+            },
+        ] {
+            let settings = Settings {
+                provider,
+                ..Settings::default()
+            };
+            settings.save(&dir).unwrap();
+            let text = fs::read_to_string(dir.join(FILE)).unwrap();
+            assert!(
+                !text.contains(KEY) && !text.contains("PRUEBA_SINTETICA"),
+                "{text}"
+            );
+            assert_eq!(Settings::load(&dir).provider, settings.provider);
+        }
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn saved_settings_with_ollama_cloud_never_contain_the_key() {
+        let dir = std::env::temp_dir().join(format!("nestadmin-t09-cloud-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let store = MemoryCredentialStore::default();
+        store
+            .set(
+                nestadmin_ai::credentials::OLLAMA_CLOUD_API_KEY,
+                &Secret::new(KEY),
+            )
+            .unwrap();
+        let settings = Settings {
+            provider: ProviderChoice::OllamaCloud {
+                model: "modelo-t09".into(),
+            },
+            ..Settings::default()
+        };
+        settings.save(&dir).unwrap();
+        let text = fs::read_to_string(dir.join(FILE)).unwrap();
+        assert!(!text.contains("PRUEBA_SINTETICA"), "{text}");
+        assert_eq!(Settings::load(&dir).provider, settings.provider);
+        fs::remove_dir_all(&dir).unwrap();
     }
 }

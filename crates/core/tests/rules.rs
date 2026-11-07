@@ -95,7 +95,10 @@ fn rules_survive_restart() {
         store.set_rule_active("r", true).unwrap();
     }
     let store = Store::open(&path).unwrap();
-    assert_eq!(store.schema_version().unwrap(), 2);
+    assert_eq!(
+        store.schema_version().unwrap(),
+        nestadmin_core::store::SCHEMA_VERSION
+    );
     let rule = store.rule("r").unwrap().unwrap();
     assert_eq!((rule.version, rule.active), (2, true));
 }

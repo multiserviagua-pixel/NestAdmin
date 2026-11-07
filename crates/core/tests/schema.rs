@@ -22,6 +22,22 @@ fn has_rules_table(path: &std::path::Path) -> bool {
         == 1
 }
 
+/// Quita lo que añadió la migración 3 (los triggers caen con sus tablas), como si la base la
+/// hubiera creado la versión anterior.
+const DROP_SALES: &str = "DROP TABLE received_delivery_notes; DROP TABLE payments;     DROP TABLE document_links; DROP TABLE sales_lines; DROP TABLE sales_documents;     DROP TABLE recurring_skips; DROP TABLE recurring_templates; DROP TABLE series; DROP TABLE products;     DROP TABLE customers; DROP TABLE company; DROP TABLE company_logos;";
+
+fn has_table(path: &std::path::Path, name: &str) -> bool {
+    rusqlite::Connection::open(path)
+        .unwrap()
+        .query_row(
+            "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = ?1",
+            [name],
+            |r| r.get::<_, i64>(0),
+        )
+        .unwrap()
+        == 1
+}
+
 #[test]
 fn new_database_has_current_schema_and_no_backup() {
     let dir = tempfile::tempdir().unwrap();
@@ -41,8 +57,10 @@ fn migrating_keeps_a_copy_of_the_previous_schema() {
     drop(Store::open(&path).unwrap());
     // Simula una base creada por la versión anterior (esquema 1, sin la tabla de reglas).
     let conn = rusqlite::Connection::open(&path).unwrap();
-    conn.execute_batch("DROP TABLE rules; PRAGMA user_version = 1;")
-        .unwrap();
+    conn.execute_batch(&format!(
+        "{DROP_SALES} DROP TABLE rules; PRAGMA user_version = 1;"
+    ))
+    .unwrap();
     drop(conn);
 
     let store = Store::open(&path).unwrap();
@@ -62,6 +80,59 @@ fn migrating_keeps_a_copy_of_the_previous_schema() {
     drop(Store::open(&path).unwrap());
     assert_eq!(user_version(&path), SCHEMA_VERSION);
     assert_eq!(user_version(&backup), 1);
+}
+
+#[test]
+fn migrating_from_schema_2_adds_sales_tables_and_keeps_a_copy() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("nestadmin.db");
+    drop(Store::open(&path).unwrap());
+    // Base de la versión anterior (esquema 2): con reglas y sin tablas de venta.
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    conn.execute_batch(&format!("{DROP_SALES} PRAGMA user_version = 2;"))
+        .unwrap();
+    conn.execute(
+        "INSERT INTO audit_log (at, action, status) VALUES (1, 'previa', 'ok')",
+        [],
+    )
+    .unwrap();
+    drop(conn);
+
+    let store = Store::open(&path).unwrap();
+    assert_eq!(store.schema_version().unwrap(), SCHEMA_VERSION);
+    assert_eq!(SCHEMA_VERSION, 3);
+    assert_eq!(
+        store.audit_log().unwrap().len(),
+        1,
+        "los datos previos se conservan"
+    );
+    drop(store);
+
+    let backup = backup_path(&path, 2);
+    assert_eq!(backup.file_name().unwrap(), "nestadmin.esquema-2.db");
+    assert_eq!(user_version(&backup), 2);
+    assert!(has_rules_table(&backup));
+    for table in [
+        "company",
+        "customers",
+        "products",
+        "series",
+        "sales_documents",
+        "sales_lines",
+        "document_links",
+        "payments",
+        "recurring_templates",
+        "recurring_skips",
+        "company_logos",
+        "received_delivery_notes",
+    ] {
+        assert!(
+            !has_table(&backup, table),
+            "{table} no debe estar en la copia"
+        );
+        assert!(has_table(&path, table), "{table} debe existir tras migrar");
+    }
+    assert!(!backup_path(&path, 1).exists());
 }
 
 #[test]

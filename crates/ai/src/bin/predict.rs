@@ -1,8 +1,10 @@
 //! Genera predicciones JSONL para `evaluation/evaluate.py` con el proveedor elegido.
 //!
 //! Lee solo `evaluation/data/inputs/`: las expectativas nunca llegan al modelo. Las facturas
-//! se procesan en orden con un registro de duplicados vacío, como exige el protocolo. Groq
-//! requiere `--provider groq` y una credencial guardada; un fallo nunca cambia de proveedor.
+//! se procesan en orden con un registro de duplicados vacío, como exige el protocolo. Los
+//! externos (`groq`, `ollama-cloud`, `openai-compatible` con `--base-url` y `anthropic`)
+//! requieren elegirlos con `--provider` y una credencial guardada; un fallo nunca cambia de
+//! proveedor.
 
 use std::fs;
 use std::io::Write;
@@ -16,8 +18,10 @@ use nestadmin_ai::{
 use nestadmin_documents::{process_invoice, DuplicateRegistry, Invoice};
 use serde_json::{json, Value};
 
-const USAGE: &str = "uso: nestadmin-predict --provider ollama|groq --out ARCHIVO.jsonl \
-[--model MODELO] [--url URL_OLLAMA] [--groq-endpoint URL_BUCLE_LOCAL] [--inputs DIR] \
+const USAGE: &str =
+    "uso: nestadmin-predict --provider ollama|groq|ollama-cloud|openai-compatible|anthropic \
+--out ARCHIVO.jsonl [--model MODELO] [--url URL_OLLAMA] [--base-url URL_HTTPS] \
+[--groq-endpoint URL_BUCLE_LOCAL] [--inputs DIR] \
 [--timeout-secs N]";
 
 struct Args {
@@ -28,10 +32,68 @@ struct Args {
     groq_endpoint: Option<String>,
 }
 
+/// Comprueba que `--groq-endpoint` sea `http://HOST:PUERTO[/]` con `HOST` exactamente
+/// `127.0.0.1`, `localhost` o `[::1]`. Se analiza la autoridad de la URL en vez de comparar un
+/// prefijo: `http://127.0.0.1:1@host.externo/` o `http://localhost:80.evil.example/` empiezan
+/// igual que un destino local pero llevan la petición (y la clave) a otro host.
+fn validate_loopback_endpoint(endpoint: &str) -> Result<(), String> {
+    let refuse = |why: &str| {
+        Err(format!(
+            "--groq-endpoint solo admite un reenvío local (http://127.0.0.1:PUERTO,              http://localhost:PUERTO o http://[::1]:PUERTO): {why}"
+        ))
+    };
+    let Some(rest) = endpoint.strip_prefix("http://") else {
+        return refuse("el esquema debe ser http://");
+    };
+    if !rest.is_ascii()
+        || rest
+            .chars()
+            .any(|c| c.is_control() || c == ' ' || c == '\\')
+    {
+        return refuse("caracteres no admitidos");
+    }
+    let (authority, tail) = match rest.find(['/', '?', '#']) {
+        Some(i) => rest.split_at(i),
+        None => (rest, ""),
+    };
+    if !(tail.is_empty() || tail == "/") {
+        return refuse("sin ruta, query ni fragmento");
+    }
+    if authority.contains('@') {
+        return refuse("sin credenciales en la URL");
+    }
+    let (host, port) = if let Some(inner) = authority.strip_prefix('[') {
+        let Some((host, after)) = inner.split_once(']') else {
+            return refuse("dirección IPv6 mal formada");
+        };
+        let Some(port) = after.strip_prefix(':') else {
+            return refuse("falta el puerto");
+        };
+        (host, port)
+    } else {
+        let Some((host, port)) = authority.rsplit_once(':') else {
+            return refuse("falta el puerto");
+        };
+        (host, port)
+    };
+    let host_ok = match host {
+        "::1" => authority.starts_with('['),
+        h => !authority.starts_with('[') && matches!(h, "127.0.0.1" | "localhost"),
+    };
+    if !host_ok {
+        return refuse("el host no es de bucle local");
+    }
+    match port.parse::<u16>() {
+        Ok(p) if p != 0 && port.bytes().all(|b| b.is_ascii_digit()) => Ok(()),
+        _ => refuse("puerto inválido"),
+    }
+}
+
 fn parse_args() -> Result<Args, String> {
     let mut provider = None;
     let mut model = None;
     let mut url = None;
+    let mut base_url = None;
     let mut groq_endpoint: Option<String> = None;
     let mut out = None;
     let mut inputs = PathBuf::from("evaluation/data/inputs");
@@ -46,6 +108,7 @@ fn parse_args() -> Result<Args, String> {
             "--provider" => provider = Some(value()?),
             "--model" => model = Some(value()?),
             "--url" => url = Some(value()?),
+            "--base-url" => base_url = Some(value()?),
             "--groq-endpoint" => groq_endpoint = Some(value()?),
             "--out" => out = Some(PathBuf::from(value()?)),
             "--inputs" => inputs = PathBuf::from(value()?),
@@ -57,10 +120,7 @@ fn parse_args() -> Result<Args, String> {
     // un contenedor con proxy obligatorio): el adaptador sigue sin proxy (D12) y el destino
     // tiene que ser de bucle local.
     if let Some(endpoint) = &groq_endpoint {
-        let local = ["http://127.0.0.1:", "http://localhost:", "http://[::1]:"];
-        if !local.iter().any(|p| endpoint.starts_with(p)) {
-            return Err("--groq-endpoint solo admite un reenvío en 127.0.0.1".into());
-        }
+        validate_loopback_endpoint(endpoint)?;
         if provider.as_deref() != Some("groq") {
             return Err("--groq-endpoint solo tiene sentido con --provider groq".into());
         }
@@ -85,9 +145,21 @@ fn parse_args() -> Result<Args, String> {
         Some("groq") => ProviderChoice::Groq {
             model: model.ok_or("--model es obligatorio con groq")?,
         },
+        Some("ollama-cloud") => ProviderChoice::OllamaCloud {
+            model: model.ok_or("--model es obligatorio con ollama-cloud")?,
+        },
+        Some("openai-compatible") => ProviderChoice::OpenAiCompatible {
+            base_url: base_url.ok_or("--base-url es obligatorio con openai-compatible")?,
+            model: model.ok_or("--model es obligatorio con openai-compatible")?,
+        },
+        Some("anthropic") => ProviderChoice::Anthropic {
+            model: model.ok_or("--model es obligatorio con anthropic")?,
+        },
         _ => {
             return Err(
-                "--provider debe ser ollama o groq (sin valor por defecto implícito)".into(),
+                "--provider debe ser ollama, groq, ollama-cloud, openai-compatible o \
+                     anthropic (sin valor por defecto implícito)"
+                    .into(),
             )
         }
     };
@@ -166,7 +238,10 @@ fn run() -> Result<(), String> {
     let emails = load_inputs(&args.inputs, "emails.json")?;
     // El almacén del sistema solo se abre si se eligió el proveedor externo.
     let store: Box<dyn CredentialStore> = match args.choice {
-        ProviderChoice::Groq { .. } => credentials()?,
+        ProviderChoice::Groq { .. }
+        | ProviderChoice::OllamaCloud { .. }
+        | ProviderChoice::OpenAiCompatible { .. }
+        | ProviderChoice::Anthropic { .. } => credentials()?,
         ProviderChoice::Ollama { .. } => Box::new(MemoryCredentialStore::default()),
     };
     let provider: Box<dyn nestadmin_ai::Provider> = match (&args.choice, &args.groq_endpoint) {
@@ -299,4 +374,60 @@ fn run() -> Result<(), String> {
         meta_path.display()
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::validate_loopback_endpoint as check;
+
+    #[test]
+    fn accepts_only_exact_loopback_hosts_with_a_port() {
+        for ok in [
+            "http://127.0.0.1:8080",
+            "http://127.0.0.1:8080/",
+            "http://localhost:3128",
+            "http://[::1]:9000/",
+        ] {
+            assert!(check(ok).is_ok(), "{ok}");
+        }
+    }
+
+    #[test]
+    fn rejects_prefix_lookalikes_and_other_hosts() {
+        for bad in [
+            // Userinfo: el host real es el que sigue a la arroba.
+            "http://127.0.0.1:80@evil.example/",
+            "http://localhost:1@evil.example:8080",
+            "http://user@127.0.0.1:8080",
+            "http://[::1]:80@evil.example/",
+            // Prefijo coincidente, host distinto.
+            "http://localhost:80.evil.example/",
+            "http://127.0.0.1:80.evil.example",
+            "http://localhost.evil.example:8080",
+            "http://127.0.0.10:8080",
+            "http://127.0.0.1.nip.io:8080",
+            "http://[::1]x:80",
+            // Otros destinos, esquemas y formas mal formadas.
+            "https://127.0.0.1:8080",
+            "http://example.com:8080",
+            "http://0.0.0.0:8080",
+            "http://127.0.0.1",
+            "http://127.0.0.1:",
+            "http://127.0.0.1:0",
+            "http://127.0.0.1:99999",
+            "http://127.0.0.1:80a",
+            "http://127.0.0.1:8080/ruta",
+            "http://127.0.0.1:8080?x=1",
+            "http://127.0.0.1:8080#f",
+            "http://127.0.0.1:8080\\@evil.example",
+            "http://127.0.0.1:8080 @evil.example",
+            "http://LOCALHOST:8080",
+            "http://[::1:80",
+            "http://[::2]:80",
+            "http://[127.0.0.1]:80",
+            "",
+        ] {
+            assert!(check(bad).is_err(), "{bad}");
+        }
+    }
 }

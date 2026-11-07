@@ -11,6 +11,7 @@ import type {
   MailView,
   Memory,
   ProviderChoice,
+  ProviderInfo,
   Rule,
   SettingsView,
   SetupCheck,
@@ -310,7 +311,7 @@ function header() {
         ? h(
             "span",
             { class: `pill provider ${active.provider}`, title: "Proveedor de IA activo" },
-            active.provider === "ollama" ? `Local · ${active.model}` : `Groq (externo) · ${active.model}`,
+            providerLabel(active.provider, active.model),
           )
         : null,
     ),
@@ -445,11 +446,40 @@ function reviewView() {
   );
 }
 
+// Modelos para Ollama cloud (D108). El prefijado viene del backend (`default_cloud_model`,
+// `DEFAULT_CLOUD_MODEL`); aquí solo van las sugerencias adicionales. Nombres de la API directa
+// de ollama.com.
+const CLOUD_MODEL_EXTRA_SUGGESTIONS = ["gpt-oss:120b", "mistral-large-4", "deepseek-v4.1-flash"];
+// Modelos de Claude (D110): ids sin sufijo de fecha; el modelo es configurable.
+const CLAUDE_MODEL_SUGGESTIONS = ["claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5"];
+const CLAUDE_MODEL_DEFAULT = CLAUDE_MODEL_SUGGESTIONS[0];
+
+const EXTERNAL_NAME: Record<Exclude<ProviderInfo["provider"], "ollama">, string> = {
+  groq: "Groq",
+  ollama_cloud: "Ollama cloud",
+  openai_compatible: "Compatible con OpenAI",
+  anthropic: "Claude · Anthropic",
+};
+
+function providerLabel(provider: ProviderInfo["provider"], model: string): string {
+  if (provider === "ollama") return `Local · ${model}`;
+  return `${EXTERNAL_NAME[provider]} (externo) · ${model}`;
+}
+
+/// Host de una URL base para mostrarlo en el aviso; si no es una URL, el texto tal cual.
+function hostOf(baseUrl: string): string {
+  try {
+    return new URL(baseUrl.trim()).hostname || baseUrl.trim();
+  } catch {
+    return baseUrl.trim() || "el servicio configurado";
+  }
+}
+
 function provenance(result: Record<string, any>) {
   return h(
     "p",
     { class: "meta" },
-    `Propuesta de ${result.provider === "groq" ? "Groq (externo)" : "Ollama local"} · ${result.model}`,
+    `Propuesta de ${result.provider in EXTERNAL_NAME ? `${EXTERNAL_NAME[result.provider as keyof typeof EXTERNAL_NAME]} (externo)` : "Ollama local"} · ${result.model}`,
     result.latency_ms ? ` · ${(result.latency_ms / 1000).toFixed(1)} s` : "",
     ` · versión ${result.version}`,
   );
@@ -1184,16 +1214,80 @@ function settingsView() {
   const groqModel = s.choice.provider === "groq" ? s.choice.model : "qwen/qwen3-32b";
   const ollamaRadio = h("input", { type: "radio", name: "provider", value: "ollama", checked: s.choice.provider === "ollama" }) as HTMLInputElement;
   const groqRadio = h("input", { type: "radio", name: "provider", value: "groq", checked: s.choice.provider === "groq" }) as HTMLInputElement;
+  const cloudModelValue = s.choice.provider === "ollama_cloud" ? s.choice.model : s.default_cloud_model;
+  const cloudRadio = h("input", { type: "radio", name: "provider", value: "ollama_cloud", checked: s.choice.provider === "ollama_cloud" }) as HTMLInputElement;
   const model = h("input", { value: ollamaModel }) as HTMLInputElement;
   const url = h("input", { value: ollamaUrl }) as HTMLInputElement;
   const gModel = h("input", { value: groqModel }) as HTMLInputElement;
+  const cloudModel = h("input", { value: cloudModelValue, list: "ollama-cloud-models" }) as HTMLInputElement;
+  const cloudSuggestions = h(
+    "datalist",
+    { id: "ollama-cloud-models" },
+    ...[s.default_cloud_model, ...CLOUD_MODEL_EXTRA_SUGGESTIONS].map((name) => h("option", { value: name })),
+  );
+  const compatRadio = h("input", { type: "radio", name: "provider", value: "openai_compatible", checked: s.choice.provider === "openai_compatible" }) as HTMLInputElement;
+  const compatUrl = h("input", { value: s.choice.provider === "openai_compatible" ? s.choice.base_url : "", placeholder: "https://api.ejemplo.com/v1" }) as HTMLInputElement;
+  const compatModel = h("input", { value: s.choice.provider === "openai_compatible" ? s.choice.model : "" }) as HTMLInputElement;
+  const claudeRadio = h("input", { type: "radio", name: "provider", value: "anthropic", checked: s.choice.provider === "anthropic" }) as HTMLInputElement;
+  const claudeModel = h("input", { value: s.choice.provider === "anthropic" ? s.choice.model : CLAUDE_MODEL_DEFAULT, list: "claude-models" }) as HTMLInputElement;
+  const claudeSuggestions = h("datalist", { id: "claude-models" }, ...CLAUDE_MODEL_SUGGESTIONS.map((name) => h("option", { value: name })));
   const key = h("input", { type: "password", autocomplete: "off", placeholder: s.groq_key_saved ? "Clave guardada" : "gsk_…" }) as HTMLInputElement;
+  const claudeKey = h("input", { type: "password", autocomplete: "off", placeholder: s.anthropic_key_saved ? "Clave guardada" : "Clave de Anthropic" }) as HTMLInputElement;
+  const compatKey = h("input", { type: "password", autocomplete: "off", placeholder: s.openai_compatible_key_saved ? "Clave guardada" : "Clave del servicio" }) as HTMLInputElement;
+  // La clave es del host de la URL: al editarla se consulta si ya hay una guardada para ese host.
+  const compatKeyStatus = h("p", { class: "intro" });
+  const compatDelete = h("button", { class: "danger", onclick: () => void act(() => api.deleteOpenAiCompatibleKey(compatUrl.value), "Clave eliminada") }, "Eliminar clave");
+  const showCompatKey = (saved: boolean) => {
+    const host = hostOf(compatUrl.value);
+    compatKeyStatus.textContent = compatUrl.value.trim()
+      ? `La clave se guarda para el host ${host}. Si cambias de host, la clave anterior no se envía. ${saved ? "Hay una clave guardada para este host." : "No hay clave guardada para este host."}`
+      : "Indica la URL base para guardar su clave.";
+    compatKey.placeholder = saved ? "Clave guardada" : "Clave del servicio";
+    compatDelete.hidden = !saved;
+  };
+  showCompatKey(s.openai_compatible_key_saved);
+  compatUrl.addEventListener("change", () => {
+    const value = compatUrl.value;
+    api.openAiCompatibleKeySaved(value).then(
+      (saved) => compatUrl.value === value && showCompatKey(saved),
+      () => showCompatKey(false),
+    );
+  });
+  const cloudKey = h("input", { type: "password", autocomplete: "off", placeholder: s.ollama_cloud_key_saved ? "Clave guardada" : "Clave de Ollama" }) as HTMLInputElement;
   const apply = () => {
     const choice: ProviderChoice = groqRadio.checked
       ? { provider: "groq", model: gModel.value.trim() }
-      : { provider: "ollama", base_url: url.value.trim(), model: model.value.trim() };
+      : cloudRadio.checked
+        ? { provider: "ollama_cloud", model: cloudModel.value.trim() }
+        : compatRadio.checked
+          ? { provider: "openai_compatible", base_url: compatUrl.value.trim(), model: compatModel.value.trim() }
+          : claudeRadio.checked
+            ? { provider: "anthropic", model: claudeModel.value.trim() }
+            : { provider: "ollama", base_url: url.value.trim(), model: model.value.trim() };
     if (choice.provider === "groq" && !confirm("Con Groq, el contenido de documentos y correos se envía a un servicio externo. ¿Continuar?")) return;
-    void act(() => api.selectProvider(choice), `Proveedor activo: ${choice.provider === "groq" ? "Groq" : "Ollama local"}`);
+    if (
+      choice.provider === "ollama_cloud" &&
+      !confirm(
+        "El contenido de los documentos sale de este equipo y se envía a los servidores de Ollama (servicio externo). Consulta la política de privacidad de Ollama. ¿Continuar?",
+      )
+    )
+      return;
+    if (
+      choice.provider === "openai_compatible" &&
+      !confirm(
+        `El contenido de los documentos sale de este equipo y se envía a ${hostOf(choice.base_url)} (servicio externo). Consulta su política de privacidad. ¿Continuar?`,
+      )
+    )
+      return;
+    if (
+      choice.provider === "anthropic" &&
+      !confirm(
+        "El contenido de los documentos sale de este equipo y se envía a Anthropic (servicio externo). Consulta su política de privacidad. ¿Continuar?",
+      )
+    )
+      return;
+    const label = choice.provider === "ollama" ? "Ollama local" : EXTERNAL_NAME[choice.provider];
+    void act(() => api.selectProvider(choice), `Proveedor activo: ${label}`);
   };
   return h(
     "section",
@@ -1208,6 +1302,17 @@ function settingsView() {
       h("div", { class: "row indent" }, h("label", {}, "Modelo", model), h("label", {}, "Dirección local", url)),
       h("label", { class: "choice" }, groqRadio, h("span", {}, h("strong", {}, "Groq (externo)"), " — envía el contenido a la API de Groq. Requiere clave.")),
       h("div", { class: "row indent" }, h("label", {}, "Modelo", gModel)),
+      h("label", { class: "choice" }, cloudRadio, h("span", {}, h("strong", {}, "Ollama cloud (externo)"), " — envía el contenido a los servidores de Ollama. Requiere clave.")),
+      h(
+        "div",
+        { class: "row indent" },
+        h("label", {}, "Modelo", cloudModel, cloudSuggestions),
+        h("p", { class: "intro" }, `Prefijado: ${s.default_cloud_model} (elección del usuario, pendiente de medir). Otros para probar: ${CLOUD_MODEL_EXTRA_SUGGESTIONS.join(", ")}. Las etiquetas exactas se confirman en https://ollama.com/api/tags.`),
+      ),
+      h("label", { class: "choice" }, compatRadio, h("span", {}, h("strong", {}, "Compatible con OpenAI (externo)"), " — envía el contenido a la API que indiques (OpenRouter, Mistral, DeepSeek, OpenAI, Together…). Solo https; no admite direcciones locales. Requiere clave.")),
+      h("div", { class: "row indent" }, h("label", {}, "URL base", compatUrl), h("label", {}, "Modelo", compatModel)),
+      h("label", { class: "choice" }, claudeRadio, h("span", {}, h("strong", {}, "Claude · Anthropic (externo)"), " — envía el contenido a la API de Anthropic. Requiere clave.")),
+      h("div", { class: "row indent" }, h("label", {}, "Modelo", claudeModel, claudeSuggestions)),
       h("button", { class: "primary", onclick: apply }, "Usar este proveedor"),
     ),
     h(
@@ -1221,6 +1326,55 @@ function settingsView() {
         { class: "buttons" },
         h("button", { onclick: () => void act(() => api.saveGroqKey(key.value), "Clave guardada") }, "Guardar clave"),
         s.groq_key_saved ? h("button", { class: "danger", onclick: () => void act(() => api.deleteGroqKey(), "Clave eliminada") }, "Eliminar clave") : null,
+      ),
+    ),
+    h(
+      "div",
+      { class: "card" },
+      h("h3", {}, "Clave de Ollama cloud"),
+      h("p", { class: "intro" }, "Se guarda en el Administrador de credenciales de Windows. NestAdmin no la muestra ni la escribe en registros."),
+      h("div", { class: "row" }, h("label", {}, s.ollama_cloud_key_saved ? "Sustituir clave" : "Clave", cloudKey)),
+      h(
+        "div",
+        { class: "buttons" },
+        h("button", { onclick: () => void act(() => api.saveOllamaCloudKey(cloudKey.value), "Clave guardada") }, "Guardar clave"),
+        s.ollama_cloud_key_saved ? h("button", { class: "danger", onclick: () => void act(() => api.deleteOllamaCloudKey(), "Clave eliminada") }, "Eliminar clave") : null,
+      ),
+    ),
+    h(
+      "div",
+      { class: "card" },
+      h("h3", {}, "Clave del proveedor compatible con OpenAI"),
+      h("p", { class: "intro" }, "Se guarda en el Administrador de credenciales de Windows, ligada al host de la URL base. NestAdmin no la muestra ni la escribe en registros."),
+      compatKeyStatus,
+      h("div", { class: "row" }, h("label", {}, "Clave", compatKey)),
+      h(
+        "div",
+        { class: "buttons" },
+        h(
+          "button",
+          {
+            onclick: () =>
+              void act(async () => {
+                await api.saveOpenAiCompatibleKey(compatUrl.value, compatKey.value);
+              }, "Clave guardada"),
+          },
+          "Guardar clave",
+        ),
+        compatDelete,
+      ),
+    ),
+    h(
+      "div",
+      { class: "card" },
+      h("h3", {}, "Clave de Claude (Anthropic)"),
+      h("p", { class: "intro" }, "Se guarda en el Administrador de credenciales de Windows. NestAdmin no la muestra ni la escribe en registros."),
+      h("div", { class: "row" }, h("label", {}, s.anthropic_key_saved ? "Sustituir clave" : "Clave", claudeKey)),
+      h(
+        "div",
+        { class: "buttons" },
+        h("button", { onclick: () => void act(() => api.saveAnthropicKey(claudeKey.value), "Clave guardada") }, "Guardar clave"),
+        s.anthropic_key_saved ? h("button", { class: "danger", onclick: () => void act(() => api.deleteAnthropicKey(), "Clave eliminada") }, "Eliminar clave") : null,
       ),
     ),
     h("div", { class: "card" }, h("h3", {}, "Datos locales"), h("p", { class: "mono" }, s.data_dir)),
@@ -1363,7 +1517,7 @@ function stepRow(step: SetupStep) {
   );
 }
 
-// Aviso de memoria (D46): informa y deja seguir; Groq solo se elige a mano.
+// Aviso de memoria (D46): informa y deja seguir; los proveedores externos solo se eligen a mano.
 function memoryNotice() {
   const m = state.memory;
   if (!m?.warning) return null;

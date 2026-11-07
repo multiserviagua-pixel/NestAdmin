@@ -114,6 +114,9 @@ fn serve(mut stream: TcpStream, mode: &Mutex<Mode>, chats: &AtomicUsize) {
                 return;
             }
         }
+    } else if request_line.starts_with("POST /api/show ") {
+        // Modelo local, sin `remote_host` ni `remote_model`: la guarda de D107 lo deja pasar.
+        (200, json!({ "details": { "family": "qwen3" } }))
     } else {
         (404, json!({ "error": "not found" }))
     };

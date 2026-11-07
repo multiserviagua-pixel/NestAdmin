@@ -1,7 +1,8 @@
 //! Memoria del equipo frente a la IA local (D46). Qwen3 8B ocupa unos 5,2 GB y, con
 //! Windows y la aplicación, necesita 16 GB para responder dentro del plazo. Con menos se
 //! avisa sin bloquear; con 8 GB o menos, el aviso dice que probablemente no responderá a
-//! tiempo. Nunca se elige Groq por el usuario: solo se le indica que puede elegirlo.
+//! tiempo. Nunca se elige un proveedor externo por el usuario: solo se le indica que puede
+//! elegirlos.
 
 use std::sync::Arc;
 
@@ -70,13 +71,13 @@ impl Memory {
             MemoryLevel::Insufficient => Some(format!(
                 "Este equipo tiene {} GB de memoria. Con {LOW_RAM_GB} GB o menos, la IA local \
                  (Qwen3 8B) probablemente no responderá a tiempo. Puede intentarlo igualmente o \
-                 elegir Groq en Configuración; NestAdmin no lo cambiará por su cuenta.",
+                 elegir un proveedor externo en Configuración; NestAdmin no lo cambiará por su cuenta.",
                 gb(total)
             )),
             MemoryLevel::BelowRecommended => Some(format!(
                 "Este equipo tiene {} GB de memoria; se recomiendan {RECOMMENDED_RAM_GB} GB para \
                  la IA local. Puede seguir, pero las respuestas serán más lentas y alguna podría \
-                 no llegar a tiempo; si ocurre, puede elegir Groq en Configuración.",
+                 no llegar a tiempo; si ocurre, puede elegir un proveedor externo en Configuración.",
                 gb(total)
             )),
             _ => None,
@@ -105,7 +106,7 @@ impl Memory {
         match self.level {
             MemoryLevel::Insufficient | MemoryLevel::BelowRecommended => Some(format!(
                 "probablemente por falta de memoria: el equipo tiene {} GB y la IA local necesita \
-                 {RECOMMENDED_RAM_GB} GB; puede elegir Groq en Configuración",
+                 {RECOMMENDED_RAM_GB} GB; puede elegir un proveedor externo en Configuración",
                 gb(total)
             )),
             _ => None,
@@ -122,7 +123,7 @@ impl Memory {
 }
 
 /// Proveedor local que explica los tiempos agotados por poca memoria. Con memoria
-/// suficiente, desconocida o con Groq, devuelve el proveedor tal cual.
+/// suficiente, desconocida o con un proveedor externo, devuelve el proveedor tal cual.
 pub fn explain_timeouts(provider: Arc<dyn Provider>, memory: &Memory) -> Arc<dyn Provider> {
     if provider.kind() != ProviderKind::Ollama || memory.timeout_cause().is_none() {
         return provider;
