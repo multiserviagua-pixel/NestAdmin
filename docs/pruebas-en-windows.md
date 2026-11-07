@@ -69,6 +69,7 @@ Con el equipo libre (otra IA o aplicaciones pesadas falsean memoria y tiempo) y 
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts\t12-medir.ps1 -Proveedor ollama
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\t12-medir.ps1 -Proveedor ollama-cloud -Modelo gemma4:31b
 ```
 
 - [ ] Copiar a la evidencia las cifras de `evaluation\results\t12-*.txt` (memoria, duración y métricas), sin las predicciones.
