@@ -105,6 +105,8 @@ Fecha 05/10/2026";
         number,
         method: Method::PdfText,
         chars: 1,
+        confidence: None,
+        low_confidence: false,
         offset,
     };
     let extraction = Extraction {

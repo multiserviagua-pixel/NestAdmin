@@ -23,7 +23,7 @@ fn open(dir: &Path) -> App {
     let extractor = Extractor::new(
         root().join("vendor/pdfium/bin"),
         Box::new(Tesseract::new(
-            Tesseract::default_executable(),
+            Tesseract::packaged_executable(&root().join("vendor")),
             root().join("vendor/tessdata"),
         )),
     );
