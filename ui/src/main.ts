@@ -192,7 +192,7 @@ function badge(taskState: string) {
   return h("span", { class: `badge state-${taskState}` }, STATE_LABEL[taskState] ?? taskState);
 }
 
-/** Avisa una vez de cada factura que llega con importes dudosos (D49). */
+/** Avisa una vez de cada factura que llega con importes dudosos (D120). */
 function announceDoubtfulAmounts() {
   for (const t of state.tasks) {
     const message = t.result?.amount_review;

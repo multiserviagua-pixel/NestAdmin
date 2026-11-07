@@ -421,7 +421,7 @@ impl App {
             Err(error) => return Ok(self.store.fail(task.id, &error)?),
         };
         let kind = action_kind(&task);
-        // Un importe dudoso nunca se registra por regla: lo confirma una persona (D49).
+        // Un importe dudoso nunca se registra por regla: lo confirma una persona (D120).
         if let Some(message) = result["amount_review"].as_str() {
             result["review_reason"] = json!(message);
             return Ok(self.store.await_review(task.id, &result)?);
@@ -801,7 +801,7 @@ fn amount_label(field: &str) -> &str {
     }
 }
 
-/// Mensaje que pide revisar los importes cuando es probable que estén mal (D49): importes
+/// Mensaje que pide revisar los importes cuando es probable que estén mal (D120): importes
 /// recuperados como propuesta o una suma que no cuadra. Lleva la ubicación del archivo y
 /// los importes. `None` si los importes se leyeron sin duda y cuadran.
 fn amount_review(

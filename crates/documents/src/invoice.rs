@@ -3,7 +3,7 @@
 //! literal del documento.
 //!
 //! Los importes son euros con exactamente dos decimales, con punto o con coma decimal y
-//! separadores de miles bien agrupados (D04, D48); las fechas, ISO `AAAA-MM-DD`. Un valor ilegible se anota como error explícito del campo, nunca como
+//! separadores de miles bien agrupados (D04, D119); las fechas, ISO `AAAA-MM-DD`. Un valor ilegible se anota como error explícito del campo, nunca como
 //! un cero ni una fecha aproximada, y no impide validar el resto de la factura.
 
 use std::fmt;
@@ -110,7 +110,7 @@ fn days_in_month(year: u16, month: u8) -> u8 {
 const SPACES: [char; 3] = [' ', '\u{a0}', '\u{202f}'];
 
 /// Convierte un importe en euros con dos decimales: `1234.56`, `1,234.56`, `1234,56`,
-/// `1.234,56` o `1 234,56`, con `EUR` o `€` detrás si se quiere (D48). El separador decimal es
+/// `1.234,56` o `1 234,56`, con `EUR` o `€` detrás si se quiere (D119). El separador decimal es
 /// el último punto o coma y debe ir seguido de exactamente dos cifras; el otro signo, o un
 /// espacio, solo puede separar grupos de tres cifras. Se rechaza lo ambiguo (`1.234`, `1,234`,
 /// `121`) y cualquier otra precisión: adivinar el formato podría multiplicar un importe por mil.
@@ -163,7 +163,7 @@ pub fn parse_amount(field: &'static str, literal: &str) -> Result<Decimal> {
     Decimal::from_str(&format!("{sign}{digits}.{cents}")).map_err(|_| invalid())
 }
 
-/// Motivo por el que un importe se recuperó en lugar de leerse sin duda (D49).
+/// Motivo por el que un importe se recuperó en lugar de leerse sin duda (D120).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RecoveryReason {
@@ -186,7 +186,7 @@ impl RecoveryReason {
 }
 
 /// Lectura probable de un importe que [`parse_amount`] rechaza por ambiguo o incompleto
-/// (D49): `121` → 121.00; `121,5` → 121.50; `1.234`, `1,234` o `1.234.567` → separador de
+/// (D120): `121` → 121.00; `121,5` → 121.50; `1.234`, `1,234` o `1.234.567` → separador de
 /// miles. Es una propuesta para que la confirme una persona, nunca un valor seguro: lo que
 /// no encaja en esos patrones (`abc`, `1,21,00`, `12a.00`) no se recupera.
 pub fn recover_amount(literal: &str) -> Option<(Decimal, RecoveryReason)> {
@@ -228,7 +228,7 @@ pub fn recover_amount(literal: &str) -> Option<(Decimal, RecoveryReason)> {
     }
 }
 
-/// Importe que no se pudo leer sin duda y se ha recuperado como propuesta (D49). El campo
+/// Importe que no se pudo leer sin duda y se ha recuperado como propuesta (D120). El campo
 /// de la factura lleva el valor propuesto, pero la factura no puede registrarse sin que una
 /// persona lo confirme con el documento.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -340,7 +340,7 @@ pub struct Invoice {
     pub total: Option<Evidenced<Decimal>>,
     /// Campos presentes pero ilegibles, en el orden en que se interpretan.
     pub unreadable: Vec<FieldError>,
-    /// Importes dudosos recuperados como propuesta; exigen revisión humana (D49).
+    /// Importes dudosos recuperados como propuesta; exigen revisión humana (D120).
     pub recovered: Vec<RecoveredAmount>,
 }
 
@@ -432,7 +432,7 @@ fn text_field(field: &Option<Evidenced<String>>) -> Option<Evidenced<String>> {
 }
 
 /// Interpreta un campo presente; si es ilegible lo anota en `unreadable` y devuelve `None`.
-/// Importe: legible, recuperado como propuesta (D49) o ilegible.
+/// Importe: legible, recuperado como propuesta (D120) o ilegible.
 fn amount_field(
     field: &Option<Evidenced<String>>,
     name: &'static str,
@@ -501,7 +501,7 @@ mod tests {
         ok(" 121.00 EUR ", 12100);
         ok("121.00€", 12100);
         ok("-5.10", -510);
-        // Formato español y separadores de miles bien agrupados (D48).
+        // Formato español y separadores de miles bien agrupados (D119).
         ok("121,00", 12100);
         ok("242,00 €", 24200);
         ok("-5,10 EUR", -510);

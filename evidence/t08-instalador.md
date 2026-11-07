@@ -84,7 +84,7 @@ No se ha recorrido a mano en la ventana instalada.
 | Instalación y asistente | Una sola ejecución. Copió la aplicación (18:58), descargó e instaló Ollama 0.40.14 (19:02) y `qwen3:8b` (5 225 388 164 bytes, digest `500a1f067a9f`) y borró el instalador descargado de `descargas\`. |
 | Estado después | `nestadmin.exe`, `uninstall.exe`, `pdfium\`, `tessdata\`, `tesseract\` (29 archivos, `eng` y `spa`); NestAdmin 0.1.0 en Aplicaciones y acceso directo en el menú Inicio; Ollama en marcha. |
 | Abrir la aplicación | Ventana principal sin asistente: la comprobación al abrir encontró Ollama y el modelo. Indicador «Local · qwen3:8b». |
-| Documento sintético | Factura `.txt` sintética (200,00 + 42,00 = 242,00 EUR) importada con «Importar documento». Procesada con `qwen3:8b` en 52,2 s y pendiente de revisión, sin datos inventados. Los tres importes salieron ilegibles porque el validador solo admitía punto decimal; se corrigió con D48 y D49. |
+| Documento sintético | Factura `.txt` sintética (200,00 + 42,00 = 242,00 EUR) importada con «Importar documento». Procesada con `qwen3:8b` en 52,2 s y pendiente de revisión, sin datos inventados. Los tres importes salieron ilegibles porque el validador solo admitía punto decimal; se corrigió con D119 y D120. |
 
 Límites de esta ejecución:
 

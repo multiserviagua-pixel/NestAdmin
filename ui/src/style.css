@@ -590,7 +590,7 @@ h3 {
   justify-content: space-between;
 }
 
-/* Importes dudosos (D49): aviso con archivo e importes y confirmación obligatoria. */
+/* Importes dudosos (D120): aviso con archivo e importes y confirmación obligatoria. */
 .amount-review {
   border: 1px solid color-mix(in srgb, var(--warn) 45%, transparent);
   background: color-mix(in srgb, var(--warn) 10%, transparent);

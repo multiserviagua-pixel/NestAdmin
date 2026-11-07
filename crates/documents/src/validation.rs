@@ -16,7 +16,7 @@ pub enum Issue {
     /// Base + IVA distinto del total, con aritmética decimal exacta.
     TotalMismatch,
     PossibleDuplicate,
-    /// Algún importe se recuperó como propuesta y debe confirmarlo una persona (D49).
+    /// Algún importe se recuperó como propuesta y debe confirmarlo una persona (D120).
     AmountToReview,
 }
 
@@ -74,7 +74,7 @@ pub struct ValidationReport {
     pub duplicates: Vec<DuplicateCandidate>,
     /// Campos presentes pero ilegibles; vacío si todos se interpretaron.
     pub unreadable: Vec<FieldError>,
-    /// Importes recuperados como propuesta (D49); vacío si todos se leyeron sin duda.
+    /// Importes recuperados como propuesta (D120); vacío si todos se leyeron sin duda.
     pub recovered: Vec<RecoveredAmount>,
 }
 

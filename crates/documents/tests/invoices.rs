@@ -268,7 +268,7 @@ fn currency_is_kept_with_evidence_and_never_assumed() {
     let inv = Invoice::from_raw(&raw([None, None, None, None, None, Some("12,l0 EUR")]));
     assert_eq!(inv.currency, None);
 
-    // Un importe en formato español sirve como indicio, igual que con punto (D48).
+    // Un importe en formato español sirve como indicio, igual que con punto (D119).
     let inv = Invoice::from_raw(&raw([None, None, None, None, None, Some("12,10 €")]));
     assert_eq!(
         inv.currency,
