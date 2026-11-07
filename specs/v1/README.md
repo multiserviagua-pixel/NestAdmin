@@ -1,6 +1,6 @@
 # Especificación v1 — asistente administrativo local
 
-Estado: propuesta de implementación; no es evidencia de funcionamiento. Fuente de alcance: [PLAN.md](../../PLAN.md). Esta versión describe la primera entrega para Windows. Los conectores de correo y administración son simuladores; los productos reales y sus permisos siguen sin identificar.
+Estado: propuesta de implementación; no es evidencia de funcionamiento. Fuente de alcance: [PLAN.md](../../PLAN.md). Esta versión describe la primera entrega para Windows. El correo tiene conectores reales (R13) y el sistema administrativo es un simulador; la facturación de venta, con Verifactu, es propia de la aplicación (R15–R20).
 
 - [Requisitos, flujos y decisiones](requisitos.md)
 - [Registro de decisiones técnicas y versiones](decisiones.md)
