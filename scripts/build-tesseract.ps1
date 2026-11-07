@@ -1,4 +1,4 @@
-# Compila un Tesseract mínimo para el paquete (D69): solo PNG y zlib, sin libtiff, libjpeg,
+﻿# Compila un Tesseract mínimo para el paquete (D69): solo PNG y zlib, sin libtiff, libjpeg,
 # libwebp, giflib, OpenJPEG, libarchive, curl ni OpenMP, enlazado en estático con el runtime de
 # MSVC (/MT). NestAdmin solo entrega PNG a Tesseract (páginas rasterizadas por PDFium e
 # imágenes decodificadas por la aplicación, D67), así que no necesita más formatos. El

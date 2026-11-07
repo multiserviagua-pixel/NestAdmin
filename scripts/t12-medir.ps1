@@ -1,11 +1,12 @@
-# T12: ejecuta el corpus sintético con un proveedor y mide la memoria en el equipo objetivo.
+﻿# T12: ejecuta el corpus sintético con un proveedor y mide la memoria en el equipo objetivo.
 #
 #   powershell -NoProfile -ExecutionPolicy Bypass -File scripts/t12-medir.ps1 -Proveedor ollama
 #   powershell -NoProfile -ExecutionPolicy Bypass -File scripts/t12-medir.ps1 -Proveedor groq -Modelo qwen/qwen3.8-27b
 #
 # Mientras corre nestadmin-predict, cada medio segundo suma el conjunto de trabajo de los
-# procesos de Ollama (ollama*, incluido el que carga el modelo) y el del propio cliente, y guarda
-# el máximo. Con Groq la memoria del servidor remoto no es observable: solo se mide el cliente.
+# procesos de Ollama (ollama* y llama-server*, que es el que carga el modelo desde Ollama 0.40)
+# y el del propio cliente, y guarda el máximo. Anota también la memoria privada (comprometida):
+# con poca RAM libre Windows recorta el conjunto de trabajo y este se queda corto. Con Groq la memoria del servidor remoto no es observable: solo se mide el cliente.
 # Escribe las predicciones en evaluation/predictions/, el informe en evaluation/results/ y un
 # resumen en evaluation/results/t12-<proveedor>-<fecha>.txt, todo fuera de Git. No anota datos
 # personales: equipo y usuario no constan.
@@ -33,9 +34,11 @@ if ($Modelo) { $arguments += @('--model', $Modelo) }
 
 # Memoria antes de empezar: el modelo puede estar ya cargado (se anota, no se resta).
 function Get-Sample($clientId) {
-    $ollama = (Get-Process -Name 'ollama*' -ErrorAction SilentlyContinue | Measure-Object WorkingSet64 -Sum).Sum
+    $procs = @(Get-Process -Name 'ollama*', 'llama-server*' -ErrorAction SilentlyContinue)
+    $ollama = ($procs | Measure-Object WorkingSet64 -Sum).Sum
+    $private = ($procs | Measure-Object PrivateMemorySize64 -Sum).Sum
     $client = if ($clientId) { (Get-Process -Id $clientId -ErrorAction SilentlyContinue).WorkingSet64 } else { 0 }
-    [pscustomobject]@{ Ollama = [int64]$ollama; Client = [int64]$client }
+    [pscustomobject]@{ Ollama = [int64]$ollama; OllamaPrivate = [int64]$private; Client = [int64]$client }
 }
 $before = Get-Sample $null
 $os = Get-CimInstance Win32_OperatingSystem
@@ -45,10 +48,12 @@ Write-Host "==> Ejecutando el corpus con $Proveedor"
 $watch = [Diagnostics.Stopwatch]::StartNew()
 $p = Start-Process -FilePath 'target\release\nestadmin-predict.exe' -ArgumentList $arguments -PassThru -NoNewWindow
 $null = $p.Handle
-$peakOllama = 0; $peakClient = 0; $peakTotal = 0
+# Int64: con 0 a secas [Math]::Max elige Int32 y falla al pasar de 2 GB.
+[int64]$peakOllama = 0; [int64]$peakOllamaPrivate = 0; [int64]$peakClient = 0; [int64]$peakTotal = 0
 while (-not $p.HasExited) {
     $s = Get-Sample $p.Id
     $peakOllama = [Math]::Max($peakOllama, $s.Ollama)
+    $peakOllamaPrivate = [Math]::Max($peakOllamaPrivate, $s.OllamaPrivate)
     $peakClient = [Math]::Max($peakClient, $s.Client)
     $peakTotal = [Math]::Max($peakTotal, $s.Ollama + $s.Client)
     Start-Sleep -Milliseconds 500
@@ -71,13 +76,14 @@ $summary = @(
     "Ollama: $ollamaVersion",
     "Memoria libre al empezar: $(& $gb $free)",
     "Ollama antes de empezar (modelo ya cargado si > 1 GB): $(& $gb $before.Ollama)",
-    "Pico de Ollama (suma de procesos ollama*): $(& $gb $peakOllama)",
+    "Pico de Ollama, conjunto de trabajo (ollama* y llama-server*): $(& $gb $peakOllama)",
+    "Pico de Ollama, memoria privada (ollama* y llama-server*): $(& $gb $peakOllamaPrivate)",
     "Pico del cliente nestadmin-predict: $(& $gb $peakClient)",
     "Pico conjunto: $(& $gb $peakTotal)",
     "Duración: $([int]$watch.Elapsed.TotalSeconds) s",
     "Predicciones: $out (fuera de Git)",
     "Informe: evaluation/results/$report (fuera de Git)",
-    'Método: conjunto de trabajo (WorkingSet64) muestreado cada 500 ms; no incluye memoria compartida de la GPU.'
+    'Método: conjunto de trabajo (WorkingSet64) y memoria privada (PrivateMemorySize64) muestreados cada 500 ms; no incluye memoria compartida de la GPU.'
 )
 if ($Proveedor -eq 'groq') { $summary += 'Groq: la memoria del servidor remoto no es observable; el pico de Ollama es el de procesos ajenos a la prueba.' }
 $summaryPath = "evaluation/results/t12-$name-$stamp.txt"
