@@ -19,5 +19,6 @@ Cada decisión (`D<n>`) tiene un número definitivo desde que se escribe, para q
 | D01–D105 | `main` (historia hasta el 2026-11-07, con huecos D26–D29, D54–D59 y D94–D99) | Asignado |
 | D106–D118 | `claude/fase-11-venta-integracion`: proveedores externos D106–D112 (antes `D92`–`D98`) y persistencia de venta D113–D118 (antes `D99`–`D104`), integrados el 2026-11-07 | Asignado |
 | D119–D120 | `fase-9b-importes-es`: importes en formato español D119 e importes dudosos D120 (antes `D48`–`D49`), integrados el 2026-11-07 | Asignado |
+| D121–D121 | Credenciales largas repartidas en trozos del Administrador de credenciales (tokens de Microsoft), 2026-11-07 | Asignado |
 
-Siguiente número libre: **D121**.
+Siguiente número libre: **D122**.
