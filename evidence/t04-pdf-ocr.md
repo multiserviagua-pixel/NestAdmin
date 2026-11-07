@@ -71,3 +71,24 @@ Regresión del corpus sintético con la nueva instrucción (Groq): 60 de 60 camp
 
 Pendiente: la foto real de varias facturas del usuario (en su equipo; por AGENTS.md no se sube al repositorio) y Ollama/Qwen3 8B con la instrucción nueva en el equipo objetivo. El umbral de páginas escaneadas sigue sin calibrar.
 
+
+## 2026-11-07 — Tesseract mínimo en Windows (D69, pasos 1 y 2)
+
+Equipo objetivo: Windows 11 Pro 26H2 (26300.9818), Intel Core Ultra 5 125U, Build Tools 2022 (MSVC 14.44.35207). Rama `pruebas-windows-2026-11-06`.
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\build-tesseract.ps1
+```
+
+| Paso | Resultado |
+| --- | --- |
+| Primer intento | Falla: `cmake` no está en el PATH. Build Tools trae el suyo (`Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin`); el script lo usa ahora si no hay otro. |
+| Comprobación de dependencias con `dumpbin` | Falla con «Acceso denegado» al crear el proceso. Bitdefender Endpoint Security deniega crear cualquier proceso cuya línea de órdenes nombra el `tesseract.exe` recién compilado y sin firmar (también `cp`, y aunque se desactive el sandbox de la herramienta). `dumpbin` sobre otros ejecutables funciona. El script lee ahora las importaciones (normales y diferidas) del propio PE, sin lanzar procesos. Contrastado: da lo mismo que `dumpbin /dependents` para `notepad.exe` y para el Tesseract de UB Mannheim (`libtesseract-5.dll, libarchive-13.dll, libleptonica-6.dll, libtiff-6.dll, KERNEL32.dll, msvcrt.dll, libgcc_s_seh-1.dll, libstdc++-6.dll`). |
+| Compilación (zlib 1.3.1, libpng 1.6.44, Leptonica 1.85.0, Tesseract 5.5.0, commits fijados) | Correcta. |
+| **«Dependencias»** | **`KERNEL32.dll`**: ninguna DLL de terceros, del runtime de Visual C++ ni de GCC. `tesseract.exe` de 5 212 672 bytes, con las cuatro licencias y `VERSIONS.txt` en `vendor\tesseract-min`. |
+| `tesseract --version` (ejecutado una vez, antes de que el antivirus lo bloqueara) | `tesseract 5.5.0`, `leptonica-1.85.0 … [MSC v.1944 LIB Release x64]`, `libpng 1.6.44 : zlib 1.3.1`. |
+| Comprobación final del script y pruebas | **Bloqueadas**: Bitdefender deniega ejecutar `vendor\tesseract-min\tesseract.exe` («Acceso denegado»). Sin ejecutar `cargo test -p nestadmin-extract -- --include-ignored` con este ejecutable ni la comparación de texto. |
+
+Referencia medida con el Tesseract de UB Mannheim (`vendor\tesseract\tesseract.exe`, `-l spa+eng --psm 3`, JPG pasados directamente, tres ejecuciones): `dos-facturas.jpg` 285 caracteres, 5,93 / 1,11 / 1,18 s (la primera, en frío); `factura-girada-exif.jpg` 147 caracteres, 1,05 / 0,95 / 0,97 s. El texto se guardó fuera del repositorio para compararlo.
+
+El paso 3 del plan (cambiar el paquete) **no se ha aplicado**: exige que pasen las pruebas y la comparación. Para seguir hace falta una exclusión de Bitdefender para `vendor\tesseract-min\` en el equipo de desarrollo. No se ha comprobado si el antivirus bloquea igual este ejecutable una vez instalado con el paquete.

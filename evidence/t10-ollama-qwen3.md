@@ -50,3 +50,37 @@ Las instrucciones no se han ajustado a las palabras de la rúbrica, para no sesg
 - Corpus pequeño y artificial: textos limpios, sin PDF, escaneos ni variedad real de formatos. No permite extrapolar la calidad a documentos reales.
 - Falta la misma ejecución con Groq para comparar (requiere la clave del usuario) y la medición de memoria, incluida la de los procesos de Ollama; ambas forman parte de T12.
 - La latencia la mide el propio cliente por petición; no incluye el procesamiento del documento.
+
+## 2026-11-07 — T12 en el equipo objetivo: tiempo y memoria
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\t12-medir.ps1 -Proveedor ollama
+```
+
+- Commit `e5adfe1` (rama `pruebas-windows-2026-11-06`). Windows 11 Pro 26H2 (26300.9818), Intel Core Ultra 5 125U, 15,52 GB visibles, sin GPU dedicada. Ollama 0.40.14, `qwen3:8b` (`500a1f067a9f`).
+- Modelo descargado de la memoria antes de empezar (`keep_alive: 0`): la duración incluye la carga.
+- Condiciones del equipo: 3,12 GB libres al empezar; seguían abiertos WSL, Edge, Bitdefender y varias sesiones de Claude Code. Otra IA había estado trabajando en el equipo justo antes y se esperó a que terminara.
+
+| Métrica | Valor |
+| --- | --- |
+| Casos recibidos / errores | 30 / 0 |
+| Campos de factura correctos | 60 de 60 |
+| Campos ausentes inventados | 0 de 2 |
+| Incidencias (VP / FP / FN) | 4 / 0 / 0 |
+| Clasificación de correos | 20 de 20 |
+| Heurística de borradores | 13 de 20 |
+| Latencia media por caso | 16,9 s (30 muestras) |
+| Duración total | 509 s (8 min 29 s) |
+| Pico de Ollama, conjunto de trabajo (`ollama*` y `llama-server*`) | 5,22 GB |
+| Pico de Ollama, memoria privada | 5,87 GB |
+| Pico del cliente `nestadmin-predict` | 0,01 GB |
+
+Método: conjunto de trabajo y memoria privada muestreados cada 500 ms; no incluye memoria compartida de la GPU integrada. Una sola ejecución.
+
+Hallazgos del script, corregidos en la rama antes de esta medición:
+
+- Desde Ollama 0.40 el modelo se carga en `llama-server.exe`, hijo de `ollama.exe`. El filtro `ollama*` lo dejaba fuera: una primera pasada dio un pico de 0,04 GB con el modelo cargado (`llama-server` tenía 3,18 GB de conjunto de trabajo y 5,74 GB privados). Esa pasada no se usa como medida de memoria; sus métricas de calidad coinciden con las de arriba (16,1 s de media, 485 s).
+- Los picos se guardaban como `Int32` y `[Math]::Max` fallaba al pasar de 2 GB.
+- El archivo estaba en UTF-8 sin BOM y Windows PowerShell 5.1 no lo analizaba.
+
+Lectura: con 16 GB, el modelo local ocupa unos 5,2–5,9 GB y deja poco margen con otras aplicaciones abiertas (3,1 GB libres antes de cargarlo). Cada caso tarda unos 17 s. Comparación con el proveedor en la nube en [t10-ollama-cloud.md](t10-ollama-cloud.md).

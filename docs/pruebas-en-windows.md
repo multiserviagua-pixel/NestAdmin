@@ -23,6 +23,8 @@ Instalar con el script de registro, que ya no se queda esperando al terminar y q
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts\t08-registro.ps1 -Instalador <ruta del setup.exe generado>
 ```
 
+Con interfaz hay que completar el asistente (el script espera hasta 120 min). Si nadie va a estar delante, añada `-Silencioso` (instalación `/S`, T08-08).
+
 - [ ] El archivo `t08-instalar-*.txt` del escritorio contiene «Antes», «Instalación» con código de salida, «Después» y «Comprobación de la IA local: OK».
 - [ ] T08-10: el programa queda en `%LOCALAPPDATA%\Programs\NestAdmin` y los datos en `%LOCALAPPDATA%\NestAdmin`.
 - [ ] T08-11: instalando encima de la versión anterior, los datos siguen y no quedan `nestadmin.exe` ni DLL en la carpeta de datos (el script avisa si quedan).
@@ -61,13 +63,12 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts\t08-registro.ps1 -In
 
 - [ ] Guardar una clave de Groq en Ajustes y conectar una cuenta de correo de prueba. Buscar el valor de la clave en `%LOCALAPPDATA%\NestAdmin` (`findstr /S /M "<primeros caracteres>" *`): no debe aparecer en ningún archivo. Solo debe estar en el Administrador de credenciales (`NestAdmin`, `groq_api_key` y `mail/<cuenta>`).
 
-## 7. Medición en el equipo objetivo (T12) — `evidence/t10-groq.md` y `evidence/t10-ollama-qwen3.md`
+## 7. Medición en el equipo objetivo (T12) — `evidence/t10-ollama-qwen3.md` y `evidence/t10-ollama-cloud.md`
 
-Con la clave de Groq guardada en el Administrador de credenciales (servicio `NestAdmin`, nombre `groq_api_key`; la guarda Ajustes):
+Con el equipo libre (otra IA o aplicaciones pesadas falsean memoria y tiempo) y el modelo local descargado de la memoria. Groq queda fuera del diseño (2026-11-07). Ollama cloud se mide desde la rama de los proveedores externos, como explica `evidence/t10-ollama-cloud.md`, con la clave en el Administrador de credenciales (servicio `NestAdmin`, nombre `ollama_cloud_api_key`).
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts\t12-medir.ps1 -Proveedor ollama
-powershell -NoProfile -ExecutionPolicy Bypass -File scripts\t12-medir.ps1 -Proveedor groq -Modelo qwen/qwen3.8-27b
 ```
 
 - [ ] Copiar a la evidencia las cifras de `evaluation\results\t12-*.txt` (memoria, duración y métricas), sin las predicciones.
@@ -79,5 +80,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts\build-tesseract.ps1
 $env:NESTADMIN_TESSERACT = "$PWD\vendor\tesseract-min\tesseract.exe"
 cargo test -p nestadmin-extract -- --include-ignored
 ```
+
+Si un antivirus (Bitdefender en el equipo de desarrollo) bloquea el ejecutable recién compilado con «Acceso denegado», hace falta una exclusión para `vendor\tesseract-min\`, que debe añadir quien administre el antivirus.
 
 - [ ] El script termina sin «depende de DLL que no son del sistema» y las pruebas pasan. Después se cambia el paquete según los pasos del plan.
