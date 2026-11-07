@@ -7,7 +7,7 @@ Cada decisión (`D<n>`) tiene un número definitivo desde que se escribe, para q
 1. Antes de escribir su primera decisión, una rama reserva un bloque con un commit en `main` que añade una fila `Reservado` a la tabla. El bloque empieza en el siguiente número libre y deja margen (por ejemplo, diez números). Los huecos están permitidos.
 2. La rama solo usa números de su bloque. Si se le queda corto, reserva otro bloque en `main`.
 3. Al integrar la rama, su fila pasa a `Asignado`. Los números que no llegó a usar quedan como hueco.
-4. Una referencia a un número de un bloque `Reservado` todavía sin integrar es válida; cualquier otra referencia a una decisión inexistente es un error.
+4. Una referencia a un número de un bloque `Reservado` todavía sin integrar es válida; cualquier otra referencia a una decisión inexistente es un error. Los números antiguos de una renumeración se citan entre acentos graves (`` `D92` ``), que el verificador no lee como referencias.
 5. Si hay que renumerar una rama antigua, se hace con `scripts/renumerar.py` en la propia rama antes de fusionarle `main`, para que los números viejos solo signifiquen lo suyo.
 
 `scripts/check.py` comprueba que no hay decisiones repetidas, que cada una cae en un bloque de esta tabla, que los bloques no se solapan y que no se citan decisiones inexistentes en la especificación, `PLAN.md`, `AGENTS.md` y `README.md`.

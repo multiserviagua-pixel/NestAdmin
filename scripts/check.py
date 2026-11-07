@@ -62,7 +62,9 @@ def check_decisions(texts):
     for name, text in texts.items():
         if name == "specs/v1/numeracion.md":
             continue
-        for n in sorted({int(x) for x in DECISION_REF.findall(text)}):
+        # Los números antiguos de una renumeración se citan entre acentos graves.
+        plain = re.sub(r"`[^`\n]*`", "", text)
+        for n in sorted({int(x) for x in DECISION_REF.findall(plain)}):
             if n not in seen and not any(a <= n <= b for a, b in reserved):
                 errors.append(f"{name}: cita la decisión inexistente D{n:02d}.")
     return errors
