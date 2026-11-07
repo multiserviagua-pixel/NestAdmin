@@ -26,4 +26,4 @@ Resto del espacio de trabajo: `cargo fmt --all --check`, `cargo clippy --workspa
 - Generar el instalador con `THIRD_PARTY_NOTICES.txt` y `pdfium/licenses/` y comprobar que se instalan (no se ha empaquetado en esta rama: hay una prueba del instalador en curso en este equipo).
 - Ejecutar `scripts/setup-dev.ps1` sin `-Comprobar` en una máquina limpia.
 - Resolver la redistribución de `libjbig-0.dll` (GPL) e `libiconv-2.dll` (LGPL) y confirmar las licencias de las DLL con los paquetes de la build.
-- Actualizador firmado (D63): sin implementar hasta tener la clave del editor; sus casos están en la matriz.
+- Actualizador firmado (D63): sin implementar hasta generar la clave de firma del actualizador, que no existe todavía (2026-11-07); sus casos están en la matriz.
