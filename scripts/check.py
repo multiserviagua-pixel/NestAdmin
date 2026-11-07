@@ -9,10 +9,14 @@ REQUIRED = (
     "PLAN.md", "AGENTS.md", "README.md", "specs/v1/README.md", "specs/v1/requisitos.md",
     "specs/v1/decisiones.md", "specs/v1/contratos.md", "specs/v1/trazabilidad.md",
     "specs/v1/tareas.md", "specs/v1/pruebas-instalador.md", "specs/v1/actualizaciones.md",
+    "specs/v1/numeracion.md",
 )
 STATUSES = ("Pendiente", "Parcial", "Cumplido")
 ROW = re.compile(r"^\| (R\d{2}) \| (T\d{2}[a-z]?): .+ \| (.+?) \|$", re.MULTILINE)
 LINK = re.compile(r"\[[^\]]*\]\(([^)\s]+)\)")
+DECISION = re.compile(r"^- \*\*D(\d+)\b", re.MULTILINE)
+DECISION_REF = re.compile(r"\bD(\d+)\b")
+BLOCK = re.compile(r"^\| D(\d+)[–-]D(\d+) \| .+? \| (Asignado|Reservado) \|$", re.MULTILINE)
 
 
 def check_links(root, name, text):
@@ -29,6 +33,41 @@ def check_links(root, name, text):
     return errors
 
 
+def check_decisions(texts):
+    """Decisiones únicas, dentro de un bloque de numeracion.md y sin referencias huérfanas."""
+    errors = []
+    decisions_text = texts.get("specs/v1/decisiones.md")
+    blocks_text = texts.get("specs/v1/numeracion.md")
+    if decisions_text is None or blocks_text is None:
+        return errors
+    numbers = [int(n) for n in DECISION.findall(decisions_text)]
+    seen = set()
+    for n in numbers:
+        if n in seen:
+            errors.append(f"La decisión D{n:02d} está repetida.")
+        seen.add(n)
+    blocks = [(int(a), int(b), state) for a, b, state in BLOCK.findall(blocks_text)]
+    if not blocks:
+        errors.append("specs/v1/numeracion.md no tiene bloques de decisiones.")
+    for i, (a, b, _) in enumerate(blocks):
+        if a > b:
+            errors.append(f"Bloque mal formado: D{a:02d}–D{b:02d}.")
+        for c, d, _ in blocks[i + 1:]:
+            if a <= d and c <= b:
+                errors.append(f"Los bloques D{a:02d}–D{b:02d} y D{c:02d}–D{d:02d} se solapan.")
+    for n in sorted(seen):
+        if not any(a <= n <= b for a, b, _ in blocks):
+            errors.append(f"La decisión D{n:02d} no está en ningún bloque de specs/v1/numeracion.md.")
+    reserved = [(a, b) for a, b, state in blocks if state == "Reservado"]
+    for name, text in texts.items():
+        if name == "specs/v1/numeracion.md":
+            continue
+        for n in sorted({int(x) for x in DECISION_REF.findall(text)}):
+            if n not in seen and not any(a <= n <= b for a, b in reserved):
+                errors.append(f"{name}: cita la decisión inexistente D{n:02d}.")
+    return errors
+
+
 def check(root):
     errors = []
     texts = {}
@@ -39,6 +78,7 @@ def check(root):
         else:
             texts[name] = path.read_text(encoding="utf-8")
             errors.extend(check_links(root, name, texts[name]))
+    errors.extend(check_decisions(texts))
     req_text = texts.get("specs/v1/requisitos.md")
     matrix_text = texts.get("specs/v1/trazabilidad.md")
     if req_text is None or matrix_text is None:

@@ -9,7 +9,7 @@ use std::path::Path;
 use image::imageops::FilterType;
 use image::{DynamicImage, ImageDecoder, ImageFormat, ImageReader, Limits};
 
-use crate::{visible_chars, ExtractError, Extraction, Method, Ocr, Page};
+use crate::{visible_chars, ExtractError, Extraction, Ocr, Page};
 
 /// Extensiones de imagen que se procesan con OCR.
 pub const IMAGE_EXTENSIONS: &[&str] = &["jpg", "jpeg", "png", "tif", "tiff", "bmp", "webp"];
@@ -23,7 +23,17 @@ const MIN_SIDE: u32 = 1500;
 /// ocupa 400 MB): un archivo manipulado no puede agotar la memoria del equipo.
 const MAX_DECODE_BYTES: u64 = 512 * 1024 * 1024;
 
-pub(crate) fn extract(ocr: &dyn Ocr, path: &Path) -> Result<Extraction, ExtractError> {
+/// Imagen en escala de grises tal como la recibe el OCR (orientación EXIF aplicada y tamaño
+/// ajustado). La usa el ejemplo de calibración del OCR.
+pub fn prepare_image(path: &Path) -> Result<image::GrayImage, ExtractError> {
+    Ok(prepare(load(path)?).into_luma8())
+}
+
+pub(crate) fn extract(
+    ocr: &dyn Ocr,
+    min_confidence: f32,
+    path: &Path,
+) -> Result<Extraction, ExtractError> {
     let image = load(path)?;
     let scratch = tempfile::tempdir().map_err(|e| {
         ExtractError::OcrUnavailable(format!("sin carpeta temporal ({})", e.kind()))
@@ -35,19 +45,14 @@ pub(crate) fn extract(ocr: &dyn Ocr, path: &Path) -> Result<Extraction, ExtractE
             page: 1,
             message: format!("no se pudo preparar la imagen ({e})"),
         })?;
-    let text = ocr.recognize(&prepared, 1)?;
-    let chars = visible_chars(&text);
+    let recognized = ocr.recognize_page(&prepared, 1)?;
+    let chars = visible_chars(&recognized.text);
     if chars == 0 {
         return Err(ExtractError::Empty);
     }
     Ok(Extraction {
-        text,
-        pages: vec![Page {
-            number: 1,
-            method: Method::Ocr,
-            chars,
-            offset: 0,
-        }],
+        text: recognized.text,
+        pages: vec![Page::ocr(1, chars, recognized.confidence, min_confidence)],
     })
 }
 

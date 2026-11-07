@@ -1,12 +1,13 @@
 # Instrucciones del proyecto
 
 - Lea `PLAN.md` y las especificaciones de `specs/v1/` antes de cambiar el comportamiento. Mantenga requisitos, contratos, matriz y pruebas alineados; registre los cambios de alcance.
-- Priorice el procesamiento local. Nunca añada respaldo automático hacia un servicio de IA externo. Las acciones de envío y registro requieren revisión salvo una regla expresa activa.
+- La IA usa por defecto un proveedor externo (cloud/API) elegido y confirmado por el usuario, con su clave en el almacén protegido; la IA local (Ollama) es opcional y sirve de respaldo (D100–D103). El único respaldo automático permitido es del proveedor externo elegido hacia la IA local, en las condiciones de D101; nunca añada respaldo automático hacia otro servicio de IA externo ni de la IA local hacia uno externo, y no envíe a un proveedor externo más contenido que el que la tarea necesita. OCR y extracción de texto siguen siendo locales. Las acciones de envío y registro requieren revisión salvo una regla expresa activa.
 - No incluya documentos reales, credenciales, datos personales ni resultados privados en fixtures, registros o el repositorio. Use exclusivamente datos sintéticos para las pruebas y mantenga los resultados de evaluación separados del contenido de usuario.
 - Evite efectos duplicados al recuperar trabajos y cubra los fallos de modelos, OCR, red y credenciales. La ausencia de datos debe ser explícita.
 - Ejecute `python scripts/check.py` al modificar la documentación. Ejecute además las pruebas y comprobaciones pertinentes del código que se implemente. El verificador documental no acredita que exista o funcione la aplicación.
 - No marque criterios de aceptación como cumplidos sin evidencia reproducible. Las pruebas de instalador, escritorio y rendimiento requieren Windows y, cuando corresponda, el hardware objetivo.
 - Construya el instalador (`scripts/build-clean.ps1`, `tauri build`, NSIS) solo cuando el flujo de trabajo lo necesite: al cerrar una etapa, para una prueba de instalación o cuando una prueba concreta dependa de él. Está autorizado en esos casos sin pedir confirmación; no lo compile para validar cambios corrientes, que se comprueban con pruebas, clippy, formato y `check.py`. Esta regla vale para todos los agentes y subagentes.
+- Desarrollo solo en local (desde el 2026-11-07, hasta nuevo aviso del usuario): se permiten commits, ramas y merges en el repositorio local, pero no `git push`, ni abrir, actualizar o fusionar PR, ni relanzar o esperar el CI de GitHub (`gh pr`, `gh run`). La verificación es local: pruebas, clippy, formato y `check.py`. Esta regla vale para todos los agentes y subagentes.
 
 ## Enrutado de modelos (ahorro de créditos)
 
@@ -34,4 +35,4 @@ La sesión principal encadena los agentes sin pedir confirmación entre pasos:
 4. `arquitecto` revisa solo si el cambio toca alcance, credenciales, OAuth, envío o registro automáticos.
 5. Si el flujo cierra una etapa o requiere una prueba de instalación, se construye el instalador.
 
-La automatización del flujo de desarrollo no cambia las reglas de la aplicación: sin respaldo automático a una IA externa y con revisión de envíos y registros salvo regla expresa activa.
+La automatización del flujo de desarrollo no cambia las reglas de la aplicación: el único respaldo automático de IA es del proveedor externo elegido a la IA local (D101), nunca hacia otro proveedor externo ni de local a externo, y los envíos y registros requieren revisión salvo regla expresa activa.
