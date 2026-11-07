@@ -121,7 +121,7 @@ En `tests/mail_accounts.rs`, la prueba de respuesta perdida en Graph termina aho
 
 ## Pendiente para completar T13
 
-- Ensayo con una cuenta de prueba real de Microsoft 365: requiere registrar la aplicación en Entra ID.
+- Microsoft 365 real: inicio de sesión, lectura y borradores hechos el 2026-11-07 (ver al final); falta un envío aprobado.
 - Gmail: provocar con la cuenta real un corte entre el envío y el recibo y comprobar que la reconciliación por `Message-ID` propio (D41) lo confirma; en particular, que Gmail mantiene esa cabecera al enviar. La parte simulada está hecha.
 - Recorrido con una cuenta real desde la ventana: añadir la cuenta, consultar, aprobar un envío y desconectar. Requiere `correo-oauth.json` con los clientes del editor (D43).
 - Calidad de clasificación y borradores con correo real: sin medir.
@@ -143,3 +143,13 @@ Pendiente: adjuntos reales de Microsoft 365 y Gmail, y el recorrido desde la apl
 
 La documentación de Entra solo garantiza que se ignora el puerto con `http://localhost`, y el portal no deja registrar `http://127.0.0.1` sin editar el manifiesto. Microsoft usa ahora `http://localhost:<puerto>/`. Pruebas `gmail::localhost_redirect_is_accepted_over_ipv4_and_ipv6` (en este contenedor solo hay IPv4 de bucle local; el caso IPv6 se omite y lo dice) y `gmail::microsoft_uses_localhost_and_google_the_ip_literal`. Google sigue con `127.0.0.1`. Guía para el registro y el recorrido real: [docs/guia-microsoft-365.pdf](../docs/guia-microsoft-365.pdf), que se genera con `python docs/guia-microsoft-365.py`. Pendiente: el inicio de sesión real con Microsoft 365.
 
+## 2026-11-07 — Microsoft real desde la ventana (versión de desarrollo de main, D121)
+
+Equipo de desarrollo (Windows 11), `scripts\dev-pruebas.ps1` con datos aparte y el cliente público registrado en Entra ID (cuentas personales y profesionales, redirección `http://localhost`). Cuenta personal de Outlook de prueba del responsable; aquí no constan direcciones, asuntos ni contenido.
+
+| Paso | Resultado |
+|---|---|
+| Inicio de sesión | El navegador vuelve a `http://localhost:<puerto>/` (llegó por IPv6, `[::1]`) y el canje de código responde HTTP 200. **Fallo encontrado**: los tokens de Microsoft superan el límite de una entrada del Administrador de credenciales (2560 bytes, UTF-16) y la pantalla mostraba «almacén de credenciales no disponible: error del almacén». Corregido con D121 (secreto en 3 trozos `mail/microsoft-1#1..3`); tras el arreglo la cuenta queda «Conectada» con su dirección (D48). |
+| Consulta | 3 mensajes leídos, 3 tareas encoladas con ID `microsoft-1:…`; una segunda consulta no encola nada (0 nuevos). En la misma consulta se leyeron también el simulador y una cuenta de Gmail. |
+| Borradores | Con la IA local (`qwen3:8b`, límite de 180 s) las 3 tareas fallaron primero por `timeout` mientras el equipo compilaba; reintentadas desde «Tareas», terminaron en 21–100 s y quedaron en revisión con borrador. Los 3 remitentes eran automáticos (aviso de seguridad y publicidad) y la IA propuso responder igualmente: dato para la calidad de borradores. |
+| Envío | No ejecutado: responder a esos remitentes escribiría a terceros. Pendiente con un mensaje enviado desde una dirección propia. |
