@@ -5,6 +5,7 @@ use nestadmin_documents::IsoDate;
 use nestadmin_sales::{Exemption, Product, ReceivedStatus};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use super::{
     audit, clean, dec, parse_date, plain, qualification_from, tax_rate_from, SalesResult,
@@ -58,7 +59,7 @@ const MAX_LOGO_BYTES: usize = 2 * 1024 * 1024;
 pub(crate) fn load_company(conn: &Connection) -> SalesResult<Option<Company>> {
     Ok(conn
         .query_row(
-            "SELECT name, tax_id, address, email, iban, logo, logo_mime FROM company WHERE id = 1",
+            "SELECT c.name, c.tax_id, c.address, c.email, c.iban, l.data, l.mime              FROM company c LEFT JOIN company_logos l ON l.sha256 = c.logo_sha256 WHERE c.id = 1",
             [],
             |r| {
                 Ok(Company {
@@ -73,6 +74,26 @@ pub(crate) fn load_company(conn: &Connection) -> SalesResult<Option<Company>> {
             },
         )
         .optional()?)
+}
+
+/// SHA-256 (hexadecimal) del logotipo actual de la empresa, si lo hay.
+pub(crate) fn company_logo_sha256(conn: &Connection) -> SalesResult<Option<String>> {
+    Ok(conn
+        .query_row("SELECT logo_sha256 FROM company WHERE id = 1", [], |r| {
+            r.get::<_, Option<String>>(0)
+        })
+        .optional()?
+        .flatten())
+}
+
+fn sha256_hex(data: &[u8]) -> String {
+    use std::fmt::Write;
+    Sha256::digest(data)
+        .iter()
+        .fold(String::with_capacity(64), |mut hex, byte| {
+            let _ = write!(hex, "{byte:02x}");
+            hex
+        })
 }
 
 pub(crate) fn load_customer(conn: &Connection, id: i64) -> SalesResult<Customer> {
@@ -238,24 +259,54 @@ impl Store {
                 ));
             }
         }
-        self.conn.execute(
-            "INSERT INTO company (id, name, tax_id, address, email, iban, logo, logo_mime, updated_at) \
-             VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8) \
-             ON CONFLICT(id) DO UPDATE SET name = excluded.name, tax_id = excluded.tax_id, \
-             address = excluded.address, email = excluded.email, iban = excluded.iban, \
-             logo = excluded.logo, logo_mime = excluded.logo_mime, updated_at = excluded.updated_at",
+        let tx = self.conn.transaction()?;
+        // El logotipo se guarda una sola vez por contenido y nunca se modifica: los documentos
+        // emitidos citan el suyo por su hash (D76, D90).
+        let logo_sha256 = match (&company.logo, &company.logo_mime) {
+            (Some(logo), Some(mime)) => {
+                let hash = sha256_hex(logo);
+                tx.execute(
+                    "INSERT OR IGNORE INTO company_logos (sha256, mime, data, created_at)                      VALUES (?1, ?2, ?3, ?4)",
+                    params![hash, mime, logo, now_ms()],
+                )?;
+                Some(hash)
+            }
+            _ => None,
+        };
+        tx.execute(
+            "INSERT INTO company (id, name, tax_id, address, email, iban, logo_sha256, updated_at)              VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7)              ON CONFLICT(id) DO UPDATE SET name = excluded.name, tax_id = excluded.tax_id,              address = excluded.address, email = excluded.email, iban = excluded.iban,              logo_sha256 = excluded.logo_sha256, updated_at = excluded.updated_at",
             params![
                 clean(&company.name),
                 clean(&company.tax_id),
                 clean(&company.address),
                 clean(&company.email),
                 clean(&company.iban),
-                company.logo,
-                company.logo_mime,
+                logo_sha256,
                 now_ms(),
             ],
         )?;
+        tx.commit()?;
         Ok(())
+    }
+
+    /// Logotipo (contenido y tipo MIME) con ese SHA-256, incluso si la empresa ya usa otro: así
+    /// la copia de un documento emitido sigue pudiendo mostrarse (D76). `None` si no existe.
+    /// Comprueba que el contenido guardado corresponde al hash.
+    pub fn company_logo_by_hash(&self, sha256: &str) -> SalesResult<Option<(Vec<u8>, String)>> {
+        let found: Option<(Vec<u8>, String)> = self
+            .conn
+            .query_row(
+                "SELECT data, mime FROM company_logos WHERE sha256 = ?1",
+                [sha256],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?;
+        if let Some((data, _)) = &found {
+            if sha256_hex(data) != sha256 {
+                return Err(SalesStoreError::Corrupt(format!("logotipo {sha256}")));
+            }
+        }
+        Ok(found)
     }
 
     // --- Clientes ---
@@ -480,14 +531,27 @@ impl Store {
         document_ref: Option<&str>,
         invoice_ref: Option<&str>,
     ) -> SalesResult<()> {
-        let current = self.received_delivery_note(id)?;
-        current.status.transition(ReceivedStatus::Reviewed)?;
         let tx = self.conn.transaction()?;
-        tx.execute(
-            "UPDATE received_delivery_notes SET status = 'reviewed', document_ref = ?2, \
-             invoice_ref = ?3, updated_at = ?4 WHERE id = ?1 AND status = 'received'",
+        let raw = tx
+            .query_row(
+                &format!("SELECT {RECEIVED_COLS} FROM received_delivery_notes WHERE id = ?1"),
+                [id],
+                received_row,
+            )
+            .optional()?
+            .ok_or(SalesStoreError::not_found("albarán recibido", id))?;
+        received_from(raw)?
+            .status
+            .transition(ReceivedStatus::Reviewed)?;
+        let changed = tx.execute(
+            "UPDATE received_delivery_notes SET status = 'reviewed', document_ref = ?2,              invoice_ref = ?3, updated_at = ?4 WHERE id = ?1 AND status = 'received'",
             params![id, document_ref, invoice_ref, now_ms()],
         )?;
+        if changed != 1 {
+            return Err(SalesStoreError::Conflict(format!(
+                "el albarán recibido {id} cambió de estado durante la revisión"
+            )));
+        }
         audit(
             &tx,
             "sales.received_reviewed",

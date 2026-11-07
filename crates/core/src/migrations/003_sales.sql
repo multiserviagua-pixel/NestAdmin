@@ -1,16 +1,25 @@
 -- Migración 3 (D03, D72): facturación de venta. Importes como texto decimal con dos decimales
 -- (D04, solo EUR); fechas como texto ISO AAAA-MM-DD.
 
+-- Logotipos de solo inserción (D76, D90): se identifican por el SHA-256 de su contenido, de
+-- modo que un documento emitido puede citar el suyo (en `issuer_snapshot`) aunque la empresa
+-- cambie de logotipo después.
+CREATE TABLE company_logos (
+    sha256      TEXT PRIMARY KEY,
+    mime        TEXT NOT NULL,
+    data        BLOB NOT NULL,
+    created_at  INTEGER NOT NULL
+);
+
 CREATE TABLE company (
-    id          INTEGER PRIMARY KEY CHECK (id = 1),
-    name        TEXT,
-    tax_id      TEXT,
-    address     TEXT,
-    email       TEXT,
-    iban        TEXT,
-    logo        BLOB,
-    logo_mime   TEXT,
-    updated_at  INTEGER NOT NULL
+    id           INTEGER PRIMARY KEY CHECK (id = 1),
+    name         TEXT,
+    tax_id       TEXT,
+    address      TEXT,
+    email        TEXT,
+    iban         TEXT,
+    logo_sha256  TEXT REFERENCES company_logos (sha256),
+    updated_at   INTEGER NOT NULL
 );
 
 CREATE TABLE customers (
@@ -55,6 +64,15 @@ CREATE TABLE recurring_templates (
     active      INTEGER NOT NULL DEFAULT 1 CHECK (active IN (0, 1)),
     created_at  INTEGER NOT NULL,
     updated_at  INTEGER NOT NULL
+);
+
+-- Periodos de una plantilla recurrente cuyo borrador se eliminó a propósito: la generación los
+-- trata como existentes y no los vuelve a crear (D87).
+CREATE TABLE recurring_skips (
+    template_id INTEGER NOT NULL REFERENCES recurring_templates (id),
+    period      INTEGER NOT NULL,
+    created_at  INTEGER NOT NULL,
+    PRIMARY KEY (template_id, period)
 );
 
 CREATE TABLE sales_documents (
@@ -226,12 +244,69 @@ END;
 CREATE TRIGGER series_never_backwards
 BEFORE UPDATE ON series
 WHEN NEW.last < OLD.last OR NEW.kind <> OLD.kind OR NEW.year <> OLD.year
+  OR (OLD.last_date IS NOT NULL AND (NEW.last_date IS NULL OR NEW.last_date < OLD.last_date))
 BEGIN
-    SELECT RAISE(ABORT, 'el correlativo de una serie no retrocede');
+    SELECT RAISE(ABORT, 'el correlativo y la fecha de una serie no retroceden');
 END;
 
 CREATE TRIGGER series_no_delete
 BEFORE DELETE ON series
 BEGIN
     SELECT RAISE(ABORT, 'una serie no se elimina');
+END;
+
+-- Todo documento nace en borrador: el estado solo avanza por las operaciones que numeran.
+CREATE TRIGGER sales_documents_insert_as_draft
+BEFORE INSERT ON sales_documents
+WHEN NEW.status <> 'draft'
+BEGIN
+    SELECT RAISE(ABORT, 'un documento nuevo es siempre un borrador');
+END;
+
+-- Una revisión sustituida no se reasigna ni vuelve a ser vigente (D74).
+CREATE TRIGGER sales_documents_superseded_fixed
+BEFORE UPDATE ON sales_documents
+WHEN OLD.superseded_by IS NOT NULL AND NEW.superseded_by IS NOT OLD.superseded_by
+BEGIN
+    SELECT RAISE(ABORT, 'la sustitución de una revisión no se reescribe');
+END;
+
+-- Una factura anulada no vuelve a ningún otro estado (D82).
+CREATE TRIGGER sales_documents_voided_final
+BEFORE UPDATE ON sales_documents
+WHEN OLD.status = 'voided' AND NEW.status <> 'voided'
+BEGIN
+    SELECT RAISE(ABORT, 'una factura anulada no cambia de estado');
+END;
+
+-- Cobros (D88): solo alta y baja, y no sobre borradores ni facturas anuladas.
+CREATE TRIGGER payments_no_insert_on_draft_or_voided
+BEFORE INSERT ON payments
+WHEN (SELECT status FROM sales_documents WHERE id = NEW.document_id) IN ('draft', 'voided')
+BEGIN
+    SELECT RAISE(ABORT, 'un borrador o una factura anulada no admite cobros');
+END;
+
+CREATE TRIGGER payments_no_update
+BEFORE UPDATE ON payments
+BEGIN
+    SELECT RAISE(ABORT, 'un cobro no se modifica: se elimina y se registra de nuevo');
+END;
+
+CREATE TRIGGER document_links_no_update
+BEFORE UPDATE ON document_links
+BEGIN
+    SELECT RAISE(ABORT, 'un vínculo entre documentos no se modifica');
+END;
+
+CREATE TRIGGER company_logos_no_update
+BEFORE UPDATE ON company_logos
+BEGIN
+    SELECT RAISE(ABORT, 'los logotipos son de solo inserción');
+END;
+
+CREATE TRIGGER company_logos_no_delete
+BEFORE DELETE ON company_logos
+BEGIN
+    SELECT RAISE(ABORT, 'los logotipos son de solo inserción');
 END;

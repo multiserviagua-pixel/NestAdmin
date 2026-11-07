@@ -4,7 +4,7 @@
 use std::path::Path;
 
 use nestadmin_core::sales::{
-    Company, CustomerData, DraftInput, DraftLine, SalesFilter, SalesStoreError,
+    Company, CustomerData, DraftInput, DraftLine, RectificationDraft, SalesFilter, SalesStoreError,
 };
 use nestadmin_core::Store;
 use nestadmin_documents::IsoDate;
@@ -77,7 +77,7 @@ fn invoice(store: &mut Store, customer: i64, price: &str) -> i64 {
 
 fn issue(store: &mut Store, id: i64, on: &str) -> String {
     store
-        .issue_sales_document(id, date(on))
+        .issue_sales_document(id, date(on), date(on))
         .unwrap()
         .number
         .unwrap()
@@ -143,7 +143,7 @@ fn a_cut_during_issuing_leaves_no_gap_and_no_state_change() {
     let id = invoice(&mut store, customer, "100.00");
 
     let error = store
-        .issue_sales_document_with(id, date("2026-03-01"), |tx, record| {
+        .issue_sales_document_with(id, date("2026-03-01"), date("2026-03-01"), |tx, record| {
             // El gancho ve el registro de la factura y escribe en la misma transacción.
             let record = record.expect("las facturas entregan datos de registro");
             assert_eq!(record.number.to_string(), "F-2026-0001");
@@ -186,7 +186,7 @@ fn a_date_before_the_last_one_of_the_series_is_rejected_without_consuming_a_numb
     issue(&mut store, a, "2026-03-10");
 
     let error = store
-        .issue_sales_document(b, date("2026-03-09"))
+        .issue_sales_document(b, date("2026-03-09"), date("2026-03-09"))
         .unwrap_err();
     assert!(matches!(error, SalesStoreError::Series(_)), "{error}");
     assert_eq!(error.code(), "conflict");
@@ -206,7 +206,7 @@ fn a_revision_cannot_be_issued_in_another_year() {
     issue(&mut store, quote, "2026-12-30");
     let revision = store.revise_sales_document(quote).unwrap();
     let error = store
-        .issue_sales_document(revision, date("2027-01-02"))
+        .issue_sales_document(revision, date("2027-01-02"), date("2027-01-02"))
         .unwrap_err();
     assert!(matches!(error, SalesStoreError::Series(_)), "{error}");
     assert_eq!(
@@ -226,7 +226,7 @@ fn an_invoice_missing_mandatory_data_is_rejected_without_a_number() {
         .unwrap();
     let id = invoice(&mut store, customer, "10.00");
     let error = store
-        .issue_sales_document(id, date("2026-03-01"))
+        .issue_sales_document(id, date("2026-03-01"), date("2026-03-01"))
         .unwrap_err();
     assert_eq!(error.code(), "invalid_input");
     assert!(error.to_string().contains("issuer"), "{error}");
@@ -238,7 +238,7 @@ fn an_invoice_missing_mandatory_data_is_rejected_without_a_number() {
     let other = store.create_customer(&no_address).unwrap();
     let id2 = invoice(&mut store, other, "10.00");
     let error = store
-        .issue_sales_document(id2, date("2026-03-01"))
+        .issue_sales_document(id2, date("2026-03-01"), date("2026-03-01"))
         .unwrap_err();
     assert_eq!(error.code(), "invalid_input");
     assert!(error.to_string().contains("recipient.address"), "{error}");
@@ -248,7 +248,7 @@ fn an_invoice_missing_mandatory_data_is_rejected_without_a_number() {
         .unwrap();
     assert_eq!(
         store
-            .issue_sales_document(empty, date("2026-03-01"))
+            .issue_sales_document(empty, date("2026-03-01"), date("2026-03-01"))
             .unwrap_err()
             .code(),
         "invalid_input"
@@ -330,7 +330,9 @@ fn issued_documents_keep_their_own_copy_of_company_customer_and_product() {
         .add_line_from_product(id, product, d("2"), d("0.5"))
         .unwrap();
     let before = {
-        store.issue_sales_document(id, date("2026-03-01")).unwrap();
+        store
+            .issue_sales_document(id, date("2026-03-01"), date("2026-03-01"))
+            .unwrap();
         store.sales_document(id).unwrap()
     };
     assert_eq!(before.lines[1].input.description, "Revisión anual");
@@ -386,7 +388,9 @@ fn drafts_are_editable_and_issued_documents_are_not() {
         (totals.total.to_string(), totals.amount_due.to_string()),
         ("36.30".to_owned(), "31.80".to_owned())
     );
-    store.issue_sales_document(id, date("2026-03-01")).unwrap();
+    store
+        .issue_sales_document(id, date("2026-03-01"), date("2026-03-01"))
+        .unwrap();
     let error = store.update_sales_draft(id, &edited).unwrap_err();
     assert_eq!(error.code(), "invalid_transition");
     assert!(store.delete_sales_draft(id).is_err());
@@ -503,7 +507,9 @@ fn payments_partial_full_excess_and_removal_leave_a_trail() {
     let mut input = draft(DocumentKind::Invoice, customer, "100.00");
     input.due_date = Some(date("2026-03-31"));
     store.update_sales_draft(id, &input).unwrap();
-    store.issue_sales_document(id, date("2026-03-01")).unwrap();
+    store
+        .issue_sales_document(id, date("2026-03-01"), date("2026-03-01"))
+        .unwrap();
     assert_eq!(
         store.sales_collection(id, today).unwrap().state,
         CollectionState::Pending
@@ -742,14 +748,24 @@ fn recurring_drafts_are_idempotent_and_overdue_ones_need_review() {
             [template],
         )
         .is_err());
-    // El borrador recurrente no se elimina (se regeneraría).
-    assert_eq!(
-        store
-            .delete_sales_draft(run.created[0].document_id)
-            .unwrap_err()
-            .code(),
-        "conflict"
-    );
+    // Eliminar un borrador recurrente deja constancia del periodo omitido (D87): no se regenera,
+    // ni en esta sesión ni tras reabrir.
+    store
+        .delete_sales_draft(run.created[0].document_id)
+        .unwrap();
+    assert!(actions(&store).contains(&"sales.recurring_skip".to_owned()));
+    assert!(store
+        .generate_recurring_drafts(date("2026-04-16"), |_| false)
+        .unwrap()
+        .created
+        .is_empty());
+    drop(store);
+    let mut store = Store::open(&path).unwrap();
+    assert!(store
+        .generate_recurring_drafts(date("2026-04-16"), |_| false)
+        .unwrap()
+        .created
+        .is_empty());
     // Una plantilla inactiva no genera.
     store.set_recurring_active(template, false).unwrap();
     assert!(store
@@ -789,7 +805,7 @@ fn revisions_keep_the_number_and_supersede_the_previous_one() {
         .update_sales_draft(revision, &draft(DocumentKind::Quote, customer, "120.00"))
         .unwrap();
     let issued = store
-        .issue_sales_document(revision, date("2026-03-05"))
+        .issue_sales_document(revision, date("2026-03-05"), date("2026-03-05"))
         .unwrap();
     assert_eq!(issued.number.as_deref(), Some("P-2026-0001"));
     assert_eq!(issued.totals.unwrap().base_total.to_string(), "120.00");
@@ -924,7 +940,9 @@ fn zero_rate_lines_keep_their_qualification() {
         }),
     })];
     let id = store.create_sales_draft(&input).unwrap();
-    let issued = store.issue_sales_document(id, date("2026-03-01")).unwrap();
+    let issued = store
+        .issue_sales_document(id, date("2026-03-01"), date("2026-03-01"))
+        .unwrap();
     let totals = issued.totals.unwrap();
     assert_eq!(totals.total.to_string(), "54.90");
     assert_eq!(
@@ -984,4 +1002,563 @@ fn company_logo_must_be_png_or_jpeg() {
     c.logo_mime = Some("image/png".into());
     store.set_sales_company(&c).unwrap();
     assert_eq!(store.sales_company().unwrap().unwrap(), c);
+}
+
+// --- Revisión de D73, D74, D81, D82, D88, D90, D99 ---
+
+fn raw(path: &Path) -> rusqlite::Connection {
+    rusqlite::Connection::open(path).unwrap()
+}
+
+/// Rectificativa por diferencias con una línea de descuento, lista para emitir.
+fn differences_corrective(store: &mut Store, customer: i64, original: i64) -> i64 {
+    let id = store
+        .create_corrective_draft(
+            original,
+            RectificationKind::R1,
+            RectificationMethod::Differences,
+        )
+        .unwrap();
+    let mut input = DraftInput::new(DocumentKind::CorrectiveInvoice);
+    input.customer_id = Some(customer);
+    input.lines = vec![DraftLine::from(line("Descuento acordado", "-1", "10.00"))];
+    store.update_sales_draft(id, &input).unwrap();
+    id
+}
+
+#[test]
+fn a_revision_is_not_issued_when_the_previous_one_was_accepted_or_converted() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("nestadmin.db");
+    let mut store = Store::open(&path).unwrap();
+    let customer = setup(&mut store);
+    let quote = store
+        .create_sales_draft(&draft(DocumentKind::Quote, customer, "100.00"))
+        .unwrap();
+    issue(&mut store, quote, "2026-03-01");
+    store
+        .transition_sales_document(quote, Status::Sent)
+        .unwrap();
+    let revision = store.revise_sales_document(quote).unwrap();
+
+    // Con un borrador de revisión pendiente, la anterior no avanza ni se convierte.
+    assert_eq!(
+        store
+            .transition_sales_document(quote, Status::Accepted)
+            .unwrap_err()
+            .code(),
+        "conflict"
+    );
+    assert_eq!(
+        store
+            .convert_sales_documents(&[quote], DocumentKind::Invoice)
+            .unwrap_err()
+            .code(),
+        "conflict"
+    );
+
+    // Si aun así el estado cambiara por debajo (carrera o base alterada), emitir la revisión
+    // se rechaza sin consumir nada.
+    raw(&path)
+        .execute(
+            "UPDATE sales_documents SET status = 'converted' WHERE id = ?1",
+            [quote],
+        )
+        .unwrap();
+    let error = store
+        .issue_sales_document(revision, date("2026-03-05"), date("2026-03-05"))
+        .unwrap_err();
+    assert_eq!(error.code(), "conflict", "{error}");
+    let after = store.sales_document(revision).unwrap();
+    assert_eq!(after.status, Status::Draft);
+    assert_eq!(store.sales_document(quote).unwrap().superseded_by, None);
+}
+
+#[test]
+fn issuing_rejects_future_dates_bad_due_dates_and_revisions_dated_backwards() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("nestadmin.db");
+    let mut store = Store::open(&path).unwrap();
+    let customer = setup(&mut store);
+    let id = invoice(&mut store, customer, "10.00");
+    let error = store
+        .issue_sales_document(id, date("2026-03-10"), date("2026-03-09"))
+        .unwrap_err();
+    assert_eq!(error.code(), "invalid_input", "{error}");
+    assert_eq!(series_rows(&path), 0, "no se consumió número");
+    assert_eq!(store.sales_document(id).unwrap().status, Status::Draft);
+
+    let mut input = draft(DocumentKind::Invoice, customer, "10.00");
+    input.due_date = Some(date("2026-03-01"));
+    store.update_sales_draft(id, &input).unwrap();
+    let error = store
+        .issue_sales_document(id, date("2026-03-05"), date("2026-03-05"))
+        .unwrap_err();
+    assert_eq!(error.code(), "invalid_input", "{error}");
+    assert!(error.to_string().contains("due_date"), "{error}");
+    assert_eq!(series_rows(&path), 0);
+    input.due_date = Some(date("2026-03-05"));
+    store.update_sales_draft(id, &input).unwrap();
+    store
+        .issue_sales_document(id, date("2026-03-05"), date("2026-03-05"))
+        .unwrap();
+
+    let quote = store
+        .create_sales_draft(&draft(DocumentKind::Quote, customer, "10.00"))
+        .unwrap();
+    issue(&mut store, quote, "2026-03-10");
+    let revision = store.revise_sales_document(quote).unwrap();
+    let error = store
+        .issue_sales_document(revision, date("2026-03-09"), date("2026-03-12"))
+        .unwrap_err();
+    assert_eq!(error.code(), "invalid_input", "{error}");
+    store
+        .issue_sales_document(revision, date("2026-03-10"), date("2026-03-12"))
+        .unwrap();
+}
+
+#[test]
+fn payments_of_the_original_count_for_the_substitute() {
+    let mut store = Store::open_in_memory().unwrap();
+    let customer = setup(&mut store);
+    let original = invoice(&mut store, customer, "100.00");
+    issue(&mut store, original, "2026-03-01");
+    let today = date("2026-03-20");
+    let (original_payment, _) = store
+        .add_sales_payment(original, today, d("121.00"), PaymentMethod::Transfer, today)
+        .unwrap();
+    let corrective = store
+        .create_corrective_draft(
+            original,
+            RectificationKind::R1,
+            RectificationMethod::Substitution,
+        )
+        .unwrap();
+    issue(&mut store, corrective, "2026-03-05");
+
+    let summary = store.sales_collection(corrective, today).unwrap();
+    assert_eq!(summary.state, CollectionState::Paid);
+    assert_eq!(summary.paid.to_string(), "121.00");
+    // Un cobro adicional en la sustituta es un exceso.
+    let error = store
+        .add_sales_payment(corrective, today, d("1.00"), PaymentMethod::Cash, today)
+        .unwrap_err();
+    assert_eq!(error.code(), "invalid_input");
+    assert!(error.to_string().contains("supera"), "{error}");
+
+    // Retirar el cobro de la original sigue permitido y vuelve a dejar pendiente la sustituta.
+    store.remove_sales_payment(original_payment, today).unwrap();
+    let summary = store.sales_collection(corrective, today).unwrap();
+    assert_eq!(summary.state, CollectionState::Pending);
+    assert_eq!(summary.outstanding.to_string(), "121.00");
+}
+
+#[test]
+fn incompatible_correctives_are_rejected_when_created_and_when_issued() {
+    let mut store = Store::open_in_memory().unwrap();
+    let customer = setup(&mut store);
+
+    // Sustitución en vigor: ni otra sustitución ni diferencias.
+    let a = invoice(&mut store, customer, "100.00");
+    issue(&mut store, a, "2026-03-01");
+    let first = store
+        .create_corrective_draft(a, RectificationKind::R1, RectificationMethod::Substitution)
+        .unwrap();
+    let second = store
+        .create_corrective_draft(a, RectificationKind::R1, RectificationMethod::Substitution)
+        .unwrap();
+    issue(&mut store, first, "2026-03-02");
+    for method in [
+        RectificationMethod::Substitution,
+        RectificationMethod::Differences,
+    ] {
+        let error = store
+            .create_corrective_draft(a, RectificationKind::R1, method)
+            .unwrap_err();
+        assert_eq!(error.code(), "conflict", "{error}");
+    }
+    // El borrador creado antes tampoco se puede emitir ahora.
+    let error = store
+        .issue_sales_document(second, date("2026-03-03"), date("2026-03-03"))
+        .unwrap_err();
+    assert_eq!(error.code(), "conflict", "{error}");
+    assert_eq!(store.sales_document(second).unwrap().status, Status::Draft);
+
+    // Varias por diferencias sí; después, la sustitución no.
+    let b = invoice(&mut store, customer, "100.00");
+    issue(&mut store, b, "2026-03-04");
+    let d1 = differences_corrective(&mut store, customer, b);
+    let d2 = differences_corrective(&mut store, customer, b);
+    let sub = store
+        .create_corrective_draft(b, RectificationKind::R1, RectificationMethod::Substitution)
+        .unwrap();
+    issue(&mut store, d1, "2026-03-05");
+    issue(&mut store, d2, "2026-03-05");
+    assert_eq!(
+        store
+            .create_corrective_draft(b, RectificationKind::R1, RectificationMethod::Substitution)
+            .unwrap_err()
+            .code(),
+        "conflict"
+    );
+    let error = store
+        .issue_sales_document(sub, date("2026-03-06"), date("2026-03-06"))
+        .unwrap_err();
+    assert_eq!(error.code(), "conflict", "{error}");
+    let more = differences_corrective(&mut store, customer, b);
+    issue(&mut store, more, "2026-03-06");
+}
+
+#[test]
+fn an_invoice_with_a_corrective_in_force_cannot_be_voided() {
+    let mut store = Store::open_in_memory().unwrap();
+    let customer = setup(&mut store);
+    let original = invoice(&mut store, customer, "100.00");
+    issue(&mut store, original, "2026-03-01");
+    let corrective = differences_corrective(&mut store, customer, original);
+    issue(&mut store, corrective, "2026-03-02");
+    let error = store.void_sales_invoice(original).unwrap_err();
+    assert_eq!(error.code(), "conflict", "{error}");
+    assert_eq!(
+        store.sales_document(original).unwrap().status,
+        Status::Issued
+    );
+    // Anulada la rectificativa, la original se puede anular.
+    store.void_sales_invoice(corrective).unwrap();
+    assert_eq!(
+        store.void_sales_invoice(original).unwrap().status,
+        Status::Voided
+    );
+}
+
+#[test]
+fn rectified_base_and_tax_always_come_from_the_original() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("nestadmin.db");
+    let mut store = Store::open(&path).unwrap();
+    let customer = setup(&mut store);
+    let original = invoice(&mut store, customer, "100.00");
+    issue(&mut store, original, "2026-03-01");
+    let corrective = store
+        .create_corrective_draft(
+            original,
+            RectificationKind::R1,
+            RectificationMethod::Substitution,
+        )
+        .unwrap();
+
+    // La edición solo cambia tipo y método: los importes que traiga la entrada se ignoran.
+    let mut input = draft(DocumentKind::CorrectiveInvoice, customer, "80.00");
+    input.rectification = Some(RectificationDraft {
+        kind: RectificationKind::R2,
+        method: RectificationMethod::Substitution,
+        rectified_base: Some(d("5.00")),
+        rectified_tax: Some(d("1.00")),
+    });
+    store.update_sales_draft(corrective, &input).unwrap();
+    let stored = store
+        .sales_document(corrective)
+        .unwrap()
+        .rectification
+        .unwrap();
+    assert_eq!(stored.kind, RectificationKind::R2);
+    assert_eq!(stored.rectified_base.unwrap().to_string(), "100.00");
+    assert_eq!(stored.rectified_tax.unwrap().to_string(), "21.00");
+
+    // Y si la base se altera por debajo, al emitir vuelve a tomarse de la original.
+    raw(&path)
+        .execute(
+            "UPDATE sales_documents SET rectified_base = '1.00', rectified_tax = '0.10' \
+             WHERE id = ?1",
+            [corrective],
+        )
+        .unwrap();
+    let issued = store
+        .issue_sales_document(corrective, date("2026-03-05"), date("2026-03-05"))
+        .unwrap();
+    let rect = issued.rectification.unwrap();
+    assert_eq!(rect.rectified_base.unwrap().to_string(), "100.00");
+    assert_eq!(rect.rectified_tax.unwrap().to_string(), "21.00");
+}
+
+#[test]
+fn issued_documents_cite_their_own_logo_by_hash() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("nestadmin.db");
+    let mut store = Store::open(&path).unwrap();
+    let customer = setup(&mut store);
+    let mut with_logo = company();
+    with_logo.logo = Some(b"abc".to_vec());
+    with_logo.logo_mime = Some("image/png".into());
+    store.set_sales_company(&with_logo).unwrap();
+
+    let first = invoice(&mut store, customer, "10.00");
+    store
+        .issue_sales_document(first, date("2026-03-01"), date("2026-03-01"))
+        .unwrap();
+    let hash = store
+        .sales_document(first)
+        .unwrap()
+        .issuer
+        .unwrap()
+        .logo_sha256
+        .unwrap();
+    assert_eq!(
+        hash,
+        "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+    );
+
+    // Cambiar el logotipo después no altera lo emitido y el anterior sigue disponible.
+    with_logo.logo = Some(b"otro logotipo".to_vec());
+    store.set_sales_company(&with_logo).unwrap();
+    let second = invoice(&mut store, customer, "10.00");
+    store
+        .issue_sales_document(second, date("2026-03-02"), date("2026-03-02"))
+        .unwrap();
+    let other = store
+        .sales_document(second)
+        .unwrap()
+        .issuer
+        .unwrap()
+        .logo_sha256
+        .unwrap();
+    assert_ne!(other, hash);
+    assert_eq!(
+        store
+            .sales_document(first)
+            .unwrap()
+            .issuer
+            .unwrap()
+            .logo_sha256
+            .as_deref(),
+        Some(hash.as_str())
+    );
+    assert_eq!(
+        store.company_logo_by_hash(&hash).unwrap(),
+        Some((b"abc".to_vec(), "image/png".to_owned()))
+    );
+    assert_eq!(store.company_logo_by_hash("0000").unwrap(), None);
+    // Quitar el logotipo tampoco afecta a lo emitido; la tabla es de solo inserción.
+    with_logo.logo = None;
+    with_logo.logo_mime = None;
+    store.set_sales_company(&with_logo).unwrap();
+    assert!(store.company_logo_by_hash(&hash).unwrap().is_some());
+    let conn = raw(&path);
+    assert!(conn
+        .execute("UPDATE company_logos SET mime = 'image/jpeg'", [])
+        .is_err());
+    assert!(conn.execute("DELETE FROM company_logos", []).is_err());
+}
+
+#[test]
+fn recurring_templates_that_cannot_run_fail_alone() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("nestadmin.db");
+    let mut store = Store::open(&path).unwrap();
+    let customer = setup(&mut store);
+    let retired = store
+        .create_customer(&customer_data("Cliente Retirado SL", "87654321X"))
+        .unwrap();
+    let lines = [line("Cuota mensual", "1", "40.00")];
+    let first_day = date("2026-03-01");
+    let ok = store
+        .create_recurring_template(customer, &lines, Frequency::Monthly, first_day, None)
+        .unwrap();
+    let with_retired = store
+        .create_recurring_template(retired, &lines, Frequency::Monthly, first_day, None)
+        .unwrap();
+    let corrupt = store
+        .create_recurring_template(customer, &lines, Frequency::Monthly, first_day, None)
+        .unwrap();
+    store.retire_customer(retired).unwrap();
+    raw(&path)
+        .execute(
+            "UPDATE recurring_templates SET lines = 'no es json' WHERE id = ?1",
+            [corrupt],
+        )
+        .unwrap();
+
+    let run = store
+        .generate_recurring_drafts(date("2026-03-20"), |_| true)
+        .unwrap();
+    assert_eq!(run.created.len(), 1);
+    assert_eq!(run.created[0].key.template_id, ok as u64);
+    let failed: Vec<i64> = run.failed.iter().map(|(id, _)| *id).collect();
+    assert_eq!(failed, vec![with_retired, corrupt]);
+
+    // Una plantilla inexistente no se actualiza en silencio.
+    assert_eq!(
+        store
+            .update_recurring_template(999, customer, &lines, Frequency::Monthly, first_day, None)
+            .unwrap_err()
+            .code(),
+        "not_found"
+    );
+}
+
+#[test]
+fn a_late_recurring_draft_is_not_auto_issued_after_a_cut() {
+    let mut store = Store::open_in_memory().unwrap();
+    let customer = setup(&mut store);
+    store
+        .create_recurring_template(
+            customer,
+            &[line("Cuota mensual", "1", "40.00")],
+            Frequency::Monthly,
+            date("2026-01-15"),
+            None,
+        )
+        .unwrap();
+    let run = store
+        .generate_recurring_drafts(date("2026-03-20"), |_| true)
+        .unwrap();
+    let (old, current) = (run.created[0].document_id, run.created[2].document_id);
+    let on_time = date("2026-03-20");
+    assert_eq!(
+        store.recurring_issue_mode(current, on_time, true).unwrap(),
+        IssueMode::AutoIssueByRule
+    );
+    assert_eq!(
+        store.recurring_issue_mode(current, on_time, false).unwrap(),
+        IssueMode::RequiresReview
+    );
+    assert_eq!(
+        store.recurring_issue_mode(old, on_time, true).unwrap(),
+        IssueMode::RequiresReview
+    );
+    // Tras un corte largo el periodo actual ya no es aquel.
+    assert_eq!(
+        store
+            .recurring_issue_mode(current, date("2026-05-20"), true)
+            .unwrap(),
+        IssueMode::RequiresReview
+    );
+    // Un documento que no es recurrente es un error explícito.
+    let plain = invoice(&mut store, customer, "1.00");
+    assert_eq!(
+        store
+            .recurring_issue_mode(plain, on_time, true)
+            .unwrap_err()
+            .code(),
+        "conflict"
+    );
+}
+
+#[test]
+fn a_corrective_can_be_made_for_a_customer_retired_afterwards() {
+    let mut store = Store::open_in_memory().unwrap();
+    let customer = setup(&mut store);
+    let original = invoice(&mut store, customer, "100.00");
+    issue(&mut store, original, "2026-03-01");
+    store.retire_customer(customer).unwrap();
+
+    let corrective = store
+        .create_corrective_draft(
+            original,
+            RectificationKind::R1,
+            RectificationMethod::Substitution,
+        )
+        .unwrap();
+    // Seguir con el mismo cliente no se rechaza; cambiar a otro retirado, sí.
+    let mut input = draft(DocumentKind::CorrectiveInvoice, customer, "80.00");
+    input.rectification = None;
+    store.update_sales_draft(corrective, &input).unwrap();
+    let other = store
+        .create_customer(&customer_data("Otro Cliente SL", "87654321X"))
+        .unwrap();
+    store.retire_customer(other).unwrap();
+    input.customer_id = Some(other);
+    assert_eq!(
+        store
+            .update_sales_draft(corrective, &input)
+            .unwrap_err()
+            .code(),
+        "invalid_input"
+    );
+    assert_eq!(issue(&mut store, corrective, "2026-03-05"), "FR-2026-0001");
+}
+
+#[test]
+fn triggers_guard_status_series_links_and_payments() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("nestadmin.db");
+    let mut store = Store::open(&path).unwrap();
+    let customer = setup(&mut store);
+    let paid = invoice(&mut store, customer, "10.00");
+    issue(&mut store, paid, "2026-03-01");
+    let today = date("2026-03-02");
+    store
+        .add_sales_payment(paid, today, d("5.00"), PaymentMethod::Cash, today)
+        .unwrap();
+    let voided = invoice(&mut store, customer, "10.00");
+    issue(&mut store, voided, "2026-03-02");
+    store.void_sales_invoice(voided).unwrap();
+    let pending = invoice(&mut store, customer, "10.00");
+    let quote = store
+        .create_sales_draft(&draft(DocumentKind::Quote, customer, "10.00"))
+        .unwrap();
+    issue(&mut store, quote, "2026-03-03");
+    let revision = store.revise_sales_document(quote).unwrap();
+    store
+        .issue_sales_document(revision, date("2026-03-04"), date("2026-03-04"))
+        .unwrap();
+
+    let conn = raw(&path);
+    for (sql, why) in [
+        (
+            "INSERT INTO sales_documents (kind, status, created_at, updated_at) \
+             VALUES ('invoice', 'issued', 0, 0)",
+            "nace en borrador",
+        ),
+        (
+            "UPDATE series SET last_date = '2000-01-01' WHERE kind = 'invoice'",
+            "la fecha de la serie no retrocede",
+        ),
+        (
+            "UPDATE series SET last_date = NULL WHERE kind = 'invoice'",
+            "la fecha de la serie no se borra",
+        ),
+        (
+            "UPDATE sales_documents SET superseded_by = NULL WHERE superseded_by IS NOT NULL",
+            "superseded_by no se desfija",
+        ),
+        (
+            "UPDATE sales_documents SET superseded_by = 1 WHERE superseded_by IS NOT NULL",
+            "superseded_by no se reescribe",
+        ),
+        (
+            "UPDATE sales_documents SET status = 'issued' WHERE status = 'voided'",
+            "de anulada no se sale",
+        ),
+        (
+            "UPDATE document_links SET relation = 'rectifies'",
+            "los vínculos no se modifican",
+        ),
+        (
+            "UPDATE payments SET amount = '1.00'",
+            "los cobros no se modifican",
+        ),
+    ] {
+        assert!(conn.execute(sql, []).is_err(), "debía fallar: {why}");
+    }
+    for document in [voided, pending] {
+        assert!(
+            conn.execute(
+                "INSERT INTO payments (document_id, date, amount, method, created_at) \
+                 VALUES (?1, '2026-03-05', '1.00', 'cash', 0)",
+                [document],
+            )
+            .is_err(),
+            "no admite cobros: {document}"
+        );
+    }
+    // Alta y baja de cobros sí.
+    conn.execute(
+        "INSERT INTO payments (document_id, date, amount, method, created_at) \
+         VALUES (?1, '2026-03-05', '1.00', 'cash', 0)",
+        [paid],
+    )
+    .unwrap();
+    conn.execute("DELETE FROM payments WHERE amount = '1.00'", [])
+        .unwrap();
 }

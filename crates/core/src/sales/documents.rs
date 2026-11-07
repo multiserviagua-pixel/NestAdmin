@@ -9,12 +9,14 @@ use nestadmin_sales::{
     InvoiceContent, InvoiceRecordInput, LineInput, LineMode, Party, Rectification,
     RectificationKind, RectificationMethod, SeriesCounter, SeriesKey, Status, Totals,
 };
-use rusqlite::{params, Connection, OptionalExtension, Transaction};
+use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBehavior};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
-use super::master::{load_company, load_customer, load_product, Company, Customer};
+use super::master::{
+    company_logo_sha256, load_company, load_customer, load_product, Company, Customer,
+};
 use super::{
     audit, clean, dec, kind_from, method_from, method_text, money, parse_date, plain,
     qualification_from, rect_kind_from, rect_kind_text, status_from, tax_rate_from, SalesResult,
@@ -95,6 +97,10 @@ pub struct IssuerSnapshot {
     pub party: Party,
     pub email: Option<String>,
     pub iban: Option<String>,
+    /// SHA-256 del logotipo vigente al emitir; se lee con `Store::company_logo_by_hash` y
+    /// no cambia aunque la empresa cambie de logotipo después (D76, D90).
+    #[serde(default)]
+    pub logo_sha256: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -492,9 +498,16 @@ pub(crate) fn load_document(conn: &Connection, id: i64) -> SalesResult<SalesDocu
     })
 }
 
-fn check_draft_input(conn: &Connection, input: &DraftInput) -> SalesResult<()> {
+/// `keep_customer` es el cliente que el borrador ya tenía: seguir con él no se rechaza aunque
+/// se haya retirado después (una rectificativa debe poder hacerse igualmente).
+fn check_draft_input(
+    conn: &Connection,
+    input: &DraftInput,
+    keep_customer: Option<i64>,
+) -> SalesResult<()> {
     if let Some(customer_id) = input.customer_id {
-        if load_customer(conn, customer_id)?.retired {
+        let customer = load_customer(conn, customer_id)?;
+        if customer.retired && keep_customer != Some(customer_id) {
             return Err(SalesStoreError::invalid(
                 "customer_id",
                 "el cliente está retirado",
@@ -560,6 +573,72 @@ fn touch_status(conn: &Connection, id: i64, from: Status, to: Status) -> SalesRe
     Ok(())
 }
 
+/// R5 corresponde a rectificar una simplificada y solo a ella (D81).
+fn check_rectification_kind(original: &SalesDocument, kind: RectificationKind) -> SalesResult<()> {
+    let simplified = original.kind == DocumentKind::SimplifiedInvoice;
+    if simplified != (kind == RectificationKind::R5) {
+        return Err(SalesStoreError::invalid(
+            "rectification.kind",
+            "R5 corresponde a rectificar una simplificada y solo a ella",
+        ));
+    }
+    Ok(())
+}
+
+/// Base y cuota de la factura rectificada (D99): por sustitución, siempre las guardadas de la
+/// original; por diferencias no se admiten.
+fn rectified_amounts(
+    original: &SalesDocument,
+    method: RectificationMethod,
+) -> SalesResult<(Option<Decimal>, Option<Decimal>)> {
+    match method {
+        RectificationMethod::Substitution => {
+            let totals = original.totals.as_ref().ok_or_else(|| {
+                SalesStoreError::Corrupt(format!("la factura {} no tiene totales", original.id))
+            })?;
+            Ok((Some(totals.base_total), Some(totals.tax_total)))
+        }
+        RectificationMethod::Differences => Ok((None, None)),
+    }
+}
+
+/// Una factura no admite dos sustituciones en vigor ni mezclar sustitución con diferencias
+/// (D81, D88); varias por diferencias sí. `exclude` es la propia rectificativa si ya existe.
+fn ensure_corrective_compatible(
+    conn: &Connection,
+    original_id: i64,
+    method: RectificationMethod,
+    exclude: Option<i64>,
+) -> SalesResult<()> {
+    let mut stmt = conn.prepare(
+        "SELECT rectification_method FROM sales_documents WHERE rectifies_id = ?1 \
+         AND status IN ('issued', 'sent') AND id <> ?2",
+    )?;
+    let methods = stmt
+        .query_map(params![original_id, exclude.unwrap_or(-1)], |r| {
+            r.get::<_, Option<String>>(0)
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    for text in methods {
+        let existing = method_from(&text.unwrap_or_default())?;
+        match (method, existing) {
+            (RectificationMethod::Differences, RectificationMethod::Differences) => {}
+            (RectificationMethod::Substitution, RectificationMethod::Substitution) => {
+                return Err(SalesStoreError::Conflict(format!(
+                    "la factura {original_id} ya tiene una rectificativa por sustitución en vigor"
+                )))
+            }
+            _ => {
+                return Err(SalesStoreError::Conflict(format!(
+                    "la factura {original_id} ya tiene rectificativas en vigor de otro método: \
+                     no se mezclan sustitución y diferencias"
+                )))
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Reglas de la rectificativa que se evalúan al crearla y de nuevo al emitirla.
 fn rectification_for_issue(
     conn: &Connection,
@@ -576,23 +655,62 @@ fn rectification_for_issue(
     };
     let original = load_document(conn, original_id)?;
     can_correct(original.kind, original.status)?;
+    check_rectification_kind(&original, rect.kind)?;
+    ensure_corrective_compatible(conn, original_id, rect.method, Some(doc.id))?;
     let number = parse_series(&original)?.ok_or_else(|| {
         SalesStoreError::Conflict(format!("la factura {original_id} no tiene número"))
     })?;
+    // Lo que traiga el borrador en base y cuota se ignora (D99).
+    let (rectified_base, rectified_tax) = rectified_amounts(&original, rect.method)?;
     Ok(Some(Rectification {
         rectified_number: Some(number),
         rectified_date: original.issue_date,
         kind: Some(rect.kind),
         method: Some(rect.method),
-        rectified_base: rect.rectified_base,
-        rectified_tax: rect.rectified_tax,
+        rectified_base,
+        rectified_tax,
     }))
+}
+
+/// Id de la revisión anterior (`revision - 1`) con el mismo número.
+fn previous_revision_id(conn: &Connection, doc: &SalesDocument) -> SalesResult<Option<i64>> {
+    let (Some(year), Some(sequence)) = (doc.series_year, doc.sequence) else {
+        return Ok(None);
+    };
+    Ok(conn
+        .query_row(
+            "SELECT id FROM sales_documents WHERE kind = ?1 AND series_year = ?2 \
+             AND sequence = ?3 AND revision = ?4",
+            params![
+                doc.kind.as_str(),
+                year,
+                sequence,
+                doc.revision.saturating_sub(1)
+            ],
+            |r| r.get(0),
+        )
+        .optional()?)
+}
+
+/// `true` si hay un borrador de revisión posterior pendiente de emitir (D74).
+fn has_pending_revision(conn: &Connection, doc: &SalesDocument) -> SalesResult<bool> {
+    let (Some(year), Some(sequence)) = (doc.series_year, doc.sequence) else {
+        return Ok(false);
+    };
+    let pending: i64 = conn.query_row(
+        "SELECT count(*) FROM sales_documents WHERE kind = ?1 AND series_year = ?2 \
+         AND sequence = ?3 AND revision > ?4 AND status = 'draft'",
+        params![doc.kind.as_str(), year, sequence, doc.revision],
+        |r| r.get(0),
+    )?;
+    Ok(pending > 0)
 }
 
 fn issue_in_tx<F>(
     tx: &Transaction<'_>,
     id: i64,
     issue_date: IsoDate,
+    today: IsoDate,
     hook: F,
 ) -> SalesResult<SalesDocument>
 where
@@ -601,16 +719,57 @@ where
     let doc = load_document(tx, id)?;
     transition(doc.kind, doc.status, Status::Issued)?;
 
+    // Fechas (D73): no se expide con fecha futura ni con vencimiento anterior a la expedición.
+    if issue_date > today {
+        return Err(SalesStoreError::invalid(
+            "issue_date",
+            "la fecha de expedición no puede ser posterior a hoy",
+        ));
+    }
+    if doc.due_date.is_some_and(|due| due < issue_date) {
+        return Err(SalesStoreError::invalid(
+            "due_date",
+            "el vencimiento no puede ser anterior a la fecha de expedición",
+        ));
+    }
+    // Una revisión solo se emite si la anterior sigue vigente (D74).
+    let previous_id = if doc.revision > 1 {
+        let previous_id = previous_revision_id(tx, &doc)?.ok_or_else(|| {
+            SalesStoreError::Conflict(format!("no existe la revisión anterior del documento {id}"))
+        })?;
+        let previous = load_document(tx, previous_id)?;
+        if can_revise(previous.kind, previous.status).is_err() || previous.superseded_by.is_some() {
+            return Err(SalesStoreError::Conflict(format!(
+                "la revisión anterior del documento {id} ya no admite revisión (estado {})",
+                previous.status.as_str()
+            )));
+        }
+        if previous.issue_date.is_some_and(|prev| issue_date < prev) {
+            return Err(SalesStoreError::invalid(
+                "issue_date",
+                "una revisión no puede tener fecha anterior a la de la revisión previa",
+            ));
+        }
+        Some(previous_id)
+    } else {
+        None
+    };
+
     let company = load_company(tx)?;
     let customer = doc.customer_id.map(|c| load_customer(tx, c)).transpose()?;
+    let logo_sha256 = company_logo_sha256(tx)?;
     let issuer = company.as_ref().map(|c| IssuerSnapshot {
         party: party_of_company(c),
         email: clean(&c.email),
         iban: clean(&c.iban),
+        logo_sha256: logo_sha256.clone(),
     });
     let recipient = customer.as_ref().map(party_of_customer);
     let lines: Vec<LineInput> = doc.lines.iter().map(|l| l.input.clone()).collect();
 
+    let rectification = rectification_for_issue(tx, &doc)?;
+    let rectified_base = rectification.as_ref().and_then(|r| r.rectified_base);
+    let rectified_tax = rectification.as_ref().and_then(|r| r.rectified_tax);
     let content = InvoiceContent {
         kind: doc.kind,
         issue_date: Some(issue_date),
@@ -619,7 +778,7 @@ where
         recipient: recipient.clone(),
         lines: lines.clone(),
         withholding_percent: doc.withholding_percent,
-        rectification: rectification_for_issue(tx, &doc)?,
+        rectification,
         recipient_requested_tax_id: doc.recipient_requested_tax_id,
         art_4_2_declared: doc.art_4_2_declared,
     };
@@ -682,7 +841,8 @@ where
     let changed = tx.execute(
         "UPDATE sales_documents SET status = 'issued', series_year = ?2, sequence = ?3, \
          issue_date = ?4, issuer_snapshot = ?5, recipient_snapshot = ?6, totals = ?7, \
-         base_total = ?8, tax_total = ?9, total = ?10, amount_due = ?11, updated_at = ?12 \
+         base_total = ?8, tax_total = ?9, total = ?10, amount_due = ?11, updated_at = ?12, \
+         rectified_base = ?13, rectified_tax = ?14 \
          WHERE id = ?1 AND status = 'draft'",
         params![
             id,
@@ -697,6 +857,8 @@ where
             money(totals.total),
             money(totals.amount_due),
             now_ms(),
+            rectified_base.map(money),
+            rectified_tax.map(money),
         ],
     )?;
     if changed != 1 {
@@ -704,22 +866,15 @@ where
             "el documento {id} cambió de estado durante la emisión"
         )));
     }
-    if doc.revision > 1 {
+    if let Some(previous_id) = previous_id {
         let replaced = tx.execute(
             "UPDATE sales_documents SET superseded_by = ?1, updated_at = ?2 \
-             WHERE kind = ?3 AND series_year = ?4 AND sequence = ?5 AND revision = ?6",
-            params![
-                id,
-                now_ms(),
-                doc.kind.as_str(),
-                i64::from(number.series.year),
-                number.sequence,
-                doc.revision - 1,
-            ],
+             WHERE id = ?3 AND superseded_by IS NULL",
+            params![id, now_ms(), previous_id],
         )?;
         if replaced != 1 {
             return Err(SalesStoreError::Conflict(format!(
-                "no existe la revisión anterior del documento {id}"
+                "la revisión anterior del documento {id} ya está sustituida"
             )));
         }
     }
@@ -744,7 +899,7 @@ impl Store {
             ));
         }
         let tx = self.conn.transaction()?;
-        check_draft_input(&tx, input)?;
+        check_draft_input(&tx, input, None)?;
         let mut draft = NewDraft::new(input.kind);
         apply_input(&mut draft, input);
         let id = insert_draft(&tx, &draft)?;
@@ -763,9 +918,28 @@ impl Store {
                 "el tipo de un documento no se cambia",
             ));
         }
-        check_draft_input(&tx, input)?;
+        check_draft_input(&tx, input, current.customer_id)?;
+        // En una rectificativa solo se cambian el tipo y el método; base y cuota rectificadas
+        // se recalculan de la original, nunca se toman de la entrada (D99).
         let rectification = match current.kind {
-            DocumentKind::CorrectiveInvoice => input.rectification.or(current.rectification),
+            DocumentKind::CorrectiveInvoice => {
+                let wanted = input.rectification.or(current.rectification);
+                let (Some(original_id), Some(wanted)) = (current.rectifies_id, wanted) else {
+                    return Err(SalesStoreError::invalid(
+                        "rectification",
+                        "la rectificativa no referencia ninguna factura",
+                    ));
+                };
+                let original = load_document(&tx, original_id)?;
+                check_rectification_kind(&original, wanted.kind)?;
+                let (rectified_base, rectified_tax) = rectified_amounts(&original, wanted.method)?;
+                Some(RectificationDraft {
+                    kind: wanted.kind,
+                    method: wanted.method,
+                    rectified_base,
+                    rectified_tax,
+                })
+            }
             _ => None,
         };
         tx.execute(
@@ -828,11 +1002,19 @@ impl Store {
         let tx = self.conn.transaction()?;
         let doc = load_document(&tx, id)?;
         ensure_editable(doc.status)?;
-        if doc.recurring_template_id.is_some() {
-            // Borrarlo haría que el siguiente arranque volviera a generar ese periodo (D87).
-            return Err(SalesStoreError::Conflict(
-                "el borrador de una plantilla recurrente no se elimina".into(),
-            ));
+        // Borrar el borrador de una plantilla recurrente deja constancia del periodo omitido:
+        // sin ella el siguiente arranque lo volvería a generar (D87).
+        if let (Some(template), Some(period)) = (doc.recurring_template_id, doc.recurring_period) {
+            tx.execute(
+                "INSERT OR IGNORE INTO recurring_skips (template_id, period, created_at) \
+                 VALUES (?1, ?2, ?3)",
+                params![template, period, now_ms()],
+            )?;
+            audit(
+                &tx,
+                "sales.recurring_skip",
+                &json!({ "id": id, "template": template, "period": period }),
+            )?;
         }
         let converted: i64 = tx.query_row(
             "SELECT count(*) FROM document_links WHERE to_id = ?1 AND relation = 'converted'",
@@ -879,29 +1061,39 @@ impl Store {
 
     // --- Emisión (D73) ---
 
+    /// `today` es la fecha actual del llamador: no se expide con fecha posterior (D73).
     pub fn issue_sales_document(
         &mut self,
         id: i64,
         issue_date: IsoDate,
+        today: IsoDate,
     ) -> SalesResult<SalesDocument> {
-        self.issue_sales_document_with(id, issue_date, |_, _| Ok(()))
+        self.issue_sales_document_with(id, issue_date, today, |_, _| Ok(()))
     }
 
     /// Emite el documento en una sola transacción: valida, toma el número de la serie, fija el
     /// contenido y las copias de emisor y destinatario y, en facturas, entrega a `hook` los
     /// datos del registro Verifactu (D83) dentro de la misma transacción. Si `hook` o cualquier
-    /// paso falla, no se consume número ni cambia el estado (T15).
+    /// paso falla, no se consume número ni cambia el estado (T15). Rechaza una fecha de
+    /// expedición posterior a `today` y un vencimiento anterior a la expedición.
+    ///
+    /// El mensaje de un [`SalesStoreError::External`] devuelto por `hook` llega tal cual al
+    /// llamador y a los registros: no debe contener secretos (credenciales, tokens, claves).
     pub fn issue_sales_document_with<F>(
         &mut self,
         id: i64,
         issue_date: IsoDate,
+        today: IsoDate,
         hook: F,
     ) -> SalesResult<SalesDocument>
     where
         F: FnOnce(&Transaction<'_>, Option<&InvoiceRecordInput>) -> SalesResult<()>,
     {
-        let tx = self.conn.transaction()?;
-        let issued = issue_in_tx(&tx, id, issue_date, hook)?;
+        // Inmediata: el número se toma con el bloqueo de escritura ya adquirido.
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let issued = issue_in_tx(&tx, id, issue_date, today, hook)?;
         tx.commit()?;
         Ok(issued)
     }
@@ -917,6 +1109,11 @@ impl Store {
         if doc.superseded_by.is_some() {
             return Err(SalesStoreError::Conflict(
                 "la revisión está sustituida por otra posterior".into(),
+            ));
+        }
+        if has_pending_revision(&tx, &doc)? {
+            return Err(SalesStoreError::Conflict(
+                "hay un borrador de revisión pendiente: emítalo o elimínelo antes".into(),
             ));
         }
         let dedicated = match to {
@@ -1001,14 +1198,28 @@ impl Store {
     }
 
     /// Anula una factura `issued` (nunca una `sent`). `hook` recibe el documento dentro de la
-    /// transacción para escribir el registro de anulación Verifactu (D83).
+    /// transacción para escribir el registro de anulación Verifactu (D83). Con una rectificativa
+    /// en vigor (`issued` o `sent`) la factura no se anula (D82). El mensaje de un
+    /// [`SalesStoreError::External`] del gancho no debe contener secretos.
     pub fn void_sales_invoice_with<F>(&mut self, id: i64, hook: F) -> SalesResult<SalesDocument>
     where
         F: FnOnce(&Transaction<'_>, &SalesDocument) -> SalesResult<()>,
     {
-        let tx = self.conn.transaction()?;
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
         let doc = load_document(&tx, id)?;
         can_void(doc.kind, doc.status)?;
+        let in_force: i64 = tx.query_row(
+            "SELECT count(*) FROM sales_documents WHERE rectifies_id = ?1              AND status IN ('issued', 'sent')",
+            [id],
+            |r| r.get(0),
+        )?;
+        if in_force > 0 {
+            return Err(SalesStoreError::Conflict(format!(
+                "la factura {id} tiene una rectificativa en vigor y no se anula (D82)"
+            )));
+        }
         touch_status(&tx, id, doc.status, Status::Voided)?;
         let voided = load_document(&tx, id)?;
         hook(&tx, &voided)?;
@@ -1035,30 +1246,19 @@ impl Store {
                 "la factura {original_id} no tiene número"
             )));
         }
-        let simplified = original.kind == DocumentKind::SimplifiedInvoice;
-        if simplified != (kind == RectificationKind::R5) {
-            return Err(SalesStoreError::invalid(
-                "rectification.kind",
-                "R5 corresponde a rectificar una simplificada y solo a ella",
-            ));
-        }
+        check_rectification_kind(&original, kind)?;
+        ensure_corrective_compatible(&tx, original_id, method, None)?;
         let mut draft = NewDraft::new(DocumentKind::CorrectiveInvoice);
         draft.customer_id = original.customer_id;
         draft.rectifies_id = Some(original_id);
         draft.art_4_2_declared = original.art_4_2_declared;
         draft.recipient_requested_tax_id = original.recipient_requested_tax_id;
-        let (rectified_base, rectified_tax) = match method {
-            RectificationMethod::Substitution => {
-                let totals = original.totals.as_ref().ok_or_else(|| {
-                    SalesStoreError::Corrupt(format!("la factura {original_id} no tiene totales"))
-                })?;
-                draft.lines = copy_lines(&original);
-                draft.operation_date = original.operation_date;
-                draft.withholding = original.withholding_percent;
-                (Some(totals.base_total), Some(totals.tax_total))
-            }
-            RectificationMethod::Differences => (None, None),
-        };
+        let (rectified_base, rectified_tax) = rectified_amounts(&original, method)?;
+        if method == RectificationMethod::Substitution {
+            draft.lines = copy_lines(&original);
+            draft.operation_date = original.operation_date;
+            draft.withholding = original.withholding_percent;
+        }
         draft.rectification = Some(RectificationDraft {
             kind,
             method,
@@ -1101,6 +1301,14 @@ impl Store {
                 "el documento {} está sustituido por una revisión posterior",
                 superseded.id
             )));
+        }
+        for s in &sources {
+            if has_pending_revision(&tx, s)? {
+                return Err(SalesStoreError::Conflict(format!(
+                    "el documento {} tiene un borrador de revisión pendiente",
+                    s.id
+                )));
+            }
         }
         let mut checks = Vec::with_capacity(sources.len());
         for s in &sources {

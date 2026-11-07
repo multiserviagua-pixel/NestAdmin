@@ -24,7 +24,7 @@ fn has_rules_table(path: &std::path::Path) -> bool {
 
 /// Quita lo que añadió la migración 3 (los triggers caen con sus tablas), como si la base la
 /// hubiera creado la versión anterior.
-const DROP_SALES: &str = "DROP TABLE received_delivery_notes; DROP TABLE payments;     DROP TABLE document_links; DROP TABLE sales_lines; DROP TABLE sales_documents;     DROP TABLE recurring_templates; DROP TABLE series; DROP TABLE products;     DROP TABLE customers; DROP TABLE company;";
+const DROP_SALES: &str = "DROP TABLE received_delivery_notes; DROP TABLE payments;     DROP TABLE document_links; DROP TABLE sales_lines; DROP TABLE sales_documents;     DROP TABLE recurring_skips; DROP TABLE recurring_templates; DROP TABLE series; DROP TABLE products;     DROP TABLE customers; DROP TABLE company; DROP TABLE company_logos;";
 
 fn has_table(path: &std::path::Path, name: &str) -> bool {
     rusqlite::Connection::open(path)
@@ -122,6 +122,8 @@ fn migrating_from_schema_2_adds_sales_tables_and_keeps_a_copy() {
         "document_links",
         "payments",
         "recurring_templates",
+        "recurring_skips",
+        "company_logos",
         "received_delivery_notes",
     ] {
         assert!(
