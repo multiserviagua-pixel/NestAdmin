@@ -1578,6 +1578,8 @@ mod tests {
             method: Method::PdfText,
             chars: 1,
             offset,
+            confidence: None,
+            low_confidence: false,
         }
     }
 
