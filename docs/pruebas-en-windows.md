@@ -2,6 +2,16 @@
 
 Lo que queda del plan y solo se puede acreditar en Windows: la versión de prueba, las pruebas desde la ventana, la instalación y las mediciones. Usar solo datos sintéticos (`crates/extract/tests/fixtures/`, el correo simulado y el corpus de `evaluation/`). Anotar fecha, versión (commit), resultado y códigos de error en el archivo de evidencia indicado. No anotar direcciones, asuntos ni documentos reales.
 
+## Forma de trabajo (desde el 2026-11-07)
+
+Las pruebas diarias se hacen con la versión de desarrollo de `main`, sin instalar nada (en el equipo de desarrollo también con el acceso «NestAdmin main (pruebas).bat» del escritorio):
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\dev-pruebas.ps1
+```
+
+Usa una carpeta de datos aparte (`%USERPROFILE%\NestAdmin-pruebas`) para no tocar ni migrar la de la versión instalada, y copia allí `correo-oauth.json` de la instalación. Las credenciales del Administrador de credenciales son las mismas. Antes hay que cerrar la versión instalada desde el área de notificación. Sirve para las secciones 2, 3, 4 y 6 y para el correo real; no sirve para la 1 (instalador), para la 5 en lo que depende del paquete ni para medir (la 7 usa `t12-medir.ps1`, que compila optimizado). El instalador se construye una sola vez al cerrar cada etapa (sección 0).
+
 ## 0. Construir la versión de prueba
 
 Desde la carpeta del repositorio, en la rama `main` (el desarrollo es solo local desde el 2026-11-07, sin `git pull`):
