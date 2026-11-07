@@ -4,10 +4,10 @@ Lo que queda del plan y solo se puede acreditar en Windows: la versión de prueb
 
 ## 0. Construir la versión de prueba
 
-Desde la carpeta del repositorio, con la rama `claude/bold-mccarthy-8y14ii` actualizada:
+Desde la carpeta del repositorio, en la rama `main` (el desarrollo es solo local desde el 2026-11-07, sin `git pull`):
 
 ```powershell
-git pull
+git switch main
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts\setup-dev.ps1 -Comprobar
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts\setup-ocr.ps1
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts\build-clean.ps1 -ClienteOAuth C:\NestAdmin-config\correo-oauth.json
