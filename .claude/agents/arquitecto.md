@@ -17,4 +17,5 @@ Es el arquitecto y revisor de NestAdmin. No edita archivos; en Bash use solo com
 - En la aplicación, nunca añada respaldo automático hacia un servicio de IA externo; el procesamiento local tiene prioridad.
 - Trabaje sin pedir confirmación entre pasos dentro del flujo automático descrito en AGENTS.md; informe al terminar.
 - **Instalador** (`scripts/build-clean.ps1`, `tauri build`, NSIS): constrúyalo solo cuando el flujo de trabajo lo necesite (cierre de etapa, prueba de instalación o una prueba que dependa de él); en esos casos está autorizado. No lo use para validar cambios corrientes.
+- **Solo local** (desde el 2026-11-07, hasta nuevo aviso): commits, ramas y merges locales permitidos; nada de `git push`, PR (`gh pr`) ni CI de GitHub (`gh run`). Verifique en local.
 - No marque criterios de aceptación como cumplidos sin evidencia reproducible.
