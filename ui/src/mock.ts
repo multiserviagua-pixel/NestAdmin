@@ -32,6 +32,40 @@ const rules: Rule[] = [];
 const audit: AuditEntry[] = [];
 let choice: ProviderChoice = { provider: "ollama", base_url: "http://127.0.0.1:11434", model: "qwen3:8b" };
 let groqKey = false;
+let ollamaCloudKey = false;
+let anthropicKey = false;
+// Claves del proveedor compatible con OpenAI por host (D109).
+const compatKeys = new Set<string>();
+
+/// Réplica reducida de la validación de URL base del adaptador (D109).
+function compatHost(baseUrl: string): string {
+  const raw = String(baseUrl).trim();
+  if (!/^https:\/\//i.test(raw)) throw "unavailable: URL base no admitida: solo se admite https://";
+  let url: URL;
+  try {
+    url = new URL(raw);
+  } catch {
+    throw "unavailable: URL base no admitida: host no válido";
+  }
+  if (url.username || url.password) throw "unavailable: URL base no admitida: no puede llevar usuario ni contraseña";
+  if (url.search || url.hash) throw "unavailable: URL base no admitida: no puede llevar query ni fragmento";
+  const host = url.hostname.toLowerCase().replace(/\.$/, "");
+  const local =
+    !host.includes(".") ||
+    /(^|\.)(localhost|local|internal|lan|localdomain)$/.test(host) ||
+    /^(127\.|10\.|0\.|192\.168\.|169\.254\.|172\.(1[6-9]|2\d|3[01])\.)/.test(host) ||
+    host.startsWith("[");
+  if (local) throw "unavailable: URL base no admitida: apunta a este equipo o a la red local";
+  return host;
+}
+
+function compatKeySaved(baseUrl: string): boolean {
+  try {
+    return compatKeys.has(compatHost(baseUrl));
+  } catch {
+    return false;
+  }
+}
 
 // Cuentas de correo simuladas. `?sin-cuentas` en la URL abre la pantalla sin ninguna cuenta y
 // `?sin-cliente` imita una instalación sin clientes OAuth del editor. Iniciar sesión espera
@@ -173,9 +207,9 @@ function memory(): Memory {
   const level = total + GIB >= 16 * GIB ? "recommended" : total < 9 * GIB ? "insufficient" : "below_recommended";
   let warning =
     level === "insufficient"
-      ? `Este equipo tiene ${gb(total)} GB de memoria. Con 8 GB o menos, la IA local (Qwen3 8B) probablemente no responderá a tiempo. Puede intentarlo igualmente o elegir Groq en Configuración; NestAdmin no lo cambiará por su cuenta.`
+      ? `Este equipo tiene ${gb(total)} GB de memoria. Con 8 GB o menos, la IA local (Qwen3 8B) probablemente no responderá a tiempo. Puede intentarlo igualmente o elegir un proveedor externo en Configuración; NestAdmin no lo cambiará por su cuenta.`
       : level === "below_recommended"
-        ? `Este equipo tiene ${gb(total)} GB de memoria; se recomiendan 16 GB para la IA local. Puede seguir, pero las respuestas serán más lentas y alguna podría no llegar a tiempo; si ocurre, puede elegir Groq en Configuración.`
+        ? `Este equipo tiene ${gb(total)} GB de memoria; se recomiendan 16 GB para la IA local. Puede seguir, pero las respuestas serán más lentas y alguna podría no llegar a tiempo; si ocurre, puede elegir un proveedor externo en Configuración.`
         : null;
   if (available < 6 * GIB) {
     const free = `Ahora hay ${gb(available)} GB libres: cierre otros programas antes de usar la IA local.`;
@@ -224,7 +258,7 @@ function simulatePreparation(run: { cancelled: boolean }) {
       return void setTimeout(tick, 350);
     }
     if (timesOut) {
-      const message = `timeout: el proveedor no respondió a tiempo, probablemente por falta de memoria: el equipo tiene ${ramGb.toFixed(1).replace(".", ",")} GB y la IA local necesita 16 GB; puede elegir Groq en Configuración`;
+      const message = `timeout: el proveedor no respondió a tiempo, probablemente por falta de memoria: el equipo tiene ${ramGb.toFixed(1).replace(".", ",")} GB y la IA local necesita 16 GB; puede elegir un proveedor externo en Configuración`;
       emit("verify", "failed", message);
       return finish({ report: null, error: { code: "verify_failed", message } });
     }
@@ -572,16 +606,47 @@ const handlers: Record<string, (a: any, options?: any) => unknown> = {
     choice,
     active: { provider: choice.provider, model: choice.model },
     groq_key_saved: groqKey,
+    ollama_cloud_key_saved: ollamaCloudKey,
+    anthropic_key_saved: anthropicKey,
+    openai_compatible_key_saved: choice.provider === "openai_compatible" && compatKeySaved(choice.base_url),
+    default_cloud_model: "gemma4:31b", // espejo de DEFAULT_CLOUD_MODEL (solo vista previa)
     data_dir: "%LOCALAPPDATA%\\NestAdmin (vista previa: datos en memoria)",
   }),
   select_provider: ({ choice: next }) => {
     if (next.provider === "groq" && !groqKey) throw "unauthorized: credencial ausente o rechazada";
+    if (next.provider === "ollama_cloud" && !ollamaCloudKey) throw "unauthorized: credencial ausente o rechazada";
+    if (next.provider === "anthropic" && !anthropicKey) throw "unauthorized: credencial ausente o rechazada";
+    if (next.provider === "openai_compatible" && !compatKeys.has(compatHost(next.base_url))) {
+      throw "unauthorized: credencial ausente o rechazada";
+    }
     choice = next;
     return { provider: next.provider, model: next.model };
   },
+  save_anthropic_key: ({ key }) => {
+    if (!String(key).trim()) throw "la clave está vacía";
+    anthropicKey = true;
+  },
+  delete_anthropic_key: () => {
+    anthropicKey = false;
+  },
+  save_openai_compatible_key: ({ baseUrl, key }) => {
+    if (!String(key).trim()) throw "la clave está vacía";
+    compatKeys.add(compatHost(String(baseUrl)));
+  },
+  delete_openai_compatible_key: ({ baseUrl }) => {
+    compatKeys.delete(compatHost(String(baseUrl)));
+  },
+  openai_compatible_key_saved: ({ baseUrl }) => compatKeySaved(String(baseUrl)),
   save_groq_key: ({ key }) => {
     if (!String(key).trim()) throw "la clave está vacía";
     groqKey = true;
+  },
+  save_ollama_cloud_key: ({ key }) => {
+    if (!String(key).trim()) throw "la clave está vacía";
+    ollamaCloudKey = true;
+  },
+  delete_ollama_cloud_key: () => {
+    ollamaCloudKey = false;
   },
   delete_groq_key: () => {
     groqKey = false;

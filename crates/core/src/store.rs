@@ -65,6 +65,8 @@ CREATE TABLE rules (
     PRIMARY KEY (id, version)
 );
 "#,
+    // Facturación de venta (D72); ver sales/.
+    include_str!("migrations/003_sales.sql"),
 ];
 
 /// Base de datos local. Cada operación pública se confirma en una transacción,

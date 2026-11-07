@@ -2339,9 +2339,13 @@ dependencies = [
 name = "nestadmin-core"
 version = "0.1.0"
 dependencies = [
+ "nestadmin-documents",
+ "nestadmin-sales",
  "rusqlite",
+ "rust_decimal",
  "serde",
  "serde_json",
+ "sha2",
  "tempfile",
  "thiserror 2.0.21",
 ]
@@ -2404,6 +2408,16 @@ dependencies = [
  "tempfile",
  "ureq",
  "url",
+]
+
+[[package]]
+name = "nestadmin-sales"
+version = "0.1.0"
+dependencies = [
+ "nestadmin-documents",
+ "rust_decimal",
+ "serde",
+ "thiserror 2.0.21",
 ]
 
 [[package]]
