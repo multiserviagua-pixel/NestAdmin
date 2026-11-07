@@ -518,10 +518,10 @@ struct SettingsView {
     groq_key_saved: bool,
     ollama_cloud_key_saved: bool,
     anthropic_key_saved: bool,
-    /// Clave del host de la URL compatible con OpenAI configurada (D95); `false` si la
+    /// Clave del host de la URL compatible con OpenAI configurada (D109); `false` si la
     /// selección actual no es ese proveedor o su URL no es válida.
     openai_compatible_key_saved: bool,
-    /// Modelo prefijado para Ollama cloud (D94): la interfaz lo toma de aquí.
+    /// Modelo prefijado para Ollama cloud (D108): la interfaz lo toma de aquí.
     default_cloud_model: &'static str,
     data_dir: PathBuf,
 }
@@ -600,7 +600,7 @@ fn delete_groq_key(shared: State<'_, SharedState>) -> CmdResult<()> {
     shared.credentials.delete(GROQ_API_KEY).map_err(text)
 }
 
-/// Igual que la de Groq (D92): va directa al almacén del sistema y nunca se devuelve.
+/// Igual que la de Groq (D106): va directa al almacén del sistema y nunca se devuelve.
 #[tauri::command]
 fn save_ollama_cloud_key(shared: State<'_, SharedState>, key: String) -> CmdResult<()> {
     let key = key.trim();
@@ -621,7 +621,7 @@ fn delete_ollama_cloud_key(shared: State<'_, SharedState>) -> CmdResult<()> {
         .map_err(text)
 }
 
-/// Claves de los proveedores externos nuevos (D95, D96): como las demás, van directas al
+/// Claves de los proveedores externos nuevos (D109, D110): como las demás, van directas al
 /// almacén del sistema y nunca se devuelven ni se guardan en `configuracion.json`.
 #[tauri::command]
 fn save_anthropic_key(shared: State<'_, SharedState>, key: String) -> CmdResult<()> {

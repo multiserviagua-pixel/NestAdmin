@@ -34,10 +34,10 @@ let choice: ProviderChoice = { provider: "ollama", base_url: "http://127.0.0.1:1
 let groqKey = false;
 let ollamaCloudKey = false;
 let anthropicKey = false;
-// Claves del proveedor compatible con OpenAI por host (D95).
+// Claves del proveedor compatible con OpenAI por host (D109).
 const compatKeys = new Set<string>();
 
-/// Réplica reducida de la validación de URL base del adaptador (D95).
+/// Réplica reducida de la validación de URL base del adaptador (D109).
 function compatHost(baseUrl: string): string {
   const raw = String(baseUrl).trim();
   if (!/^https:\/\//i.test(raw)) throw "unavailable: URL base no admitida: solo se admite https://";

@@ -73,7 +73,7 @@ pub struct Rectification {
     pub rectified_date: Option<IsoDate>,
     pub kind: Option<RectificationKind>,
     pub method: Option<RectificationMethod>,
-    /// Base imponible de la factura rectificada. Obligatoria por sustitución (D99); no se
+    /// Base imponible de la factura rectificada. Obligatoria por sustitución (D113); no se
     /// admite por diferencias.
     pub rectified_base: Option<Decimal>,
     /// Cuota de la factura rectificada. Misma regla que la base.

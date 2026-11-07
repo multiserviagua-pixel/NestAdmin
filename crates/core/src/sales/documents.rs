@@ -585,7 +585,7 @@ fn check_rectification_kind(original: &SalesDocument, kind: RectificationKind) -
     Ok(())
 }
 
-/// Base y cuota de la factura rectificada (D99): por sustitución, siempre las guardadas de la
+/// Base y cuota de la factura rectificada (D113): por sustitución, siempre las guardadas de la
 /// original; por diferencias no se admiten.
 fn rectified_amounts(
     original: &SalesDocument,
@@ -660,7 +660,7 @@ fn rectification_for_issue(
     let number = parse_series(&original)?.ok_or_else(|| {
         SalesStoreError::Conflict(format!("la factura {original_id} no tiene número"))
     })?;
-    // Lo que traiga el borrador en base y cuota se ignora (D99).
+    // Lo que traiga el borrador en base y cuota se ignora (D113).
     let (rectified_base, rectified_tax) = rectified_amounts(&original, rect.method)?;
     Ok(Some(Rectification {
         rectified_number: Some(number),
@@ -920,7 +920,7 @@ impl Store {
         }
         check_draft_input(&tx, input, current.customer_id)?;
         // En una rectificativa solo se cambian el tipo y el método; base y cuota rectificadas
-        // se recalculan de la original, nunca se toman de la entrada (D99).
+        // se recalculan de la original, nunca se toman de la entrada (D113).
         let rectification = match current.kind {
             DocumentKind::CorrectiveInvoice => {
                 let wanted = input.rectification.or(current.rectification);

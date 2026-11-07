@@ -22,7 +22,7 @@
 //!   cual. **Por sustitución**: el efecto fiscal es la diferencia con la factura sustituida,
 //!   por lo que la entrada lleva [`IssuedEntry::replaced`] (desglose de la original) y el
 //!   resumen resta ese desglose; el libro lista los importes tal como se emitieron.
-//! * **Calificación (D99)**: el resumen agrupa por tipo y por calificación de la operación
+//! * **Calificación (D113)**: el resumen agrupa por tipo y por calificación de la operación
 //!   (`S2`, `N1`, `N2`, `E1`–`E6`; los gravados no llevan), de modo que exenta, no sujeta e
 //!   inversión del sujeto pasivo no se mezclan en el mismo 0 %. Las facturas recibidas no
 //!   traen calificación (la extracción no la da) y van sin ella.

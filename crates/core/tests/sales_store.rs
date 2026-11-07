@@ -1004,7 +1004,7 @@ fn company_logo_must_be_png_or_jpeg() {
     assert_eq!(store.sales_company().unwrap().unwrap(), c);
 }
 
-// --- Revisión de D73, D74, D81, D82, D88, D90, D99 ---
+// --- Revisión de D73, D74, D81, D82, D88, D90, D113 ---
 
 fn raw(path: &Path) -> rusqlite::Connection {
     rusqlite::Connection::open(path).unwrap()

@@ -1,4 +1,4 @@
-//! Adaptador nativo de la API de Anthropic (D96). Proveedor externo con el mismo estatus que
+//! Adaptador nativo de la API de Anthropic (D110). Proveedor externo con el mismo estatus que
 //! Groq: solo por selección explícita y con la credencial presente; sin respaldo hacia otro
 //! modelo ni proveedor (no se usa el parámetro `fallbacks`).
 //!

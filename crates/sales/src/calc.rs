@@ -62,7 +62,7 @@ impl TaxRate {
 }
 
 /// Calificación de la operación según los valores de la AEAT para el registro de facturación
-/// (`CalificacionOperacion` y `OperacionExenta`, D99): sujeta no exenta (`S1`, `S2`), no sujeta
+/// (`CalificacionOperacion` y `OperacionExenta`, D113): sujeta no exenta (`S1`, `S2`), no sujeta
 /// (`N1`, `N2`) y exenta por causa (`E1`–`E6`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum TaxQualification {
@@ -140,7 +140,7 @@ impl TaxQualification {
 }
 
 /// Exención, no sujeción o inversión del sujeto pasivo de una línea al 0 %: la calificación
-/// codificada y, opcionalmente, un texto descriptivo para la factura (D99).
+/// codificada y, opcionalmente, un texto descriptivo para la factura (D113).
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct Exemption {
     pub qualification: TaxQualification,

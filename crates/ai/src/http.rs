@@ -24,7 +24,7 @@ pub(crate) fn agent(timeout: Duration) -> Agent {
         .into()
 }
 
-/// Igual que `agent`, pero sin seguir redirecciones (D95, D96): una credencial externa solo
+/// Igual que `agent`, pero sin seguir redirecciones (D109, D110): una credencial externa solo
 /// viaja al host validado, nunca a otro al que apunte un `Location`. Una respuesta 3xx se
 /// informa como proveedor no disponible.
 pub(crate) fn agent_no_redirects(timeout: Duration) -> Agent {
@@ -38,7 +38,7 @@ pub(crate) fn agent_no_redirects(timeout: Duration) -> Agent {
         .into()
 }
 
-/// Error del resolvedor: el host solo resuelve a direcciones no públicas (D95).
+/// Error del resolvedor: el host solo resuelve a direcciones no públicas (D109).
 #[derive(Debug)]
 struct NonPublicHost;
 
@@ -51,7 +51,7 @@ impl std::fmt::Display for NonPublicHost {
 impl std::error::Error for NonPublicHost {}
 
 /// Descarta todas las direcciones locales, privadas o reservadas. Sin ninguna pública,
-/// error: no se conecta a nada (D95).
+/// error: no se conecta a nada (D109).
 pub(crate) fn public_addrs_only(addrs: Vec<SocketAddr>) -> Result<Vec<SocketAddr>, AiError> {
     let public: Vec<SocketAddr> = addrs
         .into_iter()
@@ -69,7 +69,7 @@ fn normalize_ip(ip: IpAddr) -> IpAddr {
 }
 
 /// Resolvedor que filtra el DNS en el momento de conectar, de modo que cubre también el
-/// rebinding (D95).
+/// rebinding (D109).
 #[derive(Debug, Default)]
 struct PublicOnlyResolver {
     inner: DefaultResolver,
@@ -94,7 +94,7 @@ impl Resolver for PublicOnlyResolver {
 }
 
 /// Agente de los proveedores externos de destino configurable o público: sin redirecciones y
-/// con el resolvedor que descarta direcciones no públicas (D95).
+/// con el resolvedor que descarta direcciones no públicas (D109).
 pub(crate) fn agent_external(timeout: Duration) -> Agent {
     let config = Agent::config_builder()
         .timeout_global(Some(timeout))

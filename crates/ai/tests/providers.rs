@@ -368,7 +368,7 @@ fn model_output_outside_the_contract_is_invalid() {
     ));
 }
 
-// Ollama cloud (D92, D93): segundo proveedor externo, mismas garantías que Groq.
+// Ollama cloud (D106, D107): segundo proveedor externo, mismas garantías que Groq.
 
 const CLOUD_KEY: &str = "ollama_prueba_no_real_9876543210";
 
@@ -725,7 +725,7 @@ fn local_provider_rejects_cloud_models() {
 }
 
 // ---------------------------------------------------------------------------------------
-// Proveedor genérico compatible con OpenAI (D95) y Claude nativo (D96).
+// Proveedor genérico compatible con OpenAI (D109) y Claude nativo (D110).
 // ---------------------------------------------------------------------------------------
 
 const COMPAT_KEY: &str = "sk-compat-prueba-no-real-1122334455";

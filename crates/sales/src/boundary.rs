@@ -47,7 +47,7 @@ impl InvoiceTypeCode {
 }
 
 /// Factura rectificada. Por sustitución lleva además la base y la cuota rectificadas, que el
-/// registro de la AEAT exige en ese caso (D99); por diferencias son `None`.
+/// registro de la AEAT exige en ese caso (D113); por diferencias son `None`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RectifiedRef {
     pub number: DocumentNumber,
@@ -286,7 +286,7 @@ mod tests {
         assert_eq!(r.invoice_type.as_str(), "R4");
         let rectified = r.rectifies.unwrap();
         assert_eq!(rectified.number.to_string(), "F-2026-0007");
-        // Por sustitución constan la base y la cuota rectificadas (D99).
+        // Por sustitución constan la base y la cuota rectificadas (D113).
         assert_eq!(rectified.base, Some(Decimal::from(80)));
         assert_eq!(rectified.tax, Some(Decimal::new(1680, 2)));
     }
