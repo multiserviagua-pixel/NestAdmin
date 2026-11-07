@@ -13,8 +13,8 @@ pub mod validation;
 pub use duplicates::{DuplicateCandidate, DuplicateReason, DuplicateRegistry};
 pub use error::{DocumentError, Result};
 pub use invoice::{
-    parse_amount, parse_currency, Evidenced, FieldError, FieldErrorKind, Invoice, IsoDate,
-    RawInvoice, EUR,
+    parse_amount, parse_currency, recover_amount, Evidenced, FieldError, FieldErrorKind, Invoice,
+    IsoDate, RawInvoice, RecoveredAmount, RecoveryReason, EUR,
 };
 pub use text::{DocumentFormat, DocumentText, ExtractedText, LocalDocumentText};
 pub use validation::{process_invoice, validate, Issue, ValidationReport};

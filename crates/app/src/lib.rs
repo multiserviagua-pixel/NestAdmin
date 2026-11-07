@@ -24,7 +24,9 @@ use nestadmin_core::{
     ActionRecord, ActionRequest, AuditEntry, Authorization, Connector, ConnectorError, CoreError,
     Rule, Store, Task, TaskError, TaskState,
 };
-use nestadmin_documents::{process_invoice, DuplicateRegistry, Evidenced, Invoice, RawInvoice};
+use nestadmin_documents::{
+    process_invoice, DuplicateRegistry, Evidenced, Invoice, Issue, RawInvoice, RecoveryReason,
+};
 use nestadmin_extract::{Extraction, Extractor};
 use nestadmin_mail::{OAuthConfig, Tokens};
 use nestadmin_simulators::{AdminSimulator, MailSimulator, Message, NewDraft};
@@ -866,6 +868,11 @@ impl App {
             }
         }
         let kind = action_kind(&task);
+        // Un importe dudoso nunca se registra por regla: lo confirma una persona (D120).
+        if let Some(message) = result["amount_review"].as_str() {
+            result["review_reason"] = json!(message);
+            return Ok(self.store.await_review(task.id, &result)?);
+        }
         let several = result["part"]["of"].as_u64().is_some_and(|n| n > 1);
         let decision = if several {
             // Una regla nunca registra sola una factura separada de un documento con varias:
@@ -1007,6 +1014,14 @@ impl App {
             "total": field("total"),
         });
         let input: Value = serde_json::from_str(&task.input_ref).unwrap_or(Value::Null);
+        // El usuario conoce el nombre; la copia guardada permite abrir el original importado.
+        let document = match (input["document"].as_str(), input["path"].as_str()) {
+            (Some(name), Some(path)) => format!("{name}», copia en «{path}"),
+            (Some(name), None) => name.to_owned(),
+            (None, Some(path)) => path.to_owned(),
+            (None, None) => "documento sin nombre".to_owned(),
+        };
+        let amount_review = amount_review(&document, &report, &fields);
         let pages = extraction.and_then(|e| serde_json::to_value(&e.pages).ok());
         let sources: serde_json::Map<String, Value> = extraction
             .map(|extraction| {
@@ -1023,6 +1038,7 @@ impl App {
             "type": INVOICE,
             "version": 1,
             "document": input["document"],
+            "document_path": input["path"],
             "origin": input["origin"],
             "pages": pages,
             "fields": fields,
@@ -1030,6 +1046,8 @@ impl App {
             "issues": report.issues.iter().map(|i| i.as_str()).collect::<Vec<_>>(),
             "duplicates": report.duplicates,
             "unreadable": report.unreadable,
+            "recovered": report.recovered,
+            "amount_review": amount_review,
             "provider": generated.provider,
             "model": generated.model,
             "latency_ms": generated.latency_ms,
@@ -1560,6 +1578,58 @@ fn raw_from_fields(fields: &Value) -> RawInvoice {
         tax: field("tax"),
         total: field("total"),
     }
+}
+
+/// Nombre del importe tal como lo ve el usuario.
+fn amount_label(field: &str) -> &str {
+    match field {
+        "subtotal" => "Base imponible",
+        "tax" => "IVA",
+        "total" => "Total",
+        other => other,
+    }
+}
+
+/// Mensaje que pide revisar los importes cuando es probable que estén mal (D120): importes
+/// recuperados como propuesta o una suma que no cuadra. Lleva la ubicación del archivo y
+/// los importes. `None` si los importes se leyeron sin duda y cuadran.
+fn amount_review(
+    document: &str,
+    report: &nestadmin_documents::ValidationReport,
+    fields: &serde_json::Map<String, Value>,
+) -> Option<String> {
+    let mut parts: Vec<String> = report
+        .recovered
+        .iter()
+        .map(|r| {
+            let why = match r.reason {
+                RecoveryReason::NoDecimals => "sin decimales",
+                RecoveryReason::OneDecimal => "con un solo decimal",
+                RecoveryReason::AmbiguousSeparator => "el punto o la coma podría ser de miles",
+            };
+            format!(
+                "{} leído como «{}», se propone {} ({why})",
+                amount_label(&r.field),
+                r.literal,
+                r.value
+            )
+        })
+        .collect();
+    if report.issues.contains(&Issue::TotalMismatch) {
+        let amount = |key: &str| fields[key].as_str().unwrap_or("?").to_owned();
+        parts.push(format!(
+            "base {} + IVA {} no coincide con el total {}",
+            amount("subtotal"),
+            amount("tax"),
+            amount("total")
+        ));
+    }
+    (!parts.is_empty()).then(|| {
+        format!(
+            "Revise los importes en «{document}»: {}. Compruébelos con el documento; solo se registra con su aprobación.",
+            parts.join("; ")
+        )
+    })
 }
 
 /// Directorio de datos por defecto en Windows (D03).
