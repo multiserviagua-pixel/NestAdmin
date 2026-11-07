@@ -82,6 +82,28 @@ class CheckTests(unittest.TestCase):
         req.write_text(req.read_text(encoding='utf-8').replace('- **R12**', '- **R13**'), encoding='utf-8')
         self.assertTrue(any('sin huecos' in e for e in check.check(self.root)))
 
+    def append(self, name, extra):
+        path = self.root / name
+        path.write_text(path.read_text(encoding='utf-8') + extra, encoding='utf-8')
+
+    def test_duplicate_decision_fails(self):
+        self.append('specs/v1/decisiones.md', '\n- **D100 Copia.** Repetida.\n')
+        self.assertIn('La decisión D100 está repetida.', check.check(self.root))
+
+    def test_decision_outside_blocks_fails(self):
+        self.append('specs/v1/decisiones.md', '\n- **D900 Suelta.** Sin bloque.\n')
+        self.assertTrue(any('D900 no está en ningún bloque' in e for e in check.check(self.root)))
+
+    def test_dangling_reference_fails_unless_reserved(self):
+        self.append('PLAN.md', '\nVer D900.\n')
+        self.assertIn('PLAN.md: cita la decisión inexistente D900.', check.check(self.root))
+        self.append('specs/v1/numeracion.md', '| D900–D909 | `rama-de-prueba` | Reservado |\n')
+        self.assertEqual(check.check(self.root), [])
+
+    def test_overlapping_blocks_fail(self):
+        self.append('specs/v1/numeracion.md', '| D100–D200 | `otra` | Reservado |\n')
+        self.assertTrue(any('se solapan' in e for e in check.check(self.root)))
+
 
 if __name__ == '__main__':
     unittest.main()

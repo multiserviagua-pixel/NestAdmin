@@ -4,6 +4,7 @@ Estado: propuesta de implementación; no es evidencia de funcionamiento. Fuente 
 
 - [Requisitos, flujos y decisiones](requisitos.md)
 - [Registro de decisiones técnicas y versiones](decisiones.md)
+- [Numeración de decisiones y bloques reservados](numeracion.md)
 - [Contratos entre componentes](contratos.md)
 - [Matriz de requisitos y verificación](trazabilidad.md)
 - [Casos de prueba del instalador](pruebas-instalador.md)
