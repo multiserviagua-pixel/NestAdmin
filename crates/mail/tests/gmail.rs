@@ -601,7 +601,7 @@ fn localhost_redirect_is_accepted_over_ipv4_and_ipv6() {
     let config = common::oauth_localhost(&base);
     let ipv6 = std::net::TcpListener::bind("[::1]:0").is_ok();
     // El servidor simulado numera los tokens que emite: cada inicio de sesión recibe el siguiente.
-    let mut emitidos = 0;
+    let mut issued = 0;
     for host in ["127.0.0.1", "[::1]"] {
         if host == "[::1]" && !ipv6 {
             eprintln!("sin IPv6 de bucle local: se omite ese caso");
@@ -626,8 +626,8 @@ fn localhost_redirect_is_accepted_over_ipv4_and_ipv6() {
                 .contains("Inicio de sesión completado"),
             "{host}"
         );
-        emitidos += 1;
-        assert_eq!(tokens.access_token, format!("access-{emitidos}"), "{host}");
+        issued += 1;
+        assert_eq!(tokens.access_token, format!("access-{issued}"), "{host}");
     }
 }
 

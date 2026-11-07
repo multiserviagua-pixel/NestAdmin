@@ -1,6 +1,6 @@
 # Plan de redistribución de Tesseract (D69)
 
-Estado: **propuesta en curso**. La compilación mínima se ha validado en Linux; falta compilarla y probarla en Windows antes de cambiar el paquete. No es asesoramiento jurídico: la conclusión se apoya en las licencias que declaran los proyectos y debe confirmarla quien publique el instalador.
+Estado: **propuesta en curso**. La compilación mínima se ha validado en Linux. En Windows (2026-11-07) compila y solo depende de `KERNEL32.dll`, pero el antivirus del equipo de desarrollo bloquea ejecutarla: faltan las pruebas y la comparación del paso 2 antes de cambiar el paquete ([evidencia](../../evidence/t04-pdf-ocr.md)). No es asesoramiento jurídico: la conclusión se apoya en las licencias que declaran los proyectos y debe confirmarla quien publique el instalador.
 
 ## Problema
 
