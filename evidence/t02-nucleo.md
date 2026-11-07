@@ -36,9 +36,13 @@ Ejecución con D50, 2026-11-05, mismo equipo: 12 pruebas superadas, 0 fallidas.
 
 `cargo test -p nestadmin-app --locked --test reprocess` cubre el reproceso de una tarea cuya acción ya se intentó, con el simulador y con Gmail y Graph simulados, incluidos cortes del proceso (pánico) y reinicios de la aplicación entre medias: no se pide otro texto a la IA, lo ya realizado se completa sin repetirlo y otra versión solo se ejecuta tras comprobar que la anterior no salió. Detalle de escenarios en [la evidencia T13](t13-conectores-correo.md#reproceso-de-un-envío-ya-intentado-d50).
 
+## Reinicio de la aplicación de escritorio (2026-11-05, D53)
+
+`cargo test -p nestadmin-desktop --locked recorrido::` termina procesos reales de la aplicación (comandos y cola de `crates/desktop` con el runtime simulado de Tauri) con la tarea en curso, en revisión y justo tras aprobar, y comprueba al reabrir la recuperación sin efectos duplicados; también la salida completa con tareas en cola, y que los comandos `tasks` y `audit_log` devuelven estado, incidencias, errores y pendientes. Detalle y resultados en [T07](t07-revision-reglas.md#recorrido-desde-la-ventana-d53).
+
 ## Pendiente para completar T02
 
-- Reinicio real de la aplicación Tauri y recuperación al arrancar (fase 6).
-- Mostrar estado, incidencias y pendientes en la interfaz.
+- Ver estado, incidencias y pendientes pintados en la ventana WebView2 solo se ha comprobado a mano.
+- El corte entre el efecto externo y su confirmación no se provoca con el proceso completo (no hay un punto de corte determinista); lo cubren las pruebas del núcleo de esta página y de [T06](t06-simuladores.md).
 
 La reconciliación con los simuladores de correo y administración en lugar del conector de prueba se verifica en [la evidencia T06](t06-simuladores.md) (`crates/simulators/tests/core_integration.rs`); las pruebas de este documento siguen usando el conector de prueba.

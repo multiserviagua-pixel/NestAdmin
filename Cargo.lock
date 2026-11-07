@@ -2356,6 +2356,7 @@ dependencies = [
  "nestadmin-extract",
  "nestadmin-mail",
  "nestadmin-setup",
+ "nestadmin-simulators",
  "serde",
  "serde_json",
  "tauri",
