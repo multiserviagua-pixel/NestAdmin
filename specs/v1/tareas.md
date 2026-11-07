@@ -24,7 +24,8 @@ Cada casilla se marca solo cuando todos sus requisitos están en `Cumplido` en l
   6. Instalador: quitar `--preparar` de `NSIS_HOOK_POSTINSTALL` en `crates/desktop/installer-hooks.nsh`; comprobación al abrir solo del OCR y del proveedor, y D39 solo con la IA local elegida (D103). `scripts/t08-registro.ps1` sin exigir la respuesta del modelo local. Casos T08e.
   7. Retirar el adaptador de Groq y sus referencias (configuración, interfaz, `predict`, guías) conservando su evidencia histórica.
   8. Actualizar el sitio del editor, la política de privacidad, `README.md`, `docs/pruebas-en-windows.md` y `evaluation/README.md` para describir la IA externa por defecto y qué datos salen (D102); revisión con el responsable de protección de datos antes de usarla con datos reales.
-  9. Medir Ollama cloud `gemma4:31b` con el corpus en el equipo objetivo (T10, T12, D104) y construir el instalador una sola vez al cerrar la etapa para T08e.
+  9. Instrucciones de todas las tareas con el JSON, las claves y los valores admitidos explícitos; validación estricta de enumeraciones sin corrección por parecido; pruebas T03i con un servidor que ignora `format` (D105).
+  10. Medir Ollama cloud `gemma4:31b` con el corpus en el equipo objetivo (T10, T12, D104, D105; hoy fallan los 20 correos) y, si no pasa el corpus completo, decidir otro modelo o proveedor por defecto; construir el instalador una sola vez al cerrar la etapa para T08e.
 
 ## Puertas de entrega
 
