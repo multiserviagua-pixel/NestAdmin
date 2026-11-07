@@ -11,6 +11,12 @@ use crate::provider::{
 
 pub const ENDPOINT: &str = "https://api.groq.com/openai/v1";
 
+/// Reintentos ante un 429 dentro del plazo de la petición. La espera es la que pide el
+/// proveedor (`Retry-After`), o `DEFAULT_WAIT` si no la da, con un máximo de `MAX_WAIT`.
+const MAX_RATE_LIMIT_RETRIES: u32 = 10;
+const DEFAULT_WAIT: Duration = Duration::from_secs(2);
+const MAX_WAIT: Duration = Duration::from_secs(30);
+
 /// Adaptador externo (D07). Solo se construye tras la selección explícita del usuario y
 /// con una credencial presente; nunca se usa como respaldo del proveedor local.
 pub struct GroqProvider {
@@ -18,6 +24,7 @@ pub struct GroqProvider {
     model: String,
     api_key: Secret,
     agent: Agent,
+    timeout: Duration,
 }
 
 impl GroqProvider {
@@ -33,6 +40,7 @@ impl GroqProvider {
             model: model.to_owned(),
             api_key,
             agent: http::agent(timeout),
+            timeout,
         }
     }
 }
@@ -78,12 +86,26 @@ impl Provider for GroqProvider {
             body["response_format"] = json!({ "type": "json_object" });
         }
         let started = Instant::now();
-        let response = http::post_json(
-            &self.agent,
-            &format!("{}/chat/completions", self.endpoint),
-            Some(self.api_key.expose()),
-            &body,
-        )?;
+        let url = format!("{}/chat/completions", self.endpoint);
+        let mut retries = 0;
+        let response = loop {
+            match http::post_json(&self.agent, &url, Some(self.api_key.expose()), &body) {
+                Err(AiError::RateLimited { retry_after_ms }) => {
+                    let wait = retry_after_ms
+                        .map(Duration::from_millis)
+                        .unwrap_or(DEFAULT_WAIT)
+                        .min(MAX_WAIT);
+                    // Solo se espera si cabe en el plazo; si no, se informa sin esperar.
+                    if retries >= MAX_RATE_LIMIT_RETRIES || started.elapsed() + wait >= self.timeout
+                    {
+                        return Err(AiError::RateLimited { retry_after_ms });
+                    }
+                    retries += 1;
+                    std::thread::sleep(wait);
+                }
+                other => break other?,
+            }
+        };
         let latency_ms = started.elapsed().as_millis() as u64;
         let text = response
             .pointer("/choices/0/message/content")

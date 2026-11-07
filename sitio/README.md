@@ -43,7 +43,7 @@ Cada afirmación sobre la aplicación se apoya en la especificación o el códig
 
 - Procesamiento local, Ollama con Qwen3 8B por defecto y Groq solo por elección expresa sin cambio automático: R03, D06, D07.
 - Credenciales en el Administrador de credenciales de Windows y fuera de los registros: R09, D08, D13.
-- OAuth con PKCE, bucle local `127.0.0.1`, ámbitos `gmail.modify` y Graph `offline_access Mail.ReadWrite Mail.Send`, solo HTTPS y sin proxy: D31, D32, D12.
+- OAuth con PKCE, bucle local `127.0.0.1`, ámbitos `gmail.modify` y Graph `offline_access User.Read Mail.ReadWrite Mail.Send` (`User.Read` solo para la dirección del buzón, D48), solo HTTPS y sin proxy: D31, D32, D12.
 - Lectura de la bandeja de entrada, cuerpo en texto, adjuntos ignorados, borrador en el hilo: D34 y `crates/mail/src/gmail.rs`.
 - Envío solo con revisión o regla activa: R07, D17. Un envío por clave: D33, D41.
 - Datos en `%LOCALAPPDATA%\NestAdmin`, que el desinstalador conserva: D18, D36.

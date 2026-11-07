@@ -1,8 +1,10 @@
 //! Clientes OAuth del editor para Gmail y Microsoft 365 (D43). No son secretos de usuario: son
 //! la identidad de la aplicación registrada por el editor en Google Cloud y en Entra ID. Se leen
 //! de `correo-oauth.json`, que nunca se versiona con valores reales; el repositorio solo trae
-//! `correo-oauth.ejemplo.json` con marcadores. Sin archivo, o con marcadores, el proveedor
-//! queda «no configurado» y la ventana lo dice en lugar de intentar iniciar sesión.
+//! `correo-oauth.ejemplo.json` con marcadores. El instalador lo lleva junto a `nestadmin.exe`
+//! cuando se construye con `scripts/build-clean.ps1 -ClienteOAuth <ruta>` (D51). Sin archivo, o
+//! con marcadores, el proveedor queda «no configurado» y la ventana lo dice en lugar de intentar
+//! iniciar sesión.
 
 use std::fs;
 use std::path::{Path, PathBuf};

@@ -25,3 +25,8 @@ Thumbs.db
 
 # Binarios descargados por scripts/setup-ocr.ps1.
 vendor/
+
+# Claude Code: solo se versionan los agentes y la configuración compartida.
+.claude/*
+!.claude/agents/
+!.claude/settings.json

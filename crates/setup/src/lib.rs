@@ -178,6 +178,9 @@ pub struct Report {
     pub ollama_installed: bool,
     pub model: String,
     pub model_digest: Option<String>,
+    /// `Some(true)` si el digest coincide con el evaluado (D62); `None` si no se conoce
+    /// alguno de los dos.
+    pub model_pinned: Option<bool>,
     pub answer: String,
     pub latency_ms: u64,
     /// Memoria leída al preparar; su aviso no impide terminar (D46).
@@ -206,6 +209,8 @@ pub enum Startup {
 pub struct Config {
     pub ollama_url: String,
     pub model: String,
+    /// Digest del manifiesto del modelo evaluado (D62). Uno distinto se avisa sin bloquear.
+    pub model_digest: Option<String>,
     pub tesseract_exe: PathBuf,
     pub tessdata_dir: PathBuf,
     pub pdfium_dir: PathBuf,
@@ -234,6 +239,7 @@ impl Config {
         Self {
             ollama_url: nestadmin_ai::ollama::DEFAULT_URL.into(),
             model: nestadmin_ai::ollama::DEFAULT_MODEL.into(),
+            model_digest: Some(nestadmin_ai::ollama::DEFAULT_MODEL_DIGEST.into()),
             tesseract_exe,
             tessdata_dir,
             pdfium_dir,
@@ -565,6 +571,20 @@ impl Setup {
                 self.model_digest().flatten()
             }
         };
+        let model_pinned = match (&digest, &self.config.model_digest) {
+            (Some(found), Some(expected)) => Some(found.eq_ignore_ascii_case(expected)),
+            _ => None,
+        };
+        if model_pinned == Some(false) {
+            emit.send(
+                Step::Model,
+                StepState::Done,
+                format!(
+                    "El modelo {} tiene un digest distinto del evaluado; funciona, pero sus                      resultados no están medidos",
+                    self.config.model
+                ),
+            );
+        }
         cancel.check()?;
 
         // Verificación con el adaptador de la aplicación.
@@ -585,6 +605,7 @@ impl Setup {
             ollama_installed: installed,
             model: self.config.model.clone(),
             model_digest: digest,
+            model_pinned,
             answer,
             latency_ms,
             memory,

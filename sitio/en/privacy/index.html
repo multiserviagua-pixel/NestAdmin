@@ -65,6 +65,7 @@
     <tr><td>Google (Gmail API)</td><td><code>https://www.googleapis.com/auth/gmail.modify</code></td><td>Read inbox messages, create reply drafts in the original thread and send a draft only when you approve it or a rule you enabled covers it. It is not used to delete email.</td></tr>
     <tr><td>Microsoft (Graph)</td><td><code>Mail.ReadWrite</code></td><td>Read messages and create reply drafts.</td></tr>
     <tr><td>Microsoft (Graph)</td><td><code>Mail.Send</code></td><td>Send a draft only when you approve it or a rule you enabled covers it.</td></tr>
+    <tr><td>Microsoft (Graph)</td><td><code>User.Read</code></td><td>Read the account's email address when you sign in, to show which mailbox each message came from. It is stored only on your computer.</td></tr>
     <tr><td>Microsoft (Graph)</td><td><code>offline_access</code></td><td>Stay connected without asking you to sign in every time.</td></tr>
   </tbody>
 </table>
@@ -99,7 +100,7 @@
 <h2 id="storage">6. Where data is stored</h2>
 <p>Everything is stored on your computer, not on the publisher's servers:</p>
 <ul>
-  <li><strong>Working data</strong> (tasks, processed messages and documents, extracted data, drafts, rules and history): in a local database inside the <code>%LOCALAPPDATA%\NestAdmin</code> folder of your Windows user, together with one file per email account that records which drafts the app created and whether they were sent, so nothing is sent twice.</li>
+  <li><strong>Working data</strong> (tasks, processed messages and documents, extracted data, drafts, rules and history): in a local database inside the <code>%LOCALAPPDATA%\NestAdmin</code> folder of your Windows user, together with one file per email account that records which drafts the app created and whether they were sent, so nothing is sent twice, and the list of connected accounts with the name you give them and each mailbox address (to show where each message came from). Documents you import are copied to that folder with their name, the path you imported them from and a SHA-256 fingerprint, so you can open the original and check the data.</li>
   <li><strong>Credentials</strong> (Google and Microsoft tokens, Groq key): in Windows Credential Manager. They are never written to the database or to logs.</li>
 </ul>
 <p>The original messages remain in your Gmail or Microsoft 365 account; NestAdmin does not move or delete them.</p>

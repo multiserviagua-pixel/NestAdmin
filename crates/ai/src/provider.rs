@@ -72,6 +72,10 @@ pub enum AiError {
     TimeoutCause(String),
     #[error("invalid_response: {0}")]
     InvalidResponse(String),
+    /// El proveedor externo limita las peticiones (HTTP 429). Lleva la espera que pidió, si
+    /// la dio. Se reintenta con el mismo proveedor dentro del plazo; nunca cambia de proveedor.
+    #[error("rate_limited: el proveedor limita las peticiones; vuelva a intentarlo más tarde")]
+    RateLimited { retry_after_ms: Option<u64> },
 }
 
 impl AiError {
@@ -81,6 +85,7 @@ impl AiError {
             Self::Unauthorized => "unauthorized",
             Self::Timeout | Self::TimeoutCause(_) => "timeout",
             Self::InvalidResponse(_) => "invalid_response",
+            Self::RateLimited { .. } => "rate_limited",
         }
     }
 }

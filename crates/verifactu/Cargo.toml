@@ -1,0 +1,20 @@
+[package]
+name = "nestadmin-verifactu"
+version = "0.1.0"
+description = "Núcleo VERI*FACTU de NestAdmin: registros de facturación, huella encadenada, XML del servicio de la AEAT, QR de cotejo y simulador local. Sin base de datos, sin Tauri y sin red real."
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+# Codificador PNG sin `image`: el QR se dibuja en escala de grises con su leyenda.
+png = "=0.18.1"
+# Solo la matriz del QR; el PNG y el SVG se componen aquí para añadir la leyenda.
+qrcode = { version = "=0.14.1", default-features = false }
+quick-xml = "=0.42.0"
+serde = { version = "1", features = ["derive"] }
+sha2 = "0.10"
+thiserror = "2"
+
+[dev-dependencies]
+tempfile = "3"

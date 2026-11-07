@@ -4,6 +4,8 @@
 import type {
   AccountFetch,
   AuditEntry,
+  DocumentOrigin,
+  MailOrigin,
   FetchReport,
   MailAccount,
   MailProviderKind,
@@ -42,24 +44,34 @@ const signInListeners: Array<(url: string) => void> = [];
 const mailAccounts: MailAccount[] = params.has("sin-cuentas")
   ? []
   : [
-      { id: "simulador", provider: "simulator", label: "Correo simulado", status: "connected", last_fetch: null },
+      {
+        id: "simulador",
+        provider: "simulator",
+        label: "Correo simulado",
+        address: "administracion@nestadmin.test",
+        status: "connected",
+        last_fetch: null,
+      },
       {
         id: "microsoft-1",
         provider: "microsoft",
         label: "Oficina",
+        address: "oficina@empresa.test",
         status: clientsConfigured ? "connected" : "not_configured",
-        last_fetch: { account: "microsoft-1", read: 25, added: 3, error: null },
+        last_fetch: { account: "microsoft-1", read: 25, added: 3, error: null, attachments: { imported: 2, skipped: [], failed: [] } },
       },
       {
         id: "google-1",
         provider: "google",
         label: "Facturación",
+        address: "facturas@empresa.test",
         status: clientsConfigured ? "signed_out" : "not_configured",
         last_fetch: {
           account: "google-1",
           read: 0,
           added: 0,
           error: { code: "unauthorized", message: "la sesión caducó; vuelva a iniciar sesión" },
+          attachments: { imported: 0, skipped: [], failed: [] },
         },
       },
     ];
@@ -95,6 +107,8 @@ function signIn(provider: MailProviderKind, label: string, account: string | nul
         id,
         provider,
         label: label.trim() || `${provider === "google" ? "Google" : "Microsoft"} ${id.split("-")[1]}`,
+        // Como `users.getProfile` o `/me` en la aplicación (D48).
+        address: `buzon-${id}@empresa.test`,
         status: "connected",
         last_fetch: null,
       };
@@ -109,11 +123,18 @@ function fetchMail(): FetchReport {
   const accounts: AccountFetch[] = mailAccounts.map((a) => {
     const fetch: AccountFetch =
       a.status === "connected"
-        ? { account: a.id, read: Math.min(mailLimit, a.provider === "simulator" ? 5 : 2), added: 0, error: null }
+        ? {
+            account: a.id,
+            read: Math.min(mailLimit, a.provider === "simulator" ? 5 : 2),
+            added: 0,
+            error: null,
+            attachments: { imported: 0, skipped: [], failed: [] },
+          }
         : {
             account: a.id,
             read: 0,
             added: 0,
+            attachments: { imported: 0, skipped: [], failed: [] },
             error:
               a.status === "not_configured"
                 ? { code: "unavailable", message: "esta instalación no tiene configurado el cliente OAuth" }
@@ -121,7 +142,7 @@ function fetchMail(): FetchReport {
           };
     if (a.status === "connected" && a.provider !== "simulator") {
       const n = tasks.filter((t) => t.input_ref.includes(`"${a.id}:`)).length + 1;
-      task("email", { message_id: `${a.id}:sintetico-${n}`, account: a.id }, "queued", null);
+      task("email", { message_id: `${a.id}:sintetico-${n}`, account: a.id, origin: origin(a.id) }, "queued", null);
       fetch.added = 1;
     }
     a.last_fetch = fetch;
@@ -213,6 +234,7 @@ function simulatePreparation(run: { cancelled: boolean }) {
         ollama_installed: false,
         model: "qwen3:8b",
         model_digest: "500a1f067a9f",
+        model_pinned: true,
         answer: "listo",
         latency_ms: memory().level === "recommended" ? 2400 : 94_000,
         memory: memory(),
@@ -239,10 +261,31 @@ function task(kind: string, input: object, state: Task["state"], result: Task["r
   return t;
 }
 
-const invoiceResult = (document: string, total: string, issues: string[]) => ({
+const origin = (account: string): MailOrigin => {
+  const a = mailAccounts.find((m) => m.id === account);
+  return a
+    ? { account, provider: a.provider, label: a.label, address: a.address }
+    : { account, provider: "google", label: "Antigua cuenta", address: null };
+};
+
+// Huella sintética estable para la vista previa (no es la de ningún archivo real).
+const fakeSha = (seed: string) =>
+  Array.from({ length: 64 }, (_, i) => "0123456789abcdef"[(seed.charCodeAt(i % seed.length) * (i + 7)) % 16]).join("");
+
+const fileOrigin = (name: string, path: string | null, daysAgo: number): DocumentOrigin => ({
+  kind: "file",
+  name,
+  original_path: path,
+  imported_at: Math.floor(now() / 1000) - daysAgo * 86400,
+  sha256: fakeSha(name),
+  size: 48_213,
+});
+
+const invoiceResult = (document: string, total: string, issues: string[], source: DocumentOrigin | null) => ({
   type: "invoice",
   version: 1,
   document,
+  origin: source,
   fields: {
     supplier: "Suministros Alfa SL",
     invoice_number: "FS-2026-014",
@@ -255,7 +298,21 @@ const invoiceResult = (document: string, total: string, issues: string[]) => ({
   issues,
   duplicates: [],
   unreadable: [],
-  pages: [{ number: 1, method: issues.length ? "ocr" : "pdf_text", chars: 120 }],
+  pages: issues.length
+    ? [
+        { number: 1, method: "ocr", chars: 120, offset: 0 },
+        { number: 2, method: "ocr", chars: 80, offset: 140 },
+      ]
+    : [{ number: 1, method: "pdf_text", chars: 120, offset: 0 }],
+  // Dónde aparece cada campo en el texto; la moneda no aparece literalmente.
+  sources: {
+    supplier: { pages: [1], text: "Suministros Alfa SL", line: "Suministros Alfa SL · CIF B00000000" },
+    invoice_number: { pages: [1], text: "FS-2026-014", line: "Factura n.º FS-2026-014" },
+    date: { pages: [1], text: "01/10/2026", line: "Fecha: 01/10/2026" },
+    subtotal: { pages: [issues.length ? 2 : 1], text: "100,00", line: "Base imponible 100,00" },
+    tax: { pages: [issues.length ? 2 : 1], text: "21,00", line: "IVA 21 % 21,00" },
+    total: { pages: [issues.length ? 2 : 1], text: total.replace(".", ","), line: `TOTAL ${total.replace(".", ",")} €` },
+  },
   provider: "ollama",
   model: "qwen3:8b",
   latency_ms: 15200,
@@ -263,9 +320,54 @@ const invoiceResult = (document: string, total: string, issues: string[]) => ({
   action: { kind: "register_invoice" },
 });
 
-task("invoice", { document: "factura-alfa.txt" }, "awaiting_review", invoiceResult("factura-alfa.txt", "121.00", []));
+task(
+  "invoice",
+  { document: "factura-alfa.pdf" },
+  "awaiting_review",
+  invoiceResult("factura-alfa.pdf", "121.00", [], fileOrigin("factura-alfa.pdf", "C:\\Users\\Usuario\\Documents\\Facturas\\factura-alfa.pdf", 1)),
+);
+task(
+  "invoice",
+  { document: "factura-beta-escaneada.pdf" },
+  "awaiting_review",
+  invoiceResult("factura-beta-escaneada.pdf", "125.00", ["total_mismatch"], {
+    ...fileOrigin("factura-beta-escaneada.pdf", null, 0),
+    kind: "email",
+    account: origin("google-1"),
+    message_id: "google-1:18c2-sintetico",
+    from: "facturas@proveedor-alfa.test",
+    subject: "Factura FS-2026-015",
+    attachment: "factura-beta-escaneada.pdf",
+  } as DocumentOrigin),
+);
+// Importado antes de que se registrara el origen: se dice que no consta.
+task("invoice", { document: "factura-antigua.txt" }, "awaiting_review", invoiceResult("factura-antigua.txt", "121.00", [], null));
+task("email", { message_id: "simulador:M-0005", account: "simulador" }, "awaiting_review", {
+  type: "email",
+  version: 1,
+  origin: origin("simulador"),
+  message: {
+    id: "simulador:M-0005",
+    subject: "Cambio de horario",
+    from: "logistica@transportes-delta.test",
+    to: ["administracion@nestadmin.test"],
+    body: "El horario de recogida cambia a partir del lunes.",
+    date: "2026-10-06",
+  },
+  category: "otros",
+  draft: {
+    to: ["logistica@transportes-delta.test"],
+    subject: "Re: Cambio de horario",
+    body: "Gracias por el aviso; tomamos nota del nuevo horario de recogida.\n\nUn saludo.",
+  },
+  provider: "ollama",
+  model: "qwen3:8b",
+  review_reason: "ninguna regla activa coincide",
+  action: { kind: "send_draft" },
+});
+// Importe dudoso (D120): se pide confirmarlo con el documento antes de aprobar.
 task("invoice", { document: "factura-dudosa.txt" }, "awaiting_review", {
-  ...invoiceResult("factura-dudosa.txt", "1210.00", ["amount_to_review"]),
+  ...invoiceResult("factura-dudosa.txt", "1210.00", ["amount_to_review"], fileOrigin("factura-dudosa.txt", "C:\\Users\\Usuario\\Documents\\Facturas\\factura-dudosa.txt", 2)),
   fields: { supplier: "Suministros Alfa SL", invoice_number: "FS-2026-015", date: "2026-10-02", subtotal: "1000.00", tax: "210.00", total: "1210.00", currency: "EUR" },
   document_path: "C:\\Users\\demo\\AppData\\Local\\NestAdmin\\documentos\\1793816133.txt",
   recovered: [{ field: "subtotal", literal: "1.000", evidence: "1.000", value: "1000.00", reason: "ambiguous_separator" }],
@@ -274,15 +376,17 @@ task("invoice", { document: "factura-dudosa.txt" }, "awaiting_review", {
   review_reason:
     "Revise los importes en «factura-dudosa.txt», copia en «C:\\Users\\demo\\AppData\\Local\\NestAdmin\\documentos\\1793816133.txt»: Base imponible leído como «1.000», se propone 1000.00 (el punto o la coma podría ser de miles). Compruébelos con el documento; solo se registra con su aprobación.",
 });
-task("invoice", { document: "factura-beta.txt" }, "awaiting_review", invoiceResult("factura-beta.txt", "125.00", ["total_mismatch"]));
 task("email", { message_id: "microsoft-1:AAMk-sintetico-2", account: "microsoft-1" }, "awaiting_review", {
   type: "email",
   version: 1,
+  origin: origin("microsoft-1"),
   message: {
     id: "microsoft-1:AAMk-sintetico-2",
     subject: "Consulta sobre el pedido 2231",
     from: "cliente.beta@ejemplo.test",
+    to: ["oficina@empresa.test", "compras@empresa.test"],
     body: "¿Podrían confirmar la fecha de entrega del pedido 2231?",
+    date: "2026-11-04T09:12:00Z",
   },
   category: "consulta_pago",
   draft: {
@@ -293,6 +397,31 @@ task("email", { message_id: "microsoft-1:AAMk-sintetico-2", account: "microsoft-
   provider: "ollama",
   model: "qwen3:8b",
   review_reason: "ninguna regla activa coincide",
+  action: { kind: "send_draft" },
+});
+// Envío reintentado cuyo borrador borró el usuario (D50): se conserva el texto aprobado y hay
+// que confirmar que no se envió antes de preparar uno nuevo.
+task("email", { message_id: "google-1:18c2-sintetico-7", account: "google-1" }, "awaiting_review", {
+  type: "email",
+  version: 1,
+  message: {
+    id: "google-1:18c2-sintetico-7",
+    subject: "Solicitud de duplicado de factura",
+    from: "compras@cliente-delta.test",
+    body: "¿Pueden reenviarnos el duplicado de la factura FS-2026-011?",
+  },
+  category: "solicitud_factura",
+  draft: {
+    to: ["compras@cliente-delta.test"],
+    subject: "Re: Solicitud de duplicado de factura",
+    body: "Buenos días:\n\nAdjuntamos el duplicado de la factura FS-2026-011.\n\nUn saludo.",
+  },
+  provider: "ollama",
+  model: "qwen3:8b",
+  review_reason:
+    "el borrador del intento anterior ya no existe y no consta enviado; confirme que no se envió antes de preparar otro",
+  attempt: { version: 1 },
+  recovery: { version: 1, error: "not_found", needs_confirmation: true },
   action: { kind: "send_draft" },
 });
 task("invoice", { document: "escaneada.txt" }, "failed", null, {
@@ -336,11 +465,15 @@ const handlers: Record<string, (a: any, options?: any) => unknown> = {
   tasks: () => structuredClone(tasks),
   import_file: (bytes: Uint8Array, options?: { headers: Record<string, string> }) => {
     const name = decodeURIComponent(options?.headers["x-nestadmin-name"] ?? "");
-    if (!/\.(txt|pdf)$/i.test(name)) throw `«${name}»: solo se admiten archivos .txt y .pdf`;
+    if (!/\.(txt|pdf|jpe?g|png|tiff?|bmp|webp)$/i.test(name)) throw `«${name}»: solo se admiten texto (.txt), PDF e imágenes (.jpg, .png, .tif, .bmp, .webp)`;
     if (bytes.length === 0) throw `«${name}» está vacío`;
-    return task("invoice", { document: name }, "queued", null);
+    // El navegador no da la ruta original: queda como «no consta», igual que en la aplicación.
+    return task("invoice", { document: name, origin: { ...fileOrigin(name, null, 0), size: bytes.length } }, "queued", null);
   },
   fetch_mail: () => fetchMail(),
+  open_original: ({ id }) => {
+    if (find(id).kind !== "invoice") throw `la tarea ${id} no tiene documento`;
+  },
   mail_accounts: (): MailView => ({
     accounts: mailAccounts,
     limit: mailLimit,
@@ -362,10 +495,26 @@ const handlers: Record<string, (a: any, options?: any) => unknown> = {
     if (index < 0) throw `not_found: la cuenta ${id} no está conectada en NestAdmin`;
     mailAccounts.splice(index, 1);
   },
+  rename_mail_account: ({ id, label }) => {
+    const account = mailAccounts.find((a) => a.id === id);
+    if (!account) throw `not_found: la cuenta ${id} no está conectada en NestAdmin`;
+    const text = String(label ?? "").trim().slice(0, 60);
+    // Mismo nombre predeterminado que `account_label` en Rust.
+    account.label =
+      text || (account.provider === "simulator" ? "Correo simulado" : `${account.provider === "google" ? "Google" : "Microsoft"} ${id.split("-")[1]}`);
+    return account;
+  },
   add_simulated_mail_account: () => {
     let account = mailAccounts.find((a) => a.id === "simulador");
     if (!account) {
-      account = { id: "simulador", provider: "simulator", label: "Correo simulado", status: "connected", last_fetch: null };
+      account = {
+        id: "simulador",
+        provider: "simulator",
+        label: "Correo simulado",
+        address: "administracion@nestadmin.test",
+        status: "connected",
+        last_fetch: null,
+      };
       mailAccounts.unshift(account);
     }
     return account;
@@ -375,9 +524,31 @@ const handlers: Record<string, (a: any, options?: any) => unknown> = {
     const current = t.result?.version ?? 1;
     if (current !== version) throw `el contenido cambió (versión ${current}, se aprobó la ${version}); revíselo de nuevo`;
     const action = t.kind === "invoice" ? "register_invoice" : "send_draft";
+    // Como la aplicación: sin confirmar que el intento anterior no salió, no se envía otro.
+    if (t.result?.recovery?.needs_confirmation) return t;
     audit.push({ task_id: id, action, status: "confirmed", authorization: "aprobación", detail: null });
     t.state = "completed";
     t.result = { ...t.result, receipt: { simulated: true } };
+    return t;
+  },
+  confirm_not_sent: ({ id }) => {
+    const t = reviewable(id);
+    if (!t.result?.attempt) throw `la tarea ${id} no tiene ningún intento anterior`;
+    const action = t.kind === "invoice" ? "register_invoice" : "send_draft";
+    const version = t.result.version ?? 1;
+    audit.push({
+      task_id: id,
+      action,
+      status: "superseded",
+      authorization: "aprobación",
+      detail: `task-${id}/${action}/v${version}: el usuario confirmó que no se realizó`,
+    });
+    const { recovery: _recovery, ...rest } = t.result;
+    t.result = {
+      ...rest,
+      version: version + 1,
+      review_reason: "versión nueva tras confirmar que el intento anterior no se realizó",
+    };
     return t;
   },
   edit_draft: ({ id, body }) => {
@@ -454,6 +625,7 @@ const mutating = new Set([
   "import_file",
   "fetch_mail",
   "approve",
+  "confirm_not_sent",
   "edit_draft",
   "reject",
   "retry",
@@ -461,6 +633,7 @@ const mutating = new Set([
   "update_rule",
   "set_rule_active",
   "remove_mail_account",
+  "rename_mail_account",
   "add_simulated_mail_account",
 ]);
 

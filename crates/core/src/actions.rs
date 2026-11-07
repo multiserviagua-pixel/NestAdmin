@@ -85,6 +85,25 @@ impl ActionOutcome {
     }
 }
 
+/// Acción registrada de una tarea, para decidir qué hacer al reprocesarla (D50).
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct ActionRecord {
+    pub idempotency_key: String,
+    pub kind: String,
+    pub version: i64,
+    /// `pending`, `confirmed`, `failed` o `superseded`.
+    pub status: String,
+    pub authorization: String,
+    pub receipt: Option<Value>,
+}
+
+impl ActionRecord {
+    /// Iniciada y sin resultado conocido: pudo ocurrir o no.
+    pub fn is_unsettled(&self) -> bool {
+        self.status == "pending" || self.status == "failed"
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct AuditEntry {
     pub task_id: Option<i64>,
@@ -195,13 +214,14 @@ impl Store {
         for (key, task_id, authorization) in pending {
             let found = match connector.lookup(&key) {
                 Ok(Some(receipt)) => {
-                    let tx = self.conn.transaction()?;
-                    tx.execute(
-                        "UPDATE actions SET status = 'confirmed', receipt = ?2, error = NULL, updated_at = ?3 WHERE idempotency_key = ?1",
-                        params![key, serde_json::to_string(&receipt)?, now_ms()],
+                    self.mark_confirmed(
+                        task_id,
+                        kind,
+                        &key,
+                        &authorization,
+                        &receipt,
+                        "reconciled",
                     )?;
-                    audit(&tx, task_id, kind, "reconciled", &authorization, &key)?;
-                    tx.commit()?;
                     true
                 }
                 // Sin respuesta del conector no se puede afirmar nada: la acción sigue pendiente.
@@ -210,6 +230,84 @@ impl Store {
             outcome.push((key, found));
         }
         Ok(outcome)
+    }
+
+    /// Acciones de una tarea, de la más antigua a la más reciente.
+    pub fn task_actions(&self, task_id: i64) -> Result<Vec<ActionRecord>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT idempotency_key, kind, version, status, authorization, receipt FROM actions
+             WHERE task_id = ?1 ORDER BY created_at, version",
+        )?;
+        let rows = stmt.query_map([task_id], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, i64>(2)?,
+                r.get::<_, String>(3)?,
+                r.get::<_, String>(4)?,
+                r.get::<_, Option<String>>(5)?,
+            ))
+        })?;
+        let mut records = Vec::new();
+        for row in rows {
+            let (idempotency_key, kind, version, status, authorization, receipt) = row?;
+            records.push(ActionRecord {
+                idempotency_key,
+                kind,
+                version,
+                status,
+                authorization,
+                receipt: receipt.map(|r| serde_json::from_str(&r)).transpose()?,
+            });
+        }
+        Ok(records)
+    }
+
+    /// Confirma una acción iniciada cuyo efecto el conector ha comprobado con `lookup`.
+    pub fn reconcile_action(
+        &mut self,
+        task_id: i64,
+        record: &ActionRecord,
+        receipt: &Value,
+    ) -> Result<()> {
+        self.mark_confirmed(
+            task_id,
+            &record.kind,
+            &record.idempotency_key,
+            &record.authorization,
+            receipt,
+            "reconciled",
+        )
+    }
+
+    /// Cierra una acción iniciada que no consta realizada y no se volverá a intentar porque
+    /// la sustituye otra versión (D50). Quien llama ya ha preguntado al conector; la
+    /// autorización dice quién lo decidió. Una acción sustituida no se reconcilia más.
+    pub fn supersede_action(
+        &mut self,
+        task_id: i64,
+        record: &ActionRecord,
+        authorization: &Authorization,
+        reason: &str,
+    ) -> Result<()> {
+        let tx = self.conn.transaction()?;
+        let changed = tx.execute(
+            "UPDATE actions SET status = 'superseded', updated_at = ?2
+             WHERE idempotency_key = ?1 AND status IN ('pending', 'failed')",
+            params![record.idempotency_key, now_ms()],
+        )?;
+        if changed == 1 {
+            audit(
+                &tx,
+                task_id,
+                &record.kind,
+                "superseded",
+                &authorization.label(),
+                &format!("{}: {reason}", record.idempotency_key),
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
     }
 
     pub fn action_status(&self, key: &str) -> Result<Option<String>> {
@@ -247,19 +345,31 @@ impl Store {
         receipt: &Value,
         status: &str,
     ) -> Result<()> {
+        self.mark_confirmed(
+            request.task_id,
+            &request.kind,
+            key,
+            authorization,
+            receipt,
+            status,
+        )
+    }
+
+    fn mark_confirmed(
+        &mut self,
+        task_id: i64,
+        kind: &str,
+        key: &str,
+        authorization: &str,
+        receipt: &Value,
+        status: &str,
+    ) -> Result<()> {
         let tx = self.conn.transaction()?;
         tx.execute(
             "UPDATE actions SET status = 'confirmed', receipt = ?2, error = NULL, updated_at = ?3 WHERE idempotency_key = ?1",
             params![key, serde_json::to_string(receipt)?, now_ms()],
         )?;
-        audit(
-            &tx,
-            request.task_id,
-            &request.kind,
-            status,
-            authorization,
-            key,
-        )?;
+        audit(&tx, task_id, kind, status, authorization, key)?;
         tx.commit()?;
         Ok(())
     }

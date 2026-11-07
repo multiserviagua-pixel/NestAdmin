@@ -28,7 +28,8 @@ use serde::Serialize;
 use serde_json::Value;
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
-use tauri::{AppHandle, Emitter, Manager, State, WindowEvent};
+use tauri::{AppHandle, Builder, Emitter, Manager, Runtime, State, Window, WindowEvent};
+use tauri_plugin_dialog::DialogExt;
 
 use crate::settings::{credential_store, provider_for, Settings};
 
@@ -93,7 +94,7 @@ struct SignIn {
 type SharedState = Arc<Shared>;
 type CmdResult<T> = Result<T, String>;
 
-fn changed(handle: &AppHandle) {
+fn changed<R: Runtime>(handle: &AppHandle<R>) {
     let _ = handle.emit(CHANGED, ());
 }
 
@@ -109,9 +110,9 @@ fn tasks(shared: State<'_, SharedState>) -> CmdResult<Vec<Task>> {
 /// Recibe el archivo como cuerpo binario de la llamada y su nombre, codificado con
 /// `encodeURIComponent`, en la cabecera `x-nestadmin-name`.
 #[tauri::command]
-fn import_file(
+fn import_file<R: Runtime>(
     shared: State<'_, SharedState>,
-    handle: AppHandle,
+    handle: AppHandle<R>,
     request: tauri::ipc::Request<'_>,
 ) -> CmdResult<Task> {
     let tauri::ipc::InvokeBody::Raw(bytes) = request.body() else {
@@ -127,6 +128,89 @@ fn import_file(
     shared.wake();
     changed(&handle);
     Ok(task)
+}
+
+/// Resultado de importar desde el selector: lo importado y, aparte, cada archivo rechazado.
+#[derive(Serialize)]
+struct ImportReport {
+    imported: Vec<Task>,
+    errors: Vec<String>,
+}
+
+/// Abre el selector de archivos del sistema y encola lo elegido leyéndolo del disco, de modo
+/// que el origen guarda la ruta original (D49). Cancelar el selector no importa nada.
+#[tauri::command]
+async fn import_dialog<R: Runtime>(
+    shared: State<'_, SharedState>,
+    handle: AppHandle<R>,
+) -> CmdResult<ImportReport> {
+    let shared = Arc::clone(shared.inner());
+    let worker = Arc::clone(&shared);
+    let dialog = handle.clone();
+    let report = tauri::async_runtime::spawn_blocking(move || {
+        let picked = dialog
+            .dialog()
+            .file()
+            .set_title("Importar documentos")
+            .add_filter(
+                "Facturas (PDF, imagen o texto)",
+                &[
+                    "pdf", "jpg", "jpeg", "png", "tif", "tiff", "bmp", "webp", "txt",
+                ],
+            )
+            .blocking_pick_files()
+            .unwrap_or_default();
+        let mut report = ImportReport {
+            imported: Vec::new(),
+            errors: Vec::new(),
+        };
+        for file in picked {
+            let path = match file.into_path() {
+                Ok(path) => path,
+                Err(e) => {
+                    report.errors.push(format!("ruta no válida: {e}"));
+                    continue;
+                }
+            };
+            match worker.app()?.import_path(&path) {
+                Ok(task) => report.imported.push(task),
+                Err(e) => report.errors.push(e.to_string()),
+            }
+        }
+        Ok::<_, String>(report)
+    })
+    .await
+    .map_err(text)??;
+    if !report.imported.is_empty() {
+        shared.wake();
+        changed(&handle);
+    }
+    Ok(report)
+}
+
+/// Abre con el visor del sistema la copia guardada del documento de una tarea. Solo se abren
+/// archivos de la carpeta de documentos de NestAdmin, nunca una ruta que envíe la ventana.
+#[tauri::command]
+fn open_original(shared: State<'_, SharedState>, id: i64) -> CmdResult<()> {
+    let path = shared.app()?.document_file(id).map_err(text)?;
+    open_file(&path)
+}
+
+/// Abre un archivo local con la aplicación predeterminada sin pasar por un intérprete.
+fn open_file(path: &std::path::Path) -> CmdResult<()> {
+    #[cfg(windows)]
+    {
+        std::process::Command::new("explorer")
+            .arg(path)
+            .spawn()
+            .map(|_| ())
+            .map_err(|e| format!("no se pudo abrir el visor del sistema: {e}"))
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = path;
+        Err("abrir el original solo está disponible en Windows".into())
+    }
 }
 
 /// Decodifica `%XX` (UTF-8); `None` si la secuencia no es válida.
@@ -147,7 +231,10 @@ fn percent_decode(text: &str) -> Option<String> {
 /// Consulta las cuentas. Puede tardar si un proveedor responde despacio, así que se hace
 /// fuera del hilo de la ventana. El informe dice qué cuenta falló y por qué.
 #[tauri::command]
-async fn fetch_mail(shared: State<'_, SharedState>, handle: AppHandle) -> CmdResult<FetchReport> {
+async fn fetch_mail<R: Runtime>(
+    shared: State<'_, SharedState>,
+    handle: AppHandle<R>,
+) -> CmdResult<FetchReport> {
     let shared = Arc::clone(shared.inner());
     let worker = Arc::clone(&shared);
     let report =
@@ -194,9 +281,9 @@ fn set_mail_limit(shared: State<'_, SharedState>, limit: usize) -> CmdResult<()>
 /// y espera la redirección en 127.0.0.1. Con `account`, renueva la sesión de esa cuenta; sin
 /// ella, añade una cuenta nueva. Los tokens van directos al almacén de credenciales.
 #[tauri::command]
-async fn mail_sign_in(
+async fn mail_sign_in<R: Runtime>(
     shared: State<'_, SharedState>,
-    handle: AppHandle,
+    handle: AppHandle<R>,
     provider: MailProviderKind,
     label: String,
     account: Option<String>,
@@ -212,9 +299,9 @@ async fn mail_sign_in(
     Ok(view)
 }
 
-fn sign_in(
+fn sign_in<R: Runtime>(
     shared: &Shared,
-    handle: &AppHandle,
+    handle: &AppHandle<R>,
     provider: MailProviderKind,
     label: &str,
     account: Option<&str>,
@@ -293,9 +380,9 @@ fn open_browser(url: &str) {
 
 /// Desconecta una cuenta: borra sus tokens del almacén y la quita de la lista.
 #[tauri::command]
-fn remove_mail_account(
+fn remove_mail_account<R: Runtime>(
     shared: State<'_, SharedState>,
-    handle: AppHandle,
+    handle: AppHandle<R>,
     id: String,
 ) -> CmdResult<()> {
     shared.app()?.remove_mail_account(&id).map_err(text)?;
@@ -303,10 +390,26 @@ fn remove_mail_account(
     Ok(())
 }
 
+/// Cambia el nombre visible de una cuenta (el identificador no cambia).
 #[tauri::command]
-fn add_simulated_mail_account(
+fn rename_mail_account<R: Runtime>(
     shared: State<'_, SharedState>,
-    handle: AppHandle,
+    handle: AppHandle<R>,
+    id: String,
+    label: String,
+) -> CmdResult<AccountView> {
+    let view = shared
+        .app()?
+        .rename_mail_account(&id, &label)
+        .map_err(text)?;
+    changed(&handle);
+    Ok(view)
+}
+
+#[tauri::command]
+fn add_simulated_mail_account<R: Runtime>(
+    shared: State<'_, SharedState>,
+    handle: AppHandle<R>,
 ) -> CmdResult<AccountView> {
     let view = shared.app()?.add_simulated_mail_account().map_err(text)?;
     changed(&handle);
@@ -314,9 +417,9 @@ fn add_simulated_mail_account(
 }
 
 #[tauri::command]
-fn approve(
+fn approve<R: Runtime>(
     shared: State<'_, SharedState>,
-    handle: AppHandle,
+    handle: AppHandle<R>,
     id: i64,
     version: i64,
 ) -> CmdResult<Task> {
@@ -325,10 +428,22 @@ fn approve(
     task
 }
 
+/// El usuario confirma que el intento anterior no se envió; prepara una versión nueva (D50).
 #[tauri::command]
-fn edit_draft(
+fn confirm_not_sent<R: Runtime>(
     shared: State<'_, SharedState>,
-    handle: AppHandle,
+    handle: AppHandle<R>,
+    id: i64,
+) -> CmdResult<Task> {
+    let task = shared.app()?.confirm_not_sent(id).map_err(text);
+    changed(&handle);
+    task
+}
+
+#[tauri::command]
+fn edit_draft<R: Runtime>(
+    shared: State<'_, SharedState>,
+    handle: AppHandle<R>,
     id: i64,
     body: String,
 ) -> CmdResult<Task> {
@@ -338,14 +453,22 @@ fn edit_draft(
 }
 
 #[tauri::command]
-fn reject(shared: State<'_, SharedState>, handle: AppHandle, id: i64) -> CmdResult<Task> {
+fn reject<R: Runtime>(
+    shared: State<'_, SharedState>,
+    handle: AppHandle<R>,
+    id: i64,
+) -> CmdResult<Task> {
     let task = shared.app()?.reject(id).map_err(text)?;
     changed(&handle);
     Ok(task)
 }
 
 #[tauri::command]
-fn retry(shared: State<'_, SharedState>, handle: AppHandle, id: i64) -> CmdResult<Task> {
+fn retry<R: Runtime>(
+    shared: State<'_, SharedState>,
+    handle: AppHandle<R>,
+    id: i64,
+) -> CmdResult<Task> {
     let task = shared.app()?.retry(id).map_err(text)?;
     shared.wake();
     changed(&handle);
@@ -358,9 +481,9 @@ fn rules(shared: State<'_, SharedState>) -> CmdResult<Vec<Rule>> {
 }
 
 #[tauri::command]
-fn create_rule(
+fn create_rule<R: Runtime>(
     shared: State<'_, SharedState>,
-    handle: AppHandle,
+    handle: AppHandle<R>,
     id: String,
     action_kind: String,
     conditions: Value,
@@ -374,9 +497,9 @@ fn create_rule(
 }
 
 #[tauri::command]
-fn update_rule(
+fn update_rule<R: Runtime>(
     shared: State<'_, SharedState>,
-    handle: AppHandle,
+    handle: AppHandle<R>,
     id: String,
     conditions: Value,
 ) -> CmdResult<Rule> {
@@ -386,9 +509,9 @@ fn update_rule(
 }
 
 #[tauri::command]
-fn set_rule_active(
+fn set_rule_active<R: Runtime>(
     shared: State<'_, SharedState>,
-    handle: AppHandle,
+    handle: AppHandle<R>,
     id: String,
     active: bool,
 ) -> CmdResult<Rule> {
@@ -501,7 +624,10 @@ struct SetupDone {
 /// y el final como `nestadmin://setup-done`; un fallo deja la preparación lista para
 /// reintentar y los pasos ya hechos se saltan.
 #[tauri::command]
-fn setup_prepare(preparation: State<'_, Arc<Preparation>>, handle: AppHandle) -> CmdResult<()> {
+fn setup_prepare<R: Runtime>(
+    preparation: State<'_, Arc<Preparation>>,
+    handle: AppHandle<R>,
+) -> CmdResult<()> {
     start_preparation(&preparation, handle)
 }
 
@@ -517,7 +643,7 @@ fn setup_cancel(preparation: State<'_, Arc<Preparation>>) -> CmdResult<()> {
 /// Cierra el modo `--preparar` sin éxito: el instalador lo indica y la aplicación ofrecerá
 /// el asistente al abrirse.
 #[tauri::command]
-fn setup_abandon(preparation: State<'_, Arc<Preparation>>, handle: AppHandle) {
+fn setup_abandon<R: Runtime>(preparation: State<'_, Arc<Preparation>>, handle: AppHandle<R>) {
     if let Ok(running) = preparation.running.lock() {
         if let Some(cancel) = running.as_ref() {
             cancel.cancel();
@@ -528,7 +654,10 @@ fn setup_abandon(preparation: State<'_, Arc<Preparation>>, handle: AppHandle) {
     }
 }
 
-fn start_preparation(preparation: &Arc<Preparation>, handle: AppHandle) -> CmdResult<()> {
+fn start_preparation<R: Runtime>(
+    preparation: &Arc<Preparation>,
+    handle: AppHandle<R>,
+) -> CmdResult<()> {
     let cancel = {
         let mut running = preparation.running.lock().map_err(text)?;
         if running.is_some() {
@@ -579,7 +708,11 @@ fn start_preparation(preparation: &Arc<Preparation>, handle: AppHandle) -> CmdRe
 /// Comprobación al abrir (D39), en un hilo aparte: arranca un Ollama detenido y, si falta
 /// algo, avisa a la ventana para que muestre el asistente. Nunca descarga ni cambia de
 /// proveedor.
-fn startup_check(preparation: Arc<Preparation>, handle: AppHandle, local_provider: bool) {
+fn startup_check<R: Runtime>(
+    preparation: Arc<Preparation>,
+    handle: AppHandle<R>,
+    local_provider: bool,
+) {
     let spawned = thread::Builder::new()
         .name("nestadmin-comprobacion".into())
         .spawn(move || {
@@ -595,7 +728,7 @@ fn startup_check(preparation: Arc<Preparation>, handle: AppHandle, local_provide
 }
 
 /// Procesa la cola sin bloquear la ventana: la llamada al modelo se hace sin el cerrojo.
-fn worker(shared: SharedState, handle: AppHandle, wake: Receiver<()>) {
+fn worker<R: Runtime>(shared: SharedState, handle: AppHandle<R>, wake: Receiver<()>) {
     while !shared.stopping.load(Ordering::SeqCst) {
         let job = match shared.app() {
             Ok(mut app) => app.begin_next(),
@@ -623,7 +756,7 @@ fn worker(shared: SharedState, handle: AppHandle, wake: Receiver<()>) {
     }
 }
 
-fn show_main(handle: &AppHandle) {
+fn show_main<R: Runtime>(handle: &AppHandle<R>) {
     if let Some(window) = handle.get_webview_window("main") {
         let _ = window.unminimize();
         let _ = window.show();
@@ -632,15 +765,20 @@ fn show_main(handle: &AppHandle) {
 }
 
 /// Salida completa: no se toman tareas nuevas; una tarea en curso se recupera al reabrir.
-fn quit(handle: &AppHandle) {
+fn quit<R: Runtime>(handle: &AppHandle<R>) {
+    stop_worker(handle);
+    handle.exit(0);
+}
+
+/// Deja de tomar tareas nuevas y despierta la cola para que su hilo termine.
+fn stop_worker<R: Runtime>(handle: &AppHandle<R>) {
     if let Some(shared) = handle.try_state::<SharedState>() {
         shared.stopping.store(true, Ordering::SeqCst);
         shared.wake();
     }
-    handle.exit(0);
 }
 
-fn data_dir(handle: &AppHandle) -> PathBuf {
+fn data_dir<R: Runtime>(handle: &AppHandle<R>) -> PathBuf {
     std::env::var_os("NESTADMIN_DATA_DIR")
         .map(PathBuf::from)
         .or_else(nestadmin_app::default_data_dir)
@@ -697,15 +835,20 @@ fn extractor() -> Extractor {
     )
 }
 
-fn preparation(data_dir: &std::path::Path, prepare_only: bool) -> Arc<Preparation> {
+/// Preparación de producción (D37, D38): componentes del paquete y el sistema real.
+fn windows_setup(data_dir: &std::path::Path) -> Setup {
     let config = nestadmin_setup::Config::windows(
         tesseract_exe(),
         tessdata_dir(),
         pdfium_dir(),
         data_dir.join("descargas"),
     );
+    Setup::new(config, Box::new(WindowsSystem))
+}
+
+fn preparation(setup: Setup, prepare_only: bool) -> Arc<Preparation> {
     Arc::new(Preparation {
-        setup: Arc::new(Setup::new(config, Box::new(WindowsSystem))),
+        setup: Arc::new(setup),
         prepare_only,
         running: Mutex::new(None),
         startup: Mutex::new(None),
@@ -714,10 +857,10 @@ fn preparation(data_dir: &std::path::Path, prepare_only: bool) -> Arc<Preparatio
 
 /// Modo `--preparar` (D36): solo el asistente. Sin base de datos, cola ni bandeja; cerrar la
 /// ventana sin terminar devuelve 1 al instalador.
-fn setup_prepare_only(handle: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
+fn setup_prepare_only<R: Runtime>(handle: &AppHandle<R>) -> Result<(), Box<dyn std::error::Error>> {
     let data_dir = data_dir(handle);
     std::fs::create_dir_all(&data_dir)?;
-    handle.manage(preparation(&data_dir, true));
+    handle.manage(preparation(windows_setup(&data_dir), true));
     if let Some(window) = handle.get_webview_window("main") {
         let _ = window.set_title("Preparación de NestAdmin");
         let _ = window.set_size(tauri::LogicalSize::new(720.0, 600.0));
@@ -726,10 +869,45 @@ fn setup_prepare_only(handle: &AppHandle) -> Result<(), Box<dyn std::error::Erro
     Ok(())
 }
 
-fn setup(handle: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
-    let data_dir = data_dir(handle);
+/// Lo que cambia entre la aplicación instalada y las pruebas de recorrido (D53): carpeta de
+/// datos, almacén de credenciales, preparación, extracción y bandeja. Todo lo demás —comandos,
+/// configuración, cola y proveedor— es el mismo código en los dos casos.
+struct Deps {
+    data_dir: PathBuf,
+    credentials: Arc<dyn CredentialStore>,
+    setup: Setup,
+    extractor: Extractor,
+    /// Icono del área de notificación; las pruebas no lo crean para no tocar la bandeja.
+    tray: bool,
+}
+
+impl Deps {
+    fn installed<R: Runtime>(handle: &AppHandle<R>) -> Self {
+        let data_dir = data_dir(handle);
+        Self {
+            credentials: credential_store(),
+            setup: windows_setup(&data_dir),
+            extractor: extractor(),
+            tray: true,
+            data_dir,
+        }
+    }
+}
+
+/// Abre los datos, arranca la cola y, si se pide, el icono del área de notificación.
+/// Devuelve el hilo de la cola, que termina tras `stop_worker`.
+fn start<R: Runtime>(
+    handle: &AppHandle<R>,
+    deps: Deps,
+) -> Result<thread::JoinHandle<()>, Box<dyn std::error::Error>> {
+    let Deps {
+        data_dir,
+        credentials,
+        setup,
+        extractor,
+        tray,
+    } = deps;
     std::fs::create_dir_all(&data_dir)?;
-    let credentials = credential_store();
     let settings = Settings::load(&data_dir);
     let local_provider = matches!(settings.provider, ProviderChoice::Ollama { .. });
     let provider = provider_for(&settings.provider, credentials.as_ref());
@@ -741,14 +919,14 @@ fn setup(handle: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
     let mut app = App::open_with_mail(
         &AppPaths::new(&data_dir),
         provider,
-        Arc::new(extractor()),
+        Arc::new(extractor),
         mail,
     )?;
     if let Err(error) = app.set_mail_limit(settings.mail_limit) {
         eprintln!("límite de correo no válido en la configuración: {error}");
     }
     let (sender, receiver) = mpsc::channel();
-    let preparation = preparation(&data_dir, false);
+    let preparation = preparation(setup, false);
     handle.manage(Arc::clone(&preparation));
     startup_check(preparation, handle.clone(), local_provider);
     let shared = Arc::new(Shared {
@@ -763,10 +941,16 @@ fn setup(handle: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
     });
     handle.manage(Arc::clone(&shared));
     let worker_handle = handle.clone();
-    thread::Builder::new()
+    let worker = thread::Builder::new()
         .name("nestadmin-cola".into())
         .spawn(move || worker(shared, worker_handle, receiver))?;
+    if tray {
+        build_tray(handle)?;
+    }
+    Ok(worker)
+}
 
+fn build_tray<R: Runtime>(handle: &AppHandle<R>) -> tauri::Result<()> {
     let show = MenuItem::with_id(handle, "show", "Mostrar NestAdmin", true, None::<&str>)?;
     let exit = MenuItem::with_id(
         handle,
@@ -802,53 +986,47 @@ fn setup(handle: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn main() {
-    let prepare_only = std::env::args().skip(1).any(|arg| arg == PREPARE_ARG);
-    let mut builder = tauri::Builder::default();
-    if !prepare_only {
-        // Primero: una segunda ejecución solo muestra la ventana existente.
-        builder = builder.plugin(tauri_plugin_single_instance::init(|handle, _args, _cwd| {
-            show_main(handle)
-        }));
-    }
-    builder
-        .setup(move |app| {
-            if prepare_only {
-                setup_prepare_only(app.handle())?;
-            } else {
-                setup(app.handle())?;
-            }
-            Ok(())
-        })
-        .on_window_event(move |window, event| {
-            if let WindowEvent::CloseRequested { api, .. } = event {
-                if prepare_only {
-                    // Cerrar el asistente del instalador equivale a cancelarlo.
-                    if let Some(preparation) = window.try_state::<Arc<Preparation>>() {
-                        if let Ok(running) = preparation.running.lock() {
-                            if let Some(cancel) = running.as_ref() {
-                                cancel.cancel();
-                            }
-                        }
+/// Cerrar la ventana principal la oculta y el trabajo sigue; en el modo `--preparar`,
+/// cerrar el asistente equivale a cancelarlo.
+fn on_window_event<R: Runtime>(window: &Window<R>, event: &WindowEvent, prepare_only: bool) {
+    if let WindowEvent::CloseRequested { api, .. } = event {
+        if prepare_only {
+            if let Some(preparation) = window.try_state::<Arc<Preparation>>() {
+                if let Ok(running) = preparation.running.lock() {
+                    if let Some(cancel) = running.as_ref() {
+                        cancel.cancel();
                     }
-                    window.app_handle().exit(1);
-                } else {
-                    api.prevent_close();
-                    let _ = window.hide();
                 }
             }
-        })
+            window.app_handle().exit(1);
+        } else {
+            api.prevent_close();
+            let _ = window.hide();
+        }
+    }
+}
+
+/// Eventos de ventana y comandos que se exponen a la interfaz; las pruebas de recorrido usan
+/// esta misma función con el runtime simulado de Tauri.
+fn configure<R: Runtime>(builder: Builder<R>, prepare_only: bool) -> Builder<R> {
+    builder
+        .plugin(tauri_plugin_dialog::init())
+        .on_window_event(move |window, event| on_window_event(window, event, prepare_only))
         .invoke_handler(tauri::generate_handler![
             tasks,
             import_file,
+            import_dialog,
+            open_original,
             fetch_mail,
             mail_accounts,
             set_mail_limit,
             mail_sign_in,
             mail_sign_in_cancel,
             remove_mail_account,
+            rename_mail_account,
             add_simulated_mail_account,
             approve,
+            confirm_not_sent,
             edit_draft,
             reject,
             retry,
@@ -867,6 +1045,29 @@ fn main() {
             setup_cancel,
             setup_abandon,
         ])
+}
+
+fn main() {
+    let prepare_only = std::env::args().skip(1).any(|arg| arg == PREPARE_ARG);
+    let mut builder = tauri::Builder::default();
+    if !prepare_only {
+        // Primero: una segunda ejecución solo muestra la ventana existente.
+        builder = builder.plugin(tauri_plugin_single_instance::init(|handle, _args, _cwd| {
+            show_main(handle)
+        }));
+    }
+    configure(builder, prepare_only)
+        .setup(move |app| {
+            if prepare_only {
+                setup_prepare_only(app.handle())?;
+            } else {
+                start(app.handle(), Deps::installed(app.handle()))?;
+            }
+            Ok(())
+        })
         .run(tauri::generate_context!())
         .expect("no se pudo iniciar NestAdmin");
 }
+
+#[cfg(test)]
+mod recorrido;

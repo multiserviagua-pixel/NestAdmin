@@ -8,7 +8,8 @@ pub mod rules;
 pub mod store;
 
 pub use actions::{
-    ActionOutcome, ActionRequest, AuditEntry, Authorization, Connector, ConnectorError,
+    ActionOutcome, ActionRecord, ActionRequest, AuditEntry, Authorization, Connector,
+    ConnectorError,
 };
 pub use error::{CoreError, Result};
 pub use queue::{Task, TaskError, TaskState};

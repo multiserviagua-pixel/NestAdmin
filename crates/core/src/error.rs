@@ -15,8 +15,12 @@ pub enum CoreError {
         from: TaskState,
         to: TaskState,
     },
-    #[error("esquema de base de datos {found} más reciente que el soportado ({supported})")]
+    #[error(
+        "esquema de base de datos {found} más reciente que el soportado ({supported}); \n         instale la versión de NestAdmin que lo creó o restaure la copia nestadmin.esquema-{supported}.db"
+    )]
     UnsupportedSchema { found: i64, supported: i64 },
+    #[error("no se pudo guardar la copia previa a la migración: {0}")]
+    Backup(std::io::Error),
     #[error("la clave {0} ya existe con otro contenido")]
     IdempotencyConflict(String),
     #[error("regla {0} inexistente")]

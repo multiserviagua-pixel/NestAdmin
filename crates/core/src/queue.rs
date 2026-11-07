@@ -299,6 +299,34 @@ impl Store {
         Ok(task)
     }
 
+    /// Guarda en una tarea en curso o en revisión el resultado exacto que se va a ejecutar,
+    /// antes de llamar a ningún conector y sin cambiar su estado (D50). Al reprocesarla se
+    /// reutiliza este contenido en vez de pedir otro a la IA.
+    pub fn record_attempt(&mut self, id: i64, result: &Value) -> Result<Task> {
+        let tx = self.conn.transaction()?;
+        let task = load(&tx, id)?;
+        if !matches!(task.state, TaskState::Running | TaskState::AwaitingReview) {
+            return Err(CoreError::InvalidTransition {
+                task: id,
+                from: task.state,
+                to: task.state,
+            });
+        }
+        let now = now_ms();
+        tx.execute(
+            "UPDATE tasks SET result = ?2, updated_at = ?3 WHERE id = ?1",
+            params![id, serde_json::to_string(result)?, now],
+        )?;
+        tx.execute(
+            "INSERT INTO task_transitions (task_id, from_state, to_state, reason, at)
+             VALUES (?1, ?2, ?2, 'intento de acción registrado', ?3)",
+            params![id, task.state.as_str(), now],
+        )?;
+        let task = load(&tx, id)?;
+        tx.commit()?;
+        Ok(task)
+    }
+
     /// Todas las tareas, de la más reciente a la más antigua.
     pub fn all_tasks(&self) -> Result<Vec<Task>> {
         let mut stmt = self.conn.prepare(&format!(

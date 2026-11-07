@@ -1,20 +1,25 @@
 //! Extracción local de texto (R04, D09, D10): texto plano, PDF con capa de texto mediante
-//! PDFium y páginas escaneadas mediante OCR con Tesseract como proceso local. Nada sale del
-//! equipo. Si una página no se puede leer, el documento entero falla con el motivo: nunca se
+//! PDFium, y páginas escaneadas e imágenes (fotos de factura) mediante OCR con Tesseract como
+//! proceso local. Nada sale del equipo. Si una página no se puede leer, el documento entero falla con el motivo: nunca se
 //! entrega una extracción incompleta como si fuera completa.
 
 mod ocr;
 mod pdf;
+mod picture;
 
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-pub use ocr::{Ocr, Tesseract};
+pub use ocr::{mean_confidence, Ocr, OcrText, Tesseract};
+pub use picture::{prepare_image, IMAGE_EXTENSIONS};
 
-/// Una página con menos caracteres visibles que este umbral se considera escaneada (D10).
-/// Valor inicial; se ajustará con pruebas sobre facturas.
-pub const DEFAULT_MIN_CHARS: usize = 20;
+/// Una página con menos caracteres visibles que este umbral se considera escaneada (D10,
+/// calibrado en D92).
+pub const DEFAULT_MIN_CHARS: usize = 60;
+/// Por debajo de esta confianza media de Tesseract (0–100) la página se marca como OCR de
+/// baja calidad (D93).
+pub const DEFAULT_MIN_CONFIDENCE: f32 = 85.0;
 /// Resolución con la que se rasteriza una página para el OCR.
 pub const OCR_DPI: f32 = 300.0;
 
@@ -26,15 +31,73 @@ pub enum Method {
     Ocr,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Page {
     pub number: usize,
     pub method: Method,
     /// Caracteres visibles (sin espacios) obtenidos en la página.
     pub chars: usize,
+    /// Confianza media del OCR (0–100); solo en páginas con OCR.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confidence: Option<f32>,
+    /// OCR por debajo del umbral de confianza: el texto puede tener errores (D93).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub low_confidence: bool,
+    /// Posición (en bytes) en que empieza el texto de la página dentro de `Extraction::text`.
+    /// Sirve para saber de qué página salió cada campo extraído (D49).
+    #[serde(default)]
+    pub offset: usize,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+impl Extraction {
+    /// Páginas en que aparece `needle` en el texto extraído, en orden y sin repetir.
+    pub fn pages_containing(&self, needle: &str) -> Vec<usize> {
+        if needle.trim().is_empty() {
+            return Vec::new();
+        }
+        let mut found = Vec::new();
+        for (index, _) in self.text.match_indices(needle) {
+            let page = self
+                .pages
+                .iter()
+                .rev()
+                .find(|p| p.offset <= index)
+                .map(|p| p.number);
+            if let Some(page) = page {
+                if !found.contains(&page) {
+                    found.push(page);
+                }
+            }
+        }
+        found
+    }
+}
+
+impl Page {
+    pub(crate) fn text(number: usize, method: Method, chars: usize) -> Self {
+        Self {
+            number,
+            method,
+            chars,
+            confidence: None,
+            low_confidence: false,
+            offset: 0,
+        }
+    }
+
+    pub(crate) fn ocr(number: usize, chars: usize, confidence: Option<f32>, min: f32) -> Self {
+        Self {
+            number,
+            method: Method::Ocr,
+            chars,
+            confidence,
+            low_confidence: confidence.is_some_and(|c| c < min),
+            offset: 0,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Extraction {
     pub text: String,
     pub pages: Vec<Page>,
@@ -87,6 +150,7 @@ pub struct Extractor {
     pdfium_dir: PathBuf,
     ocr: Box<dyn Ocr>,
     min_chars: usize,
+    min_confidence: f32,
 }
 
 impl Extractor {
@@ -95,6 +159,7 @@ impl Extractor {
             pdfium_dir: pdfium_dir.into(),
             ocr,
             min_chars: DEFAULT_MIN_CHARS,
+            min_confidence: DEFAULT_MIN_CONFIDENCE,
         }
     }
 
@@ -103,7 +168,18 @@ impl Extractor {
         self
     }
 
-    /// Extrae el texto según la extensión del archivo: `.txt` o `.pdf`.
+    pub fn with_min_confidence(mut self, min_confidence: f32) -> Self {
+        self.min_confidence = min_confidence;
+        self
+    }
+
+    /// Motor de OCR configurado.
+    pub fn ocr(&self) -> &dyn Ocr {
+        self.ocr.as_ref()
+    }
+
+    /// Extrae el texto según la extensión del archivo: `.txt`, `.pdf` o una imagen
+    /// ([`IMAGE_EXTENSIONS`]), que pasa entera por OCR.
     pub fn extract(&self, path: &Path) -> Result<Extraction, ExtractError> {
         let extension = path
             .extension()
@@ -112,8 +188,20 @@ impl Extractor {
             .unwrap_or_default();
         match extension.as_str() {
             "txt" => plain_text(path),
-            "pdf" => pdf::extract(&self.pdfium_dir, self.ocr.as_ref(), self.min_chars, path),
+            "pdf" => pdf::extract(
+                &self.pdfium_dir,
+                self.ocr.as_ref(),
+                self.min_chars,
+                self.min_confidence,
+                path,
+            ),
+            ext if IMAGE_EXTENSIONS.contains(&ext) => {
+                picture::extract(self.ocr.as_ref(), self.min_confidence, path)
+            }
             "" => Err(ExtractError::Unsupported("archivo sin extensión".into())),
+            "heic" | "heif" => Err(ExtractError::Unsupported(
+                "fotos HEIC: expórtelas como JPG desde el móvil o el visor de fotos".into(),
+            )),
             other => Err(ExtractError::Unsupported(format!(".{other}"))),
         }
     }
@@ -129,10 +217,6 @@ fn plain_text(path: &Path) -> Result<Extraction, ExtractError> {
     }
     Ok(Extraction {
         text,
-        pages: vec![Page {
-            number: 1,
-            method: Method::PlainText,
-            chars,
-        }],
+        pages: vec![Page::text(1, Method::PlainText, chars)],
     })
 }

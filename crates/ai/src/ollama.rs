@@ -10,6 +10,11 @@ use crate::provider::{
 
 pub const DEFAULT_URL: &str = "http://127.0.0.1:11434";
 pub const DEFAULT_MODEL: &str = "qwen3:8b";
+/// Digest del manifiesto de `qwen3:8b` evaluado (T10, D62): el SHA-256 que Ollama muestra en
+/// `/api/tags` y que coincide con `registry.ollama.ai/v2/library/qwen3/manifests/8b`. Ollama
+/// comprueba al descargar la huella de cada capa del manifiesto.
+pub const DEFAULT_MODEL_DIGEST: &str =
+    "500a1f067a9f782620b40bee6f7b0c89e17ae61f686b92c24933e4ca4b2b8b41";
 
 /// Adaptador local (D06). Solo admite direcciones de bucle local, de modo que el
 /// contenido nunca sale del equipo por este camino.

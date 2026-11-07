@@ -372,6 +372,93 @@ fn reconcile_actions_confirms_known_effects_and_keeps_unknown_pending() {
 }
 
 #[test]
+fn recorded_attempts_survive_restart_and_superseded_actions_are_never_reconciled() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = db(&dir);
+    let world = Rc::new(RefCell::new(World::default()));
+    let task = {
+        let mut store = Store::open(&path).unwrap();
+        let task = store.enqueue("email", "msg-1").unwrap().id;
+        store.claim_next().unwrap();
+        // El resultado que se va a ejecutar se guarda antes de llamar al conector (D50).
+        let attempt = json!({ "version": 1, "attempt": { "version": 1 } });
+        store.record_attempt(task, &attempt).unwrap();
+        let early = FakeConnector {
+            crash_before_execute: true,
+            ..FakeConnector::new(&world)
+        };
+        let _ = catch_unwind(AssertUnwindSafe(|| {
+            store.perform_action(&send_request(task, 1, "uno"), &early)
+        }));
+        task
+    };
+    let mut store = reopen(&path);
+    store.recover().unwrap();
+    let recovered = store.task(task).unwrap();
+    assert_eq!(recovered.state, TaskState::Queued);
+    assert_eq!(recovered.result.unwrap()["attempt"]["version"], 1);
+    // Solo se registra en tareas en curso o en revisión.
+    assert!(store.record_attempt(task, &json!({})).is_err());
+
+    let actions = store.task_actions(task).unwrap();
+    assert_eq!(actions.len(), 1);
+    assert!(actions[0].is_unsettled());
+    store
+        .supersede_action(task, &actions[0], &Authorization::Approval, "prueba")
+        .unwrap();
+    // Sustituir dos veces no deja dos entradas en el historial.
+    store
+        .supersede_action(task, &actions[0], &Authorization::Approval, "prueba")
+        .unwrap();
+    let key = send_request(task, 1, "").idempotency_key();
+    assert_eq!(
+        store.action_status(&key).unwrap().as_deref(),
+        Some("superseded")
+    );
+    assert!(store
+        .reconcile_actions("send_draft", &FakeConnector::new(&world))
+        .unwrap()
+        .is_empty());
+    let log: Vec<String> = store
+        .audit_log()
+        .unwrap()
+        .into_iter()
+        .map(|e| e.status)
+        .collect();
+    assert_eq!(log, ["pending", "superseded"]);
+    assert_eq!(world.borrow().executions, 0);
+}
+
+#[test]
+fn reconcile_action_confirms_a_failed_attempt_that_did_happen() {
+    let dir = tempfile::tempdir().unwrap();
+    let world = Rc::new(RefCell::new(World::default()));
+    let mut store = Store::open(&db(&dir)).unwrap();
+    let task = store.enqueue("email", "msg-1").unwrap().id;
+    let request = send_request(task, 1, "uno");
+    // El efecto ocurre, pero el conector responde con error: queda `failed`.
+    FakeConnector::new(&world)
+        .execute(&request.idempotency_key(), &request.payload)
+        .unwrap();
+    let failing = FakeConnector {
+        fail_with: Some("unavailable"),
+        ..FakeConnector::new(&world)
+    };
+    assert!(store.perform_action(&request, &failing).is_err());
+    let action = store.task_actions(task).unwrap().remove(0);
+    assert_eq!(action.status, "failed");
+    let receipt = FakeConnector::new(&world)
+        .lookup(&action.idempotency_key)
+        .unwrap()
+        .unwrap();
+    store.reconcile_action(task, &action, &receipt).unwrap();
+    let action = store.task_actions(task).unwrap().remove(0);
+    assert_eq!(action.status, "confirmed");
+    assert_eq!(action.receipt, Some(receipt));
+    assert_eq!(world.borrow().executions, 1);
+}
+
+#[test]
 fn changed_content_needs_new_version_and_never_reuses_key() {
     let world = Rc::new(RefCell::new(World::default()));
     let connector = FakeConnector::new(&world);

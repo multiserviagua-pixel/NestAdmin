@@ -10,30 +10,33 @@
 pub mod accounts;
 pub mod rules;
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use nestadmin_ai::tasks::{email_request, extraction_request, parse_email, parse_extraction};
+use nestadmin_ai::tasks::{
+    email_request, extraction_request, parse_email, parse_extraction, parse_other_invoices,
+};
 use nestadmin_ai::{GenerateRequest, GenerateResult, Provider, ProviderKind};
 use nestadmin_core::{
-    ActionRequest, AuditEntry, Authorization, ConnectorError, CoreError, Rule, Store, Task,
-    TaskError, TaskState,
+    ActionRecord, ActionRequest, AuditEntry, Authorization, Connector, ConnectorError, CoreError,
+    Rule, Store, Task, TaskError, TaskState,
 };
 use nestadmin_documents::{
     process_invoice, DuplicateRegistry, Evidenced, Invoice, Issue, RawInvoice, RecoveryReason,
 };
-use nestadmin_extract::Extractor;
+use nestadmin_extract::{Extraction, Extractor};
 use nestadmin_mail::{OAuthConfig, Tokens};
 use nestadmin_simulators::{AdminSimulator, MailSimulator, Message, NewDraft};
 use serde::Serialize;
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 
 use crate::accounts::{
-    split_id, AccountFetch, AccountView, Accounts, FetchReport, MailAccountsView, MailEnv,
-    MailIssue, MailProviderKind,
+    split_id, AccountFetch, AccountView, Accounts, AttachmentFetch, AttachmentIssue, FetchReport,
+    MailAccountsView, MailEnv, MailIssue, MailProviderKind,
 };
 use crate::rules::{decide, RuleDecision, REGISTER_INVOICE, SEND_DRAFT};
 
@@ -110,13 +113,74 @@ pub struct App {
     documents: PathBuf,
     registry: DuplicateRegistry,
     extractor: Arc<Extractor>,
+    /// Mientras sea `true`, no empieza ninguna tarea nueva (actualización pendiente, D63).
+    paused: bool,
 }
 
-/// Trabajo de una tarea: una solicitud lista o un documento del que extraer el texto.
+/// Si se puede instalar una actualización sin cortar trabajo (actualizaciones.md, paso 5).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct UpdateReadiness {
+    /// No hay ninguna tarea ejecutándose: instalar no corta nada.
+    pub ready: bool,
+    /// Tareas ejecutándose (la IA, el OCR o un envío en curso).
+    pub running: usize,
+    /// Tareas en cola: se conservan y se procesan tras actualizar (R02).
+    pub queued: usize,
+    /// Tareas pendientes de revisión: se conservan.
+    pub awaiting_review: usize,
+    /// Si la cola está en pausa: no empieza ninguna tarea nueva.
+    pub paused: bool,
+}
+
+/// Trabajo de una tarea: una solicitud lista, un documento del que extraer el texto o, si ya
+/// se intentó ejecutar su acción, el resultado guardado entonces (D50), sin volver a la IA.
 enum Prepared {
     Request(GenerateRequest),
     Document(PathBuf),
+    /// Una factura más de un documento con varias (D68): sus campos ya los dio la IA al
+    /// procesar la primera; solo se vuelve a leer el documento para localizar cada campo.
+    Split(PathBuf, GenerateResult),
+    Resume(Value),
 }
+
+/// Lo que devuelve el trabajo de una tarea.
+enum Outcome {
+    Generated(GenerateResult),
+    Resumed(Value),
+}
+
+/// Estado de los intentos anteriores de la acción de una tarea (D50).
+enum Previous {
+    /// No queda ningún intento sin cerrar: se puede ejecutar.
+    Clear,
+    /// Una versión consta realizada.
+    Done { version: i64, receipt: Value },
+    /// Un intento no se pudo comprobar: el conector falló o el borrador ya no existe.
+    Unknown { version: i64, error: ConnectorError },
+}
+
+/// Motivo de revisión de las facturas de un documento con varias (D68).
+const SPLIT_REASON: &str =
+    "el documento contiene varias facturas; la IA las separó y cada una se revisa por separado";
+
+/// Campos ya extraídos de una factura separada de un documento con varias (D68).
+fn split_preset(input: &Value) -> Option<GenerateResult> {
+    let preset = input.get("preset")?;
+    Some(GenerateResult {
+        request_id: String::new(),
+        provider: serde_json::from_value(preset["provider"].clone()).ok()?,
+        model: preset["model"].as_str().unwrap_or("").to_owned(),
+        output: preset["output"].clone(),
+        latency_ms: 0,
+        usage: Default::default(),
+    })
+}
+
+/// Motivo de revisión de una tarea cuyo intento anterior no se confirmó.
+const RESUMED_REASON: &str =
+    "el intento anterior no se confirmó; se conserva el contenido aprobado, sin pedir otro a la IA";
+/// Motivo de revisión cuando el borrador anterior ya no existe y no consta enviado.
+const MISSING_REASON: &str = "el borrador del intento anterior ya no existe y no consta enviado; confirme que no se envió antes de preparar otro";
 
 /// Tarea tomada de la cola con su trabajo preparado.
 pub struct Job {
@@ -129,9 +193,9 @@ pub struct Job {
 /// Respuesta del proveedor (o el motivo del fallo) lista para `finish`.
 pub struct Completed {
     task: Task,
-    outcome: Result<GenerateResult, TaskError>,
-    /// Páginas del documento y método de cada una (texto, PDF u OCR).
-    pages: Option<Value>,
+    outcome: Result<Outcome, TaskError>,
+    /// Texto y páginas del documento (método de cada una: texto, PDF u OCR).
+    extraction: Option<Extraction>,
 }
 
 impl Job {
@@ -144,28 +208,37 @@ impl Job {
             extractor,
             prepared,
         } = self;
-        let mut pages = None;
+        let mut extracted = None;
         let outcome = prepared.and_then(|prepared| {
             let request = match prepared {
+                Prepared::Resume(result) => return Ok(Outcome::Resumed(result)),
+                Prepared::Split(path, generated) => {
+                    extracted = extractor.extract(&path).ok();
+                    return Ok(Outcome::Generated(generated));
+                }
                 Prepared::Request(request) => request,
                 Prepared::Document(path) => {
                     let extraction = extractor
                         .extract(&path)
                         .map_err(|e| task_error(e.code(), e.to_string(), e.recoverable()))?;
-                    pages = serde_json::to_value(&extraction.pages).ok();
-                    extraction_request(&task.id.to_string(), &extraction.text)
+                    let request = extraction_request(&task.id.to_string(), &extraction.text);
+                    extracted = Some(extraction);
+                    request
                 }
             };
-            provider.generate(&request).map_err(|e| TaskError {
-                code: e.code().to_owned(),
-                message: e.to_string(),
-                recoverable: true,
-            })
+            provider
+                .generate(&request)
+                .map(Outcome::Generated)
+                .map_err(|e| TaskError {
+                    code: e.code().to_owned(),
+                    message: e.to_string(),
+                    recoverable: true,
+                })
         });
         Completed {
             task,
             outcome,
-            pages,
+            extraction: extracted,
         }
     }
 }
@@ -207,12 +280,177 @@ impl App {
             documents: paths.documents(),
             registry: DuplicateRegistry::new(),
             extractor,
+            paused: false,
         };
         app.store.recover()?;
         app.store.reconcile_actions(SEND_DRAFT, &app.mail)?;
         app.store.reconcile_actions(REGISTER_INVOICE, &app.admin)?;
+        app.complete_confirmed_reviews()?;
         app.rebuild_registry()?;
         Ok(app)
+    }
+
+    /// Una tarea que seguía en revisión cuando se cortó su acción y cuya acción consta ya
+    /// confirmada (por ejemplo, al reconciliar al abrir) se completa: no se vuelve a pedir
+    /// aprobación de algo que ya ocurrió.
+    fn complete_confirmed_reviews(&mut self) -> AppResult<()> {
+        for task in self.store.tasks_in(TaskState::AwaitingReview)? {
+            let kind = action_kind(&task);
+            let done = self
+                .store
+                .task_actions(task.id)?
+                .into_iter()
+                .rfind(|a| a.kind == kind && a.status == "confirmed");
+            if let Some(done) = done {
+                let result = task.result.clone().unwrap_or(Value::Null);
+                let receipt = done.receipt.unwrap_or(Value::Null);
+                self.complete_with(task.id, result, done.version, receipt)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Resultado guardado de una tarea cuya acción ya se intentó (D50): se reutiliza al
+    /// reprocesarla. También cubre tareas anteriores a D50 con acciones registradas.
+    fn attempted_result(&self, task: &Task) -> AppResult<Option<Value>> {
+        let Some(result) = task.result.as_ref().filter(|r| r.get("action").is_some()) else {
+            return Ok(None);
+        };
+        if result.get("attempt").is_some() || !self.store.task_actions(task.id)?.is_empty() {
+            return Ok(Some(result.clone()));
+        }
+        Ok(None)
+    }
+
+    /// Comprueba con el conector los intentos anteriores de la acción de una tarea. La versión
+    /// `executing` se excluye porque `perform_action` ya la consulta antes de repetirla. Con
+    /// `supersede`, los intentos que el conector no ve realizados se cierran como sustituidos
+    /// con esa autorización; sin ella se dejan como están.
+    fn check_previous(
+        &mut self,
+        task: &Task,
+        executing: Option<i64>,
+        supersede: Option<&Authorization>,
+    ) -> AppResult<Previous> {
+        let kind = action_kind(task);
+        let actions: Vec<ActionRecord> = self
+            .store
+            .task_actions(task.id)?
+            .into_iter()
+            .filter(|a| a.kind == kind)
+            .collect();
+        if let Some(done) = actions.iter().rev().find(|a| a.status == "confirmed") {
+            return Ok(Previous::Done {
+                version: done.version,
+                receipt: done.receipt.clone().unwrap_or(Value::Null),
+            });
+        }
+        let mut unsent = Vec::new();
+        let mut unknown = None;
+        for action in actions
+            .iter()
+            .filter(|a| a.is_unsettled() && Some(a.version) != executing)
+        {
+            let found = match kind {
+                REGISTER_INVOICE => self.admin.lookup(&action.idempotency_key),
+                _ => self.mail.lookup(&action.idempotency_key),
+            };
+            match found {
+                Ok(Some(receipt)) => {
+                    self.store.reconcile_action(task.id, action, &receipt)?;
+                    return Ok(Previous::Done {
+                        version: action.version,
+                        receipt,
+                    });
+                }
+                Ok(None) => unsent.push(action),
+                Err(error) => {
+                    unknown.get_or_insert((action.version, error));
+                }
+            }
+        }
+        if let Some((version, error)) = unknown {
+            return Ok(Previous::Unknown { version, error });
+        }
+        if let Some(authorization) = supersede {
+            for action in unsent {
+                self.store.supersede_action(
+                    task.id,
+                    action,
+                    authorization,
+                    "el conector no lo ve realizado; lo sustituye otra versión",
+                )?;
+            }
+        }
+        Ok(Previous::Clear)
+    }
+
+    /// Completa la tarea con el recibo de una versión ya realizada. Si no es la versión que
+    /// se muestra, se recupera el contenido de ese intento y se indica cuál salió.
+    fn complete_with(
+        &mut self,
+        task_id: i64,
+        mut result: Value,
+        version: i64,
+        receipt: Value,
+    ) -> AppResult<Task> {
+        if result["version"].as_i64() != Some(version) {
+            if result["attempt"]["version"].as_i64() == Some(version)
+                && !result["attempt"]["draft"].is_null()
+            {
+                result["draft"] = result["attempt"]["draft"].clone();
+                result["version"] = json!(version);
+            } else {
+                result["sent_version"] = json!(version);
+            }
+        }
+        result["receipt"] = receipt;
+        // Para la ventana: se completó con un intento anterior, no con una ejecución nueva.
+        result["recovered"] = json!({ "version": version });
+        if let Some(fields) = result.as_object_mut() {
+            fields.remove("recovery");
+        }
+        Ok(self.store.complete(task_id, &result)?)
+    }
+
+    /// Deja la tarea en revisión con el contenido dado, desde `running` o desde la revisión.
+    fn back_to_review(&mut self, task: &Task, result: &Value) -> AppResult<Task> {
+        let current = self.store.task(task.id)?;
+        Ok(match current.state {
+            TaskState::AwaitingReview => self.store.revise(task.id, result)?,
+            _ => self.store.await_review(task.id, result)?,
+        })
+    }
+
+    /// Reproceso de una tarea cuya acción ya se intentó: si consta realizada se completa; si
+    /// no, vuelve a revisión con el mismo contenido y versión, explicando lo ocurrido. Nunca se
+    /// ejecuta nada sin una nueva aprobación.
+    fn resume(&mut self, task: Task, mut result: Value) -> AppResult<Task> {
+        let attempted = result["attempt"]["version"]
+            .as_i64()
+            .or_else(|| result["version"].as_i64())
+            .unwrap_or(1);
+        let (error, missing) = match self.check_previous(&task, None, None)? {
+            Previous::Done { version, receipt } => {
+                return self.complete_with(task.id, result, version, receipt)
+            }
+            Previous::Unknown { error, .. } => {
+                let missing = error.code == nestadmin_simulators::codes::NOT_FOUND;
+                (Some(error.code), missing)
+            }
+            Previous::Clear => (task.error.as_ref().map(|e| e.code.clone()), false),
+        };
+        result["review_reason"] = json!(if missing {
+            MISSING_REASON
+        } else {
+            RESUMED_REASON
+        });
+        result["recovery"] = json!({
+            "version": attempted,
+            "error": error,
+            "needs_confirmation": missing,
+        });
+        self.back_to_review(&task, &result)
     }
 
     /// Vuelve a cargar en orden las facturas ya procesadas para seguir detectando duplicados.
@@ -245,43 +483,152 @@ impl App {
         if text.trim().is_empty() {
             return Err(AppError::Invalid("el documento está vacío".into()));
         }
-        self.store_document(name, "txt", text.as_bytes())
+        let origin = json!({ "kind": "file", "name": name, "original_path": null });
+        self.store_document(name, "txt", text.as_bytes(), origin)
     }
 
-    /// Encola un archivo `.txt` o `.pdf`. Se guarda una copia en los datos locales; la
-    /// extracción (con OCR si hace falta) se hace al procesar la tarea.
+    /// Encola un archivo `.txt` o `.pdf` del que no se conoce la ruta original.
     pub fn import_file(&mut self, name: &str, bytes: &[u8]) -> AppResult<Task> {
-        let extension = Path::new(name)
-            .extension()
-            .and_then(|e| e.to_str())
-            .map(str::to_ascii_lowercase)
-            .unwrap_or_default();
-        if extension != "txt" && extension != "pdf" {
-            return Err(AppError::Invalid(format!(
-                "«{name}»: solo se admiten archivos .txt y .pdf"
-            )));
-        }
-        if bytes.is_empty() {
-            return Err(AppError::Invalid(format!("«{name}» está vacío")));
-        }
-        if bytes.len() > MAX_DOCUMENT_BYTES {
+        self.import_file_from(name, None, bytes)
+    }
+
+    /// Lee un archivo del disco y lo encola anotando su ruta original como origen.
+    pub fn import_path(&mut self, path: &Path) -> AppResult<Task> {
+        let name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .ok_or_else(|| AppError::Invalid("el archivo no tiene un nombre válido".into()))?
+            .to_owned();
+        let size = fs::metadata(path)?.len();
+        if size > MAX_DOCUMENT_BYTES as u64 {
             return Err(AppError::Invalid(format!(
                 "«{name}» supera el tamaño máximo de {} MB",
                 MAX_DOCUMENT_BYTES / 1_000_000
             )));
         }
-        self.store_document(name, &extension, bytes)
+        let bytes = fs::read(path)?;
+        self.import_file_from(&name, Some(path), &bytes)
     }
 
-    fn store_document(&mut self, name: &str, extension: &str, bytes: &[u8]) -> AppResult<Task> {
-        let stamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0);
+    /// Encola un archivo `.txt` o `.pdf`. Se guarda una copia en los datos locales junto con
+    /// su origen (nombre, ruta original si se conoce, fecha de importación y SHA-256); la
+    /// extracción (con OCR si hace falta) se hace al procesar la tarea.
+    pub fn import_file_from(
+        &mut self,
+        name: &str,
+        original: Option<&Path>,
+        bytes: &[u8],
+    ) -> AppResult<Task> {
+        let extension = check_document(name, bytes)?;
+        let origin = json!({
+            "kind": "file",
+            "name": name,
+            // Ruta tal como la dio el sistema; `null` si no se conoce (texto pegado o un
+            // selector que no la facilita).
+            "original_path": original.map(|p| p.display().to_string()),
+        });
+        self.store_document(name, &extension, bytes, origin)
+    }
+
+    /// Encola un adjunto de un correo ya recibido (`message_task`, la tarea de ese correo).
+    /// El origen copia la cuenta, el remitente y el asunto guardados en esa tarea, de modo que
+    /// la factura dice de qué buzón y de qué mensaje salió (D49).
+    pub fn import_attachment(
+        &mut self,
+        message_task: i64,
+        name: &str,
+        bytes: &[u8],
+    ) -> AppResult<Task> {
+        self.import_attachment_keyed(message_task, name, bytes, "", "")
+    }
+
+    fn import_attachment_keyed(
+        &mut self,
+        message_task: i64,
+        name: &str,
+        bytes: &[u8],
+        attachment_key: &str,
+        attachment_id: &str,
+    ) -> AppResult<Task> {
+        let task = self.store.task(message_task)?;
+        if task.kind != EMAIL {
+            return Err(AppError::Invalid(format!(
+                "la tarea {message_task} no es un correo"
+            )));
+        }
+        let extension = check_document(name, bytes)?;
+        let input: Value = serde_json::from_str(&task.input_ref).unwrap_or(Value::Null);
+        let message = &input["message"];
+        let account = match input.get("origin").filter(|o| !o.is_null()) {
+            Some(origin) => origin.clone(),
+            None => {
+                let id = input["message_id"].as_str().unwrap_or("");
+                serde_json::to_value(self.mail.origin(split_id(id).0)).unwrap_or_default()
+            }
+        };
+        let origin = json!({
+            "kind": "email",
+            "account": account,
+            "message_id": input["message_id"],
+            "from": message["from"],
+            "subject": message["subject"],
+            "attachment": name,
+        });
+        let mut origin = origin;
+        if !attachment_key.is_empty() {
+            origin["attachment_key"] = json!(attachment_key);
+            origin["attachment_id"] = json!(attachment_id);
+        }
+        self.store_document(name, &extension, bytes, origin)
+    }
+
+    /// Guarda la copia y encola la tarea. `origin` dice de dónde vino; aquí se añaden la
+    /// fecha de importación, el tamaño y la huella SHA-256 del contenido.
+    fn store_document(
+        &mut self,
+        name: &str,
+        extension: &str,
+        bytes: &[u8],
+        mut origin: Value,
+    ) -> AppResult<Task> {
+        let now = SystemTime::now().duration_since(UNIX_EPOCH).ok();
+        let stamp = now.map(|d| d.as_nanos()).unwrap_or(0);
         let path = self.documents.join(format!("{stamp}.{extension}"));
         fs::write(&path, bytes)?;
-        let input = json!({ "document": name, "path": path });
+        origin["imported_at"] = json!(now.map(|d| d.as_secs()));
+        origin["sha256"] = json!(hex(&Sha256::digest(bytes)));
+        origin["size"] = json!(bytes.len());
+        let input = json!({ "document": name, "path": path, "origin": origin });
         Ok(self.store.enqueue(INVOICE, &input.to_string())?)
+    }
+
+    /// Copia guardada del documento de una tarea, para abrirla con el visor del sistema. Solo
+    /// se devuelve si está dentro de la carpeta de documentos de NestAdmin y sigue existiendo.
+    pub fn document_file(&mut self, task_id: i64) -> AppResult<PathBuf> {
+        let task = self.store.task(task_id)?;
+        if task.kind != INVOICE {
+            return Err(AppError::Invalid(format!(
+                "la tarea {task_id} no tiene documento"
+            )));
+        }
+        let input: Value = serde_json::from_str(&task.input_ref).unwrap_or(Value::Null);
+        let missing = || {
+            AppError::Invalid(format!(
+                "la copia guardada del documento de la tarea {task_id} ya no está"
+            ))
+        };
+        let path = input["path"]
+            .as_str()
+            .map(PathBuf::from)
+            .ok_or_else(missing)?;
+        let folder = fs::canonicalize(&self.documents)?;
+        let file = fs::canonicalize(&path).map_err(|_| missing())?;
+        if !file.starts_with(&folder) || !file.is_file() {
+            return Err(AppError::Invalid(
+                "el documento no está en la carpeta de NestAdmin".into(),
+            ));
+        }
+        Ok(file)
     }
 
     /// Consulta cada cuenta (como mucho el límite de mensajes por cuenta) y encola los
@@ -289,17 +636,24 @@ impl App {
     /// pedirlo al proveedor. El fallo de una cuenta queda en el informe y no detiene a las
     /// demás.
     pub fn fetch_mail(&mut self) -> AppResult<FetchReport> {
-        let mut known: HashSet<String> = HashSet::new();
-        for task in self
-            .store
-            .all_tasks()?
-            .into_iter()
-            .filter(|t| t.kind == EMAIL)
-        {
+        // Mensajes con tarea (ID con cuenta → tarea) y adjuntos ya importados.
+        let mut known: HashMap<String, i64> = HashMap::new();
+        let mut imported: HashSet<String> = HashSet::new();
+        for task in self.store.all_tasks()? {
             let input: Value = serde_json::from_str(&task.input_ref).unwrap_or(Value::Null);
-            if let Some(id) = input["message_id"].as_str() {
-                let (account, inner) = split_id(id);
-                known.insert(accounts::join_id(account, inner));
+            match task.kind.as_str() {
+                EMAIL => {
+                    if let Some(id) = input["message_id"].as_str() {
+                        let (account, inner) = split_id(id);
+                        known.insert(accounts::join_id(account, inner), task.id);
+                    }
+                }
+                INVOICE => {
+                    if let Some(key) = input["origin"]["attachment_key"].as_str() {
+                        imported.insert(key.to_owned());
+                    }
+                }
+                _ => {}
             }
         }
         let mut report = FetchReport {
@@ -311,22 +665,31 @@ impl App {
             let fetch = match outcome {
                 Ok(messages) => {
                     let mut added = 0;
+                    let mut attachments = AttachmentFetch::default();
                     for message in &messages {
-                        if known.insert(message.id.clone()) {
-                            let input = json!({
-                                "message_id": message.id,
-                                "account": account,
-                                "message": message,
-                            });
-                            self.store.enqueue(EMAIL, &input.to_string())?;
-                            added += 1;
-                        }
+                        let task_id = match known.get(&message.id) {
+                            Some(id) => *id,
+                            None => {
+                                let input = json!({
+                                    "message_id": message.id,
+                                    "account": account,
+                                    "origin": self.mail.origin(&account),
+                                    "message": message,
+                                });
+                                let task = self.store.enqueue(EMAIL, &input.to_string())?;
+                                known.insert(message.id.clone(), task.id);
+                                added += 1;
+                                task.id
+                            }
+                        };
+                        self.import_attachments(task_id, message, &mut imported, &mut attachments)?;
                     }
                     AccountFetch {
                         account,
                         read: messages.len(),
                         added,
                         error: None,
+                        attachments,
                     }
                 }
                 Err(error) => AccountFetch {
@@ -334,6 +697,7 @@ impl App {
                     read: 0,
                     added: 0,
                     error: Some(MailIssue::from(&error)),
+                    attachments: AttachmentFetch::default(),
                 },
             };
             report.added += fetch.added;
@@ -341,6 +705,69 @@ impl App {
             report.accounts.push(fetch);
         }
         Ok(report)
+    }
+
+    /// Importa como documentos los adjuntos admitidos de un mensaje que aún no se importaron.
+    /// La clave de un adjunto es el mensaje, su nombre y su tamaño, que no cambian entre
+    /// consultas (el identificador de Gmail sí puede cambiar). Un fallo de descarga queda en
+    /// el informe y se reintenta en la consulta siguiente; nunca se pierde en silencio.
+    fn import_attachments(
+        &mut self,
+        message_task: i64,
+        message: &Message,
+        imported: &mut HashSet<String>,
+        report: &mut AttachmentFetch,
+    ) -> AppResult<()> {
+        for attachment in &message.attachments {
+            let name = attachment_name(attachment);
+            let key = format!(
+                "{}#{}#{}",
+                message.id,
+                name,
+                attachment.size.map(|s| s.to_string()).unwrap_or_default()
+            );
+            if imported.contains(&key) {
+                continue;
+            }
+            if !supported_document(&name) {
+                report.skipped.push(name);
+                continue;
+            }
+            let fail = |code: &str, message: String| AttachmentIssue {
+                name: name.clone(),
+                code: code.to_owned(),
+                message,
+            };
+            if attachment
+                .size
+                .is_some_and(|s| s > MAX_DOCUMENT_BYTES as u64)
+            {
+                report.failed.push(fail(
+                    "invalid_input",
+                    format!(
+                        "supera el tamaño máximo de {} MB",
+                        MAX_DOCUMENT_BYTES / 1_000_000
+                    ),
+                ));
+                continue;
+            }
+            let bytes = match self.mail.fetch_attachment(&message.id, &attachment.id) {
+                Ok(bytes) => bytes,
+                Err(e) => {
+                    report.failed.push(fail(&e.code, e.message));
+                    continue;
+                }
+            };
+            match self.import_attachment_keyed(message_task, &name, &bytes, &key, &attachment.id) {
+                Ok(_) => {
+                    imported.insert(key);
+                    report.imported += 1;
+                }
+                Err(AppError::Invalid(reason)) => report.failed.push(fail("invalid_input", reason)),
+                Err(other) => return Err(other),
+            }
+        }
+        Ok(())
     }
 
     /// Mensaje de una tarea de correo: el guardado al encolarla o, en tareas anteriores a las
@@ -355,14 +782,28 @@ impl App {
 
     /// Toma la siguiente tarea y prepara su solicitud. `None` si la cola está vacía.
     pub fn begin_next(&mut self) -> AppResult<Option<Job>> {
+        if self.paused {
+            return Ok(None);
+        }
         let Some(task) = self.store.claim_next()? else {
             return Ok(None);
         };
         let input: Value = serde_json::from_str(&task.input_ref).unwrap_or(Value::Null);
         let id = task.id.to_string();
+        if let Some(result) = self.attempted_result(&task)? {
+            return Ok(Some(Job {
+                task,
+                provider: Arc::clone(&self.provider),
+                extractor: Arc::clone(&self.extractor),
+                prepared: Ok(Prepared::Resume(result)),
+            }));
+        }
         let prepared = match task.kind.as_str() {
             INVOICE => match input["path"].as_str() {
-                Some(path) => Ok(Prepared::Document(PathBuf::from(path))),
+                Some(path) => match split_preset(&input) {
+                    Some(generated) => Ok(Prepared::Split(PathBuf::from(path), generated)),
+                    None => Ok(Prepared::Document(PathBuf::from(path))),
+                },
                 None => Err(task_error(
                     "document_unreadable",
                     "la tarea no indica el documento",
@@ -409,24 +850,38 @@ impl App {
     pub fn finish(&mut self, completed: Completed) -> AppResult<Task> {
         let task = completed.task;
         let generated = match completed.outcome {
-            Ok(generated) => generated,
+            Ok(Outcome::Generated(generated)) => generated,
+            Ok(Outcome::Resumed(result)) => return self.resume(task, result),
             Err(error) => return Ok(self.store.fail(task.id, &error)?),
         };
         let built = match task.kind.as_str() {
-            INVOICE => self.invoice_result(&task, &generated, completed.pages),
+            INVOICE => self.invoice_result(&task, &generated, completed.extraction.as_ref()),
             _ => self.email_result(&task, &generated),
         };
         let mut result = match built {
             Ok(result) => result,
             Err(error) => return Ok(self.store.fail(task.id, &error)?),
         };
+        if task.kind == INVOICE {
+            if let Err(error) = self.enqueue_other_invoices(&task, &generated, &mut result) {
+                return Ok(self.store.fail(task.id, &error)?);
+            }
+        }
         let kind = action_kind(&task);
         // Un importe dudoso nunca se registra por regla: lo confirma una persona (D120).
         if let Some(message) = result["amount_review"].as_str() {
             result["review_reason"] = json!(message);
             return Ok(self.store.await_review(task.id, &result)?);
         }
-        match decide(&self.store.rules()?, kind, &result) {
+        let several = result["part"]["of"].as_u64().is_some_and(|n| n > 1);
+        let decision = if several {
+            // Una regla nunca registra sola una factura separada de un documento con varias:
+            // la separación la hizo el modelo y la revisa una persona.
+            RuleDecision::Review(SPLIT_REASON.into())
+        } else {
+            decide(&self.store.rules()?, kind, &result)
+        };
+        match decision {
             RuleDecision::Automate {
                 rule_id,
                 rule_version,
@@ -445,6 +900,81 @@ impl App {
         }
     }
 
+    /// Si la IA vio más facturas en el documento, encola una tarea por cada una con el mismo
+    /// documento y origen, y marca `part` («factura k de n») en el resultado. Al reprocesar
+    /// la tarea (recuperación tras un corte) no se encolan otra vez las que ya existen.
+    fn enqueue_other_invoices(
+        &mut self,
+        task: &Task,
+        generated: &GenerateResult,
+        result: &mut Value,
+    ) -> Result<(), TaskError> {
+        let input: Value = serde_json::from_str(&task.input_ref).unwrap_or(Value::Null);
+        if input.get("part").is_some() {
+            result["part"] = input["part"].clone();
+            return Ok(());
+        }
+        let others = parse_other_invoices(&generated.output)
+            .map_err(|e| task_error(e.code(), e.to_string(), true))?;
+        if others.is_empty() {
+            return Ok(());
+        }
+        let of = others.len() + 1;
+        result["part"] = json!({ "index": 1, "of": of });
+        let existing: HashSet<u64> = self
+            .store
+            .all_tasks()
+            .map_err(|e| task_error("unavailable", e.to_string(), true))?
+            .into_iter()
+            .filter_map(|t| {
+                let i: Value = serde_json::from_str(&t.input_ref).ok()?;
+                (i["part"]["split_from"].as_i64() == Some(task.id))
+                    .then(|| i["part"]["index"].as_u64())
+                    .flatten()
+            })
+            .collect();
+        for (offset, output) in others.into_iter().enumerate() {
+            let index = offset as u64 + 2;
+            if existing.contains(&index) {
+                continue;
+            }
+            let mut part_input = input.clone();
+            part_input["part"] = json!({ "index": index, "of": of, "split_from": task.id });
+            part_input["preset"] = json!({
+                "output": output,
+                "provider": generated.provider,
+                "model": generated.model,
+            });
+            self.store
+                .enqueue(INVOICE, &part_input.to_string())
+                .map_err(|e| task_error("unavailable", e.to_string(), true))?;
+        }
+        Ok(())
+    }
+
+    /// Detiene o reanuda el inicio de tareas nuevas. Las que ya se ejecutan terminan; las
+    /// que esperan en la cola no se pierden. La pausa no se guarda: tras reiniciar (por
+    /// ejemplo, al instalar la versión nueva) la cola sigue sola.
+    pub fn set_queue_paused(&mut self, paused: bool) {
+        self.paused = paused;
+    }
+
+    /// Estado de la cola para decidir si se instala una actualización: solo se instala sin
+    /// tareas ejecutándose (actualizaciones.md, paso 5). Quien instala pausa la cola, espera a
+    /// que `ready` sea `true` y entonces cierra la aplicación como en una salida completa.
+    pub fn update_readiness(&self) -> AppResult<UpdateReadiness> {
+        let tasks = self.store.all_tasks()?;
+        let count = |state: TaskState| tasks.iter().filter(|t| t.state == state).count();
+        let running = count(TaskState::Running);
+        Ok(UpdateReadiness {
+            ready: running == 0,
+            running,
+            queued: count(TaskState::Queued),
+            awaiting_review: count(TaskState::AwaitingReview),
+            paused: self.paused,
+        })
+    }
+
     /// Procesa una tarea completa en el hilo actual. `None` si no había trabajo.
     pub fn process_next(&mut self) -> AppResult<Option<Task>> {
         match self.begin_next()? {
@@ -457,7 +987,7 @@ impl App {
         &mut self,
         task: &Task,
         generated: &GenerateResult,
-        pages: Option<Value>,
+        extraction: Option<&Extraction>,
     ) -> Result<Value, TaskError> {
         let raw = parse_extraction(&generated.output)
             .map_err(|e| task_error(e.code(), e.to_string(), true))?;
@@ -492,13 +1022,27 @@ impl App {
             (None, None) => "documento sin nombre".to_owned(),
         };
         let amount_review = amount_review(&document, &report, &fields);
+        let pages = extraction.and_then(|e| serde_json::to_value(&e.pages).ok());
+        let sources: serde_json::Map<String, Value> = extraction
+            .map(|extraction| {
+                fields
+                    .iter()
+                    .filter_map(|(name, value)| {
+                        let source = field_source(extraction, name, value.as_str()?)?;
+                        Some((name.clone(), source))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
         Ok(json!({
             "type": INVOICE,
             "version": 1,
             "document": input["document"],
             "document_path": input["path"],
+            "origin": input["origin"],
             "pages": pages,
             "fields": fields,
+            "sources": sources,
             "issues": report.issues.iter().map(|i| i.as_str()).collect::<Vec<_>>(),
             "duplicates": report.duplicates,
             "unreadable": report.unreadable,
@@ -526,9 +1070,17 @@ impl App {
         // Sin remitente no hay a quién responder: el borrador se muestra, pero no se puede enviar.
         let to: Vec<String> = message.from.iter().cloned().collect();
         let subject = message.subject.as_ref().map(|s| format!("Re: {s}"));
+        // Tareas anteriores a D48 no guardaron el origen: se toma el de la cuenta actual.
+        let origin = match input.get("origin").filter(|o| !o.is_null()) {
+            Some(origin) => origin.clone(),
+            None => {
+                serde_json::to_value(self.mail.origin(split_id(&message.id).0)).unwrap_or_default()
+            }
+        };
         Ok(json!({
             "type": EMAIL,
             "version": 1,
+            "origin": origin,
             "message": message,
             "category": category,
             "draft": { "to": to, "subject": subject, "body": body },
@@ -548,6 +1100,45 @@ impl App {
         authorization: Authorization,
     ) -> AppResult<Task> {
         let version = result["version"].as_i64().unwrap_or(1);
+        // Antes de ejecutar otra versión, los intentos anteriores deben constar como no
+        // realizados: si alguno salió, la tarea se completa con él y no se ejecuta otro.
+        match self.check_previous(&task, Some(version), Some(&authorization))? {
+            Previous::Clear => {}
+            Previous::Done { version, receipt } => {
+                return self.complete_with(task.id, result, version, receipt)
+            }
+            Previous::Unknown { version, error }
+                if error.code == nestadmin_simulators::codes::NOT_FOUND =>
+            {
+                result["review_reason"] = json!(MISSING_REASON);
+                result["recovery"] = json!({
+                    "version": version,
+                    "error": error.code,
+                    "needs_confirmation": true,
+                });
+                return self.back_to_review(&task, &result);
+            }
+            Previous::Unknown { error, .. } => {
+                return Ok(self.store.fail(
+                    task.id,
+                    &task_error(
+                        &error.code,
+                        format!("no se pudo comprobar el intento anterior: {error}"),
+                        true,
+                    ),
+                )?)
+            }
+        }
+        // Se guarda lo que se va a ejecutar antes de llamar a ningún conector (D50).
+        let draft = match task.kind.as_str() {
+            INVOICE => Value::Null,
+            _ => result["draft"].clone(),
+        };
+        result["attempt"] = json!({ "version": version, "draft": draft });
+        if let Some(fields) = result.as_object_mut() {
+            fields.remove("recovery");
+        }
+        self.store.record_attempt(task.id, &result)?;
         let outcome = match task.kind.as_str() {
             INVOICE => {
                 let request = ActionRequest {
@@ -644,6 +1235,62 @@ impl App {
         Ok(self.store.revise(task_id, &result)?)
     }
 
+    /// El usuario confirma que el intento anterior no se envió (o registró), por ejemplo
+    /// porque borró el borrador. Antes se pregunta al conector: si consta realizado, la tarea
+    /// se completa con ese recibo. Si no, los intentos se cierran como sustituidos y el mismo
+    /// contenido pasa a una versión nueva, con claves nuevas, que requiere aprobación (D50).
+    pub fn confirm_not_sent(&mut self, task_id: i64) -> AppResult<Task> {
+        let (task, mut result) = self.reviewable(task_id)?;
+        let kind = action_kind(&task);
+        let actions: Vec<ActionRecord> = self
+            .store
+            .task_actions(task.id)?
+            .into_iter()
+            .filter(|a| a.kind == kind)
+            .collect();
+        if result.get("attempt").is_none() && actions.is_empty() {
+            return Err(AppError::Invalid(format!(
+                "la tarea {task_id} no tiene ningún intento anterior"
+            )));
+        }
+        if let Some(done) = actions.iter().rev().find(|a| a.status == "confirmed") {
+            let receipt = done.receipt.clone().unwrap_or(Value::Null);
+            return self.complete_with(task.id, result, done.version, receipt);
+        }
+        let mut unsent = Vec::new();
+        for action in actions.iter().filter(|a| a.is_unsettled()) {
+            let found = match kind {
+                REGISTER_INVOICE => self.admin.lookup(&action.idempotency_key),
+                _ => self.mail.lookup(&action.idempotency_key),
+            };
+            match found {
+                Ok(Some(receipt)) => {
+                    self.store.reconcile_action(task.id, action, &receipt)?;
+                    return self.complete_with(task.id, result, action.version, receipt);
+                }
+                Ok(None) => unsent.push(action),
+                Err(e) if e.code == nestadmin_simulators::codes::NOT_FOUND => unsent.push(action),
+                Err(e) => return Err(AppError::Connector(e)),
+            }
+        }
+        for action in unsent {
+            self.store.supersede_action(
+                task.id,
+                action,
+                &Authorization::Approval,
+                "el usuario confirmó que no se realizó",
+            )?;
+        }
+        let version = result["version"].as_i64().unwrap_or(1);
+        result["version"] = json!(version + 1);
+        result["review_reason"] =
+            json!("versión nueva tras confirmar que el intento anterior no se realizó");
+        if let Some(fields) = result.as_object_mut() {
+            fields.remove("recovery");
+        }
+        Ok(self.store.revise(task_id, &result)?)
+    }
+
     /// Descarta la tarea sin ejecutar ninguna acción.
     pub fn reject(&mut self, task_id: i64) -> AppResult<Task> {
         Ok(self.store.cancel(task_id)?)
@@ -723,6 +1370,12 @@ impl App {
         Ok(self.mail.reconnect(id, tokens)?)
     }
 
+    /// Cambia el nombre visible de una cuenta; vacío vuelve al predeterminado. Las tareas ya
+    /// encoladas conservan el nombre con que llegaron; la ventana muestra el actual.
+    pub fn rename_mail_account(&mut self, id: &str, label: &str) -> AppResult<AccountView> {
+        Ok(self.mail.rename(id, label)?)
+    }
+
     /// Vuelve a añadir la cuenta simulada si se había quitado.
     pub fn add_simulated_mail_account(&mut self) -> AppResult<AccountView> {
         Ok(self.mail.add_simulator()?)
@@ -776,6 +1429,142 @@ fn check_rule(action_kind: &str, conditions: &Value) -> AppResult<()> {
             "tipo de acción desconocido: {other}"
         ))),
     }
+}
+
+/// Comprueba nombre, tamaño y contenido de un documento; devuelve su extensión.
+/// Nombre con el que se guarda un adjunto: el suyo o, si no lo trae, uno deducido del tipo.
+fn attachment_name(attachment: &nestadmin_simulators::Attachment) -> String {
+    if let Some(name) = attachment
+        .name
+        .as_deref()
+        .map(str::trim)
+        .filter(|n| !n.is_empty())
+    {
+        // Sin rutas: solo el último componente, por si el remitente puso barras.
+        return name.rsplit(['/', '\\']).next().unwrap_or(name).to_owned();
+    }
+    let extension = match attachment
+        .mime
+        .as_deref()
+        .map(str::to_ascii_lowercase)
+        .as_deref()
+    {
+        Some("application/pdf") => "pdf",
+        Some("text/plain") => "txt",
+        Some("image/jpeg") => "jpg",
+        Some("image/png") => "png",
+        Some("image/tiff") => "tif",
+        _ => "bin",
+    };
+    format!(
+        "adjunto-{}.{extension}",
+        attachment.id.chars().take(12).collect::<String>()
+    )
+}
+
+/// Texto y PDF; además, las imágenes que el extractor pasa por OCR.
+fn is_document_extension(extension: &str) -> bool {
+    matches!(extension, "txt" | "pdf") || nestadmin_extract::IMAGE_EXTENSIONS.contains(&extension)
+}
+
+fn document_extension(name: &str) -> String {
+    Path::new(name)
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(str::to_ascii_lowercase)
+        .unwrap_or_default()
+}
+
+fn supported_document(name: &str) -> bool {
+    is_document_extension(&document_extension(name))
+}
+
+fn check_document(name: &str, bytes: &[u8]) -> AppResult<String> {
+    let extension = document_extension(name);
+    if !is_document_extension(&extension) {
+        return Err(AppError::Invalid(format!(
+            "«{name}»: solo se admiten texto (.txt), PDF e imágenes (.jpg, .png, .tif, .bmp, .webp)"
+        )));
+    }
+    if bytes.is_empty() {
+        return Err(AppError::Invalid(format!("«{name}» está vacío")));
+    }
+    if bytes.len() > MAX_DOCUMENT_BYTES {
+        return Err(AppError::Invalid(format!(
+            "«{name}» supera el tamaño máximo de {} MB",
+            MAX_DOCUMENT_BYTES / 1_000_000
+        )));
+    }
+    Ok(extension)
+}
+
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// Formas en que un valor normalizado puede aparecer escrito en el documento: el importe
+/// `1234.50` como `1234,50`, `1.234,50` o `1,234.50`; la fecha `2026-10-05` como `05/10/2026`.
+fn written_forms(field: &str, value: &str) -> Vec<String> {
+    let mut forms = vec![value.to_owned()];
+    match field {
+        "subtotal" | "tax" | "total" => {
+            if let Some((units, cents)) = value.split_once('.') {
+                let (sign, digits) = match units.strip_prefix('-') {
+                    Some(rest) => ("-", rest),
+                    None => ("", units),
+                };
+                let grouped = |separator: char| {
+                    let mut out = String::new();
+                    for (i, c) in digits.chars().enumerate() {
+                        if i > 0 && (digits.len() - i) % 3 == 0 {
+                            out.push(separator);
+                        }
+                        out.push(c);
+                    }
+                    out
+                };
+                forms.push(format!("{units},{cents}"));
+                forms.push(format!("{sign}{},{cents}", grouped('.')));
+                forms.push(format!("{sign}{}.{cents}", grouped(',')));
+            }
+        }
+        "date" => {
+            let parts: Vec<&str> = value.split('-').collect();
+            if let [year, month, day] = parts[..] {
+                for separator in ['/', '-', '.'] {
+                    forms.push(format!("{day}{separator}{month}{separator}{year}"));
+                }
+                let (d, m) = (day.trim_start_matches('0'), month.trim_start_matches('0'));
+                forms.push(format!("{d}/{m}/{year}"));
+            }
+        }
+        _ => {}
+    }
+    let mut unique = Vec::new();
+    for form in forms {
+        if !unique.contains(&form) {
+            unique.push(form);
+        }
+    }
+    unique
+}
+
+/// Dónde aparece un campo en el texto extraído: páginas y la línea de la primera aparición.
+/// `None` si no se encuentra literalmente (el modelo pudo reescribirlo): nunca se adivina.
+fn field_source(extraction: &Extraction, field: &str, value: &str) -> Option<Value> {
+    for form in written_forms(field, value) {
+        let pages = extraction.pages_containing(&form);
+        if pages.is_empty() {
+            continue;
+        }
+        let text = &extraction.text;
+        let at = text.find(&form)?;
+        let start = text[..at].rfind('\n').map_or(0, |i| i + 1);
+        let end = text[at..].find('\n').map_or(text.len(), |i| at + i);
+        let line: String = text[start..end].trim().chars().take(160).collect();
+        return Some(json!({ "pages": pages, "text": form, "line": line }));
+    }
+    None
 }
 
 fn raw_from_fields(fields: &Value) -> RawInvoice {
@@ -846,4 +1635,41 @@ fn amount_review(
 /// Directorio de datos por defecto en Windows (D03).
 pub fn default_data_dir() -> Option<PathBuf> {
     std::env::var_os("LOCALAPPDATA").map(|base| Path::new(&base).join("NestAdmin"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use nestadmin_extract::{Method, Page};
+
+    fn page(number: usize, offset: usize) -> Page {
+        Page {
+            number,
+            method: Method::PdfText,
+            chars: 1,
+            offset,
+            confidence: None,
+            low_confidence: false,
+        }
+    }
+
+    #[test]
+    fn amounts_and_dates_are_found_as_written_with_their_page() {
+        let first = "Proveedor Alfa SL\nFecha: 05/10/2026";
+        let text = format!("{first}\n\nBase 1.234,50\nTotal: 1.493,75 EUR");
+        let extraction = Extraction {
+            pages: vec![page(1, 0), page(2, first.len() + 2)],
+            text,
+        };
+        let total = field_source(&extraction, "total", "1493.75").unwrap();
+        assert_eq!(total["pages"], json!([2]));
+        assert_eq!(total["line"], "Total: 1.493,75 EUR");
+        let date = field_source(&extraction, "date", "2026-10-05").unwrap();
+        assert_eq!(date["pages"], json!([1]));
+        assert_eq!(date["text"], "05/10/2026");
+        assert!(
+            field_source(&extraction, "tax", "259.25").is_none(),
+            "lo que no aparece en el texto no tiene página"
+        );
+    }
 }

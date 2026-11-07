@@ -212,6 +212,7 @@ pub fn oauth(base: &str) -> OAuthConfig {
         client_secret: None,
         scopes: vec!["Mail.ReadWrite".into()],
         extra_auth_params: Vec::new(),
+        redirect_host: "127.0.0.1".into(),
     }
 }
 
@@ -237,4 +238,11 @@ pub fn count(world: &Shared, method: &str, path_end: &str) -> usize {
         .iter()
         .filter(|r| r.method == method && r.url.path().ends_with(path_end))
         .count()
+}
+
+pub fn oauth_localhost(base: &str) -> OAuthConfig {
+    OAuthConfig {
+        redirect_host: "localhost".into(),
+        ..oauth(base)
+    }
 }
