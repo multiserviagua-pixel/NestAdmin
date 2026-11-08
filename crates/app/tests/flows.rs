@@ -280,6 +280,113 @@ fn invalid_rules_are_rejected() {
 }
 
 #[test]
+fn rules_with_numeric_limit_or_unknown_keys_are_rejected() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = open(&dir, FakeProvider::new());
+    for conditions in [
+        json!({ "supplier": "Alfa SL", "max_total": 500 }),
+        json!({ "supplier": "Alfa SL", "max_total": null }),
+        json!({ "supplier": "Alfa SL", "currency": "EUR" }),
+        json!(["Alfa SL"]),
+    ] {
+        assert!(app
+            .create_rule("r", "register_invoice", &conditions)
+            .is_err());
+    }
+    assert!(app
+        .create_rule(
+            "d",
+            "send_draft",
+            &json!({ "category": "solicitud_factura", "sender": "x@example.test" })
+        )
+        .is_err());
+    assert!(app.rules().unwrap().is_empty());
+
+    app.create_rule("r", "register_invoice", &json!({ "supplier": "Alfa SL" }))
+        .unwrap();
+    for conditions in [
+        json!({ "supplier": "Alfa SL", "max_total": 500 }),
+        json!({ "supplier": "Alfa SL", "currency": "EUR" }),
+    ] {
+        assert!(app.update_rule("r", &conditions).is_err());
+    }
+    assert_eq!(app.rules().unwrap()[0].version, 1);
+}
+
+#[test]
+fn invalid_rule_ids_are_rejected() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = open(&dir, FakeProvider::new());
+    let conditions = json!({ "supplier": "Alfa SL" });
+    for id in ["", "   ", "Alfa", "con espacio", "a_b", "ñ", "a/b"] {
+        assert!(
+            app.create_rule(id, "register_invoice", &conditions)
+                .is_err(),
+            "{id:?}"
+        );
+    }
+    assert!(app
+        .create_rule(" alfa-2 ", "register_invoice", &conditions)
+        .is_ok());
+    assert_eq!(app.rules().unwrap()[0].id, "alfa-2");
+}
+
+/// Reglas antiguas escritas directamente en el almacén, sin pasar por `check_rule`.
+fn legacy_rules_dir() -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    let mut store = nestadmin_core::Store::open(&dir.path().join("nestadmin.db")).unwrap();
+    for (id, conditions) in [
+        (
+            "numerica",
+            json!({ "supplier": "Alfa SL", "max_total": 500 }),
+        ),
+        (
+            "clave-rara",
+            json!({ "supplier": "Alfa SL", "currency": "EUR" }),
+        ),
+    ] {
+        store
+            .create_rule(id, "register_invoice", &conditions)
+            .unwrap();
+        store.set_rule_active(id, true).unwrap();
+    }
+    dir
+}
+
+#[test]
+fn defective_legacy_rules_never_automate() {
+    let dir = legacy_rules_dir();
+    let mut app = open(&dir, FakeProvider::new());
+    assert!(app.rules().unwrap().iter().all(|r| r.active));
+    app.import_document("1.txt", &invoice("Alfa SL", "F-1", "121.00"))
+        .unwrap();
+    let task = app.process_next().unwrap().unwrap();
+    assert_eq!(task.state, TaskState::AwaitingReview);
+    assert_eq!(
+        task.result.unwrap()["review_reason"],
+        "ninguna regla activa coincide"
+    );
+}
+
+#[test]
+fn defective_rules_cannot_be_activated_but_can_be_deactivated() {
+    let dir = legacy_rules_dir();
+    let mut app = open(&dir, FakeProvider::new());
+    // Desactivar siempre funciona.
+    assert!(!app.set_rule_active("numerica", false).unwrap().active);
+    assert!(!app.set_rule_active("clave-rara", false).unwrap().active);
+    // Volver a activarla falla y no cambia el estado.
+    for id in ["numerica", "clave-rara"] {
+        let error = app.set_rule_active(id, true).unwrap_err().to_string();
+        assert!(error.contains("no se puede activar"), "{error}");
+    }
+    assert!(app.rules().unwrap().iter().all(|r| !r.active));
+    // Una regla inexistente sigue dando el mismo error.
+    assert!(app.set_rule_active("no-existe", true).is_err());
+    assert!(app.set_rule_active("no-existe", false).is_err());
+}
+
+#[test]
 fn mail_is_fetched_once_and_edited_drafts_need_new_approval() {
     let dir = tempfile::tempdir().unwrap();
     let mut app = open(&dir, FakeProvider::new());

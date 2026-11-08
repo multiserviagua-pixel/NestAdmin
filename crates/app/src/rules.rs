@@ -56,8 +56,21 @@ fn blockers(action_kind: &str, result: &Value) -> Option<String> {
     }
 }
 
+/// Fallo cerrado (D123): una regla con claves desconocidas o con `max_total` que no sea un
+/// texto de importe válido no coincide nunca, aunque esté activa.
 fn matches(rule: &Rule, result: &Value) -> bool {
-    let condition = |key: &str| rule.conditions.get(key).and_then(Value::as_str);
+    let Some(conditions) = rule.conditions.as_object() else {
+        return false;
+    };
+    let allowed: &[&str] = match rule.action_kind.as_str() {
+        REGISTER_INVOICE => &["supplier", "max_total"],
+        SEND_DRAFT => &["category"],
+        _ => return false,
+    };
+    if conditions.keys().any(|k| !allowed.contains(&k.as_str())) {
+        return false;
+    }
+    let condition = |key: &str| conditions.get(key).and_then(Value::as_str);
     match rule.action_kind.as_str() {
         REGISTER_INVOICE => {
             let Some(supplier) = condition("supplier") else {
@@ -67,9 +80,9 @@ fn matches(rule: &Rule, result: &Value) -> bool {
             if !actual.trim().eq_ignore_ascii_case(supplier.trim()) {
                 return false;
             }
-            match condition("max_total") {
+            match conditions.get("max_total") {
                 None => true,
-                Some(limit) => {
+                Some(Value::String(limit)) => {
                     let total = result["fields"]["total"].as_str();
                     match (
                         parse_amount("max_total", limit),
@@ -80,9 +93,87 @@ fn matches(rule: &Rule, result: &Value) -> bool {
                         _ => false,
                     }
                 }
+                // Límite no textual: la regla es defectuosa y no automatiza.
+                Some(_) => false,
             }
         }
-        SEND_DRAFT => condition("category").is_some_and(|c| result["category"].as_str() == Some(c)),
-        _ => false,
+        _ => condition("category").is_some_and(|c| result["category"].as_str() == Some(c)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn rule(action_kind: &str, conditions: Value) -> Rule {
+        Rule {
+            id: "r".into(),
+            version: 2,
+            action_kind: action_kind.into(),
+            conditions,
+            active: true,
+            created_at: 0,
+        }
+    }
+
+    fn invoice() -> Value {
+        json!({ "fields": { "supplier": "Alfa SL", "total": "121.00" }, "issues": [], "unreadable": [] })
+    }
+
+    fn automates(rule: Rule, result: &Value, kind: &str) -> bool {
+        matches!(decide(&[rule], kind, result), RuleDecision::Automate { .. })
+    }
+
+    #[test]
+    fn well_formed_rules_match() {
+        let ok = rule(
+            REGISTER_INVOICE,
+            json!({ "supplier": "alfa sl", "max_total": "200.00" }),
+        );
+        assert!(automates(ok, &invoice(), REGISTER_INVOICE));
+    }
+
+    #[test]
+    fn non_text_max_total_never_automates() {
+        for limit in [json!(500), json!(500.0), json!(null), json!(["1.00"])] {
+            let r = rule(
+                REGISTER_INVOICE,
+                json!({ "supplier": "Alfa SL", "max_total": limit }),
+            );
+            assert_eq!(
+                decide(&[r], REGISTER_INVOICE, &invoice()),
+                RuleDecision::Review("ninguna regla activa coincide".into())
+            );
+        }
+        let text = rule(
+            REGISTER_INVOICE,
+            json!({ "supplier": "Alfa SL", "max_total": "mucho" }),
+        );
+        assert!(!automates(text, &invoice(), REGISTER_INVOICE));
+    }
+
+    #[test]
+    fn unknown_keys_never_automate() {
+        let r = rule(
+            REGISTER_INVOICE,
+            json!({ "supplier": "Alfa SL", "currency": "EUR" }),
+        );
+        assert!(!automates(r, &invoice(), REGISTER_INVOICE));
+        let result =
+            json!({ "category": "solicitud_factura", "draft": { "to": ["a@example.test"] } });
+        let ok = rule(SEND_DRAFT, json!({ "category": "solicitud_factura" }));
+        assert!(automates(ok, &result, SEND_DRAFT));
+        let bad = rule(
+            SEND_DRAFT,
+            json!({ "category": "solicitud_factura", "sender": "x@example.test" }),
+        );
+        assert!(!automates(bad, &result, SEND_DRAFT));
+    }
+
+    #[test]
+    fn non_object_conditions_never_automate() {
+        let r = rule(REGISTER_INVOICE, json!("Alfa SL"));
+        assert!(!automates(r, &invoice(), REGISTER_INVOICE));
     }
 }

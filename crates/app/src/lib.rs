@@ -1569,6 +1569,7 @@ impl App {
         action_kind: &str,
         conditions: &Value,
     ) -> AppResult<Rule> {
+        check_rule_id(id)?;
         check_rule(action_kind, conditions)?;
         Ok(self.store.create_rule(id.trim(), action_kind, conditions)?)
     }
@@ -1582,7 +1583,18 @@ impl App {
         Ok(self.store.update_rule(id, conditions)?)
     }
 
+    /// Activar revalida las condiciones guardadas; desactivar es siempre posible.
     pub fn set_rule_active(&mut self, id: &str, active: bool) -> AppResult<Rule> {
+        if active {
+            if let Some(current) = self.store.rule(id)? {
+                check_rule(&current.action_kind, &current.conditions).map_err(|e| match e {
+                    AppError::Invalid(why) => {
+                        AppError::Invalid(format!("la regla {id} no se puede activar: {why}"))
+                    }
+                    other => other,
+                })?;
+            }
+        }
         Ok(self.store.set_rule_active(id, active)?)
     }
 
@@ -1648,38 +1660,73 @@ fn action_kind(task: &Task) -> &'static str {
 }
 
 fn check_rule(action_kind: &str, conditions: &Value) -> AppResult<()> {
+    let Some(map) = conditions.as_object() else {
+        return Err(AppError::Invalid(
+            "las condiciones de la regla deben ser un objeto".into(),
+        ));
+    };
+    let allowed: &[&str] = match action_kind {
+        REGISTER_INVOICE => &["supplier", "max_total"],
+        SEND_DRAFT => &["category"],
+        other => {
+            return Err(AppError::Invalid(format!(
+                "tipo de acción desconocido: {other}"
+            )))
+        }
+    };
+    if let Some(unknown) = map.keys().find(|k| !allowed.contains(&k.as_str())) {
+        return Err(AppError::Invalid(format!(
+            "condición desconocida en la regla: {unknown}"
+        )));
+    }
     let text = |key: &str| {
         conditions
             .get(key)
             .and_then(Value::as_str)
             .filter(|v| !v.trim().is_empty())
     };
-    match action_kind {
-        REGISTER_INVOICE if text("supplier").is_none() => Err(AppError::Invalid(
-            "la regla de registro necesita un proveedor".into(),
-        )),
-        REGISTER_INVOICE => match text("max_total") {
-            Some(limit) => nestadmin_documents::parse_amount("max_total", limit)
-                .map(|_| ())
-                .map_err(|_| {
-                    AppError::Invalid(
-                        "el importe máximo debe tener dos decimales, p. ej. 500.00".into(),
-                    )
-                }),
-            None => Ok(()),
-        },
-        SEND_DRAFT
-            if !nestadmin_ai::tasks::CATEGORIES.contains(&text("category").unwrap_or("")) =>
-        {
+    if action_kind == SEND_DRAFT {
+        return if nestadmin_ai::tasks::CATEGORIES.contains(&text("category").unwrap_or("")) {
+            Ok(())
+        } else {
             Err(AppError::Invalid(
                 "la regla de envío necesita una categoría válida".into(),
             ))
-        }
-        SEND_DRAFT => Ok(()),
-        other => Err(AppError::Invalid(format!(
-            "tipo de acción desconocido: {other}"
-        ))),
+        };
     }
+    if text("supplier").is_none() {
+        return Err(AppError::Invalid(
+            "la regla de registro necesita un proveedor".into(),
+        ));
+    }
+    match conditions.get("max_total") {
+        None => Ok(()),
+        Some(Value::String(limit)) => nestadmin_documents::parse_amount("max_total", limit)
+            .map(|_| ())
+            .map_err(|_| max_total_error()),
+        Some(_) => Err(max_total_error()),
+    }
+}
+
+fn max_total_error() -> AppError {
+    AppError::Invalid(
+        "el importe máximo debe ser un texto con dos decimales, p. ej. \"500.00\"".into(),
+    )
+}
+
+/// Identificador de regla: minúsculas, cifras y guiones, no vacío tras `trim`.
+fn check_rule_id(id: &str) -> AppResult<()> {
+    let id = id.trim();
+    if id.is_empty()
+        || !id
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+    {
+        return Err(AppError::Invalid(
+            "el identificador de la regla solo admite minúsculas, cifras y guiones".into(),
+        ));
+    }
+    Ok(())
 }
 
 /// Comprueba nombre, tamaño y contenido de un documento; devuelve su extensión.
