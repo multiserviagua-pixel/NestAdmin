@@ -27,6 +27,8 @@ pub enum CoreError {
     RuleNotFound(String),
     #[error("la regla {0} está archivada; desarchívela para volver a usarla")]
     RuleArchived(String),
+    #[error("la regla {0} ha cambiado; revise de nuevo")]
+    RuleChanged(String),
     #[error("conector: {0}")]
     Connector(#[from] crate::actions::ConnectorError),
 }

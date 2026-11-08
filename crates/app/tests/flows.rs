@@ -2323,3 +2323,389 @@ fn a_failure_halfway_through_update_with_ack_saves_nothing() {
     assert_eq!(view.rule.version, 1);
     assert!(view.any_sender_ack_at.is_none());
 }
+
+// ---- Contradicciones y unificación (D130, D131) ----
+
+fn ids(list: &[&str]) -> Vec<String> {
+    list.iter().map(|s| (*s).to_owned()).collect()
+}
+
+fn new_invoice_rule(app: &mut App, id: &str, supplier: &str, max: Option<&str>, active: bool) {
+    let mut conditions = json!({ "supplier": supplier });
+    if let Some(max) = max {
+        conditions["max_total"] = json!(max);
+    }
+    app.create_rule(id, "register_invoice", &conditions)
+        .unwrap();
+    if active {
+        app.set_rule_active(id, true).unwrap();
+    }
+}
+
+fn view_of(app: &App, id: &str) -> nestadmin_app::panel::RuleView {
+    app.rule_views()
+        .unwrap()
+        .into_iter()
+        .find(|v| v.rule.id == id)
+        .unwrap()
+}
+
+const MERGE_TABLES: [&str; 3] = ["rules", "rule_meta", "audit_log"];
+
+#[test]
+fn merging_archives_the_originals_and_creates_an_inactive_rule_with_its_origin() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = open(&dir, FakeProvider::new());
+    new_invoice_rule(&mut app, "alfa-libre", "Alfa SL", None, true);
+    new_invoice_rule(&mut app, "alfa-500", "Alfa SL", Some("500.00"), true);
+    let both = ids(&["alfa-libre", "alfa-500"]);
+
+    // Sin elección solo hay opciones: nada que aplicar todavía.
+    let preview = app.preview_merge(&both, None).unwrap();
+    assert!(preview.needs_choice && preview.plan.is_none());
+    assert_eq!(preview.options.len(), 2);
+    assert_eq!(preview.before.len(), 2);
+    assert!(app.preview_merge(&both, Some("999.00")).is_err());
+    let before = dump(&dir, &MERGE_TABLES);
+    let preview = app.preview_merge(&both, Some("500.00")).unwrap();
+    assert_eq!(
+        dump(&dir, &MERGE_TABLES),
+        before,
+        "ver el plan no escribe nada"
+    );
+    let plan = preview.plan.unwrap();
+
+    let view = app
+        .merge_rules(
+            &both,
+            Some("500.00"),
+            Some("Alfa hasta 500"),
+            &plan.fingerprint,
+        )
+        .unwrap();
+    assert!(!view.rule.active);
+    assert_eq!(view.rule.version, 1);
+    assert_eq!(view.name, "Alfa hasta 500");
+    assert_eq!(
+        view.rule.conditions,
+        json!({ "supplier": "Alfa SL", "max_total": "500.00" })
+    );
+    assert!(view.any_sender_ack_at.is_none());
+    let origin = view.origin.clone().unwrap();
+    assert_eq!(origin["kind"], "merge");
+    assert_eq!(origin["sources"][0]["id"], "alfa-500");
+    assert_eq!(origin["sources"][1]["id"], "alfa-libre");
+    assert_eq!(origin["option"], "500.00");
+
+    for id in ["alfa-libre", "alfa-500"] {
+        let original = view_of(&app, id);
+        assert!(original.archived_at.is_some(), "{id}");
+        assert!(!original.rule.active, "{id}");
+    }
+    let audit = app.audit_log().unwrap();
+    let entry = audit.iter().find(|e| e.action == "rule_merge").unwrap();
+    assert_eq!(entry.status, "merged");
+    let detail = entry.detail.clone().unwrap();
+    assert!(detail.contains("alfa-500 v2") && detail.contains("alfa-libre v2"));
+    assert!(detail.contains(&view.rule.id));
+}
+
+#[test]
+fn a_merged_send_rule_does_not_inherit_the_advanced_validation() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = open(&dir, FakeProvider::new());
+    app.create_rule_full(NewRule {
+        id: Some("cualquiera"),
+        name: None,
+        action_kind: "send_draft",
+        conditions: &json!({ "category": "solicitud_factura" }),
+        allow_any_sender: true,
+    })
+    .unwrap();
+    new_send_rule(
+        &mut app,
+        "dominio",
+        &json!({ "category": "solicitud_factura", "sender_domain": "alfa.test" }),
+    );
+    let both = ids(&["cualquiera", "dominio"]);
+    let preview = app.preview_merge(&both, Some("domain:alfa.test")).unwrap();
+    let plan = preview.plan.unwrap();
+    assert_eq!(plan.after.loses_any_sender, ["cualquiera"]);
+    let view = app
+        .merge_rules(&both, Some("domain:alfa.test"), None, &plan.fingerprint)
+        .unwrap();
+    assert!(view.any_sender_ack_at.is_none());
+    assert!(!view.rule.active);
+    assert_eq!(view.name, "Unificada: cualquiera + dominio");
+    let old = view_of(&app, "cualquiera");
+    assert!(old.archived_at.is_some() && old.any_sender_ack_at.is_none());
+    // La opción avanzada retirada consta en el historial.
+    assert!(app
+        .audit_log()
+        .unwrap()
+        .iter()
+        .any(|e| e.action == "rule_any_sender"
+            && e.status == "revoked"
+            && e.detail
+                .as_deref()
+                .is_some_and(|d| d.contains("cualquiera"))));
+}
+
+#[test]
+fn merging_is_rejected_when_the_rules_changed_after_the_plan_was_seen() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = open(&dir, FakeProvider::new());
+    new_invoice_rule(&mut app, "alfa-libre", "Alfa SL", None, true);
+    new_invoice_rule(&mut app, "alfa-500", "Alfa SL", Some("500.00"), true);
+    let both = ids(&["alfa-libre", "alfa-500"]);
+    let plan = app
+        .preview_merge(&both, Some("500.00"))
+        .unwrap()
+        .plan
+        .unwrap();
+
+    // Alguien edita una regla (o activa otra del tipo) después de revisar el plan.
+    app.update_rule(
+        "alfa-500",
+        &json!({ "supplier": "Alfa SL", "max_total": "800.00" }),
+    )
+    .unwrap();
+    let before = dump(&dir, &MERGE_TABLES);
+    let error = app
+        .merge_rules(&both, Some("500.00"), None, &plan.fingerprint)
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("las reglas han cambiado; revise de nuevo"),
+        "{error}"
+    );
+    assert_eq!(dump(&dir, &MERGE_TABLES), before);
+
+    // Otra regla del mismo tipo también cambia la huella.
+    let plan = app
+        .preview_merge(&both, Some("800.00"))
+        .unwrap()
+        .plan
+        .unwrap();
+    new_invoice_rule(&mut app, "beta", "Beta SA", None, true);
+    assert!(app
+        .merge_rules(&both, Some("800.00"), None, &plan.fingerprint)
+        .is_err());
+    // Elección distinta de la revisada, o huella inventada: tampoco.
+    let fresh = app
+        .preview_merge(&both, Some("800.00"))
+        .unwrap()
+        .plan
+        .unwrap();
+    assert!(app
+        .merge_rules(&both, Some("none"), None, &fresh.fingerprint)
+        .is_err());
+    assert!(app
+        .merge_rules(&both, Some("800.00"), None, "0000")
+        .is_err());
+    assert!(!view_of(&app, "alfa-500").archived_at.is_some());
+}
+
+#[test]
+fn a_failure_halfway_through_merging_changes_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = open(&dir, FakeProvider::new());
+    new_invoice_rule(&mut app, "alfa-libre", "Alfa SL", None, true);
+    new_invoice_rule(&mut app, "alfa-500", "Alfa SL", Some("500.00"), true);
+    let both = ids(&["alfa-libre", "alfa-500"]);
+    let plan = app
+        .preview_merge(&both, Some("none"))
+        .unwrap()
+        .plan
+        .unwrap();
+    // El fallo llega al auditar la unificación, cuando las originales ya se archivaron y la
+    // regla nueva ya se escribió dentro de la transacción.
+    let conn = rusqlite::Connection::open(dir.path().join("nestadmin.db")).unwrap();
+    conn.execute_batch(
+        "CREATE TRIGGER fail_merge BEFORE INSERT ON audit_log
+         WHEN NEW.action = 'rule_merge'
+         BEGIN SELECT RAISE(ABORT, 'fallo simulado'); END;",
+    )
+    .unwrap();
+    drop(conn);
+    let before = dump(&dir, &MERGE_TABLES);
+    assert!(app
+        .merge_rules(&both, Some("none"), Some("Alfa"), &plan.fingerprint)
+        .is_err());
+    assert_eq!(dump(&dir, &MERGE_TABLES), before);
+    let views = app.rule_views().unwrap();
+    assert_eq!(views.len(), 2);
+    assert!(views
+        .iter()
+        .all(|v| v.archived_at.is_none() && v.rule.active));
+}
+
+#[test]
+fn the_merged_rule_automates_only_after_it_is_activated_and_repeating_is_harmless() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = open(&dir, FakeProvider::new());
+    new_invoice_rule(&mut app, "alfa-libre", "Alfa SL", None, true);
+    new_invoice_rule(&mut app, "alfa-500", "Alfa SL", Some("500.00"), true);
+    let both = ids(&["alfa-libre", "alfa-500"]);
+
+    // Hoy las dos coinciden: la factura de 121 va a revisión.
+    app.import_document("1.txt", &invoice("Alfa SL", "F-1", "121.00"))
+        .unwrap();
+    assert_eq!(
+        app.process_next().unwrap().unwrap().state,
+        TaskState::AwaitingReview
+    );
+
+    let plan = app
+        .preview_merge(&both, Some("none"))
+        .unwrap()
+        .plan
+        .unwrap();
+    // La factura revisada se registraría con la regla unificada.
+    assert_eq!(plan.simulation.start_automating.len(), 1);
+    let view = app
+        .merge_rules(&both, Some("none"), Some("Alfa"), &plan.fingerprint)
+        .unwrap();
+    let merged = view.rule.id.clone();
+    assert!(!view.rule.active);
+
+    // Recién unificada está inactiva: nada se automatiza.
+    app.import_document("2.txt", &invoice("Alfa SL", "F-2", "121.00"))
+        .unwrap();
+    assert_eq!(
+        app.process_next().unwrap().unwrap().state,
+        TaskState::AwaitingReview
+    );
+
+    // Repetir la misma unificación (doble clic, reproceso) no tiene efectos.
+    let before = dump(&dir, &MERGE_TABLES);
+    assert!(app
+        .merge_rules(&both, Some("none"), Some("Alfa"), &plan.fingerprint)
+        .is_err());
+    assert_eq!(dump(&dir, &MERGE_TABLES), before);
+    assert!(
+        app.preview_merge(&both, Some("none")).is_err(),
+        "las archivadas no se unifican"
+    );
+
+    // Solo tras activarla, y una sola vez, automatiza.
+    app.set_rule_active(&merged, true).unwrap();
+    app.import_document("3.txt", &invoice("Alfa SL", "F-3", "121.00"))
+        .unwrap();
+    let automated = app.process_next().unwrap().unwrap();
+    assert_eq!(automated.state, TaskState::Completed);
+    assert_eq!(
+        automated.result.unwrap()["authorization"]["rule_id"],
+        json!(merged)
+    );
+    assert_eq!(view_of(&app, &merged).stats.applied, 1);
+}
+
+#[test]
+fn findings_count_the_tasks_that_already_matched_both_rules() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = open(&dir, FakeProvider::new());
+    new_invoice_rule(&mut app, "alfa-libre", "Alfa SL", None, true);
+    new_invoice_rule(&mut app, "alfa-500", "Alfa SL", Some("500.00"), true);
+    new_invoice_rule(&mut app, "beta", "Beta SA", None, true);
+
+    let findings = app.rule_findings().unwrap();
+    assert_eq!(findings.len(), 1);
+    assert!(findings[0].active_conflict);
+    assert_eq!(
+        findings[0].affected_tasks,
+        Some(0),
+        "aún no hay tareas afectadas"
+    );
+
+    app.import_document("1.txt", &invoice("Alfa SL", "F-1", "121.00"))
+        .unwrap();
+    app.import_document("2.txt", &invoice("Beta SA", "F-2", "121.00"))
+        .unwrap();
+    app.import_document("3.txt", &invoice("Alfa SL", "F-3", "900.00"))
+        .unwrap();
+    for _ in 0..3 {
+        app.process_next().unwrap().unwrap();
+    }
+    let findings = app.rule_findings().unwrap();
+    // Solo la factura de 121 € de Alfa coincidió con las dos; la de 900 € solo con la libre.
+    assert_eq!(findings[0].affected_tasks, Some(1));
+
+    // Archivar una de las dos reglas retira el hallazgo.
+    app.archive_rule("alfa-500").unwrap();
+    assert!(app.rule_findings().unwrap().is_empty());
+}
+
+#[test]
+fn activating_a_rule_reports_the_findings_it_would_create() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = open(&dir, FakeProvider::new());
+    new_invoice_rule(&mut app, "alfa-libre", "Alfa SL", None, true);
+    new_invoice_rule(&mut app, "alfa-500", "Alfa SL", Some("500.00"), false);
+    new_invoice_rule(&mut app, "beta", "Beta SA", None, true);
+    let before = dump(&dir, &MERGE_TABLES);
+
+    // Probar una regla ya guardada: el hallazgo cita su identificador real.
+    let sim = app
+        .simulate_rule(
+            "register_invoice",
+            &json!({ "supplier": "Alfa SL", "max_total": "500.00" }),
+            None,
+            false,
+            Some("alfa-500"),
+        )
+        .unwrap();
+    assert_eq!(sim.findings.len(), 1);
+    let finding = &sim.findings[0];
+    assert!(
+        finding.active_conflict,
+        "al activarla chocaría con una regla activa"
+    );
+    assert_eq!(finding.key, "overlap:alfa-500+alfa-libre");
+    assert!(finding.rules.iter().any(|r| r.id == "alfa-500"));
+    assert_eq!(finding.effect.data["narrower"]["id"], "alfa-500");
+    assert_eq!(finding.effect.data["wider"]["limit"], Value::Null);
+
+    // Una regla nueva sin guardar aparece como hipotética; sin choque, sin hallazgos.
+    let sim = app
+        .simulate_rule(
+            "register_invoice",
+            &json!({ "supplier": "Alfa SL", "max_total": "100.00" }),
+            None,
+            false,
+            None,
+        )
+        .unwrap();
+    assert!(sim
+        .findings
+        .iter()
+        .any(|f| f.rules.iter().any(|r| r.id == "(simulada)")));
+    let sim = app
+        .simulate_rule(
+            "register_invoice",
+            &json!({ "supplier": "Gama SL" }),
+            None,
+            false,
+            None,
+        )
+        .unwrap();
+    assert!(sim.findings.is_empty());
+
+    // Frente a una regla inactiva: el hallazgo existe pero no es un choque todavía.
+    let sim = app
+        .simulate_rule(
+            "register_invoice",
+            &json!({ "supplier": "Alfa SL", "max_total": "500.00" }),
+            None,
+            false,
+            Some("alfa-libre"),
+        )
+        .unwrap();
+    assert_eq!(sim.findings.len(), 1);
+    assert!(!sim.findings[0].active_conflict);
+    assert_eq!(
+        dump(&dir, &MERGE_TABLES),
+        before,
+        "la simulación no escribe"
+    );
+}

@@ -11,7 +11,9 @@ import type {
   LaunchView,
   ProviderChoice,
   ProviderInfo,
+  MergePreview,
   Rule,
+  RuleFinding,
   RuleStats,
   RuleView,
   SettingsView,
@@ -128,6 +130,14 @@ export const api = {
     assumeAnySenderAck = false,
     excludeRuleId: string | null = null,
   ) => invoke<Simulation>("simulate_rule", { actionKind, conditions, limit, assumeAnySenderAck, excludeRuleId }),
+  /** Contradicciones entre las reglas, de más a menos graves (D130). Solo lectura. */
+  ruleFindings: () => invoke<RuleFinding[]>("rule_findings"),
+  /** Revisa una unificación sin cambiar nada: antes, opciones y, con la elección hecha, el plan. */
+  previewMerge: (ids: string[], chosen: string | null) => invoke<MergePreview>("preview_merge", { ids, chosen }),
+  /** Unifica en una sola transacción (D131): regla nueva inactiva, originales archivadas.
+   * `planFingerprint` es la del plan que se revisó; si las reglas cambiaron, se rechaza. */
+  mergeRules: (ids: string[], chosen: string | null, name: string | null, planFingerprint: string) =>
+    invoke<RuleView>("merge_rules", { ids, chosen, name, planFingerprint }),
   updateRule: (id: string, conditions: Record<string, string>) => invoke<Rule>("update_rule", { id, conditions }),
   /** Guarda de una vez condiciones, nombre y validación avanzada (D126): sin guardados
    * parciales. `name`: `null` lo deja como está y `""` lo borra. */

@@ -2,13 +2,16 @@
 //! solo si exactamente una regla activa coincide y los datos no tienen incidencias; en
 //! cualquier otro caso queda pendiente de revisión.
 
+use std::cmp::Ordering;
 use std::collections::HashSet;
 
-use nestadmin_core::Rule;
+use nestadmin_core::{Rule, Task};
 use nestadmin_documents::parse_amount;
 use serde::Serialize;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
+
+use crate::{EMAIL, INVOICE};
 
 pub const REGISTER_INVOICE: &str = "register_invoice";
 pub const SEND_DRAFT: &str = "send_draft";
@@ -597,6 +600,971 @@ pub fn evaluate_result(
         }
         None => evaluated,
     }
+}
+
+// ---- Contradicciones y unificación (D130, D131) ----
+//
+// Las reglas solo autorizan: ninguna prohíbe. El conflicto real viene de D17: si dos reglas
+// activas coinciden con una tarea, esa tarea va a revisión. «Alfa sin límite» y «Alfa ≤ 500»
+// solo automatizan por encima de 500, al revés de lo que se espera. Todo lo de aquí es puro
+// (sin base de datos ni IA) y de solo lectura: nada se aplica sin aceptación.
+
+/// Id de la regla resultante en la simulación de una unificación: no es un id real.
+const MERGED: &str = "(unificada)";
+/// Tareas que mira la simulación de una unificación.
+const MERGE_SIMULATION_LIMIT: usize = 200;
+
+/// Marcas que no están en `Rule`: ids con la validación avanzada de «cualquier remitente»
+/// (D126) y ids archivados (D128). Una regla archivada no entra en ningún análisis.
+#[derive(Debug, Clone, Default)]
+pub struct Marks {
+    pub any_sender: HashSet<String>,
+    pub archived: HashSet<String>,
+}
+
+/// Cuál de las dos reglas comparadas es la más amplia.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Side {
+    First,
+    Second,
+}
+
+impl Side {
+    fn flip(self) -> Side {
+        match self {
+            Side::First => Side::Second,
+            Side::Second => Side::First,
+        }
+    }
+}
+
+/// Por qué dos reglas no se pueden comparar.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "code", rename_all = "snake_case")]
+pub enum NotComparable {
+    /// Reglas de tipos distintos.
+    DifferentKinds,
+    /// Tipo que la aplicación no reconoce (por ejemplo, el futuro «emitir recurrente»).
+    UnknownKind,
+    /// Alguna regla no tiene condiciones válidas o no indica remitente: no actúa.
+    Defective { rule_ids: Vec<String> },
+}
+
+/// Cómo se relacionan las tareas que cubren dos reglas.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "relation", rename_all = "snake_case")]
+pub enum Relation {
+    /// Cubren exactamente lo mismo.
+    Equal,
+    /// Una cubre todo lo de la otra y más.
+    Contains {
+        wider: Side,
+    },
+    /// Proveedor con nombre parecido: solo una pregunta, nunca igual.
+    Similar,
+    /// No comparten ninguna tarea.
+    Disjoint,
+    NotComparable {
+        reason: NotComparable,
+    },
+}
+
+impl Relation {
+    /// La misma relación vista desde la otra regla: `compare(b, a) == compare(a, b).mirrored()`.
+    pub fn mirrored(self) -> Relation {
+        match self {
+            Relation::Contains { wider } => Relation::Contains {
+                wider: wider.flip(),
+            },
+            other => other,
+        }
+    }
+}
+
+/// Lo que impide que una regla actúe.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Defect {
+    UnknownKind,
+    Invalid(String),
+    NoSender,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Scope {
+    Address(String),
+    Domain(String),
+    Any,
+}
+
+#[derive(Debug, Clone)]
+struct InvoiceCond {
+    /// Proveedor tal como lo escribió la regla, recortado.
+    supplier: String,
+    /// Clave de comparación, igual que `matches`: recortado y sin distinguir mayúsculas.
+    key: String,
+    /// Límite canónico («500.00») o sin límite.
+    limit: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct SendCond {
+    category: String,
+    scope: Scope,
+}
+
+#[derive(Debug, Clone)]
+enum Cond {
+    Invoice(InvoiceCond),
+    Send(SendCond),
+}
+
+fn invalid(text: impl Into<String>) -> Defect {
+    Defect::Invalid(text.into())
+}
+
+fn text_of<'a>(map: &'a serde_json::Map<String, Value>, key: &str) -> Option<&'a str> {
+    map.get(key)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+}
+
+fn parse_cond(rule: &Rule, marks: &Marks) -> Result<Cond, Defect> {
+    let allowed: &[&str] = match rule.action_kind.as_str() {
+        REGISTER_INVOICE => &["supplier", "max_total", "currency"],
+        SEND_DRAFT => &["category", "sender", "sender_domain"],
+        _ => return Err(Defect::UnknownKind),
+    };
+    let Some(map) = rule.conditions.as_object() else {
+        return Err(invalid("sus condiciones no son válidas"));
+    };
+    if let Some(key) = map.keys().find(|k| !allowed.contains(&k.as_str())) {
+        return Err(invalid(format!(
+            "tiene una condición desconocida («{key}»)"
+        )));
+    }
+    if rule.action_kind == REGISTER_INVOICE {
+        let Some(supplier) = text_of(map, "supplier") else {
+            return Err(invalid("no indica proveedor"));
+        };
+        if map
+            .get("currency")
+            .is_some_and(|c| c.as_str() != Some("EUR"))
+        {
+            return Err(invalid(
+                "su moneda no es el euro y hoy solo se registran facturas en euros",
+            ));
+        }
+        let limit = match map.get("max_total") {
+            None => None,
+            Some(Value::String(limit)) => Some(
+                parse_amount("max_total", limit)
+                    .map_err(|_| invalid(format!("su máximo «{limit}» no es un importe válido")))?
+                    .to_string(),
+            ),
+            Some(_) => return Err(invalid("su máximo no es un texto de importe")),
+        };
+        return Ok(Cond::Invoice(InvoiceCond {
+            supplier: supplier.to_owned(),
+            key: supplier.to_ascii_lowercase(),
+            limit,
+        }));
+    }
+    let Some(category) = text_of(map, "category") else {
+        return Err(invalid("no indica categoría"));
+    };
+    let scope = match (map.get("sender"), map.get("sender_domain")) {
+        (Some(_), Some(_)) => {
+            return Err(invalid(
+                "indica a la vez una dirección y un dominio de remitente",
+            ))
+        }
+        (Some(value), None) => match value.as_str().map(str::trim) {
+            Some(address) if is_email_address(address) => {
+                Scope::Address(address.to_ascii_lowercase())
+            }
+            _ => return Err(invalid("su remitente no es una dirección de correo")),
+        },
+        (None, Some(value)) => match value.as_str().map(str::trim) {
+            Some(domain) if is_domain(domain) => Scope::Domain(domain.to_ascii_lowercase()),
+            _ => return Err(invalid("su dominio de remitente no es válido")),
+        },
+        (None, None) if marks.any_sender.contains(&rule.id) => Scope::Any,
+        (None, None) => return Err(Defect::NoSender),
+    };
+    Ok(Cond::Send(SendCond {
+        category: category.to_owned(),
+        scope,
+    }))
+}
+
+/// Moneda efectiva de una regla de registro: sin `currency` es el euro. `None` si no es un texto.
+fn currency_of(rule: &Rule) -> Option<String> {
+    match rule.conditions.get("currency") {
+        None => Some("EUR".into()),
+        Some(Value::String(s)) => Some(s.trim().to_ascii_uppercase()),
+        Some(_) => None,
+    }
+}
+
+/// Nombre sin puntuación, comas ni espacios y en minúsculas: «Alfa SA» y «ALFA, S.A.» dan lo
+/// mismo. Solo sirve para preguntar si es el mismo proveedor, nunca para decidir.
+fn fold_supplier(name: &str) -> String {
+    name.chars()
+        .filter(|c| c.is_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect()
+}
+
+fn cmp_limit(a: &str, b: &str) -> Ordering {
+    let parse = |s: &str| parse_amount("max_total", s).ok();
+    parse(a).cmp(&parse(b))
+}
+
+fn domain_of(address: &str) -> &str {
+    address.rsplit_once('@').map_or("", |(_, d)| d)
+}
+
+fn compare_cond(a: &Cond, b: &Cond) -> Relation {
+    match (a, b) {
+        (Cond::Invoice(x), Cond::Invoice(y)) => {
+            if x.key == y.key {
+                match (&x.limit, &y.limit) {
+                    (None, None) => Relation::Equal,
+                    (None, Some(_)) => Relation::Contains { wider: Side::First },
+                    (Some(_), None) => Relation::Contains {
+                        wider: Side::Second,
+                    },
+                    (Some(l), Some(m)) => match cmp_limit(l, m) {
+                        Ordering::Equal => Relation::Equal,
+                        Ordering::Greater => Relation::Contains { wider: Side::First },
+                        Ordering::Less => Relation::Contains {
+                            wider: Side::Second,
+                        },
+                    },
+                }
+            } else {
+                let folded = fold_supplier(&x.supplier);
+                if !folded.is_empty() && folded == fold_supplier(&y.supplier) {
+                    Relation::Similar
+                } else {
+                    Relation::Disjoint
+                }
+            }
+        }
+        (Cond::Send(x), Cond::Send(y)) => {
+            if x.category != y.category {
+                return Relation::Disjoint;
+            }
+            match (&x.scope, &y.scope) {
+                (Scope::Any, Scope::Any) => Relation::Equal,
+                (Scope::Any, _) => Relation::Contains { wider: Side::First },
+                (_, Scope::Any) => Relation::Contains {
+                    wider: Side::Second,
+                },
+                (Scope::Address(p), Scope::Address(q)) | (Scope::Domain(p), Scope::Domain(q)) => {
+                    if p == q {
+                        Relation::Equal
+                    } else {
+                        Relation::Disjoint
+                    }
+                }
+                (Scope::Domain(d), Scope::Address(addr)) => {
+                    if domain_of(addr) == d {
+                        Relation::Contains { wider: Side::First }
+                    } else {
+                        Relation::Disjoint
+                    }
+                }
+                (Scope::Address(addr), Scope::Domain(d)) => {
+                    if domain_of(addr) == d {
+                        Relation::Contains {
+                            wider: Side::Second,
+                        }
+                    } else {
+                        Relation::Disjoint
+                    }
+                }
+            }
+        }
+        _ => Relation::NotComparable {
+            reason: NotComparable::DifferentKinds,
+        },
+    }
+}
+
+/// Relación entre lo que cubren dos reglas. Simétrica (`compare(b, a)` es `compare(a, b)`
+/// vista desde el otro lado) y puramente sobre las condiciones guardadas. Solo se comparan
+/// reglas del mismo tipo; un tipo desconocido, unas condiciones inválidas o una regla de
+/// envío sin remitente ni validación avanzada (no actúa) no son comparables.
+pub fn compare(a: &Rule, b: &Rule, marks: &Marks) -> Relation {
+    if a.action_kind != b.action_kind {
+        return Relation::NotComparable {
+            reason: NotComparable::DifferentKinds,
+        };
+    }
+    if !matches!(a.action_kind.as_str(), REGISTER_INVOICE | SEND_DRAFT) {
+        return Relation::NotComparable {
+            reason: NotComparable::UnknownKind,
+        };
+    }
+    // Monedas distintas: no se cruzan, aunque alguna regla sea defectuosa por eso mismo.
+    if a.action_kind == REGISTER_INVOICE {
+        if let (Some(x), Some(y)) = (currency_of(a), currency_of(b)) {
+            if x != y {
+                return Relation::Disjoint;
+            }
+        }
+    }
+    match (parse_cond(a, marks), parse_cond(b, marks)) {
+        (Ok(x), Ok(y)) => compare_cond(&x, &y),
+        (x, y) => {
+            let mut rule_ids: Vec<String> = [(a, x.is_err()), (b, y.is_err())]
+                .into_iter()
+                .filter(|(_, bad)| *bad)
+                .map(|(r, _)| r.id.clone())
+                .collect();
+            rule_ids.sort();
+            Relation::NotComparable {
+                reason: NotComparable::Defective { rule_ids },
+            }
+        }
+    }
+}
+
+// ---- Hallazgos ----
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FindingKind {
+    /// Las dos reglas cubren exactamente lo mismo.
+    Duplicate,
+    /// Una cubre todo lo de la otra y más.
+    Overlap,
+    /// Proveedores con nombre parecido: ¿son el mismo?
+    Similar,
+    /// Una regla que no actúa (condiciones inválidas, sin remitente o tipo desconocido).
+    Defective,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct FindingRule {
+    pub id: String,
+    pub version: i64,
+    pub active: bool,
+}
+
+/// Qué ocurre, como código y datos: la interfaz lo redacta (`rules-text.ts`).
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct Effect {
+    pub code: String,
+    pub data: Value,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct RuleFinding {
+    /// Clave estable del hallazgo («overlap:a+b»).
+    pub key: String,
+    pub kind: FindingKind,
+    pub action_kind: String,
+    /// Reglas implicadas, por identificador.
+    pub rules: Vec<FindingRule>,
+    /// Ambas reglas están activas: el choque ocurre ya. Si no, solo chocarán si se activan.
+    /// Una pregunta de nombre parecido nunca es un choque confirmado.
+    pub active_conflict: bool,
+    pub effect: Effect,
+    /// Las reglas se pueden unificar (`Equal` o `Contains`).
+    pub merge_candidate: bool,
+    /// Tareas que ya coincidieron con las dos reglas (de `rule_evaluations`); lo rellena
+    /// `App::rule_findings`. `None` si no aplica (nombre parecido, regla defectuosa).
+    pub affected_tasks: Option<usize>,
+}
+
+fn limit_json(limit: &Option<String>) -> Value {
+    limit.as_ref().map_or(Value::Null, |l| json!(l))
+}
+
+fn scope_json(scope: &Scope) -> Value {
+    match scope {
+        Scope::Address(a) => json!({ "scope": "sender", "value": a }),
+        Scope::Domain(d) => json!({ "scope": "domain", "value": d }),
+        Scope::Any => json!({ "scope": "any", "value": null }),
+    }
+}
+
+/// Datos de la regla más amplia o más estrecha de un solape.
+fn side_json(rule: &Rule, cond: &Cond) -> Value {
+    match cond {
+        Cond::Invoice(c) => json!({ "id": rule.id, "limit": limit_json(&c.limit) }),
+        Cond::Send(c) => {
+            let mut v = scope_json(&c.scope);
+            v["id"] = json!(rule.id);
+            v
+        }
+    }
+}
+
+fn supplier_of(cond: &Cond) -> String {
+    match cond {
+        Cond::Invoice(i) => i.supplier.clone(),
+        Cond::Send(_) => String::new(),
+    }
+}
+
+fn pair_effect(relation: &Relation, a: (&Rule, &Cond), b: (&Rule, &Cond)) -> Effect {
+    match (relation, a.1) {
+        (Relation::Similar, _) => Effect {
+            code: "similar_supplier".into(),
+            data: json!({
+                "first": { "id": a.0.id, "supplier": supplier_of(a.1) },
+                "second": { "id": b.0.id, "supplier": supplier_of(b.1) },
+            }),
+        },
+        (Relation::Equal, Cond::Invoice(c)) => Effect {
+            code: "same_conditions".into(),
+            data: json!({ "supplier": c.supplier, "limit": limit_json(&c.limit) }),
+        },
+        (Relation::Equal, Cond::Send(c)) => {
+            let mut data = scope_json(&c.scope);
+            data["category"] = json!(c.category);
+            Effect {
+                code: "same_conditions".into(),
+                data,
+            }
+        }
+        (Relation::Contains { wider }, cond) => {
+            let (w, n) = if *wider == Side::First {
+                (a, b)
+            } else {
+                (b, a)
+            };
+            let mut data = json!({
+                "wider": side_json(w.0, w.1),
+                "narrower": side_json(n.0, n.1),
+            });
+            match cond {
+                Cond::Invoice(c) => data["supplier"] = json!(c.supplier),
+                Cond::Send(c) => data["category"] = json!(c.category),
+            }
+            Effect {
+                code: "narrow_blocks_wide".into(),
+                data,
+            }
+        }
+        _ => Effect {
+            code: "none".into(),
+            data: json!({}),
+        },
+    }
+}
+
+fn finding_rule(rule: &Rule) -> FindingRule {
+    FindingRule {
+        id: rule.id.clone(),
+        version: rule.version,
+        active: rule.active,
+    }
+}
+
+fn defect_finding(rule: &Rule, defect: Defect) -> RuleFinding {
+    let (code, reason) = match defect {
+        Defect::UnknownKind => (
+            "not_comparable",
+            format!(
+                "la aplicación no reconoce el tipo de regla «{}», así que no puede compararla ni aplicarla",
+                rule.action_kind
+            ),
+        ),
+        Defect::NoSender => (
+            "sender_missing",
+            "no indica remitente ni tiene validada la opción avanzada: no actúa".to_owned(),
+        ),
+        Defect::Invalid(text) => ("invalid_conditions", text),
+    };
+    RuleFinding {
+        key: format!("defective:{}", rule.id),
+        kind: FindingKind::Defective,
+        action_kind: rule.action_kind.clone(),
+        rules: vec![finding_rule(rule)],
+        active_conflict: false,
+        effect: Effect {
+            code: code.into(),
+            data: json!({ "reason": reason }),
+        },
+        merge_candidate: false,
+        affected_tasks: None,
+    }
+}
+
+fn severity(f: &RuleFinding) -> u8 {
+    match (f.kind, f.active_conflict) {
+        (FindingKind::Duplicate | FindingKind::Overlap, true) => 0,
+        (FindingKind::Duplicate | FindingKind::Overlap, false) => 1,
+        (FindingKind::Similar, _) => 2,
+        (FindingKind::Defective, _) => 3,
+    }
+}
+
+/// Contradicciones entre las reglas, un hallazgo por par (y uno por regla que no actúa), de
+/// más a menos grave: primero los choques con las dos reglas activas. Las archivadas no
+/// entran; las inactivas sí, indicando que solo chocarán si se activan.
+pub fn analyze(rules: &[Rule], marks: &Marks) -> Vec<RuleFinding> {
+    let mut live: Vec<&Rule> = rules
+        .iter()
+        .filter(|r| !marks.archived.contains(&r.id))
+        .collect();
+    live.sort_by(|a, b| a.id.cmp(&b.id));
+    let parsed: Vec<Result<Cond, Defect>> = live.iter().map(|r| parse_cond(r, marks)).collect();
+    let mut findings = Vec::new();
+    for (rule, cond) in live.iter().zip(&parsed) {
+        if let Err(defect) = cond {
+            findings.push(defect_finding(rule, defect.clone()));
+        }
+    }
+    for i in 0..live.len() {
+        for j in i + 1..live.len() {
+            let (a, b) = (live[i], live[j]);
+            if a.action_kind != b.action_kind {
+                continue;
+            }
+            // Una regla que no actúa no choca con nadie: ya tiene su propio hallazgo.
+            let (Ok(ca), Ok(cb)) = (&parsed[i], &parsed[j]) else {
+                continue;
+            };
+            let relation = compare(a, b, marks);
+            let (kind, label) = match relation {
+                Relation::Equal => (FindingKind::Duplicate, "duplicate"),
+                Relation::Contains { .. } => (FindingKind::Overlap, "overlap"),
+                Relation::Similar => (FindingKind::Similar, "similar"),
+                Relation::Disjoint | Relation::NotComparable { .. } => continue,
+            };
+            let real = kind != FindingKind::Similar;
+            findings.push(RuleFinding {
+                key: format!("{label}:{}+{}", a.id, b.id),
+                kind,
+                action_kind: a.action_kind.clone(),
+                rules: vec![finding_rule(a), finding_rule(b)],
+                active_conflict: real && a.active && b.active,
+                effect: pair_effect(&relation, (a, ca), (b, cb)),
+                merge_candidate: real,
+                affected_tasks: None,
+            });
+        }
+    }
+    findings.sort_by(|x, y| {
+        severity(x)
+            .cmp(&severity(y))
+            .then_with(|| x.key.cmp(&y.key))
+    });
+    findings
+}
+
+// ---- Unificación ----
+
+/// Por qué no se puede unificar.
+#[derive(Debug, Clone, PartialEq, thiserror::Error)]
+pub enum MergeError {
+    #[error("seleccione al menos dos reglas para unificar")]
+    TooFew,
+    #[error("hay reglas repetidas en la selección")]
+    Repeated,
+    #[error("la regla {0} no existe")]
+    Missing(String),
+    #[error("la regla {0} está archivada; restáurela antes de unificarla")]
+    Archived(String),
+    #[error("solo se pueden unificar reglas del mismo tipo: no mezcle reglas de registrar facturas con reglas de enviar respuestas")]
+    MixedKinds,
+    #[error("la aplicación no reconoce este tipo de regla y no puede unificarla")]
+    UnknownKind,
+    #[error("la regla {0} no actúa ({1}); corríjala antes de unificarla")]
+    Defective(String, String),
+    #[error("«{0}» y «{1}» tienen un nombre de proveedor parecido, pero la aplicación no puede asegurar que sean el mismo; si lo son, edite una de las dos para dejar el nombre igual y después unifíquelas")]
+    SimilarSupplier(String, String),
+    #[error(
+        "las reglas {0} y {1} cubren casos distintos: no se contradicen y no hay nada que unificar"
+    )]
+    Disjoint(String, String),
+    #[error("las reglas tienen condiciones distintas; elija cuáles debe tener la regla nueva")]
+    ChoiceRequired(Vec<MergeOption>),
+    #[error("la opción «{0}» no corresponde a ninguna de las reglas elegidas")]
+    UnknownChoice(String),
+}
+
+/// Una condición posible para la regla nueva: el límite, o el remitente, de alguna original.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct MergeOption {
+    /// `none` o el límite («500.00») en facturas; `any`, `domain:x` o `sender:x` en envíos.
+    pub key: String,
+    /// Datos para explicarla: `{limit}` o `{scope, value}`.
+    pub scope: Value,
+    /// Reglas que ya la tienen.
+    pub rule_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct PlanRule {
+    pub id: String,
+    pub version: i64,
+    pub active: bool,
+    pub conditions: Value,
+    /// Tiene la validación avanzada: la regla nueva no la hereda.
+    pub any_sender: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct MergeAfter {
+    pub conditions: Value,
+    /// Siempre inactiva.
+    pub active: bool,
+    pub option_key: String,
+    /// Originales con la validación avanzada, que la regla nueva no hereda.
+    pub loses_any_sender: Vec<String>,
+    /// La regla nueva no indica remitente: no actuará hasta validar la opción avanzada.
+    pub needs_sender_validation: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct SimTask {
+    pub task_id: i64,
+    pub label: Option<String>,
+    /// Total de la factura, si consta.
+    pub total: Option<String>,
+}
+
+/// Qué cambiaría en las tareas guardadas, evaluadas con `evaluate_result` como en producción,
+/// si la regla nueva estuviera activa y las originales archivadas.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct MergeSimulation {
+    pub considered: usize,
+    pub truncated: bool,
+    pub skipped_without_result: usize,
+    /// Tareas que alguna regla original o la nueva cubre.
+    pub touched: usize,
+    /// Hoy van a revisión y con la regla nueva se automatizarían.
+    pub start_automating: Vec<SimTask>,
+    /// Hoy se automatizan y con la regla nueva irían a revisión.
+    pub stop_automating: Vec<SimTask>,
+    pub unchanged_automated: usize,
+    pub unchanged_review: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct MergePlan {
+    pub action_kind: String,
+    pub before: Vec<PlanRule>,
+    pub options: Vec<MergeOption>,
+    pub chosen: String,
+    pub after: MergeAfter,
+    pub simulation: MergeSimulation,
+    /// Huella de lo que se vio: `merge_rules` rechaza si las reglas cambiaron después.
+    pub fingerprint: String,
+}
+
+fn scope_key(cond: &Cond) -> (String, Value) {
+    match cond {
+        Cond::Invoice(c) => (
+            c.limit.clone().unwrap_or_else(|| "none".into()),
+            json!({ "limit": limit_json(&c.limit) }),
+        ),
+        Cond::Send(c) => match &c.scope {
+            Scope::Any => ("any".into(), scope_json(&c.scope)),
+            Scope::Domain(d) => (format!("domain:{d}"), scope_json(&c.scope)),
+            Scope::Address(a) => (format!("sender:{a}"), scope_json(&c.scope)),
+        },
+    }
+}
+
+/// Reglas elegidas, validadas para unificar: existentes, vivas, del mismo tipo, con
+/// condiciones válidas y todas `Equal` o `Contains` entre sí. Las devuelve ordenadas por id.
+fn merge_members<'a>(
+    rules: &'a [Rule],
+    marks: &Marks,
+    ids: &[String],
+) -> Result<Vec<(&'a Rule, Cond)>, MergeError> {
+    if ids.len() < 2 {
+        return Err(MergeError::TooFew);
+    }
+    let unique: HashSet<&String> = ids.iter().collect();
+    if unique.len() != ids.len() {
+        return Err(MergeError::Repeated);
+    }
+    let mut members: Vec<&Rule> = Vec::new();
+    for id in ids {
+        let rule = rules
+            .iter()
+            .find(|r| &r.id == id)
+            .ok_or_else(|| MergeError::Missing(id.clone()))?;
+        if marks.archived.contains(id) {
+            return Err(MergeError::Archived(id.clone()));
+        }
+        members.push(rule);
+    }
+    members.sort_by(|a, b| a.id.cmp(&b.id));
+    if members
+        .iter()
+        .any(|r| r.action_kind != members[0].action_kind)
+    {
+        return Err(MergeError::MixedKinds);
+    }
+    let mut parsed = Vec::new();
+    for rule in &members {
+        match parse_cond(rule, marks) {
+            Ok(cond) => parsed.push((*rule, cond)),
+            Err(Defect::UnknownKind) => return Err(MergeError::UnknownKind),
+            Err(Defect::NoSender) => {
+                return Err(MergeError::Defective(
+                    rule.id.clone(),
+                    "no indica remitente".into(),
+                ))
+            }
+            Err(Defect::Invalid(text)) => return Err(MergeError::Defective(rule.id.clone(), text)),
+        }
+    }
+    for i in 0..parsed.len() {
+        for j in i + 1..parsed.len() {
+            let (a, b) = (&parsed[i], &parsed[j]);
+            match compare_cond(&a.1, &b.1) {
+                Relation::Equal | Relation::Contains { .. } => {}
+                Relation::Similar => {
+                    return Err(MergeError::SimilarSupplier(
+                        supplier_of(&a.1),
+                        supplier_of(&b.1),
+                    ))
+                }
+                _ => return Err(MergeError::Disjoint(a.0.id.clone(), b.0.id.clone())),
+            }
+        }
+    }
+    Ok(parsed)
+}
+
+/// Las reglas de una unificación tal como están hoy (ordenadas por id), validadas como en
+/// `merge_plan`: sirve para mostrar el «antes» aunque aún falte elegir.
+pub fn merge_before(
+    rules: &[Rule],
+    marks: &Marks,
+    ids: &[String],
+) -> Result<Vec<PlanRule>, MergeError> {
+    Ok(merge_members(rules, marks, ids)?
+        .iter()
+        .map(|(r, _)| plan_rule(r, marks))
+        .collect())
+}
+
+fn plan_rule(r: &Rule, marks: &Marks) -> PlanRule {
+    PlanRule {
+        id: r.id.clone(),
+        version: r.version,
+        active: r.active,
+        conditions: r.conditions.clone(),
+        any_sender: marks.any_sender.contains(&r.id),
+    }
+}
+
+fn options_of(members: &[(&Rule, Cond)]) -> Vec<MergeOption> {
+    let mut options: Vec<MergeOption> = Vec::new();
+    for (rule, cond) in members {
+        let (key, scope) = scope_key(cond);
+        match options.iter_mut().find(|o| o.key == key) {
+            Some(option) => option.rule_ids.push(rule.id.clone()),
+            None => options.push(MergeOption {
+                key,
+                scope,
+                rule_ids: vec![rule.id.clone()],
+            }),
+        }
+    }
+    options
+}
+
+/// Las condiciones que puede tener la regla nueva (una por cada límite o remitente distinto
+/// de las originales). Con una sola, no hace falta elegir.
+pub fn merge_options(
+    rules: &[Rule],
+    marks: &Marks,
+    ids: &[String],
+) -> Result<Vec<MergeOption>, MergeError> {
+    Ok(options_of(&merge_members(rules, marks, ids)?))
+}
+
+fn merge_fingerprint(
+    members: &[(&Rule, Cond)],
+    marks: &Marks,
+    chosen: &str,
+    live_rules: &[Rule],
+) -> String {
+    let mut parts: Vec<String> = members
+        .iter()
+        .map(|(r, _)| {
+            format!(
+                "{}:{}:{}:{}:{}",
+                r.id,
+                r.version,
+                u8::from(r.active),
+                u8::from(marks.any_sender.contains(&r.id)),
+                r.conditions
+            )
+        })
+        .collect();
+    parts.push(format!("choice={chosen}"));
+    parts.push(rules_fingerprint(
+        live_rules,
+        &marks.any_sender,
+        &members[0].0.action_kind,
+    ));
+    let digest = Sha256::digest(parts.join("|").as_bytes());
+    digest.iter().take(8).map(|b| format!("{b:02x}")).collect()
+}
+
+fn sim_task(task: &Task, result: &Value, invoice: bool) -> SimTask {
+    SimTask {
+        task_id: task.id,
+        label: if invoice {
+            result["document"].as_str()
+        } else {
+            result["message"]["subject"].as_str()
+        }
+        .map(str::to_owned),
+        total: if invoice {
+            result["fields"]["total"].as_str().map(str::to_owned)
+        } else {
+            None
+        },
+    }
+}
+
+/// Propone la regla resultante de unificar `ids` (reglas `Equal` o `Contains` del mismo tipo)
+/// y simula con `evaluate_result` qué cambiaría en `tasks`. Es de solo lectura. Si las
+/// condiciones difieren, `chosen` debe ser la clave de una de las opciones (`merge_options`);
+/// sin elección es un error claro (`ChoiceRequired`, con las opciones). Rechaza mezclar tipos,
+/// proveedores solo parecidos y reglas archivadas.
+pub fn merge_plan(
+    rules: &[Rule],
+    marks: &Marks,
+    ids: &[String],
+    chosen: Option<&str>,
+    tasks: &[Task],
+) -> Result<MergePlan, MergeError> {
+    let members = merge_members(rules, marks, ids)?;
+    let options = options_of(&members);
+    let chosen = match (
+        chosen.map(str::trim).filter(|c| !c.is_empty()),
+        options.as_slice(),
+    ) {
+        (Some(key), _) => options
+            .iter()
+            .find(|o| o.key == key)
+            .map(|o| o.key.clone())
+            .ok_or_else(|| MergeError::UnknownChoice(key.to_owned()))?,
+        (None, [only]) => only.key.clone(),
+        (None, _) => return Err(MergeError::ChoiceRequired(options)),
+    };
+    let action_kind = members[0].0.action_kind.clone();
+    let model = members
+        .iter()
+        .find(|(_, c)| scope_key(c).0 == chosen)
+        .map(|(r, _)| *r)
+        .expect("la opción elegida sale de una regla");
+    let loses: Vec<String> = members
+        .iter()
+        .filter(|(r, _)| marks.any_sender.contains(&r.id))
+        .map(|(r, _)| r.id.clone())
+        .collect();
+    let needs_sender_validation = action_kind == SEND_DRAFT && chosen == "any";
+    let merged_conditions = model.conditions.clone();
+    let current: Vec<Rule> = rules
+        .iter()
+        .filter(|r| !marks.archived.contains(&r.id))
+        .cloned()
+        .collect();
+    let fingerprint = merge_fingerprint(&members, marks, &chosen, &current);
+
+    // Simulación: hoy (reglas vivas tal como están) frente a después (originales fuera y la
+    // regla nueva activa, que es lo que ocurrirá cuando el usuario la active).
+    let originals: HashSet<&str> = members.iter().map(|(r, _)| r.id.as_str()).collect();
+    let mut future: Vec<Rule> = current
+        .iter()
+        .filter(|r| !originals.contains(r.id.as_str()))
+        .cloned()
+        .collect();
+    future.push(Rule {
+        id: MERGED.into(),
+        version: 1,
+        action_kind: action_kind.clone(),
+        conditions: merged_conditions.clone(),
+        active: true,
+        created_at: 0,
+    });
+    let future_marks: HashSet<String> = marks
+        .any_sender
+        .iter()
+        .filter(|id| !originals.contains(id.as_str()))
+        .cloned()
+        .collect();
+    let invoice = action_kind == REGISTER_INVOICE;
+    let task_kind = if invoice { INVOICE } else { EMAIL };
+    let of_kind: Vec<&Task> = tasks.iter().filter(|t| t.kind == task_kind).collect();
+    let mut simulation = MergeSimulation {
+        considered: 0,
+        truncated: of_kind.len() > MERGE_SIMULATION_LIMIT,
+        skipped_without_result: 0,
+        touched: 0,
+        start_automating: Vec::new(),
+        stop_automating: Vec::new(),
+        unchanged_automated: 0,
+        unchanged_review: 0,
+    };
+    for task in of_kind.into_iter().take(MERGE_SIMULATION_LIMIT) {
+        let Some(result) = task.result.as_ref().filter(|r| r.is_object()) else {
+            simulation.skipped_without_result += 1;
+            continue;
+        };
+        simulation.considered += 1;
+        let before = evaluate_result(&current, &marks.any_sender, &action_kind, result);
+        let after = evaluate_result(&future, &future_marks, &action_kind, result);
+        let covered = before
+            .explanation
+            .candidates
+            .iter()
+            .any(|c| c.matches && originals.contains(c.id.as_str()))
+            || after
+                .explanation
+                .candidates
+                .iter()
+                .any(|c| c.matches && c.id == MERGED);
+        if !covered {
+            continue;
+        }
+        simulation.touched += 1;
+        let was = matches!(before.decision, RuleDecision::Automate { .. });
+        let will = matches!(after.decision, RuleDecision::Automate { .. });
+        match (was, will) {
+            (false, true) => simulation
+                .start_automating
+                .push(sim_task(task, result, invoice)),
+            (true, false) => simulation
+                .stop_automating
+                .push(sim_task(task, result, invoice)),
+            (true, true) => simulation.unchanged_automated += 1,
+            (false, false) => simulation.unchanged_review += 1,
+        }
+    }
+    Ok(MergePlan {
+        action_kind,
+        before: members.iter().map(|(r, _)| plan_rule(r, marks)).collect(),
+        options,
+        chosen: chosen.clone(),
+        after: MergeAfter {
+            conditions: merged_conditions,
+            active: false,
+            option_key: chosen,
+            loses_any_sender: loses,
+            needs_sender_validation,
+        },
+        simulation,
+        fingerprint,
+    })
 }
 
 #[cfg(test)]
@@ -1277,6 +2245,750 @@ mod tests {
         assert_eq!(
             base,
             rules_fingerprint(&[a2, other], &none, REGISTER_INVOICE)
+        );
+    }
+}
+
+#[cfg(test)]
+mod conflict_tests {
+    use super::*;
+    use nestadmin_core::TaskState;
+    use serde_json::json;
+
+    fn rule(id: &str, kind: &str, conditions: Value, active: bool) -> Rule {
+        Rule {
+            id: id.into(),
+            version: 1,
+            action_kind: kind.into(),
+            conditions,
+            active,
+            created_at: 0,
+        }
+    }
+
+    fn inv(id: &str, supplier: &str, max: Option<&str>, active: bool) -> Rule {
+        let mut c = json!({ "supplier": supplier });
+        if let Some(max) = max {
+            c["max_total"] = json!(max);
+        }
+        rule(id, REGISTER_INVOICE, c, active)
+    }
+
+    fn send(id: &str, conditions: Value, active: bool) -> Rule {
+        let mut c = json!({ "category": "solicitud_factura" });
+        for (k, v) in conditions.as_object().unwrap() {
+            c[k] = v.clone();
+        }
+        rule(id, SEND_DRAFT, c, active)
+    }
+
+    fn marks(any: &[&str], archived: &[&str]) -> Marks {
+        Marks {
+            any_sender: any.iter().map(|s| (*s).to_owned()).collect(),
+            archived: archived.iter().map(|s| (*s).to_owned()).collect(),
+        }
+    }
+
+    fn rel(a: &Rule, b: &Rule, m: &Marks) -> Relation {
+        let forward = compare(a, b, m);
+        assert_eq!(compare(b, a, m), forward.clone().mirrored(), "simetría");
+        forward
+    }
+
+    fn ids(list: &[&str]) -> Vec<String> {
+        list.iter().map(|s| (*s).to_owned()).collect()
+    }
+
+    #[test]
+    fn invoice_relations_follow_the_supplier_and_the_limit() {
+        let m = Marks::default();
+        let wide = inv("a", "Alfa SL", None, true);
+        let narrow = inv("b", "Alfa SL", Some("500.00"), true);
+        assert_eq!(
+            rel(&wide, &narrow, &m),
+            Relation::Contains { wider: Side::First }
+        );
+        assert_eq!(
+            rel(&narrow, &wide, &m),
+            Relation::Contains {
+                wider: Side::Second
+            }
+        );
+        // Mismo proveedor (sin mayúsculas ni espacios en los bordes) y mismo límite escrito
+        // de otra forma: iguales.
+        assert_eq!(
+            rel(
+                &inv("a", " alfa sl ", Some("1.000,00"), true),
+                &inv("b", "ALFA SL", Some("1000.00"), true),
+                &m
+            ),
+            Relation::Equal
+        );
+        assert_eq!(
+            rel(&wide, &inv("c", "alfa sl", None, true), &m),
+            Relation::Equal
+        );
+        // Límites distintos: contiene la de límite mayor.
+        assert_eq!(
+            rel(
+                &inv("a", "Alfa SL", Some("1000.00"), true),
+                &inv("b", "Alfa SL", Some("500.00"), true),
+                &m
+            ),
+            Relation::Contains { wider: Side::First }
+        );
+        // Otro proveedor: no se cruzan.
+        assert_eq!(
+            rel(&wide, &inv("c", "Beta SA", None, true), &m),
+            Relation::Disjoint
+        );
+    }
+
+    #[test]
+    fn a_similar_name_is_only_a_question_and_never_equal() {
+        let m = Marks::default();
+        for (x, y) in [
+            ("Alfa SA", "ALFA, S.A."),
+            ("Alfa S.L.", "alfa sl"),
+            ("Alfa  SL", "Alfa-SL"),
+        ] {
+            for limit in [None, Some("500.00")] {
+                let relation = rel(&inv("a", x, limit, true), &inv("b", y, limit, true), &m);
+                assert_eq!(relation, Relation::Similar, "{x} / {y}");
+                assert_ne!(relation, Relation::Equal);
+            }
+        }
+        // Parecidos con límites distintos siguen siendo una pregunta, no un contenido.
+        assert_eq!(
+            rel(
+                &inv("a", "Alfa SA", None, true),
+                &inv("b", "ALFA, S.A.", Some("500.00"), true),
+                &m
+            ),
+            Relation::Similar
+        );
+        assert_eq!(
+            rel(
+                &inv("a", "Alfa SL", None, true),
+                &inv("b", "Alfa Sur", None, true),
+                &m
+            ),
+            Relation::Disjoint
+        );
+    }
+
+    #[test]
+    fn rules_in_different_currencies_never_cross() {
+        let m = Marks::default();
+        let eur = rule(
+            "a",
+            REGISTER_INVOICE,
+            json!({ "supplier": "Alfa SL", "currency": "EUR" }),
+            true,
+        );
+        let usd = rule(
+            "b",
+            REGISTER_INVOICE,
+            json!({ "supplier": "Alfa SL", "currency": "USD" }),
+            true,
+        );
+        let plain = inv("c", "Alfa SL", None, true);
+        assert_eq!(rel(&eur, &usd, &m), Relation::Disjoint);
+        assert_eq!(rel(&plain, &usd, &m), Relation::Disjoint);
+        // Sin moneda es euro: igual que la que lo dice.
+        assert_eq!(rel(&eur, &plain, &m), Relation::Equal);
+        // Dos reglas en dólares no actúan (D127): no comparables, con las dos citadas.
+        let usd2 = rule(
+            "d",
+            REGISTER_INVOICE,
+            json!({ "supplier": "Alfa SL", "currency": "USD" }),
+            true,
+        );
+        assert_eq!(
+            rel(&usd, &usd2, &m),
+            Relation::NotComparable {
+                reason: NotComparable::Defective {
+                    rule_ids: ids(&["b", "d"])
+                }
+            }
+        );
+    }
+
+    #[test]
+    fn send_relations_follow_the_sender_scope() {
+        let m = marks(&["any"], &[]);
+        let address = send("a", json!({ "sender": "ana@alfa.test" }), true);
+        let same = send("b", json!({ "sender": "ANA@alfa.test" }), true);
+        let other_address = send("c", json!({ "sender": "luis@alfa.test" }), true);
+        let domain = send("d", json!({ "sender_domain": "alfa.test" }), true);
+        let sub = send("e", json!({ "sender_domain": "mail.alfa.test" }), true);
+        let other_domain = send("f", json!({ "sender_domain": "beta.test" }), true);
+        let any = send("any", json!({}), true);
+        let any2 = send("any2", json!({}), true);
+        let m2 = marks(&["any", "any2"], &[]);
+
+        assert_eq!(rel(&address, &same, &m), Relation::Equal);
+        assert_eq!(rel(&address, &other_address, &m), Relation::Disjoint);
+        assert_eq!(
+            rel(&domain, &address, &m),
+            Relation::Contains { wider: Side::First }
+        );
+        assert_eq!(
+            rel(&address, &domain, &m),
+            Relation::Contains {
+                wider: Side::Second
+            }
+        );
+        // Subdominios: el dominio es exacto.
+        assert_eq!(rel(&domain, &sub, &m), Relation::Disjoint);
+        assert_eq!(rel(&domain, &other_domain, &m), Relation::Disjoint);
+        assert_eq!(
+            rel(&address, &other_domain, &m),
+            Relation::Disjoint,
+            "una dirección no está en un dominio ajeno"
+        );
+        assert_eq!(
+            rel(
+                &domain,
+                &send("d2", json!({ "sender_domain": "ALFA.test" }), true),
+                &m
+            ),
+            Relation::Equal
+        );
+        // «Cualquier remitente» (con marca avanzada) contiene a todo lo demás.
+        assert_eq!(
+            rel(&any, &domain, &m),
+            Relation::Contains { wider: Side::First }
+        );
+        assert_eq!(
+            rel(&address, &any, &m),
+            Relation::Contains {
+                wider: Side::Second
+            }
+        );
+        assert_eq!(rel(&any, &any2, &m2), Relation::Equal);
+        // Otra categoría: no se cruzan.
+        let mut other_category = send("g", json!({ "sender": "ana@alfa.test" }), true);
+        other_category.conditions["category"] = json!("consulta_pago");
+        assert_eq!(rel(&address, &other_category, &m), Relation::Disjoint);
+    }
+
+    #[test]
+    fn a_send_rule_without_sender_or_mark_does_not_act_and_cannot_be_compared() {
+        let m = Marks::default();
+        let missing = send("a", json!({}), true);
+        let domain = send("b", json!({ "sender_domain": "alfa.test" }), true);
+        assert_eq!(
+            rel(&missing, &domain, &m),
+            Relation::NotComparable {
+                reason: NotComparable::Defective {
+                    rule_ids: ids(&["a"])
+                }
+            }
+        );
+        // Con la marca avanzada sí actúa y contiene al dominio.
+        assert_eq!(
+            rel(&missing, &domain, &marks(&["a"], &[])),
+            Relation::Contains { wider: Side::First }
+        );
+    }
+
+    #[test]
+    fn invalid_conditions_different_kinds_and_unknown_kinds_are_not_comparable() {
+        let m = Marks::default();
+        let good = inv("a", "Alfa SL", None, true);
+        for bad in [
+            rule("b", REGISTER_INVOICE, json!("texto"), true),
+            rule("b", REGISTER_INVOICE, json!({}), true),
+            rule(
+                "b",
+                REGISTER_INVOICE,
+                json!({ "supplier": "Alfa SL", "max_total": 500 }),
+                true,
+            ),
+            rule(
+                "b",
+                REGISTER_INVOICE,
+                json!({ "supplier": "Alfa SL", "max_total": "mucho" }),
+                true,
+            ),
+            rule(
+                "b",
+                REGISTER_INVOICE,
+                json!({ "supplier": "Alfa SL", "color": "azul" }),
+                true,
+            ),
+        ] {
+            assert_eq!(
+                rel(&good, &bad, &m),
+                Relation::NotComparable {
+                    reason: NotComparable::Defective {
+                        rule_ids: ids(&["b"])
+                    }
+                },
+                "{:?}",
+                bad.conditions
+            );
+        }
+        assert_eq!(
+            rel(
+                &good,
+                &send("s", json!({ "sender_domain": "alfa.test" }), true),
+                &m
+            ),
+            Relation::NotComparable {
+                reason: NotComparable::DifferentKinds
+            }
+        );
+        let future = rule("x", "emit_recurring", json!({ "client": "Alfa" }), true);
+        let future2 = rule("y", "emit_recurring", json!({ "client": "Alfa" }), true);
+        assert_eq!(
+            rel(&future, &future2, &m),
+            Relation::NotComparable {
+                reason: NotComparable::UnknownKind
+            }
+        );
+    }
+
+    #[test]
+    fn compare_is_symmetric_over_a_mixed_pool() {
+        let m = marks(&["any"], &[]);
+        let pool = vec![
+            inv("i1", "Alfa SL", None, true),
+            inv("i2", "alfa sl", Some("500.00"), false),
+            inv("i3", "ALFA, S.L.", Some("500.00"), true),
+            inv("i4", "Beta SA", None, true),
+            rule(
+                "i5",
+                REGISTER_INVOICE,
+                json!({ "supplier": "Alfa SL", "currency": "USD" }),
+                true,
+            ),
+            rule("i6", REGISTER_INVOICE, json!(7), true),
+            send("s1", json!({ "sender": "ana@alfa.test" }), true),
+            send("s2", json!({ "sender_domain": "alfa.test" }), true),
+            send("any", json!({}), true),
+            send("s3", json!({}), true),
+            rule("u1", "emit_recurring", json!({}), true),
+        ];
+        for a in &pool {
+            for b in &pool {
+                let forward = compare(a, b, &m);
+                assert_eq!(
+                    compare(b, a, &m),
+                    forward.clone().mirrored(),
+                    "{} / {}",
+                    a.id,
+                    b.id
+                );
+                if a.id == b.id {
+                    continue;
+                }
+                if matches!(forward, Relation::Similar) {
+                    assert_ne!(forward, Relation::Equal);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn analyze_gives_one_finding_per_pair_and_skips_archived_rules() {
+        let rules = vec![
+            inv("a", "Alfa SL", None, true),
+            inv("b", "Alfa SL", Some("500.00"), true),
+            inv("c", "Alfa SL", Some("500.00"), true),
+            inv("old", "Alfa SL", None, true),
+            inv("z", "Beta SA", None, true),
+        ];
+        let findings = analyze(&rules, &marks(&[], &["old"]));
+        // a⊃b, a⊃c y b=c: tres pares, uno cada uno; nada de `old` ni de Beta.
+        let keys: Vec<&str> = findings.iter().map(|f| f.key.as_str()).collect();
+        assert_eq!(keys.len(), 3, "{keys:?}");
+        assert!(keys.contains(&"duplicate:b+c"));
+        assert!(keys.contains(&"overlap:a+b"));
+        assert!(keys.contains(&"overlap:a+c"));
+        let unique: HashSet<&&str> = keys.iter().collect();
+        assert_eq!(unique.len(), keys.len());
+        assert!(findings
+            .iter()
+            .all(|f| f.active_conflict && f.merge_candidate));
+        assert!(findings
+            .iter()
+            .all(|f| f.rules.iter().all(|r| r.id != "old" && r.id != "z")));
+    }
+
+    #[test]
+    fn analyze_flags_inactive_pairs_and_orders_by_gravity() {
+        let rules = vec![
+            inv("a", "Alfa SL", None, true),
+            inv("b", "Alfa SL", Some("500.00"), false),
+            inv("c", "Gama SL", None, true),
+            inv("d", "Gama SL", None, true),
+            inv("e", "Delta SA", None, true),
+            inv("f", "DELTA, S.A.", None, true),
+            send("m", json!({}), true),
+        ];
+        let findings = analyze(&rules, &Marks::default());
+        let order: Vec<(&str, bool)> = findings
+            .iter()
+            .map(|f| (f.key.as_str(), f.active_conflict))
+            .collect();
+        assert_eq!(
+            order,
+            vec![
+                ("duplicate:c+d", true),
+                ("overlap:a+b", false),
+                ("similar:e+f", false),
+                ("defective:m", false),
+            ]
+        );
+        let inactive = &findings[1];
+        assert!(inactive.rules.iter().any(|r| !r.active));
+        assert_eq!(inactive.effect.code, "narrow_blocks_wide");
+        assert_eq!(inactive.effect.data["wider"]["limit"], Value::Null);
+        assert_eq!(inactive.effect.data["narrower"]["limit"], "500.00");
+        assert_eq!(inactive.effect.data["supplier"], "Alfa SL");
+        // La pregunta de nombre parecido no se puede unificar ni es un choque.
+        assert!(!findings[2].merge_candidate);
+        assert_eq!(findings[2].effect.code, "similar_supplier");
+        // Una regla de envío sin remitente: pendiente de corregir, no una contradicción.
+        assert_eq!(findings[3].kind, FindingKind::Defective);
+        assert_eq!(findings[3].effect.code, "sender_missing");
+    }
+
+    #[test]
+    fn analyze_does_not_cross_kinds_and_reports_unknown_kinds() {
+        let rules = vec![
+            inv("a", "Alfa SL", None, true),
+            send("s", json!({ "sender_domain": "alfa.test" }), true),
+            rule("u", "emit_recurring", json!({}), true),
+        ];
+        let findings = analyze(&rules, &Marks::default());
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].key, "defective:u");
+        assert_eq!(findings[0].effect.code, "not_comparable");
+    }
+
+    #[test]
+    fn analyze_describes_a_sender_overlap_with_concrete_data() {
+        let rules = vec![
+            send("dom", json!({ "sender_domain": "alfa.test" }), true),
+            send("dir", json!({ "sender": "ana@alfa.test" }), true),
+        ];
+        let findings = analyze(&rules, &Marks::default());
+        assert_eq!(findings.len(), 1);
+        let data = &findings[0].effect.data;
+        assert_eq!(data["category"], "solicitud_factura");
+        assert_eq!(data["wider"]["id"], "dom");
+        assert_eq!(data["wider"]["scope"], "domain");
+        assert_eq!(data["narrower"]["value"], "ana@alfa.test");
+    }
+
+    // ---- Unificación ----
+
+    fn task(id: i64, supplier: &str, total: &str) -> Task {
+        Task {
+            id,
+            kind: INVOICE.into(),
+            input_ref: format!("{id}.txt"),
+            state: TaskState::AwaitingReview,
+            attempts: 1,
+            result: Some(json!({
+                "document": format!("{id}.txt"),
+                "fields": { "supplier": supplier, "total": total },
+                "currency_evidence": { "foreign": [], "euro": true },
+                "issues": [],
+                "unreadable": [],
+            })),
+            error: None,
+            created_at: 0,
+            updated_at: 0,
+        }
+    }
+
+    fn alfa_tasks() -> Vec<Task> {
+        // Hasta 500: 100, 200, 300, 400 y 500; por encima: 600 y 700; y una de otro proveedor.
+        let mut tasks: Vec<Task> = ["100.00", "200.00", "300.00", "400.00", "500.00"]
+            .iter()
+            .zip(1..)
+            .map(|(t, i)| task(i, "Alfa SL", t))
+            .collect();
+        tasks.push(task(6, "Alfa SL", "600.00"));
+        tasks.push(task(7, "alfa sl", "700.00"));
+        tasks.push(task(8, "Beta SA", "100.00"));
+        tasks
+    }
+
+    fn two_rules() -> Vec<Rule> {
+        vec![
+            inv("alfa-libre", "Alfa SL", None, true),
+            inv("alfa-500", "Alfa SL", Some("500.00"), true),
+        ]
+    }
+
+    #[test]
+    fn merge_needs_a_choice_when_the_limits_differ() {
+        let rules = two_rules();
+        let m = Marks::default();
+        let both = ids(&["alfa-500", "alfa-libre"]);
+        let options = merge_options(&rules, &m, &both).unwrap();
+        assert_eq!(
+            options.iter().map(|o| o.key.as_str()).collect::<Vec<_>>(),
+            ["500.00", "none"]
+        );
+        let Err(MergeError::ChoiceRequired(listed)) = merge_plan(&rules, &m, &both, None, &[])
+        else {
+            panic!("debía pedir una elección");
+        };
+        assert_eq!(listed, options);
+        assert!(matches!(
+            merge_plan(&rules, &m, &both, Some("750.00"), &[]),
+            Err(MergeError::UnknownChoice(_))
+        ));
+        let plan = merge_plan(&rules, &m, &both, Some("500.00"), &[]).unwrap();
+        assert_eq!(
+            plan.after.conditions,
+            json!({ "supplier": "Alfa SL", "max_total": "500.00" })
+        );
+        assert!(!plan.after.active);
+        assert_eq!(plan.before.len(), 2);
+        // Sin límite.
+        let plan = merge_plan(&rules, &m, &both, Some("none"), &[]).unwrap();
+        assert_eq!(plan.after.conditions, json!({ "supplier": "Alfa SL" }));
+    }
+
+    #[test]
+    fn merging_equal_rules_needs_no_choice() {
+        let rules = vec![
+            inv("a", "Alfa SL", Some("500.00"), true),
+            inv("b", "alfa sl", Some("500,00"), false),
+        ];
+        let plan = merge_plan(&rules, &Marks::default(), &ids(&["b", "a"]), None, &[]).unwrap();
+        assert_eq!(plan.chosen, "500.00");
+        assert_eq!(plan.options.len(), 1);
+        assert_eq!(plan.before[0].id, "a");
+    }
+
+    #[test]
+    fn the_merge_simulation_matches_production_decisions() {
+        let rules = two_rules();
+        let m = Marks::default();
+        let tasks = alfa_tasks();
+        let both = ids(&["alfa-libre", "alfa-500"]);
+
+        // Producción hoy: hasta 500 coinciden las dos (revisión); por encima solo la libre.
+        let today: Vec<bool> = tasks
+            .iter()
+            .map(|t| {
+                matches!(
+                    evaluate_result(
+                        &rules,
+                        &HashSet::new(),
+                        REGISTER_INVOICE,
+                        t.result.as_ref().unwrap()
+                    )
+                    .decision,
+                    RuleDecision::Automate { .. }
+                )
+            })
+            .collect();
+        assert_eq!(
+            today,
+            [false, false, false, false, false, true, true, false]
+        );
+
+        // Elegir ≤ 500: 5 dejan de revisarse y 2 por encima dejan de automatizarse.
+        let plan = merge_plan(&rules, &m, &both, Some("500.00"), &tasks).unwrap();
+        let sim = &plan.simulation;
+        assert_eq!(sim.considered, 8);
+        assert_eq!(sim.touched, 7, "la de Beta no la toca ninguna regla");
+        assert_eq!(
+            sim.start_automating
+                .iter()
+                .map(|t| t.task_id)
+                .collect::<Vec<_>>(),
+            [1, 2, 3, 4, 5]
+        );
+        assert_eq!(
+            sim.stop_automating
+                .iter()
+                .map(|t| t.task_id)
+                .collect::<Vec<_>>(),
+            [6, 7]
+        );
+        assert_eq!(sim.stop_automating[0].total.as_deref(), Some("600.00"));
+        assert_eq!((sim.unchanged_automated, sim.unchanged_review), (0, 0));
+
+        // Producción con la regla nueva como único Alfa: las mismas decisiones.
+        let merged = vec![inv("nueva", "Alfa SL", Some("500.00"), true)];
+        for (t, expected) in tasks
+            .iter()
+            .zip([true, true, true, true, true, false, false, false])
+        {
+            let decision = evaluate_result(
+                &merged,
+                &HashSet::new(),
+                REGISTER_INVOICE,
+                t.result.as_ref().unwrap(),
+            )
+            .decision;
+            assert_eq!(
+                matches!(decision, RuleDecision::Automate { .. }),
+                expected,
+                "tarea {}",
+                t.id
+            );
+        }
+
+        // Elegir sin límite: las 5 dejan de revisarse y las dos grandes siguen igual.
+        let plan = merge_plan(&rules, &m, &both, Some("none"), &tasks).unwrap();
+        let sim = &plan.simulation;
+        assert_eq!(sim.start_automating.len(), 5);
+        assert!(sim.stop_automating.is_empty());
+        assert_eq!(sim.unchanged_automated, 2);
+    }
+
+    #[test]
+    fn the_merge_simulation_skips_tasks_without_result_and_other_kinds() {
+        let rules = two_rules();
+        let mut tasks = alfa_tasks();
+        tasks[0].result = None;
+        let mut mail = task(99, "Alfa SL", "100.00");
+        mail.kind = EMAIL.into();
+        tasks.push(mail);
+        let plan = merge_plan(
+            &rules,
+            &Marks::default(),
+            &ids(&["alfa-libre", "alfa-500"]),
+            Some("500.00"),
+            &tasks,
+        )
+        .unwrap();
+        assert_eq!(plan.simulation.skipped_without_result, 1);
+        assert_eq!(plan.simulation.considered, 7);
+    }
+
+    #[test]
+    fn merge_rejects_what_cannot_be_unified() {
+        let m = Marks::default();
+        let rules = vec![
+            inv("a", "Alfa SL", None, true),
+            inv("b", "Alfa SL", Some("500.00"), true),
+            inv("sim", "ALFA, S.L.", None, true),
+            inv("beta", "Beta SA", None, true),
+            send("s", json!({ "sender_domain": "alfa.test" }), true),
+            send("miss", json!({}), true),
+            send("miss2", json!({}), true),
+            rule("u", "emit_recurring", json!({}), true),
+            rule(
+                "bad",
+                REGISTER_INVOICE,
+                json!({ "supplier": "Alfa SL", "max_total": "x" }),
+                true,
+            ),
+            inv("old", "Alfa SL", None, false),
+        ];
+        let m_arch = marks(&[], &["old"]);
+        let merge = |m: &Marks, list: &[&str]| merge_plan(&rules, m, &ids(list), Some("none"), &[]);
+        assert_eq!(merge(&m, &["a"]), Err(MergeError::TooFew));
+        assert_eq!(merge(&m, &["a", "a"]), Err(MergeError::Repeated));
+        assert!(matches!(
+            merge(&m, &["a", "nope"]),
+            Err(MergeError::Missing(_))
+        ));
+        assert_eq!(
+            merge(&m_arch, &["a", "old"]),
+            Err(MergeError::Archived("old".into()))
+        );
+        assert_eq!(merge(&m, &["a", "s"]), Err(MergeError::MixedKinds));
+        assert!(matches!(
+            merge(&m, &["a", "sim"]),
+            Err(MergeError::SimilarSupplier(..))
+        ));
+        assert!(matches!(
+            merge(&m, &["a", "beta"]),
+            Err(MergeError::Disjoint(..))
+        ));
+        assert!(matches!(
+            merge(&m, &["miss", "miss2"]),
+            Err(MergeError::Defective(..))
+        ));
+        assert!(matches!(
+            merge(&m, &["a", "bad"]),
+            Err(MergeError::Defective(..))
+        ));
+        assert_eq!(
+            merge(&m, &["u", "u2"]).unwrap_err().to_string(),
+            "la regla u2 no existe"
+        );
+        let unknown = vec![
+            rule("u", "emit_recurring", json!({}), true),
+            rule("v", "emit_recurring", json!({}), true),
+        ];
+        assert_eq!(
+            merge_plan(&unknown, &m, &ids(&["u", "v"]), None, &[]),
+            Err(MergeError::UnknownKind)
+        );
+        // El mensaje del nombre parecido explica el porqué y qué hacer.
+        let text = merge(&m, &["a", "sim"]).unwrap_err().to_string();
+        assert!(
+            text.contains("Alfa SL") && text.contains("ALFA, S.L.") && text.contains("edite"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn a_merged_rule_never_inherits_the_advanced_mark_and_the_plan_says_so() {
+        let rules = vec![
+            send("any", json!({}), true),
+            send("dom", json!({ "sender_domain": "alfa.test" }), true),
+        ];
+        let m = marks(&["any"], &[]);
+        let both = ids(&["any", "dom"]);
+        let plan = merge_plan(&rules, &m, &both, Some("domain:alfa.test"), &[]).unwrap();
+        assert_eq!(plan.after.loses_any_sender, ["any"]);
+        assert!(!plan.after.needs_sender_validation);
+        assert!(
+            plan.before
+                .iter()
+                .find(|r| r.id == "any")
+                .unwrap()
+                .any_sender
+        );
+        // Si la elegida es «cualquier remitente», la regla nueva no actúa hasta validarla.
+        let plan = merge_plan(&rules, &m, &both, Some("any"), &[]).unwrap();
+        assert!(plan.after.needs_sender_validation);
+        assert_eq!(
+            plan.after.conditions,
+            json!({ "category": "solicitud_factura" })
+        );
+    }
+
+    #[test]
+    fn the_plan_fingerprint_changes_with_the_rules_and_the_choice() {
+        let m = Marks::default();
+        let both = ids(&["alfa-libre", "alfa-500"]);
+        let base = merge_plan(&two_rules(), &m, &both, Some("500.00"), &[]).unwrap();
+        let same = merge_plan(&two_rules(), &m, &both, Some("500.00"), &alfa_tasks()).unwrap();
+        assert_eq!(base.fingerprint, same.fingerprint, "las tareas no entran");
+        let other_choice = merge_plan(&two_rules(), &m, &both, Some("none"), &[]).unwrap();
+        assert_ne!(base.fingerprint, other_choice.fingerprint);
+        let mut changed = two_rules();
+        changed[1].version = 2;
+        assert_ne!(
+            base.fingerprint,
+            merge_plan(&changed, &m, &both, Some("500.00"), &[])
+                .unwrap()
+                .fingerprint
+        );
+        let mut third = two_rules();
+        third.push(inv("beta", "Beta SA", None, true));
+        assert_ne!(
+            base.fingerprint,
+            merge_plan(&third, &m, &both, Some("500.00"), &[])
+                .unwrap()
+                .fingerprint,
+            "otra regla del tipo también cuenta"
         );
     }
 }

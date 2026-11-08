@@ -1677,3 +1677,108 @@ h2 + .section {
   align-items: center;
   gap: var(--s1);
 }
+
+/* Revisión de reglas: contradicciones y unificación (R23). */
+.findings {
+  max-width: 920px;
+  margin-bottom: var(--s4);
+  border-left: 4px solid var(--warn);
+}
+
+.findings > h3 {
+  margin: 0 0 var(--s1);
+}
+
+.findings-none {
+  margin: var(--s2) 0;
+}
+
+.finding-cards {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s3);
+  margin-top: var(--s3);
+}
+
+.finding-card {
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface-2);
+  padding: var(--s3) var(--s4);
+}
+
+.finding-card p {
+  margin: var(--s1) 0;
+  max-width: 75ch;
+}
+
+.finding-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--s2) var(--s3);
+}
+
+.finding-title {
+  margin: 0;
+  font-size: var(--fs-title);
+  overflow-wrap: anywhere;
+}
+
+.finding-label {
+  font-weight: 600;
+}
+
+.finding-actions {
+  margin-top: var(--s3);
+}
+
+.activation-findings {
+  border-top: 1px solid var(--line);
+  margin-top: var(--s2);
+  padding-top: var(--s2);
+}
+
+.finding-lines {
+  margin: var(--s2) 0;
+}
+
+.finding-lines p {
+  margin: var(--s1) 0;
+}
+
+.merge-columns {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: var(--s3) var(--s4);
+}
+
+.merge-column h5 {
+  margin: 0 0 var(--s1);
+  font-size: var(--fs-body);
+}
+
+.merge-column ul {
+  margin: 0;
+  padding-left: var(--s5);
+}
+
+.merge-choice {
+  margin: var(--s3) 0 0;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  padding: var(--s2) var(--s3);
+}
+
+.merge-choice legend {
+  font-weight: 600;
+  padding: 0 var(--s1);
+}
+
+.merge-option {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--s2);
+  margin: var(--s2) 0;
+}

@@ -22,6 +22,9 @@ pub struct RuleMeta {
     /// Marca de la validación avanzada: la regla de envío puede contestar a cualquier
     /// remitente (D126). Se borra al cambiar las condiciones.
     pub allow_any_sender_ack_at: Option<i64>,
+    /// De dónde sale la regla (D131): al unificar, las reglas de origen y la opción elegida.
+    /// Solo ids, versiones y claves; nunca contenido de correos.
+    pub origin: Option<Value>,
 }
 
 /// Una evaluación que se guarda (D129). `checks` no lleva contenido del correo.
@@ -96,7 +99,7 @@ impl Store {
         Ok(self
             .conn
             .query_row(
-                "SELECT rule_id, name, archived_at, allow_any_sender_ack_at FROM rule_meta WHERE rule_id = ?1",
+                "SELECT rule_id, name, archived_at, allow_any_sender_ack_at, origin_json FROM rule_meta WHERE rule_id = ?1",
                 [id],
                 meta_from_row,
             )
@@ -106,7 +109,7 @@ impl Store {
     pub fn rule_metas(&self) -> Result<HashMap<String, RuleMeta>> {
         let mut stmt = self
             .conn
-            .prepare("SELECT rule_id, name, archived_at, allow_any_sender_ack_at FROM rule_meta")?;
+            .prepare("SELECT rule_id, name, archived_at, allow_any_sender_ack_at, origin_json FROM rule_meta")?;
         let rows = stmt.query_map([], meta_from_row)?;
         let mut map = HashMap::new();
         for meta in rows {
@@ -179,41 +182,54 @@ impl Store {
     /// hay borrado físico: el historial conserva todas las versiones (D128).
     pub fn archive_rule(&mut self, id: &str) -> Result<Rule> {
         let tx = self.conn.transaction()?;
-        let current =
-            current_rule(&tx, id)?.ok_or_else(|| CoreError::RuleNotFound(id.to_owned()))?;
-        if is_archived(&tx, id)? {
-            return Ok(current);
+        let rule = archive_in(&tx, id)?;
+        tx.commit()?;
+        Ok(rule)
+    }
+
+    /// Unifica reglas en una sola transacción (D131): archiva las originales, crea la regla
+    /// nueva **inactiva**, sin la validación avanzada de ninguna, con su origen, y lo audita
+    /// con ids y versiones. `sources` lleva cada original con la versión que se revisó: si
+    /// alguna cambió o está archivada, no se toca nada. Si algo falla a mitad, tampoco.
+    /// Nunca reactiva nada. Quien llama comprueba las condiciones con `check_rule`.
+    pub fn merge_rules(
+        &mut self,
+        sources: &[(String, i64)],
+        new_id: &str,
+        action_kind: &str,
+        conditions: &Value,
+        name: Option<&str>,
+        origin: &Value,
+    ) -> Result<Rule> {
+        let tx = self.conn.transaction()?;
+        for (id, version) in sources {
+            let current = live_rule(&tx, id)?;
+            if current.version != *version {
+                return Err(CoreError::RuleChanged(id.clone()));
+            }
         }
-        let rule = if current.active {
-            insert_rule_version(
-                &tx,
-                id,
-                current.version + 1,
-                &current.action_kind,
-                &current.conditions,
-                false,
-            )?
-        } else {
-            current
-        };
-        tx.execute(
-            "INSERT INTO rule_meta (rule_id, archived_at) VALUES (?1, ?2)
-             ON CONFLICT(rule_id) DO UPDATE SET archived_at = excluded.archived_at",
-            params![id, now_ms()],
-        )?;
-        // La validación avanzada no sobrevive al archivado: desarchivar no debe reactivar el
-        // «cualquier remitente» sin que alguien lo vuelva a validar (D126).
-        let had_ack = tx.execute(
-            "UPDATE rule_meta SET allow_any_sender_ack_at = NULL
-             WHERE rule_id = ?1 AND allow_any_sender_ack_at IS NOT NULL",
-            [id],
-        )?;
-        if had_ack > 0 {
-            audit_any_sender(&tx, &rule, false, "retirada: la regla se archivó")?;
+        if current_rule(&tx, new_id)?.is_some() {
+            return Err(CoreError::IdempotencyConflict(format!("regla {new_id}")));
         }
+        for (id, _) in sources {
+            archive_in(&tx, id)?;
+        }
+        let rule = insert_rule_version(&tx, new_id, 1, action_kind, conditions, false)?;
         tx.execute(
-            "INSERT INTO audit_log (at, task_id, action, status, authorization, detail) VALUES (?1, NULL, 'rule_archive', 'archived', NULL, ?2)",
-            params![now_ms(), format!("{id} v{}", rule.version)],
+            "INSERT INTO rule_meta (rule_id, name, origin_json) VALUES (?1, ?2, ?3)",
+            params![new_id, name, serde_json::to_string(origin)?],
+        )?;
+        let from = sources
+            .iter()
+            .map(|(id, version)| format!("{id} v{version}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        tx.execute(
+            "INSERT INTO audit_log (at, task_id, action, status, authorization, detail) VALUES (?1, NULL, 'rule_merge', 'merged', NULL, ?2)",
+            params![
+                now_ms(),
+                format!("{new_id} v1 (inactiva) sustituye a {from}; originales archivadas")
+            ],
         )?;
         tx.commit()?;
         Ok(rule)
@@ -539,6 +555,47 @@ impl Store {
     }
 }
 
+/// Archiva una regla dentro de una transacción: inactiva (versión nueva si estaba activa),
+/// marcada, sin validación avanzada y con su entrada en el historial.
+fn archive_in(tx: &rusqlite::Transaction<'_>, id: &str) -> Result<Rule> {
+    let current = current_rule(tx, id)?.ok_or_else(|| CoreError::RuleNotFound(id.to_owned()))?;
+    if is_archived(tx, id)? {
+        return Ok(current);
+    }
+    let rule = if current.active {
+        insert_rule_version(
+            tx,
+            id,
+            current.version + 1,
+            &current.action_kind,
+            &current.conditions,
+            false,
+        )?
+    } else {
+        current
+    };
+    tx.execute(
+        "INSERT INTO rule_meta (rule_id, archived_at) VALUES (?1, ?2)
+         ON CONFLICT(rule_id) DO UPDATE SET archived_at = excluded.archived_at",
+        params![id, now_ms()],
+    )?;
+    // La validación avanzada no sobrevive al archivado: desarchivar no debe reactivar el
+    // «cualquier remitente» sin que alguien lo vuelva a validar (D126).
+    let had_ack = tx.execute(
+        "UPDATE rule_meta SET allow_any_sender_ack_at = NULL
+         WHERE rule_id = ?1 AND allow_any_sender_ack_at IS NOT NULL",
+        [id],
+    )?;
+    if had_ack > 0 {
+        audit_any_sender(tx, &rule, false, "retirada: la regla se archivó")?;
+    }
+    tx.execute(
+        "INSERT INTO audit_log (at, task_id, action, status, authorization, detail) VALUES (?1, NULL, 'rule_archive', 'archived', NULL, ?2)",
+        params![now_ms(), format!("{id} v{}", rule.version)],
+    )?;
+    Ok(rule)
+}
+
 /// Escribe el nombre visible de una regla y lo deja en el historial.
 fn write_name(tx: &rusqlite::Transaction<'_>, id: &str, name: Option<&str>) -> Result<()> {
     tx.execute(
@@ -573,6 +630,9 @@ fn meta_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RuleMeta> {
         name: row.get(1)?,
         archived_at: row.get(2)?,
         allow_any_sender_ack_at: row.get(3)?,
+        origin: row
+            .get::<_, Option<String>>(4)?
+            .and_then(|text| serde_json::from_str(&text).ok()),
     })
 }
 

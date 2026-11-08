@@ -12,8 +12,13 @@ import type {
   MailProviderKind,
   MailView,
   Memory,
+  MergeOption,
+  MergePlan,
+  MergePreview,
+  PlanRule,
   ProviderChoice,
   Rule,
+  RuleFinding,
   RuleStats,
   RuleView,
   SettingsView,
@@ -698,8 +703,8 @@ function addRule(rule: Rule) {
 }
 
 // Nombre, archivado y opción avanzada de cada regla (D124, D126, D128).
-const ruleMeta = new Map<string, { name: string | null; archived_at: number | null; any_sender_ack_at: number | null }>();
-const metaOf = (id: string) => ruleMeta.get(id) ?? { name: null, archived_at: null, any_sender_ack_at: null };
+const ruleMeta = new Map<string, { name: string | null; archived_at: number | null; any_sender_ack_at: number | null; origin: RuleView["origin"] }>();
+const metaOf = (id: string) => ruleMeta.get(id) ?? { name: null, archived_at: null, any_sender_ack_at: null, origin: null };
 const setMeta = (id: string, patch: Partial<ReturnType<typeof metaOf>>) => ruleMeta.set(id, { ...metaOf(id), ...patch });
 const hasSender = (c: Record<string, unknown>) => "sender" in c || "sender_domain" in c;
 const slug = (name: string) =>
@@ -723,7 +728,7 @@ function ruleView(rule: Rule): RuleView {
     reviewed: seed.reviewed ?? 0,
     unclassified: seed.unclassified ?? 0,
   };
-  return { ...rule, name: meta.name ?? rule.id, archived_at: meta.archived_at, any_sender_ack_at: meta.any_sender_ack_at, stats };
+  return { ...rule, name: meta.name ?? rule.id, archived_at: meta.archived_at, any_sender_ack_at: meta.any_sender_ack_at, origin: meta.origin, stats };
 }
 
 // Condiciones cerradas por acción (D123, D126, D127), como en el backend. `allowNoSender`: la
@@ -810,6 +815,22 @@ const seedRules: SeedRule[] = [
     anySender: true,
     stats: { applied: 1, last_applied_at: now() - 2 * DAY, reviewed: 0 },
   },
+  // Pares para la revisión de reglas (D130): solape de facturas con choque activo, reglas
+  // iguales, solape que solo chocará al activarse, proveedor de nombre parecido y «cualquier
+  // remitente» frente a un dominio.
+  { id: "alfa-sin-limite", name: "Facturas de Alfa sin límite", action_kind: "register_invoice", conditions: { supplier: "Suministros Alfa SL" }, active: true },
+  { id: "gama-300-a", name: "Facturas de Gama hasta 300 €", action_kind: "register_invoice", conditions: { supplier: "Gama Obras SL", max_total: "300.00" }, active: true },
+  { id: "gama-300-b", name: "Gama hasta 300 € (copia)", action_kind: "register_invoice", conditions: { supplier: "gama obras sl", max_total: "300.00" }, active: true },
+  { id: "beta-hasta-100", name: "Facturas de Beta hasta 100 €", action_kind: "register_invoice", conditions: { supplier: "Beta Servicios SL", max_total: "100.00" }, active: true },
+  { id: "delta-sa", name: "Facturas de Delta SA", action_kind: "register_invoice", conditions: { supplier: "Delta SA" }, active: true },
+  { id: "delta-sa-puntos", name: "Facturas de Delta (con puntos)", action_kind: "register_invoice", conditions: { supplier: "DELTA, S.A." }, active: true },
+  {
+    id: "documentacion-dominio",
+    name: "Documentación de ejemplo.test",
+    action_kind: "send_draft",
+    conditions: { category: "documentacion", sender_domain: "ejemplo.test" },
+    active: false,
+  },
   { id: "alfa-antigua", name: "Alfa (regla antigua)", action_kind: "register_invoice", conditions: { supplier: "Suministros Alfa SL" }, active: false, archived: true },
   { id: "emitir-recurrente", action_kind: "issue_recurring", conditions: {}, active: false },
 ];
@@ -872,6 +893,209 @@ function matchRule(
     return domain.toLowerCase() === c.sender_domain.toLowerCase() ? { matches: true } : no(`el remitente es «${from}», de otro dominio que «${c.sender_domain}»`);
   }
   return rule.ack ? { matches: true } : no("la regla no indica remitente; añádalo o valide la opción avanzada", true);
+}
+
+// ---- Contradicciones y unificación (D130, D131) ----
+// Réplica mínima de `compare`, `analyze` y `merge_plan` del backend, solo para ver la interfaz
+// sin Tauri. La decisión real la toma siempre `crates/app/src/rules.rs`.
+
+type MCond =
+  | { kind: "invoice"; supplier: string; key: string; limit: string | null }
+  | { kind: "send"; category: string; scope: "sender" | "domain" | "any"; value: string | null };
+type MDefect = { code: "invalid_conditions" | "sender_missing" | "not_comparable"; reason: string };
+
+const canonLimit = (raw: string) => {
+  const t = raw.trim();
+  const n = Number(t.includes(",") ? t.replace(/\./g, "").replace(",", ".") : t);
+  return Number.isFinite(n) ? n.toFixed(2) : null;
+};
+
+function mockCond(r: Rule): MCond | MDefect {
+  const c = r.conditions as Record<string, unknown>;
+  if (r.action_kind === "register_invoice") {
+    const supplier = String(c.supplier ?? "").trim();
+    if (!supplier) return { code: "invalid_conditions", reason: "no indica proveedor" };
+    let limit: string | null = null;
+    if ("max_total" in c) {
+      limit = typeof c.max_total === "string" ? canonLimit(c.max_total) : null;
+      if (limit === null) return { code: "invalid_conditions", reason: "su máximo no es un importe válido" };
+    }
+    return { kind: "invoice", supplier, key: supplier.toLowerCase(), limit };
+  }
+  if (r.action_kind === "send_draft") {
+    const category = String(c.category ?? "").trim();
+    if (!category) return { code: "invalid_conditions", reason: "no indica categoría" };
+    if (c.sender) return { kind: "send", category, scope: "sender", value: String(c.sender).trim().toLowerCase() };
+    if (c.sender_domain) return { kind: "send", category, scope: "domain", value: String(c.sender_domain).trim().toLowerCase() };
+    if (metaOf(r.id).any_sender_ack_at !== null) return { kind: "send", category, scope: "any", value: null };
+    return { code: "sender_missing", reason: "no indica remitente ni tiene validada la opción avanzada: no actúa" };
+  }
+  return { code: "not_comparable", reason: `la aplicación no reconoce el tipo de regla «${r.action_kind}», así que no puede compararla ni aplicarla` };
+}
+
+type MRel = "equal" | "first" | "second" | "similar" | "disjoint";
+const foldName = (n: string) => n.toLowerCase().replace(/[^\p{L}\p{N}]/gu, "");
+
+/** `first`/`second`: cuál de las dos cubre más. */
+function mockRelation(a: MCond, b: MCond): MRel {
+  if (a.kind === "invoice" && b.kind === "invoice") {
+    if (a.key === b.key) {
+      if (a.limit === b.limit) return "equal";
+      if (a.limit === null) return "first";
+      if (b.limit === null) return "second";
+      return Number(a.limit) > Number(b.limit) ? "first" : "second";
+    }
+    return foldName(a.supplier) && foldName(a.supplier) === foldName(b.supplier) ? "similar" : "disjoint";
+  }
+  if (a.kind === "send" && b.kind === "send") {
+    if (a.category !== b.category) return "disjoint";
+    if (a.scope === "any" && b.scope === "any") return "equal";
+    if (a.scope === "any") return "first";
+    if (b.scope === "any") return "second";
+    if (a.scope === b.scope) return a.value === b.value ? "equal" : "disjoint";
+    const [dom, adr, wider] = a.scope === "domain" ? [a, b, "first"] : [b, a, "second"];
+    return (adr.value ?? "").split("@")[1] === dom.value ? (wider as MRel) : "disjoint";
+  }
+  return "disjoint";
+}
+
+function mockSide(r: Rule, c: MCond) {
+  return c.kind === "invoice" ? { id: r.id, limit: c.limit } : { id: r.id, scope: c.scope, value: c.value };
+}
+
+function mockFindings(list: Rule[]): RuleFinding[] {
+  const live = list.filter((r) => !metaOf(r.id).archived_at).sort((a, b) => (a.id < b.id ? -1 : 1));
+  const conds = live.map(mockCond);
+  const out: RuleFinding[] = [];
+  const fr = (r: Rule) => ({ id: r.id, version: r.version, active: r.active });
+  live.forEach((r, i) => {
+    const c = conds[i]!;
+    if ("code" in c) out.push({ key: `defective:${r.id}`, kind: "defective", action_kind: r.action_kind, rules: [fr(r)], active_conflict: false, effect: { code: c.code, data: { reason: c.reason } }, merge_candidate: false, affected_tasks: null });
+  });
+  for (let i = 0; i < live.length; i++) {
+    for (let j = i + 1; j < live.length; j++) {
+      const [a, b, ca, cb] = [live[i]!, live[j]!, conds[i]!, conds[j]!];
+      if (a.action_kind !== b.action_kind || "code" in ca || "code" in cb) continue;
+      const rel = mockRelation(ca, cb);
+      if (rel === "disjoint") continue;
+      const real = rel !== "similar";
+      const taskKind = a.action_kind === "register_invoice" ? "invoice" : "email";
+      const both = tasks.filter((t) => t.kind === taskKind && t.result && [a, b].every((x) => matchRule(taskKind, { conditions: x.conditions, ack: metaOf(x.id).any_sender_ack_at !== null }, t.result).matches)).length;
+      let effect: RuleFinding["effect"];
+      if (rel === "similar") effect = { code: "similar_supplier", data: { first: { id: a.id, supplier: (ca as any).supplier }, second: { id: b.id, supplier: (cb as any).supplier } } };
+      else if (rel === "equal") effect = { code: "same_conditions", data: ca.kind === "invoice" ? { supplier: ca.supplier, limit: ca.limit } : { category: ca.category, scope: ca.scope, value: ca.value } };
+      else {
+        const [w, wc, n, nc] = rel === "first" ? [a, ca, b, cb] : [b, cb, a, ca];
+        effect = { code: "narrow_blocks_wide", data: { ...(ca.kind === "invoice" ? { supplier: ca.supplier } : { category: ca.category }), wider: mockSide(w, wc), narrower: mockSide(n, nc) } };
+      }
+      out.push({
+        key: `${rel === "similar" ? "similar" : rel === "equal" ? "duplicate" : "overlap"}:${a.id}+${b.id}`,
+        kind: rel === "similar" ? "similar" : rel === "equal" ? "duplicate" : "overlap",
+        action_kind: a.action_kind,
+        rules: [fr(a), fr(b)],
+        active_conflict: real && a.active && b.active,
+        effect,
+        merge_candidate: real,
+        affected_tasks: real ? both : null,
+      });
+    }
+  }
+  const rank = (f: RuleFinding) => (f.kind === "defective" ? 3 : f.kind === "similar" ? 2 : f.active_conflict ? 0 : 1);
+  return out.sort((x, y) => rank(x) - rank(y) || (x.key < y.key ? -1 : 1));
+}
+
+/** Decisión de la regla única que coincide, con los bloqueos de la tarea (D125). */
+function mockAutomates(list: Rule[], kind: string, result: any): boolean {
+  const matching = list.filter((r) => r.active && matchRule(kind, { conditions: r.conditions, ack: metaOf(r.id).any_sender_ack_at !== null }, result).matches);
+  if (matching.length !== 1) return false;
+  if (kind === "invoice") return !(result.issues?.length || result.unreadable?.length || result.amount_review || (result.part && result.part.of > 1) || result.currency_evidence?.euro !== true || (foreignOf(result) ?? ["?"]).length);
+  return (result.draft?.to ?? []).length > 0;
+}
+
+function mockOptions(members: Rule[]): MergeOption[] {
+  const options: MergeOption[] = [];
+  for (const r of members) {
+    const c = mockCond(r) as MCond;
+    const key = c.kind === "invoice" ? (c.limit ?? "none") : c.scope === "any" ? "any" : `${c.scope}:${c.value}`;
+    const found = options.find((o) => o.key === key);
+    if (found) found.rule_ids.push(r.id);
+    else options.push({ key, scope: c.kind === "invoice" ? { limit: c.limit } : { scope: c.scope, value: c.value }, rule_ids: [r.id] });
+  }
+  return options;
+}
+
+function mockMembers(ids: string[]): Rule[] {
+  if (ids.length < 2) throw "seleccione al menos dos reglas para unificar";
+  const members = ids.map((id) => latest().find((r) => r.id === id) ?? (() => { throw `la regla ${id} no existe`; })()).sort((a, b) => (a.id < b.id ? -1 : 1));
+  const archived = members.find((r) => metaOf(r.id).archived_at);
+  if (archived) throw `la regla ${archived.id} está archivada; restáurela antes de unificarla`;
+  if (members.some((r) => r.action_kind !== members[0]!.action_kind))
+    throw "solo se pueden unificar reglas del mismo tipo: no mezcle reglas de registrar facturas con reglas de enviar respuestas";
+  const conds = members.map(mockCond);
+  const bad = conds.findIndex((c) => "code" in c);
+  if (bad >= 0) throw `la regla ${members[bad]!.id} no actúa (${(conds[bad] as MDefect).reason}); corríjala antes de unificarla`;
+  for (let i = 0; i < members.length; i++)
+    for (let j = i + 1; j < members.length; j++) {
+      const rel = mockRelation(conds[i] as MCond, conds[j] as MCond);
+      if (rel === "similar") throw `«${(conds[i] as any).supplier}» y «${(conds[j] as any).supplier}» tienen un nombre de proveedor parecido, pero la aplicación no puede asegurar que sean el mismo; si lo son, edite una de las dos para dejar el nombre igual y después unifíquelas`;
+      if (rel === "disjoint") throw `las reglas ${members[i]!.id} y ${members[j]!.id} cubren casos distintos: no se contradicen y no hay nada que unificar`;
+    }
+  return members;
+}
+
+function mockFingerprint(members: Rule[], chosen: string) {
+  const parts = latest().filter((r) => r.action_kind === members[0]!.action_kind && !metaOf(r.id).archived_at).map((r) => `${r.id}:${r.version}:${r.active ? 1 : 0}:${metaOf(r.id).any_sender_ack_at !== null ? 1 : 0}`);
+  return `${chosen}|${parts.sort().join("|")}`;
+}
+
+function mockPlanRule(r: Rule): PlanRule {
+  return { id: r.id, version: r.version, active: r.active, conditions: r.conditions, any_sender: metaOf(r.id).any_sender_ack_at !== null };
+}
+
+function mockPlan(members: Rule[], chosen: string): MergePlan {
+  const options = mockOptions(members);
+  const model = members.find((r) => mockOptions([r])[0]!.key === chosen);
+  if (!model) throw `la opción «${chosen}» no corresponde a ninguna de las reglas elegidas`;
+  const kind = members[0]!.action_kind === "register_invoice" ? "invoice" : "email";
+  const originals = new Set(members.map((r) => r.id));
+  const current = latest().filter((r) => !metaOf(r.id).archived_at && r.action_kind === members[0]!.action_kind);
+  const merged: Rule = { id: "(unificada)", version: 1, action_kind: model.action_kind, conditions: model.conditions, active: true, created_at: 0 };
+  const future = [...current.filter((r) => !originals.has(r.id)), merged];
+  const simulation = { considered: 0, truncated: false, skipped_without_result: 0, touched: 0, start_automating: [] as MergePlan["simulation"]["start_automating"], stop_automating: [] as MergePlan["simulation"]["stop_automating"], unchanged_automated: 0, unchanged_review: 0 };
+  const ofKind = tasks.filter((t) => t.kind === kind).sort((a, b) => b.id - a.id);
+  simulation.truncated = ofKind.length > 200;
+  for (const t of ofKind.slice(0, 200)) {
+    if (!t.result) {
+      simulation.skipped_without_result++;
+      continue;
+    }
+    simulation.considered++;
+    const covered = [...members, merged].some((r) => matchRule(kind, { conditions: r.conditions, ack: r.id !== "(unificada)" && metaOf(r.id).any_sender_ack_at !== null }, t.result!).matches);
+    if (!covered) continue;
+    simulation.touched++;
+    const was = mockAutomates(current, kind, t.result);
+    const will = mockAutomates(future, kind, t.result);
+    const item = { task_id: t.id, label: kind === "invoice" ? (t.result.document ?? null) : (t.result.message?.subject ?? null), total: kind === "invoice" ? (t.result.fields?.total ?? null) : null };
+    if (!was && will) simulation.start_automating.push(item);
+    else if (was && !will) simulation.stop_automating.push(item);
+    else if (was) simulation.unchanged_automated++;
+    else simulation.unchanged_review++;
+  }
+  return {
+    action_kind: model.action_kind,
+    before: members.map(mockPlanRule),
+    options,
+    chosen,
+    after: {
+      conditions: model.conditions,
+      active: false,
+      option_key: chosen,
+      loses_any_sender: members.filter((r) => metaOf(r.id).any_sender_ack_at !== null).map((r) => r.id),
+      needs_sender_validation: model.action_kind === "send_draft" && chosen === "any",
+    },
+    simulation,
+    fingerprint: mockFingerprint(members, chosen),
+  };
 }
 
 const handlers: Record<string, (a: any, options?: any) => unknown> = {
@@ -1104,6 +1328,7 @@ const handlers: Record<string, (a: any, options?: any) => unknown> = {
       overlaps: 0,
       no_match: 0,
       would_block_other: [],
+      findings: [],
       items,
     };
     const blocked = new Map<string, number[]>();
@@ -1165,7 +1390,50 @@ const handlers: Record<string, (a: any, options?: any) => unknown> = {
       }
     }
     sim.would_block_other = [...blocked].map(([rule_id, task_ids]) => ({ rule_id, task_ids }));
+    // Contradicciones que crearía al activarse: la hipotética frente a las demás reglas.
+    const own = excludeRuleId ? latest().find((r) => r.id === excludeRuleId) : undefined;
+    const hypothetical: Rule = { id: excludeRuleId ?? "(simulada)", version: own?.version ?? 1, action_kind: actionKind, conditions, active: true, created_at: 0 };
+    const saved = ruleMeta.get(hypothetical.id);
+    if (assumeAnySenderAck) setMeta(hypothetical.id, { any_sender_ack_at: now() });
+    sim.findings = mockFindings([...latest().filter((r) => r.id !== excludeRuleId), hypothetical]).filter(
+      (f) => f.kind !== "defective" && f.rules.some((r) => r.id === hypothetical.id),
+    );
+    if (assumeAnySenderAck) {
+      if (saved) ruleMeta.set(hypothetical.id, saved);
+      else ruleMeta.delete(hypothetical.id);
+    }
     return sim;
+  },
+  rule_findings: (): RuleFinding[] => mockFindings(latest()),
+  preview_merge: ({ ids, chosen }): MergePreview => {
+    const members = mockMembers(ids);
+    const options = mockOptions(members);
+    const pick = chosen ? String(chosen) : options.length === 1 ? options[0]!.key : null;
+    if (chosen && !options.some((o) => o.key === chosen)) throw `la opción «${chosen}» no corresponde a ninguna de las reglas elegidas`;
+    return {
+      action_kind: members[0]!.action_kind,
+      before: members.map(mockPlanRule),
+      options,
+      needs_choice: options.length > 1,
+      chosen: pick,
+      plan: pick ? mockPlan(members, pick) : null,
+      suggested_name: `Unificada: ${members.map((r) => ruleView(r).name).join(" + ")}`.slice(0, 80),
+    };
+  },
+  merge_rules: ({ ids, chosen, name, planFingerprint }): RuleView => {
+    const members = mockMembers(ids);
+    const options = mockOptions(members);
+    const key = chosen ? String(chosen) : options.length === 1 ? options[0]!.key : "";
+    if (!options.some((o) => o.key === key) || mockFingerprint(members, key) !== planFingerprint) throw "las reglas han cambiado; revise de nuevo";
+    const plan = mockPlan(members, key);
+    const title = String(name ?? "").trim() || `Unificada: ${members.map((r) => ruleView(r).name).join(" + ")}`.slice(0, 80);
+    let id = slug(title);
+    for (let n = 2; latest().some((r) => r.id === id); n++) id = `${slug(title)}-${n}`;
+    for (const r of members) handlers.archive_rule!({ id: r.id });
+    const rule = addRule({ id, version: 1, action_kind: plan.action_kind, conditions: plan.after.conditions as Record<string, string>, active: false, created_at: now() });
+    setMeta(id, { name: title, origin: { kind: "merge", sources: members.map((r) => ({ id: r.id, version: r.version })), option: key } });
+    audit.push({ task_id: null, action: "rule_merge", status: "merged", authorization: null, detail: `${id} v1 (inactiva) sustituye a ${members.map((r) => `${r.id} v${r.version}`).join(", ")}; originales archivadas` });
+    return ruleView(rule);
   },
   audit_log: () => structuredClone(audit),
   settings: (): SettingsView => {
@@ -1270,6 +1538,7 @@ const mutating = new Set([
   "set_rule_any_sender",
   "archive_rule",
   "unarchive_rule",
+  "merge_rules",
   "remove_mail_account",
   "rename_mail_account",
   "add_simulated_mail_account",

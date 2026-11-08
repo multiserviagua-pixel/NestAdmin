@@ -9,7 +9,9 @@ use serde::Serialize;
 use serde_json::{json, Value};
 
 use crate::rules::{
-    evaluate_result, evaluate_with, rules_fingerprint, Evaluation, ReasonCode, RuleDecision,
+    analyze, evaluate_result, evaluate_with, merge_before, merge_options, merge_plan,
+    rules_fingerprint, Evaluation, FindingKind, Marks, MergeError, MergeOption, MergePlan,
+    PlanRule, ReasonCode, RuleDecision, RuleFinding,
 };
 use crate::{
     action_kind, check_rule, check_rule_id, App, AppError, AppResult, EMAIL, INVOICE,
@@ -47,6 +49,8 @@ pub struct RuleView {
     pub name: String,
     pub archived_at: Option<i64>,
     pub any_sender_ack_at: Option<i64>,
+    /// De dónde sale la regla: al unificar, las reglas de origen y la opción elegida (D131).
+    pub origin: Option<Value>,
     pub stats: RuleStats,
 }
 
@@ -102,7 +106,25 @@ pub struct Simulation {
     pub overlaps: usize,
     pub no_match: usize,
     pub would_block_other: Vec<BlockedRule>,
+    /// Contradicciones que la regla crearía con las demás al activarse, con su explicación
+    /// (D130). Una regla nueva sin guardar aparece como `(simulada)`.
+    pub findings: Vec<RuleFinding>,
     pub items: Vec<SimulationItem>,
+}
+
+/// Lo que la interfaz necesita para revisar una unificación: las reglas de hoy, las
+/// opciones y, cuando ya se puede, el plan completo (D131). Solo lectura.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct MergePreview {
+    pub action_kind: String,
+    pub before: Vec<PlanRule>,
+    pub options: Vec<MergeOption>,
+    /// Las reglas tienen condiciones distintas y falta elegir.
+    pub needs_choice: bool,
+    pub chosen: Option<String>,
+    /// `None` mientras falte la elección.
+    pub plan: Option<MergePlan>,
+    pub suggested_name: String,
 }
 
 impl App {
@@ -369,6 +391,7 @@ impl App {
                         .unwrap_or_else(|| rule.id.clone()),
                     archived_at: meta.and_then(|m| m.archived_at),
                     any_sender_ack_at: meta.and_then(|m| m.allow_any_sender_ack_at),
+                    origin: meta.and_then(|m| m.origin.clone()),
                     stats: stats.remove(&rule.id).unwrap_or(RuleStats {
                         rule_id: rule.id.clone(),
                         applied: 0,
@@ -458,6 +481,7 @@ impl App {
             overlaps: 0,
             no_match: 0,
             would_block_other: Vec::new(),
+            findings: Vec::new(),
             items: Vec::new(),
         };
         let mut blocked: BTreeMap<String, Vec<i64>> = BTreeMap::new();
@@ -567,7 +591,214 @@ impl App {
             .into_iter()
             .map(|(rule_id, task_ids)| BlockedRule { rule_id, task_ids })
             .collect();
+        sim.findings = activation_findings(
+            &with_hypothetical,
+            &any_sender,
+            exclude_rule_id.and_then(|id| self.store.rule(id).ok().flatten()),
+        );
         Ok(sim)
+    }
+
+    /// Reglas y las marcas que necesita el análisis (D130): archivadas y con la validación
+    /// avanzada.
+    fn analysis_inputs(&self) -> AppResult<(Vec<Rule>, Marks)> {
+        let metas = self.store.rule_metas()?;
+        let marks = Marks {
+            any_sender: metas
+                .values()
+                .filter(|m| m.archived_at.is_none() && m.allow_any_sender_ack_at.is_some())
+                .map(|m| m.rule_id.clone())
+                .collect(),
+            archived: metas
+                .values()
+                .filter(|m| m.archived_at.is_some())
+                .map(|m| m.rule_id.clone())
+                .collect(),
+        };
+        Ok((self.store.rules()?, marks))
+    }
+
+    /// Contradicciones entre las reglas guardadas, de más a menos graves (D130). Solo
+    /// lectura: no llama a la IA ni cambia nada. Cada choque lleva el recuento de tareas
+    /// que ya coincidieron con las dos reglas, según `rule_evaluations` (la última
+    /// evaluación de cada tarea).
+    pub fn rule_findings(&self) -> AppResult<Vec<RuleFinding>> {
+        let (rules, marks) = self.analysis_inputs()?;
+        let mut findings = analyze(&rules, &marks);
+        let mut latest: HashMap<i64, Value> = HashMap::new();
+        for row in self.store.rule_evaluations()? {
+            latest.insert(row.task_id, row.checks);
+        }
+        for finding in &mut findings {
+            if !matches!(finding.kind, FindingKind::Duplicate | FindingKind::Overlap) {
+                continue;
+            }
+            let both = |checks: &Value| {
+                finding.rules.iter().all(|fr| {
+                    checks["candidates"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .any(|c| c["id"].as_str() == Some(&fr.id) && c["matches"] == json!(true))
+                })
+            };
+            let count = latest.values().filter(|c| both(c)).count();
+            finding.affected_tasks = Some(count);
+        }
+        Ok(findings)
+    }
+
+    /// Revisa una unificación sin cambiar nada: las reglas de hoy, las opciones y, con la
+    /// elección hecha (o si no hace falta), el plan con su simulación (D131). Sin elección,
+    /// `plan` es `None` y `needs_choice` lo dice.
+    pub fn preview_merge(&self, ids: &[String], chosen: Option<&str>) -> AppResult<MergePreview> {
+        let (rules, marks) = self.analysis_inputs()?;
+        let invalid = |e: MergeError| AppError::Invalid(e.to_string());
+        let before = merge_before(&rules, &marks, ids).map_err(invalid)?;
+        let options = merge_options(&rules, &marks, ids).map_err(invalid)?;
+        let tasks = self.store.all_tasks()?;
+        let plan = match merge_plan(&rules, &marks, ids, chosen, &tasks) {
+            Ok(plan) => Some(plan),
+            Err(MergeError::ChoiceRequired(_)) => None,
+            Err(e) => return Err(invalid(e)),
+        };
+        let action_kind = rules
+            .iter()
+            .find(|r| r.id == before[0].id)
+            .map(|r| r.action_kind.clone())
+            .unwrap_or_default();
+        let metas = self.store.rule_metas()?;
+        let names: Vec<String> = before
+            .iter()
+            .map(|r| {
+                metas
+                    .get(&r.id)
+                    .and_then(|m| m.name.clone())
+                    .unwrap_or_else(|| r.id.clone())
+            })
+            .collect();
+        Ok(MergePreview {
+            action_kind,
+            needs_choice: options.len() > 1,
+            chosen: plan.as_ref().map(|p| p.chosen.clone()),
+            plan,
+            options,
+            before,
+            suggested_name: suggested_merge_name(&names),
+        })
+    }
+
+    /// Unifica reglas (D131) en una sola transacción: vuelve a calcular el plan y, si las
+    /// reglas cambiaron desde que se revisó (`plan_fingerprint`), no hace nada; archiva las
+    /// originales, crea una regla **inactiva** (sin heredar la validación avanzada) que las
+    /// cita en su origen y lo audita con ids y versiones. Nunca activa nada.
+    pub fn merge_rules(
+        &mut self,
+        ids: &[String],
+        chosen: Option<&str>,
+        name: Option<&str>,
+        plan_fingerprint: &str,
+    ) -> AppResult<RuleView> {
+        let (rules, marks) = self.analysis_inputs()?;
+        let changed = || AppError::Invalid("las reglas han cambiado; revise de nuevo".into());
+        let plan = merge_plan(&rules, &marks, ids, chosen, &[]).map_err(|e| match e {
+            // La opción revisada ya no existe: alguien cambió las reglas.
+            MergeError::UnknownChoice(_) | MergeError::ChoiceRequired(_) => changed(),
+            other => AppError::Invalid(other.to_string()),
+        })?;
+        if plan.fingerprint != plan_fingerprint {
+            return Err(changed());
+        }
+        check_rule(&plan.action_kind, &plan.after.conditions, true)?;
+        let metas = self.store.rule_metas()?;
+        let names: Vec<String> = plan
+            .before
+            .iter()
+            .map(|r| {
+                metas
+                    .get(&r.id)
+                    .and_then(|m| m.name.clone())
+                    .unwrap_or_else(|| r.id.clone())
+            })
+            .collect();
+        let name = match clean_name(name)? {
+            Some(name) => name,
+            None => suggested_merge_name(&names),
+        };
+        let new_id = self.unique_rule_id(&name)?;
+        let sources: Vec<(String, i64)> = plan
+            .before
+            .iter()
+            .map(|r| (r.id.clone(), r.version))
+            .collect();
+        let origin = json!({
+            "kind": "merge",
+            "sources": plan.before.iter().map(|r| json!({
+                "id": r.id,
+                "version": r.version,
+                "active": r.active,
+                "any_sender": r.any_sender,
+            })).collect::<Vec<_>>(),
+            "option": plan.chosen,
+        });
+        let rule = self.store.merge_rules(
+            &sources,
+            &new_id,
+            &plan.action_kind,
+            &plan.after.conditions,
+            Some(&name),
+            &origin,
+        )?;
+        self.rule_view(&rule.id)
+    }
+}
+
+/// Nombre propuesto para la regla unificada: «Unificada: A + B», dentro del límite.
+fn suggested_merge_name(names: &[String]) -> String {
+    let full = format!("Unificada: {}", names.join(" + "));
+    full.chars()
+        .take(MAX_NAME_CHARS)
+        .collect::<String>()
+        .trim_end()
+        .to_owned()
+}
+
+/// Contradicciones que crearía activar la regla hipotética `(simulada)` con las demás. Si la
+/// simulación es de una regla ya guardada (`saved`), su id real sustituye al hipotético.
+fn activation_findings(
+    rules: &[Rule],
+    any_sender: &HashSet<String>,
+    saved: Option<Rule>,
+) -> Vec<RuleFinding> {
+    let marks = Marks {
+        any_sender: any_sender.clone(),
+        archived: HashSet::new(),
+    };
+    let mut findings: Vec<RuleFinding> = analyze(rules, &marks)
+        .into_iter()
+        .filter(|f| f.kind != FindingKind::Defective && f.rules.iter().any(|r| r.id == SIMULATED))
+        .collect();
+    if let Some(saved) = saved {
+        for finding in &mut findings {
+            finding.key = finding.key.replace(SIMULATED, &saved.id);
+            for fr in &mut finding.rules {
+                if fr.id == SIMULATED {
+                    fr.id = saved.id.clone();
+                    fr.version = saved.version;
+                }
+            }
+            replace_id(&mut finding.effect.data, &saved.id);
+        }
+    }
+    findings
+}
+
+fn replace_id(value: &mut Value, to: &str) {
+    match value {
+        Value::String(s) if s == SIMULATED => *s = to.to_owned(),
+        Value::Array(items) => items.iter_mut().for_each(|v| replace_id(v, to)),
+        Value::Object(map) => map.values_mut().for_each(|v| replace_id(v, to)),
+        _ => {}
     }
 }
 

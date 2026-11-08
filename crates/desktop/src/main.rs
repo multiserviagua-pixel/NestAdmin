@@ -18,7 +18,8 @@ use nestadmin_ai::{CredentialStore, ProviderChoice, Secret};
 use nestadmin_app::accounts::{
     AccountView, FetchReport, MailAccountsView, MailEnv, MailProviderKind,
 };
-use nestadmin_app::panel::{NewRule, RuleView, Simulation};
+use nestadmin_app::panel::{MergePreview, NewRule, RuleView, Simulation};
+use nestadmin_app::rules::RuleFinding;
 use nestadmin_app::{AiWait, App, AppPaths, LocalFallback, ProviderInfo};
 use nestadmin_core::{AuditEntry, Rule, RuleStats, Task};
 use nestadmin_extract::{Extractor, Tesseract};
@@ -594,6 +595,45 @@ fn simulate_rule(
             exclude_rule_id.as_deref(),
         )
         .map_err(text)
+}
+
+/// Contradicciones entre las reglas (D130). Solo lectura: no llama a la IA.
+#[tauri::command]
+fn rule_findings(shared: State<'_, SharedState>) -> CmdResult<Vec<RuleFinding>> {
+    shared.app()?.rule_findings().map_err(text)
+}
+
+/// Revisa una unificación (D131) sin cambiar nada: antes, opciones y, con la elección hecha,
+/// el plan con su simulación.
+#[tauri::command]
+fn preview_merge(
+    shared: State<'_, SharedState>,
+    ids: Vec<String>,
+    chosen: Option<String>,
+) -> CmdResult<MergePreview> {
+    shared
+        .app()?
+        .preview_merge(&ids, chosen.as_deref())
+        .map_err(text)
+}
+
+/// Unifica reglas en una sola transacción (D131): la regla nueva queda inactiva y las
+/// originales archivadas. `plan_fingerprint` es la del plan que el usuario revisó.
+#[tauri::command]
+fn merge_rules<R: Runtime>(
+    shared: State<'_, SharedState>,
+    handle: AppHandle<R>,
+    ids: Vec<String>,
+    chosen: Option<String>,
+    name: Option<String>,
+    plan_fingerprint: String,
+) -> CmdResult<RuleView> {
+    let view = shared
+        .app()?
+        .merge_rules(&ids, chosen.as_deref(), name.as_deref(), &plan_fingerprint)
+        .map_err(text)?;
+    changed(&handle);
+    Ok(view)
 }
 
 /// Guarda de una vez condiciones, nombre y validación avanzada (D126): sin guardados parciales.
@@ -1382,6 +1422,9 @@ fn configure<R: Runtime>(builder: Builder<R>, prepare_only: bool) -> Builder<R> 
             unarchive_rule,
             rule_stats,
             simulate_rule,
+            rule_findings,
+            preview_merge,
+            merge_rules,
             audit_log,
             settings,
             select_provider,

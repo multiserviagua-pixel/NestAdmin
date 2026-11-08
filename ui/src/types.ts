@@ -46,6 +46,8 @@ export interface RuleView extends Rule {
   archived_at: number | null;
   /** Marca de la opción avanzada: la regla de envío contesta a cualquier remitente. */
   any_sender_ack_at: number | null;
+  /** De dónde sale la regla: al unificar, las reglas de origen y la opción elegida (D131). */
+  origin: { kind: string; sources?: Array<{ id: string; version: number }>; option?: string } | null;
   stats: RuleStats;
 }
 
@@ -74,7 +76,80 @@ export interface Simulation {
   overlaps: number;
   no_match: number;
   would_block_other: Array<{ rule_id: string; task_ids: number[] }>;
+  /** Contradicciones que la regla crearía al activarse, con su explicación (D130). */
+  findings: RuleFinding[];
   items: SimulationItem[];
+}
+
+/** Una contradicción entre reglas (D130). El texto lo redacta `rules-text.ts`. */
+export interface RuleFinding {
+  key: string;
+  kind: "duplicate" | "overlap" | "similar" | "defective";
+  action_kind: string;
+  rules: Array<{ id: string; version: number; active: boolean }>;
+  /** Las dos reglas están activas: el choque ocurre ya. */
+  active_conflict: boolean;
+  effect: { code: string; data: Record<string, any> };
+  merge_candidate: boolean;
+  /** Tareas que ya coincidieron con las dos reglas; `null` si no aplica. */
+  affected_tasks: number | null;
+}
+
+export interface MergeOption {
+  /** `none` o el límite en facturas; `any`, `domain:x` o `sender:x` en envíos. */
+  key: string;
+  scope: Record<string, any>;
+  rule_ids: string[];
+}
+
+export interface PlanRule {
+  id: string;
+  version: number;
+  active: boolean;
+  conditions: Record<string, any>;
+  any_sender: boolean;
+}
+
+export interface SimTask {
+  task_id: number;
+  label: string | null;
+  total: string | null;
+}
+
+export interface MergePlan {
+  action_kind: string;
+  before: PlanRule[];
+  options: MergeOption[];
+  chosen: string;
+  after: {
+    conditions: Record<string, any>;
+    active: boolean;
+    option_key: string;
+    loses_any_sender: string[];
+    needs_sender_validation: boolean;
+  };
+  simulation: {
+    considered: number;
+    truncated: boolean;
+    skipped_without_result: number;
+    touched: number;
+    start_automating: SimTask[];
+    stop_automating: SimTask[];
+    unchanged_automated: number;
+    unchanged_review: number;
+  };
+  fingerprint: string;
+}
+
+/** Lo que se ve al revisar una unificación (D131). Sin elección, `plan` es `null`. */
+export interface MergePreview {
+  action_kind: string;
+  before: PlanRule[];
+  options: MergeOption[];
+  needs_choice: boolean;
+  chosen: string | null;
+  plan: MergePlan | null;
+  suggested_name: string;
 }
 
 export interface AuditEntry {

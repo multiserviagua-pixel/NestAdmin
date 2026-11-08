@@ -10,8 +10,10 @@ import type {
   MailProviderKind,
   MailView,
   Memory,
+  MergePreview,
   ProviderChoice,
   ProviderInfo,
+  RuleFinding,
   RuleView,
   SettingsView,
   Simulation,
@@ -30,7 +32,9 @@ import {
   CATEGORY_HELP,
   CATEGORY_LABEL,
   FIELD_HELP,
+  MERGE_NOTICE,
   NO_EVALUATION,
+  NO_FINDINGS,
   SIMULATION_DISCLAIMER,
   actsOnNothing,
   anyAckReady,
@@ -43,15 +47,23 @@ import {
   draftOf,
   draftProblems,
   explainEvaluation,
+  explainFinding,
   isKnownAction,
+  mergeOptionLabel,
+  mergeOptionText,
+  mergeSimulationText,
+  mergedDone,
   normalizeSearch,
+  originText,
   publicDomainWarning,
   ruleProblem,
   ruleRisk,
   ruleSentence,
   ruleStatus,
   searchText,
+  similarClarification,
   simulationSummary,
+  sortFindings,
   statsText,
   type CandidateOutcome,
   type RuleDraft,
@@ -143,6 +155,13 @@ const state = {
   originFilter: "",
   tasks: [] as Task[],
   rules: [] as RuleView[],
+  // Contradicciones entre reglas (R23); `findingsError` si no se pudieron calcular.
+  findings: [] as RuleFinding[],
+  findingsError: null as string | null,
+  // Unificación en curso (D131): hallazgo, elección, nombre y plan que se está revisando.
+  merge: null as null | { key: string; ids: string[]; chosen: string | null; name: string; status: "loading" | "done" | "error"; preview?: MergePreview; error?: string },
+  // «¿Es el mismo proveedor?» desplegado por hallazgo.
+  similarOpen: {} as Record<string, boolean>,
   audit: [] as AuditEntry[],
   settings: null as SettingsView | null,
   // Proveedor desplegado en Configuración (null: el elegido) y asistente de primer uso.
@@ -298,14 +317,19 @@ function afterConfirm(task: Task) {
 
 async function refresh(background = false) {
   try {
-    const [tasks, rules, audit, settings, mail] = await Promise.all([
+    let findingsError: string | null = null;
+    const [tasks, rules, findings, audit, settings, mail] = await Promise.all([
       api.tasks(),
       api.ruleViews(),
+      api.ruleFindings().catch((error) => {
+        findingsError = String(error);
+        return [] as RuleFinding[];
+      }),
       api.auditLog(),
       api.settings(),
       api.mailAccounts(),
     ]);
-    Object.assign(state, { tasks, rules, audit, settings, mail });
+    Object.assign(state, { tasks, rules, findings, findingsError, audit, settings, mail });
     announceDoubtfulAmounts();
   } catch (error) {
     state.notice = { kind: "error", text: String(error) };
@@ -1121,6 +1145,28 @@ function exampleList(examples: Array<{ task_id: number; label: string }>): HTMLE
   );
 }
 
+/** Contradicciones que crearía activar la regla, con su porqué (D130). `null` si no crearía ninguna. */
+function activationFindings(findings: RuleFinding[]): HTMLElement | null {
+  if (!findings.length) return null;
+  return h(
+    "div",
+    { class: "activation-findings", role: "group", "aria-label": "Contradicciones que crearía esta regla" },
+    h("p", { class: "warn-text" }, h("strong", {}, findings.length === 1 ? "Al activarla chocaría con otra regla:" : `Al activarla chocaría con otras ${findings.length} reglas:`)),
+    ...sortFindings(findings).map((f) => {
+      const t = explainFinding(f, ruleName);
+      return h(
+        "div",
+        { class: "finding-lines" },
+        h("p", {}, statusChip(t.badge.text, t.badge.tone), " ", h("strong", {}, t.title)),
+        h("p", {}, t.what),
+        h("p", {}, h("span", { class: "finding-label" }, "Por qué: "), t.why),
+        h("p", {}, h("span", { class: "finding-label" }, "Consecuencia: "), t.consequence),
+        t.timing ? h("p", { class: "meta" }, t.timing) : null,
+      );
+    }),
+  );
+}
+
 /** Resultado de la simulación de la clave dada, o `null` si no hay ninguna en curso. */
 function simulationBox(key: string, kind: string): HTMLElement | null {
   const s = state.ruleSim;
@@ -1138,6 +1184,7 @@ function simulationBox(key: string, kind: string): HTMLElement | null {
     "div",
     { class: "sim-box", role: "status" },
     h("p", { class: "sim-headline" }, summary.headline),
+    activationFindings(s.sim.findings ?? []),
     summary.empty
       ? null
       : h(
@@ -1729,6 +1776,7 @@ function ruleCard(r: RuleView): HTMLElement {
       h("dd", {}, ACTION_LABEL[r.action_kind] ?? r.action_kind),
       h("dt", {}, "Condiciones"),
       h("dd", {}, conditionsSummary(r)),
+      ...(originText(r.origin, ruleName) ? [h("dt", {}, "Origen"), h("dd", {}, originText(r.origin, ruleName)!)] : []),
     ),
   ) as HTMLDetailsElement;
   details.open = Boolean(state.ruleDetails[r.id]);
@@ -1915,6 +1963,273 @@ function categoriesPanel(): HTMLElement {
   );
 }
 
+// -- Revisión de reglas: contradicciones y unificación (R23, D130, D131) --
+
+function closeMerge() {
+  const key = state.merge?.key;
+  state.merge = null;
+  mergeToken++;
+  if (key) state.focusAfterRender = `finding:${key}:merge`;
+  render();
+}
+
+let mergeToken = 0;
+
+/** Pide el plan (solo lectura) y repinta. Solo cuenta la última petición. */
+function loadMerge(key: string, ids: string[], chosen: string | null) {
+  const token = ++mergeToken;
+  const previous = state.merge?.key === key ? state.merge : null;
+  state.merge = { key, ids, chosen, name: previous?.name ?? "", status: "loading", preview: previous?.preview };
+  render();
+  api.previewMerge(ids, chosen).then(
+    (preview) => {
+      if (token !== mergeToken || !state.merge) return;
+      state.merge = { ...state.merge, status: "done", preview, name: state.merge.name || preview.suggested_name, chosen: preview.chosen ?? chosen };
+      render();
+    },
+    (error) => {
+      if (token !== mergeToken || !state.merge) return;
+      state.merge = { ...state.merge, status: "error", error: String(error) };
+      render();
+    },
+  );
+}
+
+function mergePanel(f: RuleFinding): HTMLElement | null {
+  const m = state.merge;
+  if (!m || m.key !== f.key) return null;
+  const cancel = h("button", { type: "button", "data-focus-key": `finding:${f.key}:merge-cancel`, onclick: closeMerge }, "Cancelar");
+  const box = (...children: Child[]) =>
+    h(
+      "div",
+      {
+        class: "row-panel merge-panel",
+        role: "group",
+        "aria-label": "Unificar reglas",
+        tabindex: "-1",
+        "data-focus-key": `finding:${f.key}:merge-panel`,
+        onkeydown: (event) => {
+          if ((event as KeyboardEvent).key === "Escape") {
+            event.stopPropagation();
+            closeMerge();
+          }
+        },
+      },
+      h("h4", {}, "Unificar en una sola regla"),
+      ...children,
+    );
+  if (m.status === "loading" && !m.preview)
+    return box(h("p", { class: "meta", role: "status" }, "Preparando la unificación…"), h("div", { class: "buttons" }, cancel));
+  if (m.status === "error" || !m.preview)
+    return box(
+      h("p", { class: "error-text", role: "alert" }, `No se puede preparar la unificación: ${m.error ?? "error desconocido"}`),
+      h("div", { class: "buttons" }, cancel),
+    );
+  const preview = m.preview;
+  const plan = preview.plan;
+  const sentenceOf = (conditions: Record<string, any>, anySender = false) =>
+    ruleSentence({ id: "", version: 0, action_kind: preview.action_kind, conditions, active: false, any_sender_ack_at: anySender ? 1 : null });
+  const subject =
+    preview.action_kind === "register_invoice"
+      ? String(preview.before[0]?.conditions.supplier ?? "")
+      : categoryLabel(String(preview.before[0]?.conditions.category ?? ""));
+
+  const choice = preview.needs_choice
+    ? h(
+        "fieldset",
+        { class: "merge-choice" },
+        h("legend", {}, preview.action_kind === "register_invoice" ? "¿Con qué límite debe quedar la regla nueva?" : "¿A quién debe contestar la regla nueva?"),
+        ...preview.options.map((o) => {
+          const radio = h("input", {
+            type: "radio",
+            name: `merge-${f.key}`,
+            "data-focus-key": `finding:${f.key}:option:${o.key}`,
+            onchange: () => loadMerge(f.key, m.ids, o.key),
+          }) as HTMLInputElement;
+          radio.checked = m.chosen === o.key;
+          return h(
+            "label",
+            { class: "choice merge-option" },
+            radio,
+            h("span", {}, h("strong", {}, mergeOptionLabel(preview.action_kind, o)), h("br", {}), mergeOptionText(preview.action_kind, o, subject, ruleName)),
+          );
+        }),
+      )
+    : null;
+
+  const before = h(
+    "div",
+    { class: "merge-column" },
+    h("h5", {}, "Antes"),
+    h("ul", {}, ...preview.before.map((r) => h("li", {}, h("strong", {}, ruleName(r.id)), `: ${sentenceOf(r.conditions, r.any_sender)}. `, statusChip(r.active ? "Activa" : "Inactiva", r.active ? "ok" : "neutral")))),
+  );
+  const nameInput = h("input", {
+    type: "text",
+    id: `merge-name-${f.key}`,
+    maxlength: "80",
+    autocomplete: "off",
+    "data-focus-key": `finding:${f.key}:merge-name`,
+    oninput: () => {
+      if (state.merge) state.merge.name = nameInput.value;
+    },
+  }) as HTMLInputElement;
+  nameInput.value = m.name;
+  const after = h(
+    "div",
+    { class: "merge-column" },
+    h("h5", {}, "Después"),
+    plan
+      ? h(
+          "div",
+          {},
+          h("p", {}, h("strong", {}, "Regla nueva"), `: ${sentenceOf(plan.after.conditions)}. `, statusChip("Inactiva", "neutral")),
+          h("div", { class: "field" }, h("div", { class: "field-head" }, h("label", { for: `merge-name-${f.key}` }, "Nombre de la regla nueva")), nameInput),
+          h("p", { class: "meta" }, "Las reglas anteriores quedarán archivadas."),
+        )
+      : h("p", { class: "meta" }, "Elija una opción para ver cómo quedaría la regla nueva."),
+  );
+
+  let simulation: HTMLElement | null = null;
+  if (plan) {
+    const t = mergeSimulationText(plan, ruleName);
+    simulation = h(
+      "div",
+      { class: "sim-box", role: "status", "aria-label": "Qué cambiaría" },
+      h("p", { class: "sim-headline" }, "Qué cambiaría con sus tareas guardadas, si la regla nueva estuviera activa:"),
+      h("ul", { class: "sim-list" }, ...t.lines.map((line) => h("li", {}, line))),
+      ...t.notes.map((n) => h("p", { class: "warn-text" }, n)),
+      h("p", { class: "sim-disclaimer" }, SIMULATION_DISCLAIMER),
+    );
+  }
+
+  const go = h(
+    "button",
+    {
+      class: "primary",
+      type: "button",
+      "data-focus-key": `finding:${f.key}:merge-go`,
+      onclick: async () => {
+        if (!plan) return;
+        const name = nameInput.value.trim();
+        try {
+          const view = await api.mergeRules(m.ids, plan.chosen, name || null, plan.fingerprint);
+          state.merge = null;
+          mergeToken++;
+          state.ruleFilter = noRuleFilter();
+          state.focusAfterRender = `rule:${view.id}:toggle`;
+          state.notice = { kind: "ok", text: mergedDone(view.name) };
+          await refresh();
+        } catch (error) {
+          notify("error", error);
+          // Si las reglas cambiaron, se vuelve a calcular el plan para revisarlo de nuevo.
+          loadMerge(m.key, m.ids, m.chosen);
+        }
+      },
+    },
+    "Unificar",
+  ) as HTMLButtonElement;
+  go.disabled = !plan || m.status === "loading";
+
+  return box(
+    h("div", { class: "merge-columns" }, before, after),
+    choice,
+    simulation,
+    h("p", { class: "rule-risk" }, "Aviso: ", MERGE_NOTICE),
+    h("div", { class: "buttons" }, go, cancel),
+  );
+}
+
+function findingCard(f: RuleFinding): HTMLElement {
+  const t = explainFinding(f, ruleName);
+  const rules = f.rules.map((r) => state.rules.find((v) => v.id === r.id)).filter((r): r is RuleView => Boolean(r));
+  const actions: Child[] = [];
+  if (f.kind === "similar") {
+    actions.push(
+      h(
+        "button",
+        {
+          type: "button",
+          "data-focus-key": `finding:${f.key}:similar`,
+          "aria-expanded": String(Boolean(state.similarOpen[f.key])),
+          onclick: () => {
+            state.similarOpen[f.key] = !state.similarOpen[f.key];
+            state.focusAfterRender = `finding:${f.key}:similar`;
+            render();
+          },
+        },
+        "¿Es el mismo proveedor?",
+      ),
+    );
+  } else if (f.merge_candidate) {
+    actions.push(
+      h(
+        "button",
+        {
+          class: "primary",
+          type: "button",
+          "data-focus-key": `finding:${f.key}:merge`,
+          disabled: state.merge?.key === f.key,
+          onclick: () => loadMerge(f.key, f.rules.map((r) => r.id), null),
+        },
+        "Revisar unificación",
+      ),
+    );
+  } else if (f.kind === "defective" && f.effect.code === "sender_missing" && rules[0]) {
+    actions.push(h("button", { class: "primary", type: "button", "data-focus-key": `finding:${f.key}:fix`, onclick: () => addSender(rules[0]!) }, "Añadir remitente"));
+  } else if (f.kind === "defective" && rules[0] && isKnownAction(rules[0].action_kind)) {
+    actions.push(h("button", { type: "button", "data-focus-key": `finding:${f.key}:fix`, onclick: () => openRuleEditor({ mode: "edit", id: rules[0]!.id }, undefined) }, "Editar la regla"));
+  }
+  for (const r of rules) {
+    actions.push(h("button", { class: "link", type: "button", "data-focus-key": `finding:${f.key}:show:${r.id}`, onclick: () => showRule(r.id) }, `Ver «${r.name}»`));
+  }
+  const similar =
+    f.kind === "similar" && state.similarOpen[f.key]
+      ? h(
+          "div",
+          { class: "sim-box", role: "note" },
+          h("p", {}, similarClarification()),
+          h(
+            "div",
+            { class: "buttons" },
+            ...rules.map((r) => h("button", { type: "button", "data-focus-key": `finding:${f.key}:edit:${r.id}`, onclick: () => openRuleEditor({ mode: "edit", id: r.id }, undefined) }, `Editar «${r.name}»`)),
+          ),
+        )
+      : null;
+  return h(
+    "article",
+    { class: "finding-card", "aria-label": t.title, "data-focus-key": `finding:${f.key}` },
+    h("header", { class: "finding-head" }, h("h4", { class: "finding-title" }, t.title), statusChip(t.badge.text, t.badge.tone)),
+    h("p", {}, t.what),
+    h("p", {}, h("span", { class: "finding-label" }, "Por qué: "), t.why),
+    h("p", {}, h("span", { class: "finding-label" }, "Consecuencia: "), t.consequence),
+    t.timing ? h("p", { class: "meta" }, t.timing) : null,
+    t.tasks ? h("p", { class: "meta" }, t.tasks) : null,
+    similar,
+    mergePanel(f),
+    h("div", { class: "buttons finding-actions" }, ...actions),
+  );
+}
+
+/** Bloque «Revisión de reglas» encima de la lista: una tarjeta por hallazgo o una línea discreta. */
+function findingsBlock(): HTMLElement | null {
+  if (state.findingsError)
+    return h("p", { class: "meta findings-none", role: "alert" }, `No se ha podido revisar si hay reglas que se contradigan: ${state.findingsError}`);
+  if (!state.rules.length) return null;
+  const findings = sortFindings(state.findings);
+  if (!findings.length) return h("p", { class: "meta findings-none" }, NO_FINDINGS);
+  return h(
+    "section",
+    { class: "card findings", "aria-label": "Revisión de reglas" },
+    h("h3", {}, "Revisión de reglas"),
+    h(
+      "p",
+      { class: "meta" },
+      `${findings.length === 1 ? "Hay 1 aviso" : `Hay ${findings.length} avisos`} sobre sus reglas. Las reglas solo autorizan; si dos reglas activas coinciden con una tarea, esa tarea va a revisión. Nada se cambia sin que usted lo acepte.`,
+    ),
+    h("div", { class: "finding-cards" }, ...findings.map(findingCard)),
+  );
+}
+
 function rulesView() {
   const panel =
     state.rulesTab === "mine"
@@ -1932,6 +2247,7 @@ function rulesView() {
                 "Reglas guardadas",
                 h("button", { class: "primary", "data-focus-key": "rules:new", onclick: () => openRuleEditor({ mode: "new" }, undefined) }, "Nueva regla"),
               ),
+          findingsBlock(),
           rulesList(),
         )
       : categoriesPanel();
