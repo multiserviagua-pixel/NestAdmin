@@ -1,5 +1,5 @@
 //! Adaptador genérico de la API de chat compatible con OpenAI (D109): OpenRouter, Mistral,
-//! DeepSeek, OpenAI, Together, etc. Es un proveedor externo con el mismo estatus que Groq:
+//! DeepSeek, OpenAI, Together, etc. Es un proveedor externo con el mismo estatus que los demás externos:
 //! solo por selección explícita y con una credencial ligada al host de la URL base.
 //!
 //! El procesamiento local sigue siendo solo Ollama, así que la URL base debe ser `https://`

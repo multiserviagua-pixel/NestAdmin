@@ -9,8 +9,7 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 
 use crate::anthropic::AnthropicProvider;
-use crate::credentials::{CredentialStore, ANTHROPIC_API_KEY, GROQ_API_KEY, OLLAMA_CLOUD_API_KEY};
-use crate::groq::GroqProvider;
+use crate::credentials::{CredentialStore, ANTHROPIC_API_KEY, OLLAMA_CLOUD_API_KEY};
 use crate::ollama::{self, OllamaProvider};
 use crate::ollama_cloud::OllamaCloudProvider;
 use crate::openai_compatible::{parse_base_url, OpenAiCompatibleProvider};
@@ -21,9 +20,6 @@ use crate::provider::{AiError, GenerateRequest, GenerateResult, Provider, Provid
 pub enum ProviderChoice {
     Ollama {
         base_url: String,
-        model: String,
-    },
-    Groq {
         model: String,
     },
     OllamaCloud {
@@ -50,7 +46,6 @@ impl ProviderChoice {
     pub fn id(&self) -> &'static str {
         match self {
             Self::Ollama { .. } => "ollama",
-            Self::Groq { .. } => "groq",
             Self::OllamaCloud { .. } => "ollama_cloud",
             Self::OpenAiCompatible { .. } => "openai_compatible",
             Self::Anthropic { .. } => "anthropic",
@@ -62,7 +57,6 @@ impl ProviderChoice {
     pub fn credential_name(&self) -> Option<String> {
         match self {
             Self::Ollama { .. } => None,
-            Self::Groq { .. } => Some(GROQ_API_KEY.to_owned()),
             Self::OllamaCloud { .. } => Some(OLLAMA_CLOUD_API_KEY.to_owned()),
             Self::Anthropic { .. } => Some(ANTHROPIC_API_KEY.to_owned()),
             Self::OpenAiCompatible { base_url, .. } => {
@@ -79,7 +73,6 @@ impl ProviderChoice {
             Self::Ollama { .. } => None,
             Self::OllamaCloud { .. } => Some("ollama.com".to_owned()),
             Self::Anthropic { .. } => Some("api.anthropic.com".to_owned()),
-            Self::Groq { .. } => Some("api.groq.com".to_owned()),
             Self::OpenAiCompatible { base_url, .. } => parse_base_url(base_url).ok().map(|base| {
                 if base.port == 443 {
                     base.host
@@ -110,13 +103,6 @@ pub fn build_provider(
     match choice {
         ProviderChoice::Ollama { base_url, model } => {
             Ok(Box::new(OllamaProvider::new(base_url, model, timeout)?))
-        }
-        ProviderChoice::Groq { model } => {
-            let key = credentials
-                .get(GROQ_API_KEY)
-                .map_err(|e| AiError::Unavailable(e.to_string()))?
-                .ok_or(AiError::Unauthorized)?;
-            Ok(Box::new(GroqProvider::new(model, key, timeout)))
         }
         ProviderChoice::OllamaCloud { model } => {
             let key = credentials

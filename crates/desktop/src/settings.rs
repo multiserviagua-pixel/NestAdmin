@@ -98,6 +98,10 @@ impl Settings {
         let provider = match saved {
             None => Some(ProviderChoice::default()),
             Some(Value::Null) => None,
+            // Groq se retiró (D100). Se reconoce la etiqueta en bruto, aunque el tipo ya no
+            // exista, para dejar claro que una configuración guardada con Groq pide elegir
+            // proveedor y no se sustituye por otro externo (enviaría el contenido a un tercero
+            // no elegido). La clave de Groq que quede en el almacén no se lee ni se borra.
             Some(raw) if raw.get("provider").and_then(Value::as_str) == Some("groq") => None,
             Some(raw) => serde_json::from_value(raw.clone()).ok(),
         };
@@ -199,7 +203,6 @@ pub fn provider_for(
 pub fn unprepared(choice: &ProviderChoice, error: AiError) -> Arc<dyn Provider> {
     let (kind, model) = match choice {
         ProviderChoice::Ollama { model, .. } => (ProviderKind::Ollama, model.clone()),
-        ProviderChoice::Groq { model } => (ProviderKind::Groq, model.clone()),
         ProviderChoice::OllamaCloud { model } => (ProviderKind::OllamaCloud, model.clone()),
         ProviderChoice::OpenAiCompatible { model, .. } => {
             (ProviderKind::OpenAiCompatible, model.clone())
@@ -292,10 +295,12 @@ mod tests {
     //! da un error explícito sin pasar a Ollama.
 
     use super::*;
-    use nestadmin_ai::credentials::GROQ_API_KEY;
+    use nestadmin_ai::credentials::OLLAMA_CLOUD_API_KEY;
     use nestadmin_ai::{MemoryCredentialStore, Secret, Task};
 
     const KEY: &str = "gsk_PRUEBA_SINTETICA_T09_ajustes";
+    /// Clave que pudo dejar Groq (retirado, D100) en el almacén: nunca se lee ni se usa.
+    const LEFTOVER_GROQ_KEY: &str = "groq_api_key";
 
     fn request() -> GenerateRequest {
         GenerateRequest {
@@ -312,7 +317,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("nestadmin-t09-{}", std::process::id()));
         fs::create_dir_all(&dir).unwrap();
         let store = MemoryCredentialStore::default();
-        store.set(GROQ_API_KEY, &Secret::new(KEY)).unwrap();
+        store.set(OLLAMA_CLOUD_API_KEY, &Secret::new(KEY)).unwrap();
         let settings = Settings {
             provider: Some(ProviderChoice::OllamaCloud {
                 model: "modelo-t09".into(),
@@ -334,13 +339,17 @@ mod tests {
     }
 
     #[test]
-    fn missing_key_at_startup_fails_explicitly_and_keeps_groq() {
+    fn missing_key_at_startup_fails_explicitly_and_keeps_the_selection() {
         let store = MemoryCredentialStore::default();
-        let choice = ProviderChoice::Groq {
+        let choice = ProviderChoice::Anthropic {
             model: "modelo-t09".into(),
         };
         let provider = provider_for(&choice, &store);
-        assert_eq!(provider.kind(), ProviderKind::Groq, "sin respaldo a Ollama");
+        assert_eq!(
+            provider.kind(),
+            ProviderKind::Anthropic,
+            "sin respaldo a Ollama"
+        );
         assert_eq!(provider.generate(&request()), Err(AiError::Unauthorized));
         assert!(build(&choice, &store).is_err());
     }
@@ -348,8 +357,9 @@ mod tests {
     #[test]
     fn missing_ollama_cloud_key_at_startup_fails_explicitly_and_keeps_the_selection() {
         let store = MemoryCredentialStore::default();
-        // Con la clave de Groq presente, la de Ollama cloud sigue ausente.
-        store.set(GROQ_API_KEY, &Secret::new(KEY)).unwrap();
+        // Con una clave de Groq olvidada en el almacén, la de Ollama cloud sigue ausente y
+        // aquella no se usa.
+        store.set(LEFTOVER_GROQ_KEY, &Secret::new(KEY)).unwrap();
         let choice = ProviderChoice::OllamaCloud {
             model: "modelo-t09".into(),
         };
@@ -357,7 +367,7 @@ mod tests {
         assert_eq!(
             provider.kind(),
             ProviderKind::OllamaCloud,
-            "sin respaldo a Ollama local ni a Groq"
+            "sin respaldo a Ollama local ni a otro externo"
         );
         assert_eq!(provider.model(), "modelo-t09");
         assert_eq!(provider.generate(&request()), Err(AiError::Unauthorized));
@@ -368,7 +378,7 @@ mod tests {
     fn missing_key_for_new_external_providers_fails_explicitly_and_keeps_the_selection() {
         let store = MemoryCredentialStore::default();
         // Con todas las demás claves presentes (y la de otro host), la elegida sigue ausente.
-        store.set(GROQ_API_KEY, &Secret::new(KEY)).unwrap();
+        store.set(LEFTOVER_GROQ_KEY, &Secret::new(KEY)).unwrap();
         store
             .set(
                 nestadmin_ai::credentials::OLLAMA_CLOUD_API_KEY,

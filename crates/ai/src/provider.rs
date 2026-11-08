@@ -15,7 +15,6 @@ pub enum Task {
 #[serde(rename_all = "snake_case")]
 pub enum ProviderKind {
     Ollama,
-    Groq,
     OllamaCloud,
     #[serde(rename = "openai_compatible")]
     OpenAiCompatible,
@@ -26,7 +25,6 @@ impl fmt::Display for ProviderKind {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
             Self::Ollama => "ollama",
-            Self::Groq => "groq",
             Self::OllamaCloud => "ollama_cloud",
             Self::OpenAiCompatible => "openai_compatible",
             Self::Anthropic => "anthropic",

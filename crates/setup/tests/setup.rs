@@ -909,17 +909,18 @@ fn t08b_17_task_timeouts_on_low_memory_keep_the_code_and_explain_the_cause() {
         "{text}"
     );
 
-    // Con 16 GB, o con Groq elegido, el error no cambia.
+    // Con 16 GB, o con un externo elegido, el error no cambia.
     let sixteen = Memory::assess(Some((gib(16.0), gib(10.0))));
     let error = explain_timeouts(Arc::new(Slow(ProviderKind::Ollama)), &sixteen)
         .generate(&request)
         .unwrap_err();
     assert_eq!(error, AiError::Timeout);
-    let groq = explain_timeouts(Arc::new(Slow(ProviderKind::Groq)), &eight);
-    assert_eq!(groq.kind(), ProviderKind::Groq);
-    assert_eq!(groq.generate(&request).unwrap_err(), AiError::Timeout);
-    // Los externos nuevos tampoco atribuyen su tiempo agotado a la memoria local (D109, D110).
-    for kind in [ProviderKind::OpenAiCompatible, ProviderKind::Anthropic] {
+    // Los externos tampoco atribuyen su tiempo agotado a la memoria local (D106, D109, D110).
+    for kind in [
+        ProviderKind::OllamaCloud,
+        ProviderKind::OpenAiCompatible,
+        ProviderKind::Anthropic,
+    ] {
         let external = explain_timeouts(Arc::new(Slow(kind)), &eight);
         assert_eq!(external.kind(), kind);
         assert_eq!(external.generate(&request).unwrap_err(), AiError::Timeout);
@@ -955,7 +956,7 @@ fn t08c_02_missing_model_asks_for_the_wizard_without_downloading() {
 }
 
 #[test]
-fn t08c_03_groq_selected_checks_nothing_local() {
+fn t08c_03_external_selected_checks_nothing_local() {
     let s = scenario(false, true, "0.40.14", true);
     assert_eq!(s.setup.startup(false), Startup::NotLocal);
     assert!(s.calls().is_empty());
@@ -976,7 +977,7 @@ fn assert_external_checks_nothing_local(choice: &ProviderChoice) {
 
 #[test]
 fn t08c_03c_openai_compatible_selected_checks_nothing_local() {
-    // Igual que Groq y Ollama cloud (D109).
+    // Igual que Ollama cloud (D109).
     assert_external_checks_nothing_local(&ProviderChoice::OpenAiCompatible {
         base_url: "https://api.example.com/v1".into(),
         model: "m".into(),
@@ -985,19 +986,18 @@ fn t08c_03c_openai_compatible_selected_checks_nothing_local() {
 
 #[test]
 fn t08c_03d_anthropic_selected_checks_nothing_local() {
-    // Igual que Groq y Ollama cloud (D110).
+    // Igual que Ollama cloud (D110).
     assert_external_checks_nothing_local(&ProviderChoice::Anthropic { model: "m".into() });
 }
 
 #[test]
 fn t08c_03b_ollama_cloud_selected_checks_nothing_local() {
-    // Ollama cloud es externo como Groq (D106).
+    // Ollama cloud es externo (D106).
     assert_external_checks_nothing_local(&ProviderChoice::OllamaCloud { model: "m".into() });
 }
 
 #[test]
-fn t08c_03e_groq_is_external_and_ollama_is_local() {
-    assert_external_checks_nothing_local(&ProviderChoice::Groq { model: "m".into() });
+fn t08c_03e_ollama_is_local_and_the_default_is_external() {
     assert!(ProviderChoice::Ollama {
         base_url: "http://127.0.0.1:11434".into(),
         model: "m".into()

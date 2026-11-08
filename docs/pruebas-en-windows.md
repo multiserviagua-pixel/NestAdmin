@@ -67,15 +67,15 @@ Con interfaz hay que completar el asistente (el script espera hasta 120 min). Si
 
 - [ ] Con Ollama detenido (`taskkill /IM ollama.exe /F` y el icono de Ollama cerrado), abrir NestAdmin: arranca Ollama sin preguntar (T08c-01).
 - [ ] Con el modelo quitado (`ollama rm qwen3:8b`), abrir NestAdmin: muestra el asistente y no descarga nada en segundo plano (T08c-02).
-- [ ] Con Groq elegido, abrir NestAdmin: no arranca nada local (T08c-03).
+- [ ] Con Ollama cloud (u otro externo) elegido, abrir NestAdmin: no arranca nada local y solo se comprueba el OCR del paquete (T08c-03, D103).
 
 ## 6. Credenciales con la aplicación instalada (T09) — `evidence/t09-credenciales.md`
 
-- [ ] Guardar una clave de Groq en Ajustes y conectar una cuenta de correo de prueba. Buscar el valor de la clave en `%LOCALAPPDATA%\NestAdmin` (`findstr /S /M "<primeros caracteres>" *`): no debe aparecer en ningún archivo. Solo debe estar en el Administrador de credenciales (`NestAdmin`, `groq_api_key` y `mail/<cuenta>`).
+- [ ] Guardar una clave de Ollama cloud en Configuración y conectar una cuenta de correo de prueba. Buscar el valor de la clave en `%LOCALAPPDATA%\NestAdmin` (`findstr /S /M "<primeros caracteres>" *`): no debe aparecer en ningún archivo. Solo debe estar en el Administrador de credenciales (`NestAdmin`, `ollama_cloud_api_key` y `mail/<cuenta>`). Si una instalación anterior dejó una clave `groq_api_key`, la aplicación no la lee ni la borra: se puede quitar a mano desde el Administrador de credenciales.
 
 ## 7. Medición en el equipo objetivo (T12) — `evidence/t10-ollama-qwen3.md` y `evidence/t10-ollama-cloud.md`
 
-Con el equipo libre (otra IA o aplicaciones pesadas falsean memoria y tiempo) y el modelo local descargado de la memoria. Groq queda fuera del diseño (2026-11-07). Ollama cloud se mide desde `main` (los proveedores externos ya están integrados), como explica `evidence/t10-ollama-cloud.md`, con la clave en el Administrador de credenciales (servicio `NestAdmin`, nombre `ollama_cloud_api_key`).
+Con el equipo libre (otra IA o aplicaciones pesadas falsean memoria y tiempo) y el modelo local descargado de la memoria. Groq se retiró (D100). Ollama cloud se mide desde `main` (los proveedores externos ya están integrados), como explica `evidence/t10-ollama-cloud.md`, con la clave en el Administrador de credenciales (servicio `NestAdmin`, nombre `ollama_cloud_api_key`).
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts\t12-medir.ps1 -Proveedor ollama

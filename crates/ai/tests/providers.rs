@@ -1,5 +1,5 @@
-//! T03 a nivel de biblioteca: selección local por defecto, ausencia de respaldo, errores
-//! del contrato y credenciales que no se filtran. Los proveedores hablan con un servidor
+//! T03 a nivel de biblioteca: selección explícita (Ollama cloud por defecto, D100), ausencia
+//! de respaldo entre proveedores, errores del contrato y credenciales que no se filtran. Los proveedores hablan con un servidor
 //! HTTP simulado en 127.0.0.1; ninguna prueba sale a la red.
 
 use std::io::{BufRead, BufReader, Read, Write};
@@ -9,8 +9,7 @@ use std::thread;
 use std::time::Duration;
 
 use nestadmin_ai::anthropic::AnthropicProvider;
-use nestadmin_ai::credentials::{ANTHROPIC_API_KEY, GROQ_API_KEY, OLLAMA_CLOUD_API_KEY};
-use nestadmin_ai::groq::GroqProvider;
+use nestadmin_ai::credentials::{ANTHROPIC_API_KEY, OLLAMA_CLOUD_API_KEY};
 use nestadmin_ai::ollama::{is_cloud_model, is_loopback_http, OllamaProvider};
 use nestadmin_ai::ollama_cloud::OllamaCloudProvider;
 use nestadmin_ai::openai_compatible::{parse_base_url, OpenAiCompatibleProvider};
@@ -22,6 +21,8 @@ use nestadmin_ai::{
 use serde_json::{json, Value};
 
 const FAKE_KEY: &str = "gsk_prueba_no_real_0123456789";
+/// Clave que pudo dejar Groq (retirado, D100) en el almacén: ningún camino la lee ni la usa.
+const LEFTOVER_GROQ_KEY: &str = "groq_api_key";
 
 struct Reply {
     status: u16,
@@ -269,11 +270,14 @@ fn contract_errors_from_the_local_provider() {
 
 #[test]
 fn local_failure_never_reaches_the_external_provider() {
-    // Groq está configurado y con credencial, pero no seleccionado.
-    let (groq_url, groq_seen) = serve(vec![reply(200, json!({}))]);
+    // Otro externo (compatible con OpenAI) está configurado y con credencial, pero no seleccionado.
+    let (other_url, other_seen) = serve(vec![reply(200, json!({}))]);
     let credentials = MemoryCredentialStore::default();
     credentials
-        .set(GROQ_API_KEY, &Secret::new(FAKE_KEY))
+        .set(
+            "openai_compatible_api_key:api.example.com",
+            &Secret::new(FAKE_KEY),
+        )
         .unwrap();
     let choice = ProviderChoice::Ollama {
         base_url: closed_port_url(),
@@ -295,16 +299,17 @@ fn local_failure_never_reaches_the_external_provider() {
     );
     thread::sleep(Duration::from_millis(100));
     assert!(
-        groq_seen.lock().unwrap().is_empty(),
+        other_seen.lock().unwrap().is_empty(),
         "ninguna petición llegó al proveedor externo"
     );
-    drop(groq_url);
+    drop(other_url);
 }
 
 #[test]
 fn external_provider_requires_explicit_choice_and_credential() {
     let empty = MemoryCredentialStore::default();
-    let choice = ProviderChoice::Groq {
+    let choice = ProviderChoice::OpenAiCompatible {
+        base_url: "https://api.example.com/v1".into(),
         model: "modelo-de-prueba".into(),
     };
     assert!(matches!(
@@ -312,13 +317,26 @@ fn external_provider_requires_explicit_choice_and_credential() {
         Err(AiError::Unauthorized)
     ));
 
-    empty.set(GROQ_API_KEY, &Secret::new(FAKE_KEY)).unwrap();
+    // Una clave de Groq olvidada en el almacén no vale para nadie.
+    empty
+        .set(LEFTOVER_GROQ_KEY, &Secret::new(FAKE_KEY))
+        .unwrap();
+    assert!(matches!(
+        build_provider(&choice, &empty, Duration::from_secs(1)),
+        Err(AiError::Unauthorized)
+    ));
+    empty
+        .set(
+            "openai_compatible_api_key:api.example.com",
+            &Secret::new(FAKE_KEY),
+        )
+        .unwrap();
     let provider = build_provider(&choice, &empty, Duration::from_secs(1)).unwrap();
-    assert_eq!(provider.kind(), ProviderKind::Groq);
+    assert_eq!(provider.kind(), ProviderKind::OpenAiCompatible);
 }
 
 #[test]
-fn groq_sends_bearer_key_and_json_mode_and_parses_output() {
+fn openai_compatible_sends_bearer_key_and_json_mode_and_parses_output() {
     let content =
         json!({ "category": "consulta_pago", "draft": "Revisaremos el estado del pago." });
     let (url, seen) = serve(vec![reply(
@@ -329,7 +347,7 @@ fn groq_sends_bearer_key_and_json_mode_and_parses_output() {
             "usage": { "prompt_tokens": 50, "completion_tokens": 12 },
         }),
     )]);
-    let provider = GroqProvider::with_endpoint(
+    let provider = OpenAiCompatibleProvider::with_endpoint(
         &url,
         "modelo-de-prueba",
         Secret::new(FAKE_KEY),
@@ -338,7 +356,7 @@ fn groq_sends_bearer_key_and_json_mode_and_parses_output() {
     let result = provider
         .generate(&email_request("E05", "¿Cuándo pagan?"))
         .unwrap();
-    assert_eq!(result.provider, ProviderKind::Groq);
+    assert_eq!(result.provider, ProviderKind::OpenAiCompatible);
     assert_eq!(parse_email(&result.output).unwrap().0, "consulta_pago");
     assert_eq!(result.usage.output_tokens, Some(12));
 
@@ -362,8 +380,12 @@ fn rejected_key_is_unauthorized_and_never_printed() {
         401,
         json!({ "error": { "message": "invalid api key" } }),
     )]);
-    let provider =
-        GroqProvider::with_endpoint(&url, "m", Secret::new(FAKE_KEY), Duration::from_secs(5));
+    let provider = OpenAiCompatibleProvider::with_endpoint(
+        &url,
+        "m",
+        Secret::new(FAKE_KEY),
+        Duration::from_secs(5),
+    );
     let error = provider.generate(&email_request("E01", "t")).unwrap_err();
     assert_eq!(error, AiError::Unauthorized);
     for text in [
@@ -399,7 +421,7 @@ fn model_output_outside_the_contract_is_invalid() {
     ));
 }
 
-// Ollama cloud (D106, D107): segundo proveedor externo, mismas garantías que Groq.
+// Ollama cloud (D106, D107): segundo proveedor externo, mismas garantías que el compatible con OpenAI.
 
 const CLOUD_KEY: &str = "ollama_prueba_no_real_9876543210";
 
@@ -411,13 +433,15 @@ fn cloud_choice() -> ProviderChoice {
 
 #[test]
 fn ollama_cloud_requires_explicit_choice_and_its_own_credential() {
-    // Sin ninguna clave y con solo la de Groq: unauthorized, sin construir cliente.
+    // Sin ninguna clave y con solo una de Groq olvidada: unauthorized, sin construir cliente.
     let store = MemoryCredentialStore::default();
     assert!(matches!(
         build_provider(&cloud_choice(), &store, Duration::from_secs(1)),
         Err(AiError::Unauthorized)
     ));
-    store.set(GROQ_API_KEY, &Secret::new(FAKE_KEY)).unwrap();
+    store
+        .set(LEFTOVER_GROQ_KEY, &Secret::new(FAKE_KEY))
+        .unwrap();
     assert!(matches!(
         build_provider(&cloud_choice(), &store, Duration::from_secs(1)),
         Err(AiError::Unauthorized)
@@ -548,7 +572,8 @@ fn ollama_cloud_contract_errors() {
 
 #[test]
 fn ollama_cloud_rate_limit_is_reported_without_waiting_or_retrying() {
-    // Solo Groq espera y reintenta (D65): Ollama cloud devuelve `rate_limited` a la primera,
+    // Ningún proveedor espera ni reintenta ante un 429 (el reintento de Groq salió en D100):
+    // Ollama cloud devuelve `rate_limited` a la primera,
     // aunque `Retry-After` pida poco, y no hace una segunda petición.
     let limited = rate_limited("0");
     let (url, seen) = serve(vec![limited, ollama_ok("{}")]);
@@ -580,7 +605,7 @@ fn local_failure_never_reaches_ollama_cloud() {
         .set(OLLAMA_CLOUD_API_KEY, &Secret::new(CLOUD_KEY))
         .unwrap();
     credentials
-        .set(GROQ_API_KEY, &Secret::new(FAKE_KEY))
+        .set(LEFTOVER_GROQ_KEY, &Secret::new(FAKE_KEY))
         .unwrap();
     let choice = ProviderChoice::Ollama {
         base_url: closed_port_url(),
@@ -605,16 +630,19 @@ fn local_failure_never_reaches_ollama_cloud() {
 }
 
 #[test]
-fn ollama_cloud_failure_never_falls_back_to_local_or_groq() {
-    // Un Ollama local y un Groq simulados, vivos, con credencial de Groq presente.
+fn ollama_cloud_failure_never_falls_back_to_local_or_another_external() {
+    // Un Ollama local y un compatible con OpenAI simulados, vivos, con su credencial presente.
     let (_local_url, local_seen) = serve(vec![show_local(), ollama_ok("{}")]);
-    let (_groq_url, groq_seen) = serve(vec![reply(200, json!({}))]);
+    let (_other_url, other_seen) = serve(vec![reply(200, json!({}))]);
     let credentials = SpyStore::default();
     credentials
         .set(OLLAMA_CLOUD_API_KEY, &Secret::new(CLOUD_KEY))
         .unwrap();
     credentials
-        .set(GROQ_API_KEY, &Secret::new(FAKE_KEY))
+        .set(
+            "openai_compatible_api_key:api.example.com",
+            &Secret::new(FAKE_KEY),
+        )
         .unwrap();
     // La nube falla (puerto cerrado): el servicio devuelve el error y conserva la selección.
     // Se lee la clave como lo hace `build_provider` y se apunta a un extremo inalcanzable.
@@ -635,11 +663,14 @@ fn ollama_cloud_failure_never_falls_back_to_local_or_groq() {
     assert_eq!(service.active().0, ProviderKind::OllamaCloud);
     thread::sleep(Duration::from_millis(100));
     assert!(local_seen.lock().unwrap().is_empty(), "nada llegó al local");
-    assert!(groq_seen.lock().unwrap().is_empty(), "nada llegó a Groq");
+    assert!(
+        other_seen.lock().unwrap().is_empty(),
+        "nada llegó a otro externo"
+    );
     assert_eq!(
         *credentials.asked.lock().unwrap(),
         vec![OLLAMA_CLOUD_API_KEY.to_owned()],
-        "con la nube elegida nunca se pide la clave de Groq"
+        "con la nube elegida nunca se pide otra clave"
     );
 }
 
@@ -973,7 +1004,9 @@ fn openai_compatible_requires_explicit_choice_and_the_key_of_that_host() {
     let choice = compat_choice("https://api.example.com/v1");
     let store = SpyStore::default();
     // Claves de todos los demás proveedores y de OTRO host: no valen.
-    store.set(GROQ_API_KEY, &Secret::new(FAKE_KEY)).unwrap();
+    store
+        .set(LEFTOVER_GROQ_KEY, &Secret::new(FAKE_KEY))
+        .unwrap();
     store
         .set(OLLAMA_CLOUD_API_KEY, &Secret::new(CLOUD_KEY))
         .unwrap();
@@ -1229,10 +1262,10 @@ fn openai_compatible_does_not_follow_redirects_with_the_key() {
 #[test]
 fn compat_failure_never_falls_back_to_other_providers() {
     let (_local_url, local_seen) = serve(vec![show_local(), ollama_ok("{}")]);
-    let (_groq_url, groq_seen) = serve(vec![chat_ok("{}")]);
+    let (_cloud_url, cloud_seen) = serve(vec![ollama_ok("{}")]);
     let store = SpyStore::default();
     for (name, key) in [
-        (GROQ_API_KEY, FAKE_KEY),
+        (LEFTOVER_GROQ_KEY, FAKE_KEY),
         (OLLAMA_CLOUD_API_KEY, CLOUD_KEY),
         (ANTHROPIC_API_KEY, ANTHROPIC_KEY),
         ("openai_compatible_api_key:api.example.com", COMPAT_KEY),
@@ -1268,7 +1301,7 @@ fn compat_failure_never_falls_back_to_other_providers() {
     assert_eq!(service.active().0, ProviderKind::OpenAiCompatible);
     thread::sleep(Duration::from_millis(100));
     assert!(local_seen.lock().unwrap().is_empty());
-    assert!(groq_seen.lock().unwrap().is_empty());
+    assert!(cloud_seen.lock().unwrap().is_empty());
     assert_eq!(
         *store.asked.lock().unwrap(),
         vec![
@@ -1282,7 +1315,9 @@ fn compat_failure_never_falls_back_to_other_providers() {
 #[test]
 fn anthropic_requires_explicit_choice_and_its_own_credential() {
     let store = SpyStore::default();
-    store.set(GROQ_API_KEY, &Secret::new(FAKE_KEY)).unwrap();
+    store
+        .set(LEFTOVER_GROQ_KEY, &Secret::new(FAKE_KEY))
+        .unwrap();
     store
         .set(OLLAMA_CLOUD_API_KEY, &Secret::new(CLOUD_KEY))
         .unwrap();
@@ -1482,13 +1517,13 @@ fn anthropic_http_errors_follow_the_contract_and_hide_the_key() {
 
 #[test]
 fn anthropic_failure_never_falls_back_to_another_provider_or_model() {
-    // Local, Groq y compatible simulados y vivos, con todas las credenciales presentes.
+    // Local, Ollama cloud y compatible simulados y vivos, con todas las credenciales presentes.
     let (_local_url, local_seen) = serve(vec![show_local(), ollama_ok("{}")]);
-    let (_groq_url, groq_seen) = serve(vec![chat_ok("{}")]);
+    let (_cloud_url, cloud_seen) = serve(vec![ollama_ok("{}")]);
     let (_compat_url, compat_seen) = serve(vec![chat_ok("{}")]);
     let store = SpyStore::default();
     for (name, key) in [
-        (GROQ_API_KEY, FAKE_KEY),
+        (LEFTOVER_GROQ_KEY, FAKE_KEY),
         (OLLAMA_CLOUD_API_KEY, CLOUD_KEY),
         (ANTHROPIC_API_KEY, ANTHROPIC_KEY),
         ("openai_compatible_api_key:api.example.com", COMPAT_KEY),
@@ -1528,7 +1563,7 @@ fn anthropic_failure_never_falls_back_to_another_provider_or_model() {
     thread::sleep(Duration::from_millis(100));
     assert_eq!(claude_seen.lock().unwrap().len(), 2);
     assert!(local_seen.lock().unwrap().is_empty());
-    assert!(groq_seen.lock().unwrap().is_empty());
+    assert!(cloud_seen.lock().unwrap().is_empty());
     assert!(compat_seen.lock().unwrap().is_empty());
     assert_eq!(
         *store.asked.lock().unwrap(),
@@ -1651,16 +1686,6 @@ fn code_fence_normalization_removes_only_one_wrapping_block() {
     }
 }
 
-fn groq_ok(content: Value) -> Reply {
-    reply(
-        200,
-        json!({
-            "model": "m",
-            "choices": [{ "message": { "content": content.to_string() } }],
-        }),
-    )
-}
-
 fn rate_limited(retry_after: &str) -> Reply {
     let mut r = reply(429, json!({ "error": { "message": "rate limit" } }));
     if !retry_after.is_empty() {
@@ -1670,39 +1695,22 @@ fn rate_limited(retry_after: &str) -> Reply {
 }
 
 #[test]
-fn rate_limit_waits_what_the_provider_asks_and_retries_the_same_provider() {
-    let content = json!({ "category": "otros", "draft": "Gracias por su mensaje." });
-    let (url, seen) = serve(vec![
-        rate_limited("0.2"),
-        rate_limited("0"),
-        groq_ok(content),
-    ]);
-    let provider =
-        GroqProvider::with_endpoint(&url, "m", Secret::new(FAKE_KEY), Duration::from_secs(5));
-    let started = std::time::Instant::now();
-    let result = provider.generate(&email_request("E01", "t")).unwrap();
-    assert_eq!(result.provider, ProviderKind::Groq);
-    assert!(started.elapsed() >= Duration::from_millis(200));
-    assert_eq!(seen.lock().unwrap().len(), 3);
-}
-
-#[test]
-fn rate_limit_beyond_the_deadline_is_reported_without_waiting() {
-    let (url, seen) = serve(vec![rate_limited("60")]);
-    let provider =
-        GroqProvider::with_endpoint(&url, "m", Secret::new(FAKE_KEY), Duration::from_secs(5));
+fn openai_compatible_rate_limit_is_reported_without_waiting_or_retrying() {
+    // T03d: ni el compatible con OpenAI espera ni reintenta ante un 429 (el reintento del lado
+    // del proveedor salió con Groq, D100); la tarea se reintenta de forma explícita.
+    let (url, seen) = serve(vec![rate_limited("0.2"), chat_ok("{}")]);
+    let provider = OpenAiCompatibleProvider::with_endpoint(
+        &url,
+        "m",
+        Secret::new(COMPAT_KEY),
+        Duration::from_secs(5),
+    );
     let started = std::time::Instant::now();
     let error = provider.generate(&email_request("E01", "t")).unwrap_err();
-    assert_eq!(
-        error,
-        AiError::RateLimited {
-            retry_after_ms: Some(60_000)
-        }
-    );
-    assert_eq!(error.code(), "rate_limited");
+    assert_eq!(error.code(), "rate_limited", "{error}");
     assert!(started.elapsed() < Duration::from_secs(2));
-    assert_eq!(seen.lock().unwrap().len(), 1);
-    assert!(!format!("{error}").contains(FAKE_KEY));
+    assert_eq!(seen.lock().unwrap().len(), 1, "no hay reintento");
+    assert!(!format!("{error}").contains(COMPAT_KEY));
 }
 
 #[test]

@@ -1,7 +1,8 @@
 //! Cliente común de la API de chat compatible con OpenAI (`POST {base}/chat/completions`).
-//! Lo usan Groq (endpoint fijo) y el adaptador genérico (D109, URL validada).
+//! Lo usa el adaptador genérico (D109, URL validada). Sin reintentos ante un 429: se informa
+//! `rate_limited` y no se reintenta (D100; el reintento del lado del proveedor salió con Groq).
 
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use serde_json::{json, Value};
 use ureq::Agent;
@@ -12,20 +13,11 @@ use crate::provider::{
     parse_output, AiError, GenerateRequest, GenerateResult, ProviderKind, Usage,
 };
 
-/// Reintentos ante un 429 dentro del plazo de la petición. La espera es la que pide el
-/// proveedor (`Retry-After`), o `DEFAULT_WAIT` si no la da, con un máximo de `MAX_WAIT`.
-const MAX_RATE_LIMIT_RETRIES: u32 = 10;
-const DEFAULT_WAIT: Duration = Duration::from_secs(2);
-const MAX_WAIT: Duration = Duration::from_secs(30);
-
 pub(crate) struct ChatClient {
     pub(crate) endpoint: String,
     pub(crate) model: String,
     pub(crate) api_key: Secret,
     agent: Agent,
-    /// Plazo total de la petición si se reintenta ante un 429 (`rate_limited`); `None` informa
-    /// el 429 sin esperar.
-    rate_limit_deadline: Option<Duration>,
 }
 
 impl ChatClient {
@@ -35,23 +27,7 @@ impl ChatClient {
             model: model.to_owned(),
             api_key,
             agent,
-            rate_limit_deadline: None,
         }
-    }
-
-    /// Reintenta con el mismo proveedor ante un 429 mientras quepa en `deadline` (D65).
-    pub(crate) fn retrying_rate_limits(mut self, deadline: Duration) -> Self {
-        self.rate_limit_deadline = Some(deadline);
-        self
-    }
-
-    pub(crate) fn with_timeout(
-        endpoint: &str,
-        model: &str,
-        api_key: Secret,
-        timeout: Duration,
-    ) -> Self {
-        Self::new(endpoint, model, api_key, http::agent(timeout))
     }
 
     pub(crate) fn generate(
@@ -81,27 +57,7 @@ impl ChatClient {
         }
         let started = Instant::now();
         let url = format!("{}/chat/completions", self.endpoint);
-        let mut retries = 0;
-        let response = loop {
-            match http::post_json(&self.agent, &url, Some(self.api_key.expose()), &body) {
-                Err(AiError::RateLimited { retry_after_ms }) => {
-                    let wait = retry_after_ms
-                        .map(Duration::from_millis)
-                        .unwrap_or(DEFAULT_WAIT)
-                        .min(MAX_WAIT);
-                    // Solo se espera si cabe en el plazo; si no, se informa sin esperar.
-                    let fits = self
-                        .rate_limit_deadline
-                        .is_some_and(|deadline| started.elapsed() + wait < deadline);
-                    if retries >= MAX_RATE_LIMIT_RETRIES || !fits {
-                        return Err(AiError::RateLimited { retry_after_ms });
-                    }
-                    retries += 1;
-                    std::thread::sleep(wait);
-                }
-                other => break other?,
-            }
-        };
+        let response = http::post_json(&self.agent, &url, Some(self.api_key.expose()), &body)?;
         let latency_ms = started.elapsed().as_millis() as u64;
         let text = response
             .pointer("/choices/0/message/content")

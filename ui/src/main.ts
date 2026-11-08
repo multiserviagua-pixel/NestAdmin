@@ -455,7 +455,8 @@ function reviewView() {
 }
 
 const EXTERNAL_NAME: Record<Exclude<ProviderInfo["provider"], "ollama">, string> = {
-  groq: "Groq",
+  // Resultados antiguos con proveedor Groq (retirado, D100): solo se muestra su procedencia.
+  groq: "Groq (retirado)",
   ollama_cloud: "Ollama cloud",
   openai_compatible: "Compatible con OpenAI",
   anthropic: "Claude · Anthropic",

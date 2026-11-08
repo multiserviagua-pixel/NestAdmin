@@ -28,7 +28,7 @@ Reglas comunes:
 | T08b-14 | El doble informa 16, 15,6, 12, 9, 8 y 7,7 GiB, o no informa memoria. | Niveles `recommended` (16 y 15,6), `below_recommended` (12 y 9), `insufficient` (8 y 7,7) y `unknown`. Sin aviso con 16 GB; aviso que recomienda 16 GB con 12; aviso de que probablemente no responderá a tiempo con 8. Con menos de 6 GiB libres se sugiere cerrar programas. Sin memoria leída no se avisa. |
 | T08b-15 | Todo listo, con 16, 12 y 8 GB. | `status` da `ready` con el nivel que corresponde y `prepare` termina bien en los tres casos: el aviso no bloquea, no instala ni arranca nada más y no cambia de proveedor. |
 | T08b-16 | El modelo tarda más que el plazo de verificación, con 8, 12 y 16 GB. | Error `verify_failed` con mensaje `timeout:`; con 8 y 12 GB el mensaje cita la falta de memoria como causa probable y con 16 GB no. |
-| T08b-17 | Una tarea con Ollama agota el tiempo en un equipo de 8 GB. | El error conserva el código `timeout` y su mensaje cita la memoria del equipo. Con 16 GB, o con Groq elegido, el error no cambia. |
+| T08b-17 | Una tarea con Ollama agota el tiempo en un equipo de 8 GB. | El error conserva el código `timeout` y su mensaje cita la memoria del equipo. Con 16 GB, o con un proveedor externo elegido, el error no cambia. |
 
 ## T08c — Comprobación al abrir la aplicación (D39)
 
@@ -36,7 +36,7 @@ Reglas comunes:
 | --- | --- | --- |
 | T08c-01 | Proveedor Ollama, servicio detenido, todo instalado. | Se arranca sin intervención y la ventana principal se abre; abrir de nuevo no lo vuelve a arrancar. |
 | T08c-02 | Proveedor Ollama, falta el modelo. | No descarga en segundo plano: la ventana muestra el asistente. |
-| T08c-03 | Proveedor externo elegido (antes Groq; desde D100, Ollama cloud u otro externo). | No se comprueba ni se arranca nada local. |
+| T08c-03 | Proveedor externo elegido (Ollama cloud u otro externo; Groq se retiró en D100). | No se comprueba ni se arranca nada local. |
 | T08c-04 | La comprobación tarda (servicio lento al arrancar). | La ventana no se bloquea mientras espera. |
 
 ## T08e — Instalador sin IA local y primer arranque (D100, D101, D103)
