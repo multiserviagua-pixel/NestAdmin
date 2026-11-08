@@ -3,6 +3,7 @@
 
 import type {
   AccountFetch,
+  AiWait,
   AuditEntry,
   DocumentOrigin,
   MailOrigin,
@@ -30,12 +31,83 @@ let nextId = 1;
 const tasks: Task[] = [];
 const rules: Rule[] = [];
 const audit: AuditEntry[] = [];
-let choice: ProviderChoice = { provider: "ollama", base_url: "http://127.0.0.1:11434", model: "qwen3:8b" };
-let groqKey = false;
-let ollamaCloudKey = false;
-let anthropicKey = false;
-// Claves del proveedor compatible con OpenAI por host (D109).
-const compatKeys = new Set<string>();
+// Escenarios de IA (D100–D102, D122) por la URL, como `?sin-cuentas` en el correo:
+// - sin parámetros: Ollama cloud con clave y destino confirmados;
+// - `?sin-ia`: instalación nueva (sin clave ni confirmación): abre el asistente de primer uso;
+// - `?local`: quien tenía la IA local (con la oferta única de pasar al externo);
+// - `?clave-revocada`: la clave guardada fue rechazada (aviso sin asistente);
+// - `?modelo-retirado`: el modelo guardado ya no aparece en la lista;
+// - `?sin-ollama`: la IA local no responde; `?sin-respaldo`: respaldo desactivado;
+// - `?periodo-respaldo`: periodo de 10 minutos tras un fallo del externo;
+// - `?prueba-falla`: la prueba sintética devuelve un JSON no válido (D105).
+// Claves sintéticas: una que empiece por «gsk-invalida» o «invalida» da `unauthorized`, y una
+// que empiece por «sin-red» da `unavailable`.
+const aiParams = new URLSearchParams(location.search);
+const CLOUD_DEFAULT = "gemma4:31b"; // espejo de DEFAULT_CLOUD_MODEL (solo vista previa)
+const freshInstall = aiParams.has("sin-ia") || aiParams.has("local");
+let choice: ProviderChoice | null = aiParams.has("local")
+  ? { provider: "ollama", base_url: "http://127.0.0.1:11434", model: "qwen3:8b" }
+  : { provider: "ollama_cloud", model: aiParams.has("modelo-retirado") ? "gemma3:12b-retirado" : CLOUD_DEFAULT };
+// Nombres de credencial guardados: «ollama_cloud», «anthropic» o «compat:<host>».
+const savedKeys = new Set<string>(freshInstall ? [] : ["ollama_cloud"]);
+// Destinos confirmados: «<proveedor>|<destino>».
+const consents = new Set<string>(freshInstall ? [] : ["ollama_cloud|ollama.com"]);
+let localFallback = !aiParams.has("sin-respaldo");
+let offerShown = false;
+let keyRevoked = aiParams.has("clave-revocada");
+
+function credentialName(c: ProviderChoice): string | null {
+  switch (c.provider) {
+    case "ollama":
+      return null;
+    case "ollama_cloud":
+      return "ollama_cloud";
+    case "anthropic":
+      return "anthropic";
+    case "openai_compatible":
+      return `compat:${compatHost(c.base_url)}`;
+  }
+}
+
+function destination(c: ProviderChoice): string | null {
+  switch (c.provider) {
+    case "ollama":
+      return null;
+    case "ollama_cloud":
+      return "ollama.com";
+    case "anthropic":
+      return "api.anthropic.com";
+    case "openai_compatible":
+      return compatHost(c.base_url);
+  }
+}
+
+function consentKey(c: ProviderChoice): string | null {
+  const d = destination(c);
+  return d ? `${c.provider}|${d}` : null;
+}
+
+function aiWait(): AiWait | null {
+  if (!choice) return "needs_choice";
+  const key = consentKey(choice);
+  if (key === null) return null;
+  if (!consents.has(key)) return "needs_consent";
+  if (!savedKeys.has(credentialName(choice) ?? "")) return "needs_key";
+  return keyRevoked ? "invalid_key" : null;
+}
+
+const AI_WAIT_MESSAGE: Record<AiWait, string> = {
+  needs_choice: "Falta configurar la IA: elija un proveedor en Configuración",
+  needs_key: "Falta configurar la IA: guarde la clave del proveedor en Configuración",
+  needs_consent: "Falta configurar la IA: confirme el destino de los datos en Configuración",
+  invalid_key: "La clave de IA no es válida o fue revocada: corríjala en Configuración",
+};
+
+const MODEL_LISTS: Record<string, string[]> = {
+  ollama_cloud: [CLOUD_DEFAULT, "gpt-oss:120b", "mistral-large-4", "deepseek-v4.1-flash"],
+  anthropic: ["claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5"],
+  openai_compatible: ["modelo-sintetico-grande", "modelo-sintetico-pequeno"],
+};
 
 /// Réplica reducida de la validación de URL base del adaptador (D109).
 function compatHost(baseUrl: string): string {
@@ -57,14 +129,6 @@ function compatHost(baseUrl: string): string {
     host.startsWith("[");
   if (local) throw "unavailable: URL base no admitida: apunta a este equipo o a la red local";
   return host;
-}
-
-function compatKeySaved(baseUrl: string): boolean {
-  try {
-    return compatKeys.has(compatHost(baseUrl));
-  } catch {
-    return false;
-  }
 }
 
 // Cuentas de correo simuladas. `?sin-cuentas` en la URL abre la pantalla sin ninguna cuenta y
@@ -402,6 +466,7 @@ task("email", { message_id: "simulador:M-0005", account: "simulador" }, "awaitin
 // Importe dudoso (D120): se pide confirmarlo con el documento antes de aprobar.
 task("invoice", { document: "factura-dudosa.txt" }, "awaiting_review", {
   ...invoiceResult("factura-dudosa.txt", "1210.00", ["amount_to_review"], fileOrigin("factura-dudosa.txt", "C:\\Users\\Usuario\\Documents\\Facturas\\factura-dudosa.txt", 2)),
+  fallback: { from: "ollama_cloud", reason: "rate_limited" },
   fields: { supplier: "Suministros Alfa SL", invoice_number: "FS-2026-015", date: "2026-10-02", subtotal: "1000.00", tax: "210.00", total: "1210.00", currency: "EUR" },
   document_path: "C:\\Users\\demo\\AppData\\Local\\NestAdmin\\documentos\\1793816133.txt",
   recovered: [{ field: "subtotal", literal: "1.000", evidence: "1.000", value: "1000.00", reason: "ambiguous_separator" }],
@@ -430,6 +495,7 @@ task("email", { message_id: "microsoft-1:AAMk-sintetico-2", account: "microsoft-
   },
   provider: "ollama",
   model: "qwen3:8b",
+  fallback: { from: "ollama_cloud", reason: "unavailable" },
   review_reason: "ninguna regla activa coincide",
   action: { kind: "send_draft" },
 });
@@ -613,54 +679,66 @@ const handlers: Record<string, (a: any, options?: any) => unknown> = {
     return r.active === active ? r : addRule({ ...r, version: r.version + 1, active, created_at: now() });
   },
   audit_log: () => structuredClone(audit),
-  settings: (): SettingsView => ({
-    choice,
-    active: { provider: choice.provider, model: choice.model },
-    groq_key_saved: groqKey,
-    ollama_cloud_key_saved: ollamaCloudKey,
-    anthropic_key_saved: anthropicKey,
-    openai_compatible_key_saved: choice.provider === "openai_compatible" && compatKeySaved(choice.base_url),
-    default_cloud_model: "gemma4:31b", // espejo de DEFAULT_CLOUD_MODEL (solo vista previa)
-    data_dir: "%LOCALAPPDATA%\\NestAdmin (vista previa: datos en memoria)",
-  }),
-  select_provider: ({ choice: next }) => {
-    if (next.provider === "groq" && !groqKey) throw "unauthorized: credencial ausente o rechazada";
-    if (next.provider === "ollama_cloud" && !ollamaCloudKey) throw "unauthorized: credencial ausente o rechazada";
-    if (next.provider === "anthropic" && !anthropicKey) throw "unauthorized: credencial ausente o rechazada";
-    if (next.provider === "openai_compatible" && !compatKeys.has(compatHost(next.base_url))) {
-      throw "unauthorized: credencial ausente o rechazada";
+  settings: (): SettingsView => {
+    const wait = aiWait();
+    const consented = !choice || choice.provider === "ollama" || consents.has(consentKey(choice) ?? "");
+    return {
+      choice,
+      active: choice ? { provider: choice.provider, model: choice.model } : { provider: "ollama_cloud", model: CLOUD_DEFAULT },
+      ai_wait: wait,
+      ai_wait_message: wait ? AI_WAIT_MESSAGE[wait] : null,
+      local_fallback: localFallback,
+      fallback_period_active: aiParams.has("periodo-respaldo"),
+      consented,
+      offer_external: !offerShown && choice?.provider === "ollama",
+      default_cloud_model: CLOUD_DEFAULT,
+      data_dir: "%LOCALAPPDATA%\\NestAdmin (vista previa: datos en memoria)",
+    };
+  },
+  select_provider: ({ choice: next, consent }) => {
+    const dest = consentKey(next);
+    if (dest) {
+      if (consent) consents.add(dest);
+      else if (!consents.has(dest)) throw "Confirme antes el destino de los datos";
+      if (!savedKeys.has(credentialName(next) ?? "")) throw "unauthorized: credencial ausente o rechazada";
     }
     choice = next;
+    keyRevoked = false;
     return { provider: next.provider, model: next.model };
   },
-  save_anthropic_key: ({ key }) => {
-    if (!String(key).trim()) throw "la clave está vacía";
-    anthropicKey = true;
+  list_models: async ({ choice: target, key }) => {
+    await new Promise((resolve) => setTimeout(resolve, 600));
+    if (target.provider === "ollama") {
+      if (aiParams.has("sin-ollama")) throw "unavailable: Ollama no está instalado o no responde en esta dirección";
+      return modelPresent ? ["qwen3:8b"] : [];
+    }
+    const name = credentialName(target)!;
+    const typed = String(key ?? "").trim();
+    if (!typed && !savedKeys.has(name)) throw "unauthorized: falta la clave del proveedor";
+    if (/^(gsk-invalida|invalida)/.test(typed)) throw "unauthorized: el proveedor rechazó la clave";
+    if (/^sin-red/.test(typed)) throw "unavailable: no se pudo conectar con el proveedor";
+    if (typed) {
+      savedKeys.add(name);
+      keyRevoked = false;
+    }
+    return structuredClone(MODEL_LISTS[target.provider]);
   },
-  delete_anthropic_key: () => {
-    anthropicKey = false;
+  test_provider: async ({ choice: target }) => {
+    const dest = consentKey(target);
+    if (dest && !consents.has(dest)) throw "Confirme antes el destino de los datos";
+    await new Promise((resolve) => setTimeout(resolve, 900));
+    if (aiParams.has("prueba-falla"))
+      throw "invalid_response: la respuesta del modelo no es el JSON esperado (se recibió texto libre)";
   },
-  save_openai_compatible_key: ({ baseUrl, key }) => {
-    if (!String(key).trim()) throw "la clave está vacía";
-    compatKeys.add(compatHost(String(baseUrl)));
+  set_local_fallback: ({ enabled }) => {
+    localFallback = Boolean(enabled);
   },
-  delete_openai_compatible_key: ({ baseUrl }) => {
-    compatKeys.delete(compatHost(String(baseUrl)));
+  provider_key_saved: ({ choice: target }) => savedKeys.has(credentialName(target) ?? ""),
+  delete_provider_key: ({ choice: target }) => {
+    savedKeys.delete(credentialName(target) ?? "");
   },
-  openai_compatible_key_saved: ({ baseUrl }) => compatKeySaved(String(baseUrl)),
-  save_groq_key: ({ key }) => {
-    if (!String(key).trim()) throw "la clave está vacía";
-    groqKey = true;
-  },
-  save_ollama_cloud_key: ({ key }) => {
-    if (!String(key).trim()) throw "la clave está vacía";
-    ollamaCloudKey = true;
-  },
-  delete_ollama_cloud_key: () => {
-    ollamaCloudKey = false;
-  },
-  delete_groq_key: () => {
-    groqKey = false;
+  dismiss_external_offer: () => {
+    offerShown = true;
   },
   launch_mode: () => ({
     prepare_only: prepareOnly,
@@ -682,7 +760,7 @@ const handlers: Record<string, (a: any, options?: any) => unknown> = {
 };
 
 function startup(): Startup {
-  if (choice.provider !== "ollama") return { outcome: "not_local" };
+  if (choice?.provider !== "ollama") return { outcome: "not_local" };
   return modelPresent ? { outcome: "ready" } : { outcome: "needs_preparation", check: { status: "missing", component: "model" } };
 }
 

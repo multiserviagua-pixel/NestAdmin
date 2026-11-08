@@ -37,25 +37,35 @@ export interface AuditEntry {
 
 export type ProviderChoice =
   | { provider: "ollama"; base_url: string; model: string }
-  | { provider: "groq"; model: string }
   | { provider: "ollama_cloud"; model: string }
   | { provider: "openai_compatible"; base_url: string; model: string }
   | { provider: "anthropic"; model: string };
 
+export type ProviderId = ProviderChoice["provider"];
+
 export interface ProviderInfo {
-  provider: "ollama" | "groq" | "ollama_cloud" | "openai_compatible" | "anthropic";
+  provider: ProviderId | "groq";
   model: string;
 }
 
+/** Por qué las tareas con IA esperan en la cola (D101). */
+export type AiWait = "needs_choice" | "needs_key" | "needs_consent" | "invalid_key";
+
 export interface SettingsView {
-  choice: ProviderChoice;
+  /** `null`: hay que elegir proveedor (D100). */
+  choice: ProviderChoice | null;
   active: ProviderInfo;
-  groq_key_saved: boolean;
-  ollama_cloud_key_saved: boolean;
-  anthropic_key_saved: boolean;
-  /** Clave guardada para el host de la URL compatible con OpenAI configurada (D109). */
-  openai_compatible_key_saved: boolean;
-  /** Modelo prefijado de Ollama cloud: `DEFAULT_CLOUD_MODEL` del backend (D108). */
+  ai_wait: AiWait | null;
+  ai_wait_message: string | null;
+  /** Respaldo del proveedor externo elegido a la IA local (D101). */
+  local_fallback: boolean;
+  /** Las tareas van directas a la IA local durante 10 minutos por un fallo del externo. */
+  fallback_period_active: boolean;
+  /** Destino de la elección actual ya confirmado (siempre `true` con la IA local). */
+  consented: boolean;
+  /** Oferta única de pasar al proveedor externo a quien tenía la IA local (D100). */
+  offer_external: boolean;
+  /** Modelo recomendado de Ollama cloud: `DEFAULT_CLOUD_MODEL` del backend (D108). */
   default_cloud_model: string;
   data_dir: string;
 }

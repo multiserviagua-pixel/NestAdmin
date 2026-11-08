@@ -128,6 +128,9 @@ const state = {
   rules: [] as Rule[],
   audit: [] as AuditEntry[],
   settings: null as SettingsView | null,
+  // Proveedor desplegado en Configuración (null: el elegido) y asistente de primer uso.
+  pick: null as ProviderChoice["provider"] | null,
+  wizard: false,
   mail: null as MailView | null,
   // Dirección del inicio de sesión en curso, por si el navegador no se abrió solo.
   signInUrl: null as string | null,
@@ -307,13 +310,15 @@ function header() {
       { class: "status" },
       h("span", { class: "pill" }, `${pending} pendientes`),
       working ? h("span", { class: "pill working" }, `${working} en proceso`) : null,
-      active
-        ? h(
-            "span",
-            { class: `pill provider ${active.provider}`, title: "Proveedor de IA activo" },
-            providerLabel(active.provider, active.model),
-          )
-        : null,
+      state.settings?.ai_wait_message
+        ? h("button", { class: "pill provider waiting", title: state.settings.ai_wait_message, onclick: goToSettings }, "IA sin configurar")
+        : active
+          ? h(
+              "span",
+              { class: `pill provider ${active.provider}`, title: "Proveedor de IA activo" },
+              providerLabel(active.provider, active.model),
+            )
+          : null,
     ),
     h(
       "div",
@@ -379,6 +384,7 @@ function nav() {
           onclick: () => {
             state.view = view;
             state.notice = null;
+            if (view === "settings") resetBlocks();
             render();
           },
         },
@@ -446,14 +452,6 @@ function reviewView() {
   );
 }
 
-// Modelos para Ollama cloud (D108). El prefijado viene del backend (`default_cloud_model`,
-// `DEFAULT_CLOUD_MODEL`); aquí solo van las sugerencias adicionales. Nombres de la API directa
-// de ollama.com.
-const CLOUD_MODEL_EXTRA_SUGGESTIONS = ["gpt-oss:120b", "mistral-large-4", "deepseek-v4.1-flash"];
-// Modelos de Claude (D110): ids sin sufijo de fecha; el modelo es configurable.
-const CLAUDE_MODEL_SUGGESTIONS = ["claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5"];
-const CLAUDE_MODEL_DEFAULT = CLAUDE_MODEL_SUGGESTIONS[0];
-
 const EXTERNAL_NAME: Record<Exclude<ProviderInfo["provider"], "ollama">, string> = {
   groq: "Groq",
   ollama_cloud: "Ollama cloud",
@@ -473,6 +471,18 @@ function hostOf(baseUrl: string): string {
   } catch {
     return baseUrl.trim() || "el servicio configurado";
   }
+}
+
+/// Texto del respaldo local (D101, D102): qué proveedor externo falló y por qué.
+function fallbackText(fallback: { from: string; reason: string }): string {
+  const name = EXTERNAL_NAME[fallback.from as keyof typeof EXTERNAL_NAME] ?? fallback.from;
+  return fallback.reason === "rate_limited"
+    ? `Procesado con la IA local porque ${name} alcanzó su límite`
+    : `Procesado con la IA local porque ${name} no respondió`;
+}
+
+function fallbackNotice(result: Record<string, any>) {
+  return result.fallback ? h("div", { class: "notice warn", role: "status" }, h("span", {}, fallbackText(result.fallback))) : null;
 }
 
 function provenance(result: Record<string, any>) {
@@ -502,6 +512,7 @@ function invoiceDetail(task: Task) {
     {},
     h("h2", {}, title(task)),
     provenance(r),
+    fallbackNotice(r),
     documentOrigin(task, origin),
     r.part && r.part.of > 1
       ? h(
@@ -628,6 +639,7 @@ function emailDetail(task: Task) {
     {},
     h("h2", {}, message.subject ?? h("span", { class: "missing" }, "(sin asunto)")),
     provenance(r),
+    fallbackNotice(r),
     h("p", { class: "reason" }, `Motivo de la revisión: ${r.review_reason ?? "requiere aprobación"}`),
     recoveryBox(task, "enviar"),
     h(
@@ -698,7 +710,14 @@ function tasksView() {
                 h(
                   "td",
                   { class: "detail-cell" },
-                  t.error ? h("span", { class: "error-text" }, t.error.message) : t.result?.issues?.length ? t.result.issues.map((i: string) => ISSUE_LABEL[i] ?? i).join(", ") : "",
+                  t.error
+                    ? h("span", { class: "error-text" }, t.error.message)
+                    : t.state === "queued" && state.settings?.ai_wait_message
+                      ? h("span", { class: "warn-text" }, state.settings.ai_wait_message)
+                      : t.result?.issues?.length
+                        ? t.result.issues.map((i: string) => ISSUE_LABEL[i] ?? i).join(", ")
+                        : "",
+                  t.result?.fallback ? h("span", { class: "meta" }, ` ${fallbackText(t.result.fallback)}`) : null,
                 ),
                 h(
                   "td",
@@ -1206,89 +1225,422 @@ Déjelo vacío para volver al predeterminado.`,
   );
 }
 
+// ---- Proveedor de IA (D100–D102, D122) ----
+
+type Kind = ProviderChoice["provider"];
+
+/// Orden de la lista: el externo por defecto primero y la IA local la última.
+const KIND_ORDER: Kind[] = ["ollama_cloud", "openai_compatible", "anthropic", "ollama"];
+const KIND_NAME: Record<Kind, string> = {
+  ollama_cloud: "Ollama cloud",
+  openai_compatible: "Compatible con OpenAI",
+  anthropic: "Claude · Anthropic",
+  ollama: "IA local (Ollama)",
+};
+const KIND_NOTE: Record<Kind, string> = {
+  ollama_cloud: "externo, por defecto",
+  openai_compatible: "externo; solo https",
+  anthropic: "externo",
+  ollama: "no sale nada del equipo",
+};
+const LOCAL_URL = "http://127.0.0.1:11434";
+
+/// Estado de cada bloque de proveedor. Vive fuera de la vista para que un repintado no borre lo
+/// escrito; la clave tecleada solo está aquí hasta que el proveedor responde y se guarda.
+interface Block {
+  key: string;
+  url: string;
+  /// Modelo elegido en la lista ("" si no hay ninguno elegido).
+  model: string;
+  models: string[] | null;
+  loading: boolean;
+  listError: string | null;
+  /// Hay clave guardada para este proveedor (y host); `null` si aún no se ha consultado.
+  saved: boolean | null;
+  consent: boolean;
+  busy: boolean;
+  outcome: { kind: "ok" | "error"; text: string } | null;
+  opened: boolean;
+}
+
+interface BlockOptions {
+  /// Carga la lista al abrir si ya hay clave guardada (por defecto, solo el proveedor activo).
+  auto?: boolean;
+  /// Se llama cuando el proveedor quedó elegido y la prueba respondió bien.
+  onDone?: () => void;
+}
+
+const blocks: Partial<Record<Kind, Block>> = {};
+
+function resetBlocks() {
+  for (const kind of KIND_ORDER) delete blocks[kind];
+}
+
+function block(kind: Kind): Block {
+  let b = blocks[kind];
+  if (!b) {
+    const c = state.settings?.choice;
+    const same = c && c.provider === kind ? c : null;
+    b = {
+      key: "",
+      url: same && "base_url" in same ? same.base_url : kind === "ollama" ? LOCAL_URL : "",
+      model: "",
+      models: null,
+      loading: false,
+      listError: null,
+      saved: null,
+      consent: false,
+      busy: false,
+      outcome: null,
+      opened: false,
+    };
+    blocks[kind] = b;
+  }
+  return b;
+}
+
+/// Modelo guardado de este proveedor, si es el elegido actualmente.
+function savedModel(kind: Kind): string | null {
+  const c = state.settings?.choice;
+  return c && c.provider === kind ? c.model : null;
+}
+
+function choiceFor(kind: Kind, model: string): ProviderChoice {
+  const b = block(kind);
+  switch (kind) {
+    case "ollama_cloud":
+      return { provider: kind, model };
+    case "anthropic":
+      return { provider: kind, model };
+    case "openai_compatible":
+      return { provider: kind, base_url: b.url.trim(), model };
+    case "ollama":
+      return { provider: kind, base_url: b.url.trim() || LOCAL_URL, model };
+  }
+}
+
+/// Problema visible de la URL base del proveedor compatible; el adaptador valida el resto.
+function compatProblem(b: Block): string | null {
+  const url = b.url.trim();
+  if (!url) return "Indique la URL base del servicio.";
+  if (!/^https:\/\//i.test(url)) return "Solo se admite una URL https://.";
+  return null;
+}
+
+const LEAVES =
+  "El contenido que la tarea necesita (texto extraído de documentos; asunto, remitente, destinatarios, fecha y cuerpo de correos) sale de este equipo hacia";
+const STAYS = "No salen la base de datos, otras claves ni el archivo original.";
+
+function destinationName(kind: Kind, b: Block): string {
+  switch (kind) {
+    case "ollama_cloud":
+      return "Ollama Inc. (ollama.com, principalmente en EE. UU.)";
+    case "anthropic":
+      return "Anthropic (api.anthropic.com)";
+    case "openai_compatible":
+      return `${hostOf(b.url)} (el servicio que usted ha indicado)`;
+    case "ollama":
+      return "este equipo";
+  }
+}
+
+function destinationText(kind: Kind, b: Block): string {
+  return `${LEAVES} ${destinationName(kind, b)}. ${STAYS}`;
+}
+
+/// El destino de esta elección ya está confirmado (solo se sabe del proveedor guardado).
+function alreadyConsented(kind: Kind, b: Block): boolean {
+  const s = state.settings;
+  const c = s?.choice;
+  if (!s || !c || c.provider !== kind || !s.consented) return false;
+  return c.provider !== "openai_compatible" || hostOf(c.base_url) === hostOf(b.url);
+}
+
+function goToSettings() {
+  state.view = "settings";
+  state.notice = null;
+  resetBlocks();
+  render();
+}
+
+function goInstallLocal() {
+  state.wizard = false;
+  state.view = "setup";
+  state.notice = null;
+  render();
+}
+
+async function openBlock(kind: Kind, opts: BlockOptions) {
+  const b = block(kind);
+  if (kind === "ollama") return void (await loadModels(kind, null));
+  try {
+    b.saved = await api.providerKeySaved(choiceFor(kind, ""));
+  } catch {
+    b.saved = false;
+  }
+  const auto = opts.auto ?? state.settings?.choice?.provider === kind;
+  if (b.saved && auto && !(kind === "openai_compatible" && compatProblem(b))) await loadModels(kind, null);
+  else render();
+}
+
+/// Pide la lista de modelos (D122). Con una clave tecleada, el backend la guarda solo si la
+/// lista responde; si falla, la clave sigue en el campo y no se guarda nada.
+async function loadModels(kind: Kind, typed: string | null) {
+  const b = block(kind);
+  if (b.loading) return;
+  b.loading = true;
+  b.listError = null;
+  b.outcome = null;
+  render();
+  try {
+    const models = await api.listModels(choiceFor(kind, b.model || savedModel(kind) || ""), typed);
+    b.models = models;
+    if (typed) {
+      b.saved = true;
+      b.key = "";
+    }
+    const saved = savedModel(kind);
+    if (!b.model || !models.includes(b.model)) {
+      if (saved) b.model = models.includes(saved) ? saved : "";
+      else b.model = models[0] ?? "";
+    }
+    if (typed) await refresh(true);
+  } catch (error) {
+    b.models = null;
+    b.model = "";
+    b.listError = String(error);
+  }
+  b.loading = false;
+  render();
+}
+
+async function useProvider(kind: Kind, opts: BlockOptions) {
+  const b = block(kind);
+  const choice = choiceFor(kind, b.model);
+  b.busy = true;
+  b.outcome = null;
+  render();
+  try {
+    await api.selectProvider(choice, alreadyConsented(kind, b) || b.consent);
+  } catch (error) {
+    b.busy = false;
+    b.outcome = { kind: "error", text: `No se ha cambiado de proveedor: ${error}` };
+    render();
+    return;
+  }
+  b.consent = false;
+  await refresh(true);
+  let done = false;
+  try {
+    await api.testProvider(choice);
+    b.outcome = { kind: "ok", text: "Proveedor listo: respondió correctamente" };
+    done = true;
+  } catch (error) {
+    b.outcome = {
+      kind: "error",
+      text: `La prueba del proveedor falló: ${error}. La selección se ha mantenido; compruebe la clave y el modelo, o elija otro proveedor.`,
+    };
+  }
+  b.busy = false;
+  render();
+  if (done) opts.onDone?.();
+}
+
+async function deleteKey(kind: Kind) {
+  const b = block(kind);
+  try {
+    await api.deleteProviderKey(choiceFor(kind, b.model || savedModel(kind) || ""));
+    b.saved = false;
+    b.models = null;
+    b.model = "";
+    b.key = "";
+    b.outcome = { kind: "ok", text: "Clave eliminada" };
+  } catch (error) {
+    b.outcome = { kind: "error", text: String(error) };
+  }
+  await refresh(true);
+}
+
+/// Cambió la URL base: la lista y la clave dependen del host, así que se vuelven a consultar.
+async function urlChanged(kind: Kind, opts: BlockOptions) {
+  const b = block(kind);
+  b.models = null;
+  b.model = "";
+  b.listError = null;
+  b.outcome = null;
+  b.saved = null;
+  b.consent = false;
+  if (kind === "openai_compatible" && compatProblem(b)) {
+    b.saved = false;
+    return render();
+  }
+  render();
+  await openBlock(kind, opts);
+}
+
+/// Bloque de un proveedor: clave, lista de modelos, destino de los datos y «Usar este proveedor».
+/// Lo usan Configuración y el asistente de primer uso.
+function providerBlock(kind: Kind, opts: BlockOptions = {}): HTMLElement {
+  const b = block(kind);
+  const external = kind !== "ollama";
+  if (!b.opened) {
+    b.opened = true;
+    queueMicrotask(() => void openBlock(kind, opts));
+  }
+  const problem = kind === "openai_compatible" ? compatProblem(b) : null;
+  const consented = !external || alreadyConsented(kind, b);
+  const hasList = !!b.models && b.models.length > 0;
+  const saved = savedModel(kind);
+  const missing = hasList && saved !== null && !b.models!.includes(saved) ? saved : null;
+  const ready = hasList && b.models!.includes(b.model) && (consented || b.consent) && !b.busy && !b.loading && !problem;
+
+  const urlField =
+    kind === "openai_compatible" || kind === "ollama"
+      ? h(
+          "label",
+          {},
+          kind === "ollama" ? "Dirección local" : "URL base",
+          h("input", {
+            value: b.url,
+            placeholder: kind === "ollama" ? LOCAL_URL : "https://api.ejemplo.com/v1",
+            autocomplete: "off",
+            oninput: (event) => (b.url = (event.target as HTMLInputElement).value),
+            onchange: () => void urlChanged(kind, opts),
+          }),
+        )
+      : null;
+  const hostLine =
+    kind === "openai_compatible"
+      ? h(
+          "p",
+          { class: problem ? "error-text" : "intro" },
+          problem ??
+            `La clave queda ligada al host ${hostOf(b.url)}: con otro host no se envía. ${b.saved ? "Hay una clave guardada para este host." : "No hay clave guardada para este host."}`,
+        )
+      : null;
+  const keyField = external
+    ? h(
+        "div",
+        { class: "row" },
+        h(
+          "label",
+          {},
+          "Clave",
+          h("input", {
+            type: "password",
+            autocomplete: "off",
+            value: b.key,
+            placeholder: b.saved ? "Clave guardada" : "Pegue aquí la clave",
+            oninput: (event) => (b.key = (event.target as HTMLInputElement).value),
+          }),
+        ),
+        h(
+          "button",
+          {
+            disabled: b.loading || b.busy || !!problem || (!b.key.trim() && !b.saved),
+            "aria-busy": b.loading ? "true" : undefined,
+            onclick: () => void loadModels(kind, b.key.trim() || null),
+          },
+          b.loading ? "Comprobando…" : "Comprobar y ver modelos",
+        ),
+      )
+    : null;
+  const keyNote = external
+    ? h("p", { class: "intro" }, "La clave se guarda en el Administrador de credenciales de Windows, solo si el proveedor responde. NestAdmin no la muestra ni la escribe en registros.")
+    : null;
+
+  const model = h(
+    "label",
+    {},
+    "Modelo",
+    h(
+      "select",
+      {
+        "aria-label": "Modelo",
+        disabled: !hasList || b.loading || b.busy,
+        onchange: (event) => {
+          b.model = (event.target as HTMLSelectElement).value;
+          render();
+        },
+      },
+      hasList ? (b.model ? null : h("option", { value: "" }, "Elija un modelo")) : h("option", { value: "" }, b.loading ? "Cargando la lista…" : "Sin lista de modelos"),
+      ...(b.models ?? []).map((name) => h("option", { value: name, selected: name === b.model }, name)),
+    ),
+  );
+  const modelNotes: Child[] = [];
+  if (missing) {
+    modelNotes.push(
+      h("p", { class: "meta warn", role: "status" }, `El modelo guardado ${missing} ya no aparece en la lista. No se ha cambiado: elija otro de la lista.`),
+    );
+  } else if (!hasList && saved) {
+    modelNotes.push(h("p", { class: "meta" }, `Modelo guardado: ${saved}. No se puede cambiar hasta que la lista responda.`));
+  }
+  if (b.listError) modelNotes.push(h("p", { class: "error-text", role: "alert" }, `No se pudo obtener la lista de modelos: ${b.listError}`));
+  if (kind === "ollama" && !b.loading && (b.listError || (b.models && b.models.length === 0))) {
+    modelNotes.push(
+      h(
+        "p",
+        {},
+        b.listError ? "Ollama no está disponible en esta dirección. " : "Ollama no tiene ningún modelo instalado. ",
+        h("button", { class: "primary", onclick: goInstallLocal }, "Instalar IA local"),
+      ),
+    );
+  }
+
+  let consent: Child = null;
+  if (external) {
+    consent = consented
+      ? h("p", { class: "meta" }, `Destino de los datos confirmado: ${destinationName(kind, b)}.`)
+      : h(
+          "label",
+          { class: "choice consent" },
+          h("input", {
+            type: "checkbox",
+            checked: b.consent,
+            onchange: (event) => {
+              b.consent = (event.target as HTMLInputElement).checked;
+              render();
+            },
+          }),
+          h("span", {}, destinationText(kind, b)),
+        );
+  }
+
+  return h(
+    "div",
+    { class: "provider-block" },
+    urlField ? h("div", { class: "row" }, urlField) : null,
+    hostLine,
+    keyField,
+    keyNote,
+    h("div", { class: "row" }, model),
+    ...modelNotes,
+    consent,
+    h(
+      "div",
+      { class: "buttons" },
+      h(
+        "button",
+        { class: "primary", disabled: !ready, "aria-busy": b.busy ? "true" : undefined, onclick: () => void useProvider(kind, opts) },
+        b.busy ? "Probando el proveedor…" : "Usar este proveedor",
+      ),
+      external && b.saved ? h("button", { class: "danger", disabled: b.busy, onclick: () => void deleteKey(kind) }, "Eliminar clave") : null,
+    ),
+    b.outcome ? h("div", { class: `notice ${b.outcome.kind}`, role: b.outcome.kind === "error" ? "alert" : "status" }, h("span", {}, b.outcome.text)) : null,
+  );
+}
+
+function fallbackStateText(s: SettingsView): string {
+  if (!s.choice || s.choice.provider === "ollama") return "El respaldo solo se aplica con un proveedor externo.";
+  if (s.fallback_period_active) return "Activo durante 10 minutos porque el proveedor no responde: las tareas van directamente a la IA local.";
+  return s.local_fallback ? "Activado." : "Desactivado.";
+}
+
 function settingsView() {
   const s = state.settings;
   if (!s) return h("section", { class: "page" }, h("p", {}, "Cargando…"));
-  const ollamaModel = s.choice.provider === "ollama" ? s.choice.model : "qwen3:8b";
-  const ollamaUrl = s.choice.provider === "ollama" ? s.choice.base_url : "http://127.0.0.1:11434";
-  const groqModel = s.choice.provider === "groq" ? s.choice.model : "qwen/qwen3-32b";
-  const ollamaRadio = h("input", { type: "radio", name: "provider", value: "ollama", checked: s.choice.provider === "ollama" }) as HTMLInputElement;
-  const groqRadio = h("input", { type: "radio", name: "provider", value: "groq", checked: s.choice.provider === "groq" }) as HTMLInputElement;
-  const cloudModelValue = s.choice.provider === "ollama_cloud" ? s.choice.model : s.default_cloud_model;
-  const cloudRadio = h("input", { type: "radio", name: "provider", value: "ollama_cloud", checked: s.choice.provider === "ollama_cloud" }) as HTMLInputElement;
-  const model = h("input", { value: ollamaModel }) as HTMLInputElement;
-  const url = h("input", { value: ollamaUrl }) as HTMLInputElement;
-  const gModel = h("input", { value: groqModel }) as HTMLInputElement;
-  const cloudModel = h("input", { value: cloudModelValue, list: "ollama-cloud-models" }) as HTMLInputElement;
-  const cloudSuggestions = h(
-    "datalist",
-    { id: "ollama-cloud-models" },
-    ...[s.default_cloud_model, ...CLOUD_MODEL_EXTRA_SUGGESTIONS].map((name) => h("option", { value: name })),
-  );
-  const compatRadio = h("input", { type: "radio", name: "provider", value: "openai_compatible", checked: s.choice.provider === "openai_compatible" }) as HTMLInputElement;
-  const compatUrl = h("input", { value: s.choice.provider === "openai_compatible" ? s.choice.base_url : "", placeholder: "https://api.ejemplo.com/v1" }) as HTMLInputElement;
-  const compatModel = h("input", { value: s.choice.provider === "openai_compatible" ? s.choice.model : "" }) as HTMLInputElement;
-  const claudeRadio = h("input", { type: "radio", name: "provider", value: "anthropic", checked: s.choice.provider === "anthropic" }) as HTMLInputElement;
-  const claudeModel = h("input", { value: s.choice.provider === "anthropic" ? s.choice.model : CLAUDE_MODEL_DEFAULT, list: "claude-models" }) as HTMLInputElement;
-  const claudeSuggestions = h("datalist", { id: "claude-models" }, ...CLAUDE_MODEL_SUGGESTIONS.map((name) => h("option", { value: name })));
-  const key = h("input", { type: "password", autocomplete: "off", placeholder: s.groq_key_saved ? "Clave guardada" : "gsk_…" }) as HTMLInputElement;
-  const claudeKey = h("input", { type: "password", autocomplete: "off", placeholder: s.anthropic_key_saved ? "Clave guardada" : "Clave de Anthropic" }) as HTMLInputElement;
-  const compatKey = h("input", { type: "password", autocomplete: "off", placeholder: s.openai_compatible_key_saved ? "Clave guardada" : "Clave del servicio" }) as HTMLInputElement;
-  // La clave es del host de la URL: al editarla se consulta si ya hay una guardada para ese host.
-  const compatKeyStatus = h("p", { class: "intro" });
-  const compatDelete = h("button", { class: "danger", onclick: () => void act(() => api.deleteOpenAiCompatibleKey(compatUrl.value), "Clave eliminada") }, "Eliminar clave");
-  const showCompatKey = (saved: boolean) => {
-    const host = hostOf(compatUrl.value);
-    compatKeyStatus.textContent = compatUrl.value.trim()
-      ? `La clave se guarda para el host ${host}. Si cambias de host, la clave anterior no se envía. ${saved ? "Hay una clave guardada para este host." : "No hay clave guardada para este host."}`
-      : "Indica la URL base para guardar su clave.";
-    compatKey.placeholder = saved ? "Clave guardada" : "Clave del servicio";
-    compatDelete.hidden = !saved;
-  };
-  showCompatKey(s.openai_compatible_key_saved);
-  compatUrl.addEventListener("change", () => {
-    const value = compatUrl.value;
-    api.openAiCompatibleKeySaved(value).then(
-      (saved) => compatUrl.value === value && showCompatKey(saved),
-      () => showCompatKey(false),
-    );
-  });
-  const cloudKey = h("input", { type: "password", autocomplete: "off", placeholder: s.ollama_cloud_key_saved ? "Clave guardada" : "Clave de Ollama" }) as HTMLInputElement;
-  const apply = () => {
-    const choice: ProviderChoice = groqRadio.checked
-      ? { provider: "groq", model: gModel.value.trim() }
-      : cloudRadio.checked
-        ? { provider: "ollama_cloud", model: cloudModel.value.trim() }
-        : compatRadio.checked
-          ? { provider: "openai_compatible", base_url: compatUrl.value.trim(), model: compatModel.value.trim() }
-          : claudeRadio.checked
-            ? { provider: "anthropic", model: claudeModel.value.trim() }
-            : { provider: "ollama", base_url: url.value.trim(), model: model.value.trim() };
-    if (choice.provider === "groq" && !confirm("Con Groq, el contenido de documentos y correos se envía a un servicio externo. ¿Continuar?")) return;
-    if (
-      choice.provider === "ollama_cloud" &&
-      !confirm(
-        "El contenido de los documentos sale de este equipo y se envía a los servidores de Ollama (servicio externo). Consulta la política de privacidad de Ollama. ¿Continuar?",
-      )
-    )
-      return;
-    if (
-      choice.provider === "openai_compatible" &&
-      !confirm(
-        `El contenido de los documentos sale de este equipo y se envía a ${hostOf(choice.base_url)} (servicio externo). Consulta su política de privacidad. ¿Continuar?`,
-      )
-    )
-      return;
-    if (
-      choice.provider === "anthropic" &&
-      !confirm(
-        "El contenido de los documentos sale de este equipo y se envía a Anthropic (servicio externo). Consulta su política de privacidad. ¿Continuar?",
-      )
-    )
-      return;
-    const label = choice.provider === "ollama" ? "Ollama local" : EXTERNAL_NAME[choice.provider];
-    void act(() => api.selectProvider(choice), `Proveedor activo: ${label}`);
-  };
+  const pick: Kind = state.pick ?? s.choice?.provider ?? "ollama_cloud";
+  const externalChosen = !!s.choice && s.choice.provider !== "ollama";
   return h(
     "section",
     { class: "page" },
@@ -1296,85 +1648,55 @@ function settingsView() {
     h(
       "div",
       { class: "card" },
-      h("h3", {}, "Proveedor de IA"),
-      h("p", { class: "intro" }, "Si el proveedor elegido falla, la tarea queda fallida con el motivo. NestAdmin nunca cambia de proveedor por su cuenta."),
-      h("label", { class: "choice" }, ollamaRadio, h("span", {}, h("strong", {}, "Ollama (local, recomendado)"), " — el contenido no sale del equipo.")),
-      h("div", { class: "row indent" }, h("label", {}, "Modelo", model), h("label", {}, "Dirección local", url)),
-      h("label", { class: "choice" }, groqRadio, h("span", {}, h("strong", {}, "Groq (externo)"), " — envía el contenido a la API de Groq. Requiere clave.")),
-      h("div", { class: "row indent" }, h("label", {}, "Modelo", gModel)),
-      h("label", { class: "choice" }, cloudRadio, h("span", {}, h("strong", {}, "Ollama cloud (externo)"), " — envía el contenido a los servidores de Ollama. Requiere clave.")),
+      h("h3", {}, "Proveedor activo"),
+      h("p", {}, h("strong", {}, s.choice ? providerLabel(s.active.provider, s.active.model) : "Ninguno elegido")),
+      s.ai_wait_message ? h("div", { class: "notice warn", role: "status" }, h("span", {}, s.ai_wait_message)) : null,
       h(
-        "div",
-        { class: "row indent" },
-        h("label", {}, "Modelo", cloudModel, cloudSuggestions),
-        h("p", { class: "intro" }, `Prefijado: ${s.default_cloud_model} (elección del usuario, pendiente de medir). Otros para probar: ${CLOUD_MODEL_EXTRA_SUGGESTIONS.join(", ")}. Las etiquetas exactas se confirman en https://ollama.com/api/tags.`),
-      ),
-      h("label", { class: "choice" }, compatRadio, h("span", {}, h("strong", {}, "Compatible con OpenAI (externo)"), " — envía el contenido a la API que indiques (OpenRouter, Mistral, DeepSeek, OpenAI, Together…). Solo https; no admite direcciones locales. Requiere clave.")),
-      h("div", { class: "row indent" }, h("label", {}, "URL base", compatUrl), h("label", {}, "Modelo", compatModel)),
-      h("label", { class: "choice" }, claudeRadio, h("span", {}, h("strong", {}, "Claude · Anthropic (externo)"), " — envía el contenido a la API de Anthropic. Requiere clave.")),
-      h("div", { class: "row indent" }, h("label", {}, "Modelo", claudeModel, claudeSuggestions)),
-      h("button", { class: "primary", onclick: apply }, "Usar este proveedor"),
-    ),
-    h(
-      "div",
-      { class: "card" },
-      h("h3", {}, "Clave de Groq"),
-      h("p", { class: "intro" }, "Se guarda en el Administrador de credenciales de Windows. NestAdmin no la muestra ni la escribe en registros."),
-      h("div", { class: "row" }, h("label", {}, s.groq_key_saved ? "Sustituir clave" : "Clave", key)),
-      h(
-        "div",
-        { class: "buttons" },
-        h("button", { onclick: () => void act(() => api.saveGroqKey(key.value), "Clave guardada") }, "Guardar clave"),
-        s.groq_key_saved ? h("button", { class: "danger", onclick: () => void act(() => api.deleteGroqKey(), "Clave eliminada") }, "Eliminar clave") : null,
-      ),
-    ),
-    h(
-      "div",
-      { class: "card" },
-      h("h3", {}, "Clave de Ollama cloud"),
-      h("p", { class: "intro" }, "Se guarda en el Administrador de credenciales de Windows. NestAdmin no la muestra ni la escribe en registros."),
-      h("div", { class: "row" }, h("label", {}, s.ollama_cloud_key_saved ? "Sustituir clave" : "Clave", cloudKey)),
-      h(
-        "div",
-        { class: "buttons" },
-        h("button", { onclick: () => void act(() => api.saveOllamaCloudKey(cloudKey.value), "Clave guardada") }, "Guardar clave"),
-        s.ollama_cloud_key_saved ? h("button", { class: "danger", onclick: () => void act(() => api.deleteOllamaCloudKey(), "Clave eliminada") }, "Eliminar clave") : null,
-      ),
-    ),
-    h(
-      "div",
-      { class: "card" },
-      h("h3", {}, "Clave del proveedor compatible con OpenAI"),
-      h("p", { class: "intro" }, "Se guarda en el Administrador de credenciales de Windows, ligada al host de la URL base. NestAdmin no la muestra ni la escribe en registros."),
-      compatKeyStatus,
-      h("div", { class: "row" }, h("label", {}, "Clave", compatKey)),
-      h(
-        "div",
-        { class: "buttons" },
-        h(
-          "button",
-          {
-            onclick: () =>
-              void act(async () => {
-                await api.saveOpenAiCompatibleKey(compatUrl.value, compatKey.value);
-              }, "Clave guardada"),
+        "label",
+        { class: "choice" },
+        h("input", {
+          type: "checkbox",
+          checked: s.local_fallback,
+          disabled: !externalChosen,
+          onchange: (event) => {
+            const enabled = (event.target as HTMLInputElement).checked;
+            void act(() => api.setLocalFallback(enabled), enabled ? "Respaldo con la IA local activado" : "Respaldo con la IA local desactivado");
           },
-          "Guardar clave",
-        ),
-        compatDelete,
+        }),
+        h("span", {}, h("strong", {}, "Respaldo con la IA local"), " — ", fallbackStateText(s)),
+      ),
+      h(
+        "p",
+        { class: "intro" },
+        "Si el proveedor externo elegido no responde, agota el tiempo o alcanza su límite, la tarea se repite una sola vez con la IA local, siempre que esté preparada. Nunca se pasa a otro servicio externo ni se descarga nada para ello.",
       ),
     ),
     h(
       "div",
       { class: "card" },
-      h("h3", {}, "Clave de Claude (Anthropic)"),
-      h("p", { class: "intro" }, "Se guarda en el Administrador de credenciales de Windows. NestAdmin no la muestra ni la escribe en registros."),
-      h("div", { class: "row" }, h("label", {}, s.anthropic_key_saved ? "Sustituir clave" : "Clave", claudeKey)),
-      h(
-        "div",
-        { class: "buttons" },
-        h("button", { onclick: () => void act(() => api.saveAnthropicKey(claudeKey.value), "Clave guardada") }, "Guardar clave"),
-        s.anthropic_key_saved ? h("button", { class: "danger", onclick: () => void act(() => api.deleteAnthropicKey(), "Clave eliminada") }, "Eliminar clave") : null,
+      h("h3", {}, "Proveedor de IA"),
+      h("p", { class: "intro" }, "Elija el proveedor. Solo se envía contenido a un proveedor externo si usted confirma su destino. OCR y extracción de texto se hacen siempre en este equipo."),
+      ...KIND_ORDER.map((kind) =>
+        h(
+          "div",
+          { class: pick === kind ? "provider-choice open" : "provider-choice" },
+          h(
+            "label",
+            { class: "choice" },
+            h("input", {
+              type: "radio",
+              name: "provider",
+              value: kind,
+              checked: pick === kind,
+              onchange: () => {
+                state.pick = kind;
+                render();
+              },
+            }),
+            h("span", {}, h("strong", {}, KIND_NAME[kind]), ` (${KIND_NOTE[kind]})`),
+          ),
+          pick === kind ? h("div", { class: "indent" }, providerBlock(kind)) : null,
+        ),
       ),
     ),
     h("div", { class: "card" }, h("h3", {}, "Datos locales"), h("p", { class: "mono" }, s.data_dir)),
@@ -1616,7 +1938,12 @@ function render(background = false) {
   if (background && (focused instanceof HTMLTextAreaElement || (focused instanceof HTMLInputElement && focused.type !== "file"))) {
     if (root.contains(focused)) return;
   }
-  root.replaceChildren(header(), h("div", { class: "body" }, nav(), h("main", {}, notice, views[state.view]())));
+  const wait = state.settings?.ai_wait_message;
+  const waitBanner =
+    wait && (state.view === "review" || state.view === "tasks")
+      ? h("div", { class: "banner", role: "status" }, h("span", {}, `${wait}. Las tareas esperan en la cola.`), h("button", { onclick: goToSettings }, "Ir a Configuración"))
+      : null;
+  root.replaceChildren(header(), h("div", { class: "body" }, nav(), h("main", {}, notice, waitBanner, views[state.view]())));
 }
 
 void (async () => {
