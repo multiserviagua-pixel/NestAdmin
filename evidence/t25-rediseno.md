@@ -22,6 +22,7 @@ La vista previa admite `?muchos` para una lista grande y los parámetros anterio
 | El desplazamiento de la lista se conserva al seleccionar | Vista previa con `?muchos`, por script | Pasa |
 | Al descartar se pasa a la siguiente | Vista previa con `?muchos`, por script | Pasa |
 | «Aprobar» bloqueado con importes dudosos y motivo escrito | Vista previa, por script | Pasa |
+| Un segundo clic rápido en la barra no resuelve la tarea siguiente; uno deliberado sí | Vista previa con `?muchos`, por script | Pasa |
 | Sin desbordamiento horizontal en las 7 vistas | Vista previa a 1180 px, por script | Pasa |
 | Aspecto de Pendientes, Tareas, Cuentas de correo, Configuración y Preparación | Capturas a 860 o 1180 px | Revisado a ojo |
 

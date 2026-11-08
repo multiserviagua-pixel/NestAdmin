@@ -36,7 +36,7 @@ import {
 } from "./rules-text";
 
 import { actionBar, dataTable, emptyState, h, helpTip, icon, sectionHeader, statusChip, tabs, type Child, type IconName, type Tone } from "./components";
-import { ageText, chooseTab, emailFlags, formatAmount, invoiceFlags, isKnownKind, nextSelection, sortForReview, splitByTab, tabOf, type Flag, type ReviewTab } from "./pendientes-text";
+import { ageText, chooseTab, emailFlags, formatAmount, invoiceFlags, isKnownKind, nextSelection, sortForReview, splitByTab, tabOf, totalIsProposed, type Flag, type ReviewTab } from "./pendientes-text";
 
 const STATE_LABEL: Record<string, string> = {
   queued: "En cola",
@@ -153,6 +153,33 @@ const root = document.getElementById("app")!;
 function notify(kind: "ok" | "error", text: unknown) {
   state.notice = { kind, text: String(text) };
   render();
+}
+
+// R07, D137: resolver una tarea trae la siguiente al mismo sitio de la barra de acciones. Un
+// doble clic no debe aprobar ni descartar esa siguiente, que la persona aún no ha visto.
+const resolving = new Set<number>();
+const ACTION_LOCK_MS = 600;
+let actionLockUntil = 0;
+
+function resolveTask(task: Task, work: () => Promise<unknown>, success?: string) {
+  if (resolving.has(task.id)) return;
+  resolving.add(task.id);
+  void act(work, success).finally(() => resolving.delete(task.id));
+}
+
+/** Ignora los clics en la barra de acciones justo después de cambiar de tarea sola. */
+function guardActions(detail: HTMLElement): HTMLElement {
+  detail.addEventListener(
+    "click",
+    (event) => {
+      if (Date.now() < actionLockUntil && (event.target as Element).closest(".action-bar")) {
+        event.stopPropagation();
+        event.preventDefault();
+      }
+    },
+    true,
+  );
+  return detail;
 }
 
 async function act(work: () => Promise<unknown>, success?: string) {
@@ -316,14 +343,10 @@ function header() {
       { class: "status" },
       working ? h("span", { class: "pill working" }, `${working} en proceso`) : null,
       state.settings?.ai_wait_message
-        ? h("button", { class: "pill provider waiting", title: state.settings.ai_wait_message, onclick: goToSettings }, "IA sin configurar")
-        : active
-          ? h(
-              "span",
-              { class: `pill provider ${active.provider}`, title: "Proveedor de IA activo" },
-              providerLabel(active.provider, active.model),
-            )
-          : null,
+        ? h("button", { class: "pill provider waiting", onclick: goToSettings }, "IA en espera")
+        : null,
+      // El proveedor elegido sigue a la vista aunque esté en espera; el motivo va en el aviso superior.
+      active ? h("span", { class: `pill provider ${active.provider}` }, providerLabel(active.provider, active.model)) : null,
     ),
     h(
       "div",
@@ -439,17 +462,24 @@ function invoiceRow(task: Task, ageLabel: string): Child[] {
   const flags = invoiceFlags(task.result);
   const input = safeJson(task.input_ref);
   const origin: DocumentOrigin | undefined = task.result?.origin ?? input.origin;
-  const source = origin?.kind === "email" ? `Adjunto de ${origin.from ?? "remitente no consta"}` : title(task);
+  // R13, D48: remitente y cuenta de cada adjunto; sin origen registrado, se dice.
+  const source =
+    origin?.kind === "email"
+      ? `Adjunto de ${origin.from ?? "remitente no consta"} · ${accountShort(mailOrigin(origin.account, `${origin.account.account}:`), origin.account.account)}`
+      : origin
+        ? `Archivo importado: ${title(task)}`
+        : `${title(task)} (origen no registrado)`;
+  const proposed = totalIsProposed(task.result) ? " (propuesta)" : "";
   const part = task.result?.part?.of > 1 ? ` · parte ${task.result?.part.index} de ${task.result?.part.of}` : "";
   return [
     h(
       "span",
       { class: "item-line" },
       fields.supplier ? h("span", { class: "item-title" }, fields.supplier) : h("span", { class: "item-title missing" }, "Proveedor no consta"),
-      h("span", { class: "item-amount" }, formatAmount(fields.total, fields.currency) ?? h("span", { class: "missing" }, "Total no consta")),
+      h("span", { class: "item-amount" }, formatAmount(fields.total, fields.currency) ? `${formatAmount(fields.total, fields.currency)}${proposed}` : h("span", { class: "missing" }, "Total no consta")),
     ),
-    h("span", { class: "item-sub" }, `${fields.invoice_number ?? "Sin número"} · ${shortDate(fields.date)}${part}`),
-    h("span", { class: "item-sub" }, `${source} · ${ageLabel}`),
+    h("span", { class: "item-sub" }, `${fields.invoice_number ?? "Sin número"} · ${shortDate(fields.date)}${part} · pendiente ${ageLabel}`),
+    h("span", { class: "item-sub" }, source),
     flags.length ? h("span", { class: "item-flags" }, ...flagChips(flags)) : null,
   ];
 }
@@ -458,7 +488,7 @@ function invoiceRow(task: Task, ageLabel: string): Child[] {
 function emailRow(task: Task): Child[] {
   const input = safeJson(task.input_ref);
   const message = task.result?.message ?? input.message ?? {};
-  const account = accountShort(taskMailOrigin(task), accountId(message.id ?? input.message_id));
+  const account = isKnownKind(task.kind) ? accountShort(taskMailOrigin(task), accountId(message.id ?? input.message_id)) : "No consta";
   const category = task.result?.category;
   return [
     h(
@@ -494,10 +524,12 @@ function reviewView() {
   if (state.originFilter && !origins.has(state.originFilter)) state.originFilter = "";
   const pending = inTab.filter((t) => !state.originFilter || originKey(t) === state.originFilter);
   const ids = pending.map((t) => t.id);
-  state.selected[tab] = nextSelection(state.reviewOrder[tab], ids, state.selected[tab]);
+  const previous = state.selected[tab];
+  state.selected[tab] = nextSelection(state.reviewOrder[tab], ids, previous);
+  if (previous !== null && state.selected[tab] !== previous) actionLockUntil = Date.now() + ACTION_LOCK_MS;
   state.reviewOrder[tab] = ids;
   const selected = pending.find((t) => t.id === state.selected[tab]);
-  const now = Date.now() / 1000;
+  const now = Date.now();
   const otherTab: ReviewTab = tab === "invoices" ? "emails" : "invoices";
   const moveTo = (id: number | undefined) => {
     if (id === undefined) return;
@@ -586,7 +618,7 @@ function reviewView() {
         ),
       ),
     ),
-    selected ? (tabOf(selected.kind) === "invoices" ? invoiceDetail(selected) : emailDetail(selected)) : h("div", { class: "detail" }),
+    selected ? guardActions(tabOf(selected.kind) === "invoices" ? invoiceDetail(selected) : emailDetail(selected)) : h("div", { class: "detail" }),
   );
 }
 
@@ -680,7 +712,12 @@ function invoiceDetail(task: Task) {
         h("h2", {}, fields.supplier ?? h("span", { class: "missing" }, "Proveedor no consta")),
         h("p", { class: "detail-sub" }, `${fields.invoice_number ?? "Sin número"} · ${title(task)}`),
       ),
-      h("div", { class: "detail-amount" }, formatAmount(fields.total, fields.currency) ?? h("span", { class: "missing" }, "Total no consta")),
+      h(
+        "div",
+        { class: "detail-amount" },
+        formatAmount(fields.total, fields.currency) ?? h("span", { class: "missing" }, "Total no consta"),
+        totalIsProposed(r) ? h("span", { class: "proposed" }, " (propuesta)") : null,
+      ),
     ),
     provenance(r),
     fallbackNotice(r),
@@ -776,12 +813,12 @@ function invoiceDetail(task: Task) {
         {
           class: "primary",
           disabled: !checked || needsConfirmation,
-          onclick: () => void act(async () => afterApproval(await api.approve(task.id, r.version ?? 1), "Factura registrada en el simulador")),
+          onclick: () => resolveTask(task, async () => afterApproval(await api.approve(task.id, r.version ?? 1), "Factura registrada en el simulador")),
         },
         "Aprobar y registrar",
       ),
       openOriginal(task),
-      h("button", { class: "danger", onclick: () => void act(() => api.reject(task.id), "Tarea descartada") }, "Descartar"),
+      h("button", { class: "danger", onclick: () => resolveTask(task, () => api.reject(task.id), "Tarea descartada") }, "Descartar"),
     ),
   );
 }
@@ -817,7 +854,7 @@ function emailDetail(task: Task) {
       "dl",
       { class: "origin" },
       h("dt", {}, "Cuenta"),
-      h("dd", {}, accountLine(r.origin ?? safeJson(task.input_ref).origin, message.id)),
+      h("dd", {}, isKnownKind(task.kind) ? accountLine(r.origin ?? safeJson(task.input_ref).origin, message.id) : missing()),
       h("dt", {}, "De"),
       h("dd", {}, message.from ?? missing()),
       h("dt", {}, "Para"),
@@ -835,15 +872,21 @@ function emailDetail(task: Task) {
     { class: "detail" },
     h("div", { class: "detail-scroll", "data-scroll-key": `detail:${task.id}` }, article),
     actionBar(
-      recipients.length === 0 ? "Sin destinatario: no se puede enviar." : needsConfirmation ? "Para aprobar, confirme primero que el intento anterior no se envió." : null,
+      !isKnownKind(task.kind)
+        ? "Tipo de tarea no reconocido: no se puede enviar desde aquí."
+        : recipients.length === 0
+          ? "Sin destinatario: no se puede enviar."
+          : needsConfirmation
+            ? "Para aprobar, confirme primero que el intento anterior no se envió."
+            : null,
       h(
         "button",
         {
           class: "primary",
           // Con el borrador anterior desaparecido, primero hay que confirmar que no se envió.
-          disabled: recipients.length === 0 || needsConfirmation,
+          disabled: !isKnownKind(task.kind) || recipients.length === 0 || needsConfirmation,
           onclick: () =>
-            void act(async () => {
+            resolveTask(task, async () => {
               let version = r.version ?? 1;
               // Si se ha editado, se guarda primero como versión nueva y se aprueba esa.
               if (body.value !== (draft.body ?? "")) version = (await api.editDraft(task.id, body.value)).result?.version;
@@ -853,7 +896,7 @@ function emailDetail(task: Task) {
         "Aprobar y enviar",
       ),
       h("button", { onclick: () => void act(() => api.editDraft(task.id, body.value), "Borrador guardado como versión nueva") }, "Guardar borrador"),
-      h("button", { class: "danger", onclick: () => void act(() => api.reject(task.id), "Tarea descartada") }, "Descartar"),
+      h("button", { class: "danger", onclick: () => resolveTask(task, () => api.reject(task.id), "Tarea descartada") }, "Descartar"),
     ),
   );
 }
@@ -2550,7 +2593,8 @@ function render(background = false) {
     : null;
   // Una actualización de fondo no borra lo que el usuario está escribiendo.
   const focused = document.activeElement;
-  if (background && (focused instanceof HTMLTextAreaElement || focused instanceof HTMLSelectElement || (focused instanceof HTMLInputElement && focused.type !== "file"))) {
+  // Una casilla o un selector con el foco no congelan los refrescos: no hay texto que perder.
+  if (background && (focused instanceof HTMLTextAreaElement || (focused instanceof HTMLInputElement && !["file", "checkbox", "radio"].includes(focused.type)))) {
     if (root.contains(focused)) return;
   }
   // D103: con un proveedor externo, al abrir solo se comprueba el OCR del paquete.
@@ -2560,7 +2604,7 @@ function render(background = false) {
       : null;
   const wait = state.settings?.ai_wait_message;
   const waitBanner =
-    wait && (state.view === "review" || state.view === "tasks")
+    wait && state.view !== "settings"
       ? h("div", { class: "banner", role: "status" }, h("span", {}, `${wait}. Las tareas esperan en la cola.`), h("button", { onclick: goToSettings }, "Ir a Configuración"))
       : null;
   if (state.wizard) {

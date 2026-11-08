@@ -55,9 +55,14 @@ export function formatAmount(value: unknown, currency: unknown): string | null {
   }).format(Number(text));
 }
 
-/** Antigüedad en la bandeja. `created` y `now` en segundos. */
+/** D120: el total es una propuesta si se recuperó de un literal dudoso. */
+export function totalIsProposed(result: Record<string, any> | null): boolean {
+  return ((result?.recovered ?? []) as Array<{ field: string }>).some((a) => a.field === "total");
+}
+
+/** Antigüedad en la bandeja. `created` y `now` en milisegundos, como `Task.created_at`. */
 export function ageText(created: number, now: number): string {
-  const days = Math.floor((now - created) / 86400);
+  const days = Math.floor((now - created) / 86_400_000);
   if (days <= 0) return "hoy";
   return days === 1 ? "ayer" : `hace ${days} días`;
 }
