@@ -41,7 +41,7 @@ Revise también los textos legales con quien asesore al editor: son una base fie
 
 Cada afirmación sobre la aplicación se apoya en la especificación o el código; si la aplicación cambia, actualice el sitio:
 
-- Procesamiento local, Ollama con Qwen3 8B por defecto y Groq solo por elección expresa sin cambio automático: R03, D06, D07.
+- IA externa por defecto (Ollama cloud) con clave propia y destino confirmado, IA local opcional y respaldo solo del externo elegido a la local, sin cambio automático a otro externo; qué texto sale del equipo (D102): R03, D100–D103. Pendiente: revisión con el responsable de protección de datos antes de usar datos reales.
 - Credenciales en el Administrador de credenciales de Windows y fuera de los registros: R09, D08, D13.
 - OAuth con PKCE, bucle local `127.0.0.1`, ámbitos `gmail.modify` y Graph `offline_access User.Read Mail.ReadWrite Mail.Send` (`User.Read` solo para la dirección del buzón, D48), solo HTTPS y sin proxy: D31, D32, D12.
 - Lectura de la bandeja de entrada, cuerpo en texto, adjuntos ignorados, borrador en el hilo: D34 y `crates/mail/src/gmail.rs`.

@@ -1,6 +1,6 @@
 # Evaluación sintética inicial
 
-Este harness **no implementa ni ejecuta el producto, los modelos, OCR ni servicios**. Compara salidas ya obtenidas frente a 10 facturas y 20 correos artificiales. No hay resultados medidos de proveedores en el repositorio. Para comparar Ollama, Ollama cloud, un servicio compatible con OpenAI y Claude hay que producir un archivo de predicciones por proveedor con el mismo corpus y la misma configuración; la selección y el envío a cualquier proveedor externo requieren una decisión explícita. El evaluador no tiene código de red.
+Este harness **no implementa ni ejecuta el producto, los modelos, OCR ni servicios**. Compara salidas ya obtenidas frente a 10 facturas y 20 correos artificiales. No hay resultados medidos de proveedores en el repositorio. Para comparar Ollama, Ollama cloud, un servicio compatible con OpenAI y Claude hay que producir un archivo de predicciones por proveedor con el mismo corpus y la misma configuración; la selección y el envío a cualquier proveedor externo requieren una decisión explícita. Con un proveedor externo el texto de los casos sale del equipo hacia ese proveedor (D102); use solo los datos sintéticos del corpus, nunca documentos reales. Las cifras de `gemma4:31b` en Ollama cloud siguen sin validarse hasta medir el corpus completo (D104, D105). El evaluador no tiene código de red.
 
 ## Corpus y preparación
 

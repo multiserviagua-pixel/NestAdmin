@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>NestAdmin — asistente administrativo de escritorio para Windows</title>
-<meta name="description" content="NestAdmin es una aplicación de escritorio para Windows que ayuda a pequeñas empresas a leer correo y documentos, extraer y validar datos de facturas y preparar borradores de respuesta, con IA local.">
+<meta name="description" content="NestAdmin es una aplicación de escritorio para Windows que ayuda a pequeñas empresas a leer correo y documentos, extraer y validar datos de facturas y preparar borradores de respuesta, con IA externa elegida por ti (Ollama cloud por defecto) o local.">
 <link rel="canonical" href="https://nestadmin.humannaia.com/">
 <link rel="alternate" hreflang="es" href="https://nestadmin.humannaia.com/">
 <link rel="alternate" hreflang="en" href="https://nestadmin.humannaia.com/en/">
@@ -29,7 +29,7 @@
 <h1>NestAdmin</h1>
 <p><strong>Asistente administrativo de escritorio para Windows, pensado para pequeñas empresas.</strong></p>
 
-<p>NestAdmin lee el correo y los documentos que llegan a la empresa —facturas, PDF y documentos escaneados—, extrae y valida sus datos y prepara borradores de respuesta para que una persona los revise. Se instala en el propio equipo y, por defecto, todo el procesamiento ocurre en él.</p>
+<p>NestAdmin lee el correo y los documentos que llegan a la empresa —facturas, PDF y documentos escaneados—, extrae y valida sus datos y prepara borradores de respuesta para que una persona los revise. Se instala en el propio equipo. Los documentos, el OCR, las credenciales y los datos de trabajo se quedan en él; el análisis con IA se hace con un proveedor externo que tú eliges (por defecto, Ollama cloud, de Ollama Inc.) o con una IA local opcional.</p>
 
 <h2>Qué hace</h2>
 <ul>
@@ -43,8 +43,9 @@
 <h2>Privacidad desde el diseño</h2>
 <ul>
   <li><strong>Se ejecuta en tu equipo.</strong> El editor de NestAdmin no tiene servidores que reciban, guarden o procesen tu correo ni tus documentos.</li>
-  <li><strong>IA local por defecto.</strong> El modelo de lenguaje (Qwen3 8B, mediante Ollama) se ejecuta en el propio equipo.</li>
-  <li><strong>IA externa solo si la eliges.</strong> Puedes elegir expresamente Groq como proveedor, con tu propia clave. Solo entonces el texto que se procesa se envía a Groq. NestAdmin nunca cambia de proveedor por su cuenta.</li>
+  <li><strong>IA externa por defecto, con tu clave y tu confirmación.</strong> NestAdmin propone Ollama cloud como proveedor de IA. No envía nada hasta que guardas tu propia clave, eliges el modelo y confirmas el destino al que saldrá el texto (Ollama Inc., principalmente en EE. UU.). Después hace una prueba con un texto sintético, sin tus datos. Puedes elegir otro proveedor (compatible con OpenAI o Claude) o la IA local.</li>
+  <li><strong>Qué sale del equipo.</strong> Solo el texto que la tarea necesita: el texto ya extraído en tu equipo de la factura (el OCR y la lectura de PDF son siempre locales) o, de un correo, su asunto, remitente, destinatarios, fecha y cuerpo, junto con las instrucciones. No salen el archivo original, imágenes, la base de datos, tus credenciales ni tus rutas.</li>
+  <li><strong>IA local opcional.</strong> Puedes instalar una IA local (Qwen3 8B, mediante Ollama) para que el texto no salga del equipo, o usarla como respaldo si el proveedor externo no responde. NestAdmin nunca pasa por su cuenta a otro proveedor externo.</li>
   <li><strong>Credenciales protegidas.</strong> Las autorizaciones de Google y Microsoft se obtienen con OAuth 2.0 desde la aplicación y se guardan en el Administrador de credenciales de Windows.</li>
 </ul>
 <p>Los detalles están en la <a href="privacidad/">política de privacidad</a>.</p>
@@ -55,8 +56,8 @@
 <h2>Requisitos</h2>
 <ul>
   <li>Windows 10 u 11 de 64 bits.</li>
-  <li>16 GB de RAM recomendados para la IA local.</li>
-  <li>Conexión a Internet para la instalación inicial y para trabajar con cuentas de correo.</li>
+  <li>16 GB de RAM recomendados solo si instalas la IA local opcional.</li>
+  <li>Conexión a Internet para instalar, para el proveedor de IA externo y para trabajar con cuentas de correo.</li>
 </ul>
 </main>
 

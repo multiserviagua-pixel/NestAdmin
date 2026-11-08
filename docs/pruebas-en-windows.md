@@ -27,7 +27,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts\build-clean.ps1 -Cli
 
 ## 1. Instalación (T08, T08d) — `evidence/t08-instalador.md`
 
-Instalar con el script de registro, que ya no se queda esperando al terminar y que comprueba el modelo al final:
+Instalar con el script de registro, que ya no se queda esperando al terminar. Desde D103 el instalador no prepara la IA local, así que el script no exige la respuesta del modelo; la comprobación de la IA local es opcional (`-ComprobarIALocal`) y su ausencia no acredita nada sobre la IA local ni sobre el proveedor externo:
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts\t08-registro.ps1 -Instalador <ruta del setup.exe generado>
@@ -35,12 +35,12 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts\t08-registro.ps1 -In
 
 Con interfaz hay que completar el asistente (el script espera hasta 120 min). Si nadie va a estar delante, añada `-Silencioso` (instalación `/S`, T08-08).
 
-- [ ] El archivo `t08-instalar-*.txt` del escritorio contiene «Antes», «Instalación» con código de salida, «Después» y «Comprobación de la IA local: OK».
+- [ ] El archivo `t08-instalar-*.txt` del escritorio contiene «Antes», «Instalación» con código de salida, «Después» y la línea de IA local («no comprobada», o «Comprobación de la IA local» con `-ComprobarIALocal` si se preparó antes). El instalador no debe haber descargado Ollama ni el modelo (T08e-01).
 - [ ] T08-10: el programa queda en `%LOCALAPPDATA%\Programs\NestAdmin` y los datos en `%LOCALAPPDATA%\NestAdmin`.
 - [ ] T08-11: instalando encima de la versión anterior, los datos siguen y no quedan `nestadmin.exe` ni DLL en la carpeta de datos (el script avisa si quedan).
 - [ ] T08-13: con `-ClienteOAuth`, «Correo» ofrece Gmail y Microsoft.
 - [ ] T08-12: `t08-registro.ps1 -Accion Desinstalar` quita el programa y conserva los datos.
-- [ ] En una máquina virtual limpia (T08-01 a T08-09): sin Ollama, corte de red durante la descarga del modelo, sin Internet, `/S`.
+- [ ] En una máquina virtual limpia (T08-01 a T08-09 y T08e): sin Ollama, sin Internet salvo WebView2, `/S`. La preparación local, con su corte de red durante la descarga del modelo, se prueba aparte desde «Instalar IA local» (T08b, T08e-04).
 
 ## 2. Ventana y área de notificación (R01) — `evidence/t01-escritorio.md`
 
@@ -71,7 +71,7 @@ Con interfaz hay que completar el asistente (el script espera hasta 120 min). Si
 
 ## 6. Credenciales con la aplicación instalada (T09) — `evidence/t09-credenciales.md`
 
-- [ ] Guardar una clave de Ollama cloud en Configuración y conectar una cuenta de correo de prueba. Buscar el valor de la clave en `%LOCALAPPDATA%\NestAdmin` (`findstr /S /M "<primeros caracteres>" *`): no debe aparecer en ningún archivo. Solo debe estar en el Administrador de credenciales (`NestAdmin`, `ollama_cloud_api_key` y `mail/<cuenta>`). Si una instalación anterior dejó una clave `groq_api_key`, la aplicación no la lee ni la borra: se puede quitar a mano desde el Administrador de credenciales.
+- [ ] Guardar una clave de Ollama cloud en Configuración y conectar una cuenta de correo de prueba. Buscar el valor de la clave en `%LOCALAPPDATA%\NestAdmin` (`findstr /S /M "<primeros caracteres>" *`): no debe aparecer en ningún archivo. Solo debe estar en el Administrador de credenciales (`NestAdmin`, `ollama_cloud_api_key` y `mail/<cuenta>`). Si una instalación anterior dejó una clave `groq_api_key`, la aplicación no la lee ni la borra: se puede quitar a mano desde el Administrador de credenciales. Los secretos de más de 1000 caracteres (por ejemplo, los tokens de Microsoft) se reparten en entradas `<nombre>#1..N` del Administrador de credenciales (D121); es lo esperado y tampoco deben aparecer en ningún archivo.
 
 ## 7. Medición en el equipo objetivo (T12) — `evidence/t10-ollama-qwen3.md` y `evidence/t10-ollama-cloud.md`
 

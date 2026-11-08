@@ -37,8 +37,8 @@
 <h2>Requisitos</h2>
 <ul>
   <li>Windows 10 u 11 de 64 bits.</li>
-  <li>16 GB de RAM recomendados para la IA local.</li>
-  <li>Conexión a Internet durante la instalación, que descarga Ollama y el modelo de lenguaje si no están ya en el equipo.</li>
+  <li>16 GB de RAM recomendados solo para la IA local opcional.</li>
+  <li>Conexión a Internet para el proveedor de IA externo y para el correo. La instalación no descarga la IA local; si decides instalarla desde la aplicación, se descargan Ollama y el modelo de lenguaje.</li>
 </ul>
 
 <h2>Conectar una cuenta de correo</h2>
@@ -56,10 +56,10 @@
 </ul>
 
 <h2>Borrar tus datos del equipo</h2>
-<p>Desinstalar NestAdmin conserva tus datos para que no pierdas tu trabajo. Para borrarlos, después de desinstalar, elimina la carpeta <code>%LOCALAPPDATA%\NestAdmin</code>. Ollama y el modelo de lenguaje se conservan porque pueden usarlos otras aplicaciones; puedes desinstalarlos desde la configuración de Windows.</p>
+<p>Desinstalar NestAdmin conserva tus datos para que no pierdas tu trabajo. Para borrarlos, después de desinstalar, elimina la carpeta <code>%LOCALAPPDATA%\NestAdmin</code>. Si instalaste la IA local, Ollama y el modelo de lenguaje se conservan porque pueden usarlos otras aplicaciones; puedes desinstalarlos desde la configuración de Windows.</p>
 
 <h2>Proveedor de IA</h2>
-<p>Por defecto, NestAdmin usa IA local. Si eliges Groq, el texto procesado se envía a Groq con tu clave. Si la IA local falla, NestAdmin te lo indica y no pasa a Groq por su cuenta.</p>
+<p>Por defecto, NestAdmin propone Ollama cloud como IA externa: tras guardar tu clave, elegir el modelo y confirmar el destino, el texto que cada tarea necesita se envía a ese proveedor (consulta la política de privacidad). Si el proveedor falla, NestAdmin te lo indica; solo puede repetir la tarea con la IA local de tu equipo, si la tienes instalada y el respaldo está activado, y nunca pasa a otro proveedor externo por su cuenta.</p>
 
 <p>Más información en la <a href="../privacidad/">política de privacidad</a> y las <a href="../condiciones/">condiciones del servicio</a>.</p>
 </main>
