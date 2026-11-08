@@ -20,5 +20,6 @@ Cada decisión (`D<n>`) tiene un número definitivo desde que se escribe, para q
 | D106–D118 | `claude/fase-11-venta-integracion`: proveedores externos D106–D112 (antes `D92`–`D98`) y persistencia de venta D113–D118 (antes `D99`–`D104`), integrados el 2026-11-07 | Asignado |
 | D119–D120 | `fase-9b-importes-es`: importes en formato español D119 e importes dudosos D120 (antes `D48`–`D49`), integrados el 2026-11-07 | Asignado |
 | D121–D121 | Credenciales largas repartidas en trozos del Administrador de credenciales (tokens de Microsoft), 2026-11-07 | Asignado |
+| D122–D122 | Lista de modelos de cada proveedor y prueba sintética, 2026-11-08 | Asignado |
 
-Siguiente número libre: **D122**.
+Siguiente número libre: **D123**.

@@ -31,7 +31,7 @@ impl OllamaCloudProvider {
             endpoint: endpoint.trim_end_matches('/').to_owned(),
             model: model.to_owned(),
             api_key,
-            agent: http::agent(timeout),
+            agent: http::agent_no_redirects(timeout),
         }
     }
 }

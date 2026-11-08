@@ -630,8 +630,9 @@ fn refresh_provider(shared: &Shared) -> CmdResult<()> {
 fn select_provider(
     shared: State<'_, SharedState>,
     choice: ProviderChoice,
-    consent: bool,
+    consent: Option<bool>,
 ) -> CmdResult<ProviderInfo> {
+    let consent = consent.unwrap_or(false);
     {
         let mut current = shared.settings.lock().map_err(text)?;
         let mut updated = current.clone();
@@ -761,6 +762,92 @@ fn openai_compatible_key_present(shared: &SharedState, base_url: &str) -> CmdRes
         return Ok(false);
     };
     Ok(shared.credentials.get(&name).map_err(text)?.is_some())
+}
+
+/// Plazo de la lista de modelos y de la prueba sintética.
+const PROVIDER_CALL_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Texto fijo y sintético de la prueba del proveedor (D122): no contiene datos del usuario.
+const SYNTHETIC_TEST_PROMPT: &str = "Prueba sintética de NestAdmin: responde con la palabra OK.";
+
+/// Modelos que ofrece el proveedor (D122), tal cual los devuelve, con el recomendado primero.
+/// Con `key` vacía o ausente se usa la guardada del proveedor (la del host en el compatible);
+/// una `key` nueva se guarda solo si la lista responde, y entonces se vuelve a calcular el
+/// proveedor activo. La clave no se devuelve, ni se registra ni aparece en ningún error. No
+/// se envía contenido del usuario.
+#[tauri::command]
+async fn list_models(
+    shared: State<'_, SharedState>,
+    choice: ProviderChoice,
+    key: Option<String>,
+) -> CmdResult<Vec<String>> {
+    let shared = Arc::clone(shared.inner());
+    tauri::async_runtime::spawn_blocking(move || list_models_for(&shared, &choice, key))
+        .await
+        .map_err(text)?
+}
+
+fn list_models_for(
+    shared: &SharedState,
+    choice: &ProviderChoice,
+    key: Option<String>,
+) -> CmdResult<Vec<String>> {
+    // Una URL compatible no válida falla aquí, antes de leer ninguna clave.
+    if let ProviderChoice::OpenAiCompatible { base_url, .. } = choice {
+        nestadmin_ai::openai_compatible::parse_base_url(base_url).map_err(text)?;
+    }
+    let name = choice.credential_name();
+    let provided = key
+        .map(|k| k.trim().to_owned())
+        .filter(|k| !k.is_empty())
+        .map(Secret::new);
+    let saved;
+    let used = match (&provided, &name) {
+        (Some(key), _) => Some(key),
+        (None, Some(name)) => {
+            saved = shared.credentials.get(name).map_err(text)?;
+            saved.as_ref()
+        }
+        (None, None) => None,
+    };
+    let models =
+        nestadmin_ai::models::list_models(choice, used, PROVIDER_CALL_TIMEOUT).map_err(text)?;
+    if let (Some(key), Some(name)) = (&provided, &name) {
+        shared.credentials.set(name, key).map_err(text)?;
+        refresh_provider(shared)?;
+    }
+    Ok(models)
+}
+
+/// Prueba sintética del proveedor `choice` con su clave guardada (D122): genera con un texto
+/// fijo y devuelve `Ok` o el texto del error. Con un proveedor externo exige el destino
+/// confirmado antes de leer la clave o construir ningún cliente. No usa el bloqueo de la
+/// aplicación: una respuesta lenta no detiene el resto.
+#[tauri::command]
+async fn test_provider(shared: State<'_, SharedState>, choice: ProviderChoice) -> CmdResult<()> {
+    let shared = Arc::clone(shared.inner());
+    tauri::async_runtime::spawn_blocking(move || test_provider_for(&shared, &choice))
+        .await
+        .map_err(text)?
+}
+
+fn test_provider_for(shared: &SharedState, choice: &ProviderChoice) -> CmdResult<()> {
+    if !choice.is_local() && !shared.settings.lock().map_err(text)?.has_consent(choice) {
+        return Err("Confirme antes el destino de los datos".into());
+    }
+    let provider =
+        nestadmin_ai::build_provider(choice, shared.credentials.as_ref(), PROVIDER_CALL_TIMEOUT)
+            .map_err(text)?;
+    provider
+        .generate(&nestadmin_ai::GenerateRequest {
+            request_id: "prueba-sintetica".into(),
+            task: nestadmin_ai::Task::Classification,
+            instructions: SYNTHETIC_TEST_PROMPT.into(),
+            content: "Texto sintético sin datos de usuario.".into(),
+            schema: None,
+        })
+        .map(|_| ())
+        .map_err(text)
 }
 
 #[derive(Serialize)]
@@ -1226,6 +1313,8 @@ fn configure<R: Runtime>(builder: Builder<R>, prepare_only: bool) -> Builder<R> 
             save_openai_compatible_key,
             delete_openai_compatible_key,
             openai_compatible_key_saved,
+            list_models,
+            test_provider,
             launch_mode,
             setup_check,
             setup_prepare,

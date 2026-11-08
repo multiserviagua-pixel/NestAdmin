@@ -445,7 +445,21 @@ fn la_interfaz_solo_llama_a_comandos_registrados() {
         .filter(|n| !n.is_empty())
         .collect();
     assert!(called.len() >= 25, "no se leyeron las llamadas: {called:?}");
-    assert_eq!(called, registered);
+    // Comandos nuevos del asistente de IA (D100–D102, D122) que la interfaz aún no usa: se
+    // quitan de esta lista cuando `ui/src/api.ts` los llame (paso 5 de tareas.md).
+    const PENDING_FOR_THE_WINDOW: &[&str] = &["list_models", "test_provider"];
+    assert!(
+        called.is_subset(&registered),
+        "la interfaz llama a comandos no registrados: {:?}",
+        called.difference(&registered).collect::<Vec<_>>()
+    );
+    let unused: std::collections::BTreeSet<&str> =
+        registered.difference(&called).copied().collect();
+    assert_eq!(
+        unused,
+        PENDING_FOR_THE_WINDOW.iter().copied().collect(),
+        "comandos registrados que la interfaz no llama"
+    );
 }
 
 /// Flujo 1 y R07: importar dos facturas, ver sus incidencias, descartar una, aprobar la otra y

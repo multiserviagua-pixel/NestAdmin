@@ -141,7 +141,27 @@ pub(crate) fn post_json_with_headers(
     for (name, value) in headers {
         request = request.header(*name, *value);
     }
-    let mut response = request.send_json(body).map_err(map_error)?;
+    let response = request.send_json(body).map_err(map_error)?;
+    response_json(response)
+}
+
+/// GET con respuesta JSON y cabeceras adicionales; mismos errores del contrato que el POST.
+/// Ningún valor de cabecera aparece en los errores devueltos.
+pub(crate) fn get_json_with_headers(
+    agent: &Agent,
+    url: &str,
+    headers: &[(&str, &str)],
+) -> Result<Value, AiError> {
+    let mut request = agent.get(url);
+    for (name, value) in headers {
+        request = request.header(*name, *value);
+    }
+    let response = request.call().map_err(map_error)?;
+    response_json(response)
+}
+
+/// Estado HTTP de una respuesta a los errores del contrato (compartido por GET y POST).
+fn response_json(mut response: ureq::http::Response<ureq::Body>) -> Result<Value, AiError> {
     let status = response.status().as_u16();
     match status {
         200..=299 => response
