@@ -175,7 +175,14 @@ impl App {
         draft: Option<SignalDraft>,
     ) -> Result<bool, CoreError> {
         let Some(d) = draft else { return Ok(false) };
+        // Una aprobación no cuenta hasta que la acción conste ejecutada (D129).
+        let state = if kind == "approved" {
+            "pending"
+        } else {
+            "valid"
+        };
         self.store.record_signal(&SignalRecord {
+            state,
             kind,
             action_kind: d.action_kind,
             subject_key: &d.subject_key,
@@ -339,11 +346,16 @@ impl App {
     /// crea acciones ni llama a la IA. Dice cuántas se automatizarían, cuántas irían a
     /// revisión y por qué, cuáles solaparían con otra regla y qué reglas activas dejarían
     /// de actuar por coincidencia múltiple (D17).
+    ///
+    /// `assume_any_sender_ack` es solo una hipótesis para una regla de envío sin remitente:
+    /// simula qué haría si tuviera la validación avanzada (D126). Nunca escribe la marca; sin
+    /// ella la regla sin remitente no automatiza y la simulación lo dice.
     pub fn simulate_rule(
         &self,
         action_kind: &str,
         conditions: &Value,
         limit: Option<usize>,
+        assume_any_sender_ack: bool,
     ) -> AppResult<Simulation> {
         let limit = limit.unwrap_or(DEFAULT_SIMULATION_LIMIT);
         if limit == 0 || limit > MAX_SIMULATION_LIMIT {
@@ -358,7 +370,10 @@ impl App {
             REGISTER_INVOICE => INVOICE,
             _ => EMAIL,
         };
-        let (rules, any_sender) = self.rules_for_evaluation()?;
+        let (rules, mut any_sender) = self.rules_for_evaluation()?;
+        if assume_any_sender_ack {
+            any_sender.insert(SIMULATED.to_owned());
+        }
         let mut with_hypothetical = rules.clone();
         with_hypothetical.push(Rule {
             id: SIMULATED.into(),
@@ -507,6 +522,7 @@ pub(crate) fn signal_for(task: &Task, result: &Value) -> Option<SignalDraft> {
     // después un reintento): la señal es lo que las personas deciden por su cuenta.
     if result["part"]["of"].as_u64().is_some_and(|n| n > 1)
         || result["authorization"]["type"] == "rule"
+        || result["rule_attempt"]["type"] == "rule"
     {
         return None;
     }
@@ -720,6 +736,12 @@ mod tests {
         result["part"] = json!({ "k": 1, "of": 1 });
         assert!(signal_for(&task(INVOICE), &result).is_some());
         result["authorization"] = json!({ "type": "rule", "rule_id": "a", "rule_version": 1 });
+        assert!(signal_for(&task(INVOICE), &result).is_none());
+        // Tras aprobar un intento de regla que no se ejecutó, `authorization` es la
+        // aprobación y el intento consta en `rule_attempt`: sigue sin ser señal.
+        let attempt = result["authorization"].take();
+        result["authorization"] = json!({ "type": "approval" });
+        result["rule_attempt"] = attempt;
         assert!(signal_for(&task(INVOICE), &result).is_none());
     }
 

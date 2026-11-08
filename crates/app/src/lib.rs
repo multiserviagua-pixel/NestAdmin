@@ -1151,7 +1151,6 @@ impl App {
                     rule_id,
                     rule_version,
                 };
-                result["authorization"] = serde_json::to_value(&authorization).unwrap_or_default();
                 self.execute(task, result, authorization)
             }
             RuleDecision::Review(reason) => {
@@ -1286,9 +1285,17 @@ impl App {
         let pages = extraction.and_then(|e| serde_json::to_value(&e.pages).ok());
         // Moneda buscada en el texto local ya extraído (D127). Sin extracción no consta, y
         // las reglas lo tratan como fallo cerrado.
-        let currency_evidence = extraction
-            .map(|e| nestadmin_documents::currency_evidence(&e.text))
-            .and_then(|e| serde_json::to_value(e).ok());
+        // `ocr`: alguna página se leyó con OCR; sin `€` legible la moneda no se puede
+        // comprobar (D127). Solo un booleano, nunca texto.
+        let currency_evidence = extraction.and_then(|e| {
+            let mut evidence =
+                serde_json::to_value(nestadmin_documents::currency_evidence(&e.text)).ok()?;
+            evidence["ocr"] = json!(e
+                .pages
+                .iter()
+                .any(|p| p.method == nestadmin_extract::Method::Ocr));
+            Some(evidence)
+        });
         let sources: serde_json::Map<String, Value> = extraction
             .map(|extraction| {
                 fields
@@ -1367,6 +1374,16 @@ impl App {
         authorization: Authorization,
     ) -> AppResult<Task> {
         let version = result["version"].as_i64().unwrap_or(1);
+        // Quien autoriza lo que se ejecuta ahora es quien consta en el resultado. Si una
+        // regla lo intentó y no llegó a ejecutarse, el intento pasa a `rule_attempt` (sigue
+        // contando como decisión de regla para las señales, D129) y `authorization` pasa a
+        // ser la aprobación de la persona.
+        if matches!(authorization, Authorization::Approval)
+            && result["authorization"]["type"] == "rule"
+        {
+            result["rule_attempt"] = result["authorization"].clone();
+        }
+        result["authorization"] = serde_json::to_value(&authorization).unwrap_or_default();
         // Antes de ejecutar otra versión, los intentos anteriores deben constar como no
         // realizados: si alguno salió, la tarea se completa con él y no se ejecuta otro.
         match self.check_previous(&task, Some(version), Some(&authorization))? {
@@ -1490,7 +1507,21 @@ impl App {
         if let Err(error) = self.record_signal("approved", signal) {
             result["evidence_error"] = json!(format!("no se guardó la señal: {error}"));
         }
-        self.execute(task, result, Authorization::Approval)
+        let task_id = task.id;
+        let done = self.execute(task, result, Authorization::Approval)?;
+        // La aprobación solo vale como señal si la acción de esta versión quedó confirmada o
+        // reconciliada; si falló o volvió a revisión, la señal queda anulada (D129).
+        let confirmed = done.state == TaskState::Completed
+            && done.result.as_ref().is_some_and(|r| {
+                r["version"].as_i64() == Some(version) && r.get("sent_version").is_none()
+            });
+        if let Err(error) = self.store.settle_signal(task_id, version, confirmed) {
+            let note = json!({ "kind": "approved", "error": error.to_string() });
+            let _ = self
+                .store
+                .record_event(task_id, "signal_error", "unsettled", &note);
+        }
+        Ok(done)
     }
 
     /// Edita el borrador de una respuesta; crea una versión nueva que requiere aprobación.

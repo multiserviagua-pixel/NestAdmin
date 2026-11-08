@@ -189,6 +189,115 @@ fn migrating_from_schema_3_adds_the_rules_panel_and_keeps_old_actions() {
     assert_eq!(authorization, "regla alfa v2");
 }
 
+/// La migración 4 desactiva (con una versión nueva) las reglas activas cuyas condiciones
+/// llevan claves que hasta ahora no coincidían nunca (`currency`, `sender`, `sender_domain`).
+/// El resto, incluidas las de envío sin remitente, queda como estaba.
+#[test]
+fn migrating_from_schema_3_deactivates_old_rules_whose_conditions_now_apply() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("nestadmin.db");
+    drop(Store::open(&path).unwrap());
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    conn.execute_batch(&format!("{DROP_PANEL} PRAGMA user_version = 3;"))
+        .unwrap();
+    let rule = |id: &str, version: i64, kind: &str, conditions: &str, active: i64| {
+        conn.execute(
+            "INSERT INTO rules (id, version, action_kind, conditions, active, created_at) VALUES (?1, ?2, ?3, ?4, ?5, 1)",
+            rusqlite::params![id, version, kind, conditions, active],
+        )
+        .unwrap();
+    };
+    // Última versión activa con `currency`: pasa a inactiva.
+    rule(
+        "moneda",
+        1,
+        "register_invoice",
+        r#"{"supplier":"Alfa SL"}"#,
+        0,
+    );
+    rule(
+        "moneda",
+        2,
+        "register_invoice",
+        r#"{"supplier":"Alfa SL","currency":"EUR"}"#,
+        1,
+    );
+    // Activas de envío con remitente o dominio: pasan a inactivas.
+    rule(
+        "dominio",
+        1,
+        "send_draft",
+        r#"{"category":"consulta","sender_domain":"alfa.test"}"#,
+        1,
+    );
+    rule(
+        "direccion",
+        1,
+        "send_draft",
+        r#"{"category":"consulta","sender":"a@alfa.test"}"#,
+        1,
+    );
+    // Sin esas claves, o ya inactivas: no se tocan (la de envío sin remitente falla cerrada).
+    rule(
+        "sin-remitente",
+        1,
+        "send_draft",
+        r#"{"category":"consulta"}"#,
+        1,
+    );
+    rule(
+        "limite",
+        1,
+        "register_invoice",
+        r#"{"supplier":"X","max_total":"5.00"}"#,
+        1,
+    );
+    rule(
+        "apagada",
+        1,
+        "send_draft",
+        r#"{"category":"consulta","sender":"a@alfa.test"}"#,
+        0,
+    );
+    // La clave con valor nulo también cuenta como presente.
+    rule(
+        "nula",
+        1,
+        "register_invoice",
+        r#"{"supplier":"X","currency":null}"#,
+        1,
+    );
+    drop(conn);
+
+    let store = Store::open(&path).unwrap();
+    let latest = |id: &str| {
+        let history = store.rule_history(id).unwrap();
+        let last = history.last().unwrap().clone();
+        (history.len(), last.version, last.active, last.conditions)
+    };
+    let (n, version, active, conditions) = latest("moneda");
+    assert_eq!((n, version, active), (3, 3, false));
+    assert_eq!(conditions["currency"], "EUR", "mismas condiciones");
+    assert_eq!(latest("dominio").0, 2);
+    assert!(!latest("dominio").2);
+    assert!(!latest("direccion").2);
+    assert!(!latest("nula").2);
+    for untouched in ["sin-remitente", "limite"] {
+        let (n, _, active, _) = latest(untouched);
+        assert_eq!((n, active), (1, true), "{untouched}");
+    }
+    assert_eq!(latest("apagada").0, 1);
+    let log = store.audit_log().unwrap();
+    let migrated: Vec<_> = log
+        .iter()
+        .filter(|e| {
+            e.action == "rule" && e.detail.as_deref().is_some_and(|d| d.contains("al migrar"))
+        })
+        .collect();
+    assert_eq!(migrated.len(), 4);
+    assert!(migrated.iter().all(|e| e.status == "inactive"));
+}
+
 #[test]
 fn newer_schema_error_points_to_the_backup() {
     let dir = tempfile::tempdir().unwrap();

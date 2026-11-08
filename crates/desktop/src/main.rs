@@ -582,7 +582,7 @@ fn simulate_rule(
 ) -> CmdResult<Simulation> {
     shared
         .app()?
-        .simulate_rule(&action_kind, &conditions, limit)
+        .simulate_rule(&action_kind, &conditions, limit, false)
         .map_err(text)
 }
 

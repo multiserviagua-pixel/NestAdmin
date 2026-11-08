@@ -206,7 +206,13 @@ impl Store {
         if previously_started {
             match connector.lookup(&key) {
                 Ok(Some(receipt)) => {
-                    self.confirm(request, &key, &authorization, &receipt, "reconciled")?;
+                    // El conector ya lo había ejecutado: quien lo autorizó es quien consta en
+                    // la fila (por ejemplo, una regla cuya respuesta se perdió), no quien
+                    // llama ahora. El historial y `actions` deben coincidir.
+                    let recorded = stored_authorization
+                        .as_deref()
+                        .unwrap_or(authorization.as_str());
+                    self.confirm(request, &key, recorded, &receipt, "reconciled")?;
                     return Ok(ActionOutcome::Reconciled(receipt));
                 }
                 Ok(None) => {

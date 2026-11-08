@@ -35,6 +35,9 @@ CREATE TABLE rule_signals (
     content_version INTEGER NOT NULL,
     source_key      TEXT,
     at              INTEGER NOT NULL,
+    -- `valid`, o `pending`/`void` en una aprobación cuya acción aún no consta confirmada o
+    -- no llegó a ejecutarse: las sugerencias solo cuentan las `valid` (D129).
+    state           TEXT NOT NULL DEFAULT 'valid',
     UNIQUE (kind, task_id, content_version)
 );
 
@@ -55,3 +58,32 @@ CREATE TABLE rule_settings (
 -- Regla y versión que autorizaron la acción (NULL: aprobación o fila anterior a la migración).
 ALTER TABLE actions ADD COLUMN rule_id TEXT;
 ALTER TABLE actions ADD COLUMN rule_version INTEGER;
+
+-- Reglas activas cuyas condiciones llevan `currency`, `sender` o `sender_domain`: hasta ahora
+-- esas claves eran desconocidas y la regla nunca coincidía (D123); con D126 y D127 pasarían a
+-- coincidir sin que nadie las hubiera revisado. Su última versión se sustituye por otra
+-- inactiva con las mismas condiciones; reactivarla es una decisión explícita. Las reglas de
+-- envío sin remitente no se tocan: fallan cerradas (D126).
+INSERT INTO audit_log (at, task_id, action, status, authorization, detail)
+SELECT CAST(strftime('%s', 'now') AS INTEGER) * 1000, NULL, 'rule', 'inactive', NULL,
+       r.id || ' v' || (r.version + 1) || ' (' || r.action_kind || ') desactivada al migrar: sus condiciones ahora se aplican; revíselas y actívela'
+FROM rules r
+WHERE r.version = (SELECT MAX(version) FROM rules WHERE id = r.id)
+  AND r.active = 1
+  AND CASE WHEN json_valid(r.conditions)
+           THEN json_type(r.conditions, '$.currency') IS NOT NULL
+                OR json_type(r.conditions, '$.sender') IS NOT NULL
+                OR json_type(r.conditions, '$.sender_domain') IS NOT NULL
+           ELSE 0 END;
+
+INSERT INTO rules (id, version, action_kind, conditions, active, created_at)
+SELECT r.id, r.version + 1, r.action_kind, r.conditions, 0,
+       CAST(strftime('%s', 'now') AS INTEGER) * 1000
+FROM rules r
+WHERE r.version = (SELECT MAX(version) FROM rules WHERE id = r.id)
+  AND r.active = 1
+  AND CASE WHEN json_valid(r.conditions)
+           THEN json_type(r.conditions, '$.currency') IS NOT NULL
+                OR json_type(r.conditions, '$.sender') IS NOT NULL
+                OR json_type(r.conditions, '$.sender_domain') IS NOT NULL
+           ELSE 0 END;

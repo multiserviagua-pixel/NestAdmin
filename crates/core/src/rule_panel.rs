@@ -60,6 +60,8 @@ pub struct SignalRecord<'a> {
     pub task_id: i64,
     pub content_version: i64,
     pub source_key: Option<&'a str>,
+    /// `valid`, o `pending` para una aprobación que aún no consta ejecutada (D129).
+    pub state: &'a str,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -71,6 +73,8 @@ pub struct SignalRow {
     pub task_id: i64,
     pub content_version: i64,
     pub source_key: Option<String>,
+    /// `valid`, `pending` o `void`. Las sugerencias solo usan las `valid`.
+    pub state: String,
 }
 
 /// Contadores de una regla.
@@ -160,6 +164,16 @@ impl Store {
              ON CONFLICT(rule_id) DO UPDATE SET archived_at = excluded.archived_at",
             params![id, now_ms()],
         )?;
+        // La validación avanzada no sobrevive al archivado: desarchivar no debe reactivar el
+        // «cualquier remitente» sin que alguien lo vuelva a validar (D126).
+        let had_ack = tx.execute(
+            "UPDATE rule_meta SET allow_any_sender_ack_at = NULL
+             WHERE rule_id = ?1 AND allow_any_sender_ack_at IS NOT NULL",
+            [id],
+        )?;
+        if had_ack > 0 {
+            audit_any_sender(&tx, &rule, false, "retirada: la regla se archivó")?;
+        }
         tx.execute(
             "INSERT INTO audit_log (at, task_id, action, status, authorization, detail) VALUES (?1, NULL, 'rule_archive', 'archived', NULL, ?2)",
             params![now_ms(), format!("{id} v{}", rule.version)],
@@ -208,12 +222,26 @@ impl Store {
         Ok(rule)
     }
 
-    /// Guarda una evaluación; `UNIQUE` la hace idempotente al reprocesar. `true` si es nueva.
+    /// Guarda una evaluación; `UNIQUE` la hace idempotente al reprocesar. Con la misma clave,
+    /// si la tarea todavía no tiene ninguna acción y el resultado cambió (un corte entre la
+    /// evidencia y el intento hizo que al reprocesar la IA leyera otra cosa), la fila se
+    /// actualiza: la primera evaluación quedó obsoleta. Con una acción ya registrada, la
+    /// evaluación guardada es la que la autorizó y no se toca. `true` si se guardó o cambió.
     pub fn record_evaluation(&mut self, e: &EvaluationRecord<'_>) -> Result<bool> {
         let changed = self.conn.execute(
-            "INSERT OR IGNORE INTO rule_evaluations
+            "INSERT INTO rule_evaluations
              (task_id, content_version, action_kind, outcome, reason_code, rules_fp, checks_json, at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+             ON CONFLICT (task_id, content_version, rules_fp) DO UPDATE SET
+                 action_kind = excluded.action_kind,
+                 outcome = excluded.outcome,
+                 reason_code = excluded.reason_code,
+                 checks_json = excluded.checks_json,
+                 at = excluded.at
+             WHERE NOT EXISTS (SELECT 1 FROM actions WHERE task_id = excluded.task_id)
+               AND (rule_evaluations.outcome IS NOT excluded.outcome
+                    OR rule_evaluations.reason_code IS NOT excluded.reason_code
+                    OR rule_evaluations.checks_json IS NOT excluded.checks_json)",
             params![
                 e.task_id,
                 e.content_version,
@@ -254,8 +282,8 @@ impl Store {
     pub fn record_signal(&mut self, s: &SignalRecord<'_>) -> Result<bool> {
         let changed = self.conn.execute(
             "INSERT OR IGNORE INTO rule_signals
-             (kind, action_kind, subject_key, edit_state, task_id, content_version, source_key, at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+             (kind, action_kind, subject_key, edit_state, task_id, content_version, source_key, at, state)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             params![
                 s.kind,
                 s.action_kind,
@@ -264,15 +292,31 @@ impl Store {
                 s.task_id,
                 s.content_version,
                 s.source_key,
-                now_ms()
+                now_ms(),
+                s.state
             ],
         )?;
         Ok(changed == 1)
     }
 
+    /// Resuelve la señal `approved` de una versión: `valid` si la acción quedó confirmada o
+    /// reconciliada, `void` si no llegó a ejecutarse. Sin esa fila no hace nada.
+    pub fn settle_signal(&mut self, task_id: i64, content_version: i64, valid: bool) -> Result<()> {
+        self.conn.execute(
+            "UPDATE rule_signals SET state = ?3
+             WHERE kind = 'approved' AND task_id = ?1 AND content_version = ?2",
+            params![
+                task_id,
+                content_version,
+                if valid { "valid" } else { "void" }
+            ],
+        )?;
+        Ok(())
+    }
+
     pub fn rule_signals(&self) -> Result<Vec<SignalRow>> {
         let mut stmt = self.conn.prepare(
-            "SELECT kind, action_kind, subject_key, edit_state, task_id, content_version, source_key
+            "SELECT kind, action_kind, subject_key, edit_state, task_id, content_version, source_key, state
              FROM rule_signals ORDER BY id",
         )?;
         let rows = stmt.query_map([], |r| {
@@ -284,9 +328,34 @@ impl Store {
                 task_id: r.get(4)?,
                 content_version: r.get(5)?,
                 source_key: r.get(6)?,
+                state: r.get(7)?,
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Autorización y estado de la última entrada del historial que confirmó o reconcilió la
+    /// acción (`confirmed` o `reconciled`). `None` si no consta.
+    fn last_execution_authorization(
+        &self,
+        task_id: i64,
+        key: &str,
+    ) -> Result<Option<(String, String)>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT authorization, status FROM audit_log
+                 WHERE task_id = ?1 AND detail = ?2 AND status IN ('confirmed', 'reconciled')
+                 ORDER BY id DESC LIMIT 1",
+                params![task_id, key],
+                |r| {
+                    Ok((
+                        r.get::<_, Option<String>>(0)?.unwrap_or_default(),
+                        r.get(1)?,
+                    ))
+                },
+            )
+            .optional()?)
     }
 
     /// Contadores de todas las reglas conocidas. `applied` cuenta acciones `confirmed`
@@ -318,7 +387,7 @@ impl Store {
             .collect();
 
         let mut stmt = self.conn.prepare(
-            "SELECT rule_id, authorization, status, updated_at FROM actions
+            "SELECT rule_id, authorization, status, updated_at, idempotency_key, task_id FROM actions
              WHERE rule_id IS NOT NULL OR authorization LIKE 'regla %'",
         )?;
         let rows = stmt.query_map([], |r| {
@@ -327,19 +396,43 @@ impl Store {
                 r.get::<_, String>(1)?,
                 r.get::<_, String>(2)?,
                 r.get::<_, i64>(3)?,
+                r.get::<_, String>(4)?,
+                r.get::<_, i64>(5)?,
             ))
         })?;
         for row in rows {
-            let (rule_id, authorization, status, updated_at) = row?;
-            let attributed = rule_id.or_else(|| {
-                parse_rule_label(&authorization)
+            let (rule_id, authorization, status, updated_at, key, task_id) = row?;
+            let applied = status == "confirmed";
+            let mut unclassified = None;
+            let attributed = match rule_id {
+                Some(id) => Some(id),
+                None => match parse_rule_label(&authorization)
                     .map(|(id, _)| id)
                     .filter(|id| known.contains(id.as_str()))
-            });
-            match attributed {
-                Some(id) => {
+                {
+                    // Fila anterior a `rule_id`: la etiqueta de `actions` pudo quedar de un
+                    // intento de regla que luego ejecutó una persona. Se cree solo si la
+                    // última entrada del historial de esa acción la confirma (D129).
+                    Some(id) if applied => {
+                        match self.last_execution_authorization(task_id, &key)? {
+                            Some((a, _)) if a == authorization => Some(id),
+                            // Ejecutó una persona al aprobar: no es de la regla.
+                            Some((a, s)) if a == "aprobación" && s == "confirmed" => None,
+                            // Sin entrada, o `reconciled` con otra autorización: no se distingue.
+                            _ => {
+                                unclassified = Some(id);
+                                None
+                            }
+                        }
+                    }
+                    Some(id) => Some(id),
+                    None => None,
+                },
+            };
+            match (attributed, unclassified) {
+                (Some(id), _) => {
                     if let Some(entry) = stats.get_mut(&id) {
-                        if status == "confirmed" || status == "reconciled" {
+                        if applied {
                             entry.applied += 1;
                             entry.last_applied_at = Some(
                                 entry
@@ -349,15 +442,23 @@ impl Store {
                         }
                     }
                 }
-                None => {
-                    // Cita una regla pero no en un formato que se pueda leer con certeza.
-                    if let Some(id) = ids
-                        .iter()
-                        .filter(|id| authorization.starts_with(&format!("regla {id}")))
-                        .max_by_key(|id| id.len())
-                    {
-                        if let Some(entry) = stats.get_mut(id) {
-                            entry.unclassified += 1;
+                (None, Some(id)) => {
+                    if let Some(entry) = stats.get_mut(&id) {
+                        entry.unclassified += 1;
+                    }
+                }
+                (None, None) => {
+                    // Quien la ejecutó fue una persona, o cita una regla pero no en un
+                    // formato que se pueda leer con certeza.
+                    if parse_rule_label(&authorization).is_none() {
+                        if let Some(id) = ids
+                            .iter()
+                            .filter(|id| authorization.starts_with(&format!("regla {id}")))
+                            .max_by_key(|id| id.len())
+                        {
+                            if let Some(entry) = stats.get_mut(id) {
+                                entry.unclassified += 1;
+                            }
                         }
                     }
                 }

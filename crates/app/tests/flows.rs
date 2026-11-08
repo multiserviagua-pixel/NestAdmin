@@ -1035,6 +1035,10 @@ fn another_currency_mentioned_in_the_document_sends_it_to_review_with_or_without
         ("Total $ 121.00", false),
         ("Total US$ 121.00", false),
         ("Total 121.00 USD", false),
+        // Código pegado al importe, delante o detrás, y símbolo de ancho completo.
+        ("Total USD500.00", false),
+        ("Total 500USD", false),
+        ("Total ＄121.00", false),
         ("Total £121.00", false),
         ("Factura sin ninguna marca de moneda", true),
         ("Total 121,00 €", true),
@@ -1105,6 +1109,109 @@ fn another_currency_mentioned_in_the_document_sends_it_to_review_with_or_without
     }
 }
 
+// ---- Documentos escaneados: la moneda no se lee (D127) ----
+
+/// OCR que "lee" siempre el mismo texto.
+struct FixedText(String);
+
+impl Ocr for FixedText {
+    fn recognize(&self, _image: &Path, _page: usize) -> Result<String, ExtractError> {
+        Ok(self.0.clone())
+    }
+}
+
+/// Mapa de bits mínimo de 2x2 píxeles: lo único que importa es que sea una imagen.
+fn tiny_bmp() -> Vec<u8> {
+    let mut bytes = b"BM".to_vec();
+    bytes.extend(70u32.to_le_bytes());
+    bytes.extend([0, 0, 0, 0]);
+    bytes.extend(54u32.to_le_bytes());
+    bytes.extend(40u32.to_le_bytes());
+    bytes.extend(2i32.to_le_bytes());
+    bytes.extend(2i32.to_le_bytes());
+    bytes.extend(1u16.to_le_bytes());
+    bytes.extend(24u16.to_le_bytes());
+    bytes.extend([0u8; 24]);
+    bytes.extend([255u8; 16]);
+    bytes
+}
+
+#[test]
+fn a_scanned_invoice_without_a_legible_euro_goes_to_review_with_or_without_a_limit() {
+    // (texto que lee el OCR, ¿se registra por regla?). El `$` se lee como `S`.
+    let cases = [
+        ("Total S 121.00", false),
+        ("Total 121.00", false),
+        ("Total € 121.00", true),
+        ("Total 121.00 EUR", true),
+    ];
+    for conditions in [
+        json!({ "supplier": "Alfa SL" }),
+        json!({ "supplier": "Alfa SL", "max_total": "500.00" }),
+    ] {
+        for (n, (text, registers)) in cases.iter().enumerate() {
+            let dir = tempfile::tempdir().unwrap();
+            let json_text = invoice_note("Alfa SL", &format!("F-{}", n + 1), "121.00", text);
+            let extractor = Extractor::new(
+                dir.path().join("sin-pdfium"),
+                Box::new(FixedText(json_text)),
+            );
+            let mut app = App::open(
+                &AppPaths::new(dir.path()),
+                FakeProvider::new(),
+                Arc::new(extractor),
+            )
+            .unwrap();
+            app.create_rule("alfa", "register_invoice", &conditions)
+                .unwrap();
+            app.set_rule_active("alfa", true).unwrap();
+            let before = app.simulators().1.record_count().unwrap();
+            app.import_file("factura.bmp", &tiny_bmp()).unwrap();
+            let task = app.process_next().unwrap().unwrap();
+            let result = task.result.clone().unwrap();
+            assert_eq!(
+                result["pages"][0]["method"], "ocr",
+                "{text}: debe pasar por OCR"
+            );
+            assert_eq!(result["currency_evidence"]["ocr"], true);
+            assert!(!result["currency_evidence"].to_string().contains("Total"));
+            assert_eq!(
+                task.state == TaskState::Completed,
+                *registers,
+                "{conditions} / {text}"
+            );
+            let registered = usize::from(*registers);
+            assert_eq!(
+                app.simulators().1.record_count().unwrap(),
+                before + registered
+            );
+            if !registers {
+                assert_eq!(result["evaluation"]["code"], "scanned_currency", "{text}");
+                assert_eq!(
+                    result["review_reason"],
+                    "el documento está escaneado y no se lee la moneda"
+                );
+            }
+        }
+    }
+
+    // Un documento con texto digital y sin ninguna marca de moneda sigue contando como euro.
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = open(&dir, FakeProvider::new());
+    app.create_rule(
+        "alfa",
+        "register_invoice",
+        &json!({ "supplier": "Alfa SL" }),
+    )
+    .unwrap();
+    app.set_rule_active("alfa", true).unwrap();
+    app.import_document("1.txt", &invoice("Alfa SL", "F-1", "121.00"))
+        .unwrap();
+    let task = app.process_next().unwrap().unwrap();
+    assert_eq!(task.state, TaskState::Completed);
+    assert_eq!(task.result.unwrap()["currency_evidence"]["ocr"], false);
+}
+
 #[test]
 fn a_task_without_the_currency_check_is_never_registered_by_a_rule_and_the_simulation_says_so() {
     let dir = tempfile::tempdir().unwrap();
@@ -1120,7 +1227,12 @@ fn a_task_without_the_currency_check_is_never_registered_by_a_rule_and_the_simul
         .unwrap();
     let before = dump(&dir, &PANEL_TABLES);
     let sim = app
-        .simulate_rule("register_invoice", &json!({ "supplier": "Alfa SL" }), None)
+        .simulate_rule(
+            "register_invoice",
+            &json!({ "supplier": "Alfa SL" }),
+            None,
+            false,
+        )
         .unwrap();
     assert_eq!(sim.without_currency_check, 1);
     assert_eq!(sim.would_automate, 0);
@@ -1680,7 +1792,7 @@ fn simulating_a_rule_writes_nothing_and_reports_overlaps_and_blocks() {
         .unwrap()
         .id;
     let sim = app
-        .simulate_rule("register_invoice", &conditions, None)
+        .simulate_rule("register_invoice", &conditions, None, false)
         .unwrap();
     assert_eq!(sim.considered, invoices);
     assert!(!sim.truncated);
@@ -1707,6 +1819,7 @@ fn simulating_a_rule_writes_nothing_and_reports_overlaps_and_blocks() {
             "register_invoice",
             &json!({ "supplier": "beta sl", "max_total": "500.00" }),
             None,
+            false,
         )
         .unwrap();
     assert_eq!((beta.would_automate, beta.overlaps), (1, 0), "{beta:?}");
@@ -1714,14 +1827,14 @@ fn simulating_a_rule_writes_nothing_and_reports_overlaps_and_blocks() {
 
     // El límite recorta y lo dice.
     let small = app
-        .simulate_rule("register_invoice", &conditions, Some(2))
+        .simulate_rule("register_invoice", &conditions, Some(2), false)
         .unwrap();
     assert!(small.truncated && small.considered == 2, "{small:?}");
     assert!(app
-        .simulate_rule("register_invoice", &conditions, Some(0))
+        .simulate_rule("register_invoice", &conditions, Some(0), false)
         .is_err());
     assert!(app
-        .simulate_rule("register_invoice", &json!({ "colour": "x" }), None)
+        .simulate_rule("register_invoice", &json!({ "colour": "x" }), None, false)
         .is_err());
 
     // Un tipo sin reglas: la hipotética automatizaría lo que coincide, sin solapes.
@@ -1730,6 +1843,7 @@ fn simulating_a_rule_writes_nothing_and_reports_overlaps_and_blocks() {
             "send_draft",
             &json!({ "category": "solicitud_factura", "sender": "facturas@proveedor-alfa.test" }),
             None,
+            false,
         )
         .unwrap();
     assert!(mail.would_automate >= 1);
@@ -1740,6 +1854,7 @@ fn simulating_a_rule_writes_nothing_and_reports_overlaps_and_blocks() {
             "send_draft",
             &json!({ "category": "solicitud_factura" }),
             None,
+            false,
         )
         .unwrap();
     assert_eq!(anyone.would_automate, 0);
@@ -1834,4 +1949,165 @@ fn a_signal_that_cannot_be_saved_is_reported_without_blocking_the_action() {
         .unwrap();
     assert_eq!(rejected.state, TaskState::Cancelled);
     assert!(rejected.result.unwrap()["evidence_error"].is_string());
+}
+
+// ---- Revisión del backend de E2 ----
+
+fn signal_states(dir: &tempfile::TempDir) -> Vec<(String, i64, String)> {
+    let conn = rusqlite::Connection::open(dir.path().join("nestadmin.db")).unwrap();
+    let mut stmt = conn
+        .prepare("SELECT kind, task_id, state FROM rule_signals ORDER BY id")
+        .unwrap();
+    stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect()
+}
+
+#[test]
+fn an_approval_is_a_valid_signal_only_if_the_action_was_confirmed() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = open(&dir, FakeProvider::new());
+    app.import_document("1.txt", &invoice("Alfa SL", "F-1", "121.00"))
+        .unwrap();
+    app.import_document("2.txt", &invoice("Beta SL", "B-2", "121.00"))
+        .unwrap();
+    let first = app.process_next().unwrap().unwrap();
+    let second = app.process_next().unwrap().unwrap();
+
+    // Aprobar con el conector caído: la tarea falla y la aprobación no vale.
+    app.simulators()
+        .1
+        .set_failure(Some(FailureMode::Unavailable));
+    let failed = app.approve(first.id, 1).unwrap();
+    assert_eq!(failed.state, TaskState::Failed);
+    assert_eq!(
+        signal_states(&dir),
+        [("approved".to_owned(), first.id, "void".to_owned())]
+    );
+    // Rechazar después tampoco deja una aprobación válida (ni un rechazo: ya no estaba en
+    // revisión).
+    app.reject(first.id).unwrap();
+    assert_eq!(
+        signal_states(&dir),
+        [("approved".to_owned(), first.id, "void".to_owned())]
+    );
+
+    // Con el conector sano la aprobación queda válida, una sola vez.
+    app.simulators().1.set_failure(None);
+    let done = app.approve(second.id, 1).unwrap();
+    assert_eq!(done.state, TaskState::Completed);
+    assert_eq!(
+        signal_states(&dir),
+        [
+            ("approved".to_owned(), first.id, "void".to_owned()),
+            ("approved".to_owned(), second.id, "valid".to_owned()),
+        ]
+    );
+}
+
+#[test]
+fn a_failed_approval_followed_by_a_successful_one_leaves_one_valid_signal() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = open(&dir, FakeProvider::new());
+    app.import_document("1.txt", &invoice("Alfa SL", "F-1", "121.00"))
+        .unwrap();
+    let task = app.process_next().unwrap().unwrap();
+    app.simulators()
+        .1
+        .set_failure(Some(FailureMode::Unavailable));
+    assert_eq!(app.approve(task.id, 1).unwrap().state, TaskState::Failed);
+    app.simulators().1.set_failure(None);
+    app.retry(task.id).unwrap();
+    let review = app.process_next().unwrap().unwrap();
+    assert_eq!(review.state, TaskState::AwaitingReview);
+    assert_eq!(app.approve(task.id, 1).unwrap().state, TaskState::Completed);
+    assert_eq!(
+        signal_states(&dir),
+        [("approved".to_owned(), task.id, "valid".to_owned())]
+    );
+}
+
+#[test]
+fn shortcuts_still_count_the_rules_that_would_have_matched() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = open(&dir, FakeProvider::new());
+    app.create_rule(
+        "alfa",
+        "register_invoice",
+        &json!({ "supplier": "Alfa SL" }),
+    )
+    .unwrap();
+    app.set_rule_active("alfa", true).unwrap();
+    // La suma no cuadra: importe dudoso (D120), siempre a revisión, pero «alfa» coincidía.
+    app.import_document("1.txt", &invoice("Alfa SL", "F-1", "130.00"))
+        .unwrap();
+    let task = app.process_next().unwrap().unwrap();
+    assert_eq!(task.state, TaskState::AwaitingReview);
+    let result = task.result.unwrap();
+    assert_eq!(result["evaluation"]["code"], "amount_review");
+    assert_eq!(result["evaluation"]["candidates"][0]["id"], "alfa");
+    assert_eq!(result["evaluation"]["candidates"][0]["matches"], true);
+    let stats = app.rule_stats().unwrap();
+    assert_eq!(stats[0].reviewed, 1);
+    assert_eq!(stats[0].applied, 0);
+}
+
+#[test]
+fn archiving_a_rule_withdraws_the_any_sender_option_and_unarchiving_does_not_restore_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = open(&dir, FakeProvider::new());
+    let created = app
+        .create_rule_full(NewRule {
+            id: Some("vieja"),
+            name: None,
+            action_kind: "send_draft",
+            conditions: &json!({ "category": "solicitud_factura" }),
+            allow_any_sender: true,
+        })
+        .unwrap();
+    assert!(created.any_sender_ack_at.is_some());
+    let archived = app.archive_rule("vieja").unwrap();
+    assert!(archived.any_sender_ack_at.is_none());
+    let back = app.unarchive_rule("vieja").unwrap();
+    assert!(back.any_sender_ack_at.is_none() && back.archived_at.is_none());
+    // Sin la marca no se puede activar una regla sin remitente.
+    assert!(app.set_rule_active("vieja", true).is_err());
+    let log = app.audit_log().unwrap();
+    assert!(
+        log.iter().any(|e| e.action == "rule_any_sender"
+            && e.status == "revoked"
+            && e.detail
+                .as_deref()
+                .is_some_and(|d| d.contains("se archivó"))),
+        "{log:?}"
+    );
+}
+
+#[test]
+fn simulating_with_the_any_sender_hypothesis_never_writes_the_mark() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = open(&dir, FakeProvider::new());
+    app.fetch_mail().unwrap();
+    while app.process_next().unwrap().is_some() {}
+    let conditions = json!({ "category": "solicitud_factura" });
+    let without = app
+        .simulate_rule("send_draft", &conditions, None, false)
+        .unwrap();
+    assert_eq!(without.would_automate, 0);
+    assert!(
+        without
+            .would_review
+            .get("sender_required")
+            .copied()
+            .unwrap_or(0)
+            > 0
+    );
+    let before = dump(&dir, &["rule_meta", "audit_log", "rules"]);
+    let assumed = app
+        .simulate_rule("send_draft", &conditions, None, true)
+        .unwrap();
+    assert!(assumed.would_automate >= 1, "{assumed:?}");
+    assert_eq!(assumed.would_review.get("sender_required"), None);
+    assert_eq!(dump(&dir, &["rule_meta", "audit_log", "rules"]), before);
 }

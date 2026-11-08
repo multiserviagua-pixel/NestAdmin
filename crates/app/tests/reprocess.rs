@@ -695,6 +695,11 @@ fn a_cut_while_a_rule_sends_returns_to_review_without_asking_the_ai_again() {
 
     let done = app.approve(task.id, 1).unwrap();
     assert_eq!(done.state, TaskState::Completed);
+    // El resultado dice que aprobó la persona; el intento de la regla consta aparte.
+    let result = done.result.unwrap();
+    assert_eq!(result["authorization"]["type"], "approval");
+    assert_eq!(result["rule_attempt"]["type"], "rule");
+    assert_eq!(result["rule_attempt"]["rule_id"], "facturas");
     let world = fixture.world();
     assert_eq!((world.created, world.sends.len()), (1, 1));
     drop(world);
@@ -702,6 +707,73 @@ fn a_cut_while_a_rule_sends_returns_to_review_without_asking_the_ai_again() {
     let stats = app.rule_stats().unwrap();
     let facturas = stats.iter().find(|s| s.rule_id == "facturas").unwrap();
     assert_eq!((facturas.applied, facturas.unclassified), (0, 0));
+}
+
+/// Una regla envía y se pierde la respuesta; al reintentar no hay red y la tarea queda en
+/// revisión; con la red de vuelta aprueba una persona y el conector ya había enviado. El
+/// historial debe seguir atribuyendo el envío a la regla, igual que `actions`.
+#[test]
+fn a_rule_send_reconciled_after_a_person_approves_stays_attributed_to_the_rule() {
+    let fixture = Fixture::new();
+    let mut app = fixture.open();
+    app.add_mail_account(MailProviderKind::Microsoft, "Oficina", &expiring_tokens())
+        .unwrap();
+    app.remove_mail_account("simulador").unwrap();
+    app.create_rule(
+        "facturas",
+        "send_draft",
+        &json!({ "category": "solicitud_factura", "sender": "facturas@proveedor-g.test" }),
+    )
+    .unwrap();
+    app.set_rule_active("facturas", true).unwrap();
+    app.fetch_mail().unwrap();
+
+    // La regla envía, pero la respuesta se pierde: la tarea falla visible.
+    fixture.world().drop_send = true;
+    process_all(&mut app);
+    let task = task_for(&app, "microsoft-1:g1");
+    assert_eq!(task.state, TaskState::Failed);
+    assert_eq!(fixture.world().sends, [proposal(1)]);
+
+    // Sin red al reintentar: vuelve a revisión. Con la red de vuelta, una persona aprueba.
+    fixture.world().unavailable = true;
+    app.retry(task.id).unwrap();
+    process_all(&mut app);
+    let review = task_for(&app, "microsoft-1:g1");
+    assert_eq!(review.state, TaskState::AwaitingReview);
+    fixture.world().unavailable = false;
+    let done = app.approve(task.id, 1).unwrap();
+    assert_eq!(done.state, TaskState::Completed);
+    assert_eq!(fixture.world().sends, [proposal(1)], "un solo envío");
+
+    let label = "regla facturas v2";
+    let conn = rusqlite::Connection::open(fixture.dir.path().join("nestadmin.db")).unwrap();
+    let stored: Vec<(String, String)> = conn
+        .prepare("SELECT authorization, status FROM actions WHERE task_id = ?1")
+        .unwrap()
+        .query_map([task.id], |r| Ok((r.get(0)?, r.get(1)?)))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(stored, [(label.to_owned(), "confirmed".to_owned())]);
+    let log: Vec<_> = app
+        .audit_log()
+        .unwrap()
+        .into_iter()
+        .filter(|e| e.task_id == Some(task.id))
+        .map(|e| (e.status, e.authorization.unwrap_or_default()))
+        .collect();
+    assert_eq!(
+        log,
+        [
+            ("pending".to_owned(), label.to_owned()),
+            ("failed".to_owned(), label.to_owned()),
+            ("reconciled".to_owned(), label.to_owned()),
+        ]
+    );
+    let stats = app.rule_stats().unwrap();
+    let facturas = stats.iter().find(|s| s.rule_id == "facturas").unwrap();
+    assert_eq!(facturas.applied, 1);
 }
 
 #[test]

@@ -219,11 +219,75 @@ fn evaluations_and_signals_ignore_repeats() {
         task_id: task.id,
         content_version: 1,
         source_key: Some("abc"),
+        state: "valid",
     };
     assert!(store.record_signal(&signal("approved")).unwrap());
     assert!(!store.record_signal(&signal("approved")).unwrap());
     assert!(store.record_signal(&signal("rejected")).unwrap());
     assert_eq!(store.rule_signals().unwrap().len(), 2);
+}
+
+/// Un corte entre la evidencia y el intento deja una evaluación obsoleta: al reprocesar con la
+/// misma clave se actualiza mientras la tarea no tenga acción, y después ya no.
+#[test]
+fn a_stale_evaluation_is_updated_until_the_task_has_an_action() {
+    let mut store = Store::open_in_memory().unwrap();
+    let task = store.enqueue("invoice", "{}").unwrap();
+    let checks = |matches: bool| json!({ "candidates": [{ "id": "a", "version": 1, "active": true, "matches": matches }] });
+    let first = checks(true);
+    let second = checks(false);
+    fn make<'a>(
+        task_id: i64,
+        outcome: &'a str,
+        reason: &'a str,
+        checks: &'a serde_json::Value,
+    ) -> EvaluationRecord<'a> {
+        EvaluationRecord {
+            task_id,
+            content_version: 1,
+            action_kind: "register_invoice",
+            outcome,
+            reason_code: reason,
+            rules_fp: "fp",
+            checks,
+        }
+    }
+    assert!(store
+        .record_evaluation(&make(task.id, "automated", "automated", &first))
+        .unwrap());
+    // Lo mismo otra vez no cambia nada.
+    assert!(!store
+        .record_evaluation(&make(task.id, "automated", "automated", &first))
+        .unwrap());
+    // El reproceso da otro resultado y la tarea no tiene acción: se actualiza, sin duplicar.
+    assert!(store
+        .record_evaluation(&make(task.id, "review", "no_active_rule_matches", &second))
+        .unwrap());
+    let rows = store.rule_evaluations().unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        (rows[0].outcome.as_str(), rows[0].reason_code.as_str()),
+        ("review", "no_active_rule_matches")
+    );
+    assert_eq!(rows[0].checks, second);
+
+    // Con una acción registrada, la evaluación guardada autorizó algo y no se toca.
+    store
+        .perform_action(
+            &ActionRequest {
+                task_id: task.id,
+                kind: "register_invoice".into(),
+                version: 1,
+                payload: json!({}),
+                authorization: Authorization::Approval,
+            },
+            &Accepts,
+        )
+        .unwrap();
+    assert!(!store
+        .record_evaluation(&make(task.id, "automated", "automated", &first))
+        .unwrap());
+    assert_eq!(store.rule_evaluations().unwrap()[0].outcome, "review");
 }
 
 #[test]
@@ -323,11 +387,30 @@ fn old_actions_are_read_strictly_and_the_rest_is_unclassified() {
         ("k3", "regla alfa vX"),
         ("k4", "aprobación"),
         ("k5", "regla inexistente v1"),
+        // Etiqueta de regla, pero el historial dice que ejecutó una persona al aprobar.
+        ("k6", "regla alfa v1"),
+        // Etiqueta de regla y el historial solo dice «reconciled» con «aprobación»: no se
+        // distingue quién lo ejecutó.
+        ("k7", "regla alfa v1"),
+        // Etiqueta de regla sin ninguna entrada en el historial: no se distingue.
+        ("k8", "regla alfa v1"),
     ] {
         conn.execute(
             "INSERT INTO actions (idempotency_key, task_id, kind, version, payload, authorization, status, created_at, updated_at)
              VALUES (?1, ?2, 'register_invoice', 1, '{}', ?3, 'confirmed', 5, 7)",
             rusqlite::params![key, task.id, authorization],
+        )
+        .unwrap();
+    }
+    for (key, status, authorization) in [
+        ("k1", "confirmed", "regla alfa v3"),
+        ("k6", "confirmed", "aprobación"),
+        ("k7", "reconciled", "aprobación"),
+    ] {
+        conn.execute(
+            "INSERT INTO audit_log (at, task_id, action, status, authorization, detail)
+             VALUES (1, ?1, 'register_invoice', ?2, ?3, ?4)",
+            rusqlite::params![task.id, status, authorization, key],
         )
         .unwrap();
     }
@@ -341,6 +424,6 @@ fn old_actions_are_read_strictly_and_the_rest_is_unclassified() {
             stats[0].last_applied_at,
             stats[0].unclassified
         ),
-        (1, Some(7), 2)
+        (1, Some(7), 4)
     );
 }

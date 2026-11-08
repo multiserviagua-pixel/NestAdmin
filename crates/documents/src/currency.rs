@@ -9,14 +9,15 @@ use serde::{Deserialize, Serialize};
 /// Lo que el texto dice de la moneda. Solo códigos: nunca el contenido del texto.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CurrencyEvidence {
-    /// Códigos ISO de otras monedas mencionadas, ordenados y sin repetir.
+    /// Códigos ISO de otras monedas mencionadas, ordenados y sin repetir. `KR` es una
+    /// corona de país no determinado (`kr` solo).
     pub foreign: Vec<String>,
     /// El texto menciona el euro (`€`, `EUR`, «euro»).
     pub euro: bool,
 }
 
 /// Símbolos de otras monedas. `$` se trata aparte por sus prefijos (`US$`, `C$`…).
-const SYMBOLS: [(char, &str); 9] = [
+const SYMBOLS: &[(char, &str)] = &[
     ('£', "GBP"),
     ('¥', "JPY"),
     ('₽', "RUB"),
@@ -26,17 +27,62 @@ const SYMBOLS: [(char, &str); 9] = [
     ('₪', "ILS"),
     ('₴', "UAH"),
     ('₫', "VND"),
+    ('₱', "PHP"),
+    ('₦', "NGN"),
+    ('฿', "THB"),
+    ('₸', "KZT"),
+    ('₼', "AZN"),
+    ('₾', "GEL"),
+    ('₡', "CRC"),
+    ('₲', "PYG"),
+    ('₮', "MNT"),
 ];
 
-/// Códigos que se buscan como palabra completa y en mayúsculas.
-const CODES: [&str; 28] = [
-    "USD", "GBP", "CHF", "JPY", "CAD", "AUD", "NZD", "MXN", "CNY", "RMB", "INR", "RUB", "BRL",
-    "KRW", "SEK", "NOK", "DKK", "PLN", "CZK", "HUF", "TRY", "ZAR", "AED", "ARS", "CLP", "COP",
-    "PEN", "HKD",
+/// Códigos ISO 4217 que se aceptan en cualquier caso (`usd 500`): no son palabras corrientes.
+const STRONG: &[&str] = &[
+    "USD", "GBP", "CHF", "JPY", "CAD", "AUD", "NZD", "MXN", "CNY", "RMB", "INR", "BRL", "KRW",
+    "SEK", "NOK", "DKK", "PLN", "CZK", "HUF", "AED", "ARS", "CLP", "HKD", "SGD",
+];
+
+/// Códigos que son palabras habituales en español o inglés (`ALL`, `CUP`, `MAD`, `TOP`,
+/// `SOS`, `PEN`…): solo cuentan en mayúsculas y con una cifra al lado o tras «moneda».
+const AMBIGUOUS: &[&str] = &[
+    "ALL", "CUP", "MAD", "TOP", "SOS", "PEN", "COP", "TRY", "GEL", "RON", "DOP", "MOP", "BOB",
+    "BAM", "ANG", "AMD", "CRC", "SAR", "ISK", "LAK", "PAB", "NIO", "MNT",
+];
+
+/// Resto de ISO 4217 (sin el euro): en mayúsculas y palabra completa.
+const OTHER: &[&str] = &[
+    "AFN", "AOA", "AWG", "AZN", "BBD", "BDT", "BGN", "BHD", "BIF", "BMD", "BND", "BSD", "BTN",
+    "BWP", "BYN", "BZD", "CDF", "CVE", "DJF", "DZD", "EGP", "ERN", "ETB", "FJD", "FKP", "GHS",
+    "GIP", "GMD", "GNF", "GTQ", "GYD", "HNL", "HTG", "IDR", "ILS", "IQD", "IRR", "JMD", "JOD",
+    "KES", "KGS", "KHR", "KMF", "KPW", "KWD", "KYD", "KZT", "LBP", "LKR", "LRD", "LSL", "LYD",
+    "MDL", "MGA", "MKD", "MMK", "MRU", "MUR", "MVR", "MWK", "MYR", "MZN", "NAD", "NGN", "NPR",
+    "OMR", "PGK", "PHP", "PKR", "PYG", "QAR", "RSD", "RUB", "RWF", "SBD", "SCR", "SDG", "SHP",
+    "SLE", "SLL", "SRD", "SSP", "STN", "SVC", "SYP", "SZL", "THB", "TJS", "TMT", "TND", "TTD",
+    "TWD", "TZS", "UAH", "UGX", "UYU", "UZS", "VES", "VND", "VUV", "WST", "XAF", "XCD", "XOF",
+    "XPF", "YER", "ZAR", "ZMW", "ZWL",
+];
+
+/// Palabras que nombran sin ambigüedad una moneda (en minúsculas).
+const NAMES: &[(&str, &str)] = &[
+    ("dólar", "USD"),
+    ("dólares", "USD"),
+    ("dolar", "USD"),
+    ("dolares", "USD"),
+    ("dollar", "USD"),
+    ("dollars", "USD"),
+    ("pound", "GBP"),
+    ("pounds", "GBP"),
+    ("yen", "JPY"),
+    ("yenes", "JPY"),
+    ("yuan", "CNY"),
+    ("kr", "KR"),
+    ("zł", "PLN"),
 ];
 
 /// Prefijos de letras antes de `$` y la moneda que indican.
-const DOLLARS: [(&str, &str); 6] = [
+const DOLLARS: &[(&str, &str)] = &[
     ("US", "USD"),
     ("CA", "CAD"),
     ("C", "CAD"),
@@ -49,11 +95,72 @@ fn is_word(c: char) -> bool {
     c.is_alphanumeric() || c == '_'
 }
 
+/// Pasa a ASCII las formas de ancho completo (`＄`, `ＵＳＤ`, `５００`) y a su símbolo
+/// normal las monedas de ancho completo (`￥`, `￡`, `￦`).
+fn normalize(text: &str) -> Vec<char> {
+    text.chars()
+        .map(|c| match c {
+            '\u{FF01}'..='\u{FF5E}' => char::from_u32(c as u32 - 0xFEE0).unwrap_or(c),
+            '\u{FFE5}' => '¥',
+            '\u{FFE1}' => '£',
+            '\u{FFE6}' => '₩',
+            '\u{FE69}' => '$',
+            other => other,
+        })
+        .collect()
+}
+
+/// Palabra del texto sin las cifras de sus extremos: `USD500` y `500USD` son `USD`.
+struct Word {
+    text: String,
+    start: usize,
+    end: usize,
+    /// Lleva alguna cifra: hay un importe en esta palabra.
+    has_digit: bool,
+    /// Las cifras iban pegadas a letras.
+    digits_attached: bool,
+}
+
+fn words(chars: &[char]) -> Vec<Word> {
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < chars.len() {
+        if !is_word(chars[i]) {
+            i += 1;
+            continue;
+        }
+        let start = i;
+        while i < chars.len() && is_word(chars[i]) {
+            i += 1;
+        }
+        let raw: String = chars[start..i].iter().collect();
+        let text = raw.trim_matches(|c: char| c.is_ascii_digit()).to_owned();
+        out.push(Word {
+            has_digit: raw.chars().any(|c| c.is_ascii_digit()),
+            digits_attached: !text.is_empty() && text.len() != raw.len(),
+            text,
+            start,
+            end: i,
+        });
+    }
+    out
+}
+
+/// Separación corta (espacios o dos puntos, sin salto de línea) entre dos palabras.
+fn adjacent(chars: &[char], a_end: usize, b_start: usize) -> bool {
+    b_start >= a_end
+        && b_start - a_end <= 2
+        && chars[a_end..b_start]
+            .iter()
+            .all(|c| matches!(c, ' ' | '\u{a0}' | ':' | '\t'))
+}
+
 /// Busca en `text` menciones de otras monedas y del euro. No distingue dónde aparecen: un
 /// dólar mencionado en cualquier parte del documento ya impide tratarlo como factura en euros.
 pub fn currency_evidence(text: &str) -> CurrencyEvidence {
-    let chars: Vec<char> = text.chars().collect();
+    let chars = normalize(text);
     let mut foreign: Vec<String> = Vec::new();
+    let mut euro = false;
     for (i, &c) in chars.iter().enumerate() {
         if c == '$' {
             // Letras mayúsculas pegadas delante (`US$`), sin otra letra antes.
@@ -70,36 +177,48 @@ pub fn currency_evidence(text: &str) -> CurrencyEvidence {
             foreign.push(code.to_owned());
         } else if let Some((_, code)) = SYMBOLS.iter().find(|(s, _)| *s == c) {
             foreign.push((*code).to_owned());
-        }
-    }
-    // Códigos en palabra completa: se parte el texto en palabras.
-    let mut word = String::new();
-    let mut words: Vec<String> = Vec::new();
-    for c in text.chars().chain(std::iter::once(' ')) {
-        if is_word(c) {
-            word.push(c);
-        } else if !word.is_empty() {
-            words.push(std::mem::take(&mut word));
-        }
-    }
-    let mut euro = text.contains('€');
-    for w in &words {
-        if let Some(code) = CODES.iter().find(|code| **code == w.as_str()) {
-            foreign.push((*code).to_owned());
-        }
-        if w == "EUR" {
+        } else if c == '€' {
             euro = true;
         }
-        let lower = w.to_lowercase();
-        match lower.as_str() {
-            "euro" | "euros" => euro = true,
-            "dólar" | "dólares" | "dolar" | "dolares" => foreign.push("USD".to_owned()),
-            _ => {}
+    }
+    let words = words(&chars);
+    for (i, w) in words.iter().enumerate() {
+        if w.text.is_empty() {
+            continue;
+        }
+        let upper = w.text.to_uppercase();
+        let lower = w.text.to_lowercase();
+        if matches!(lower.as_str(), "eur" | "euro" | "euros") {
+            euro = true;
+        } else if let Some((_, code)) = NAMES.iter().find(|(n, _)| *n == lower) {
+            foreign.push((*code).to_owned());
+        } else if STRONG.contains(&upper.as_str()) {
+            foreign.push(upper);
+        } else if w.text != upper {
+            // El resto de códigos solo cuentan en mayúsculas.
+        } else if AMBIGUOUS.contains(&upper.as_str()) {
+            // Palabra corriente: solo con un importe al lado o tras «moneda».
+            let amount_before =
+                i > 0 && words[i - 1].has_digit && adjacent(&chars, words[i - 1].end, w.start);
+            let amount_after = words
+                .get(i + 1)
+                .is_some_and(|n| n.has_digit && adjacent(&chars, w.end, n.start));
+            let named = i > 0
+                && matches!(
+                    words[i - 1].text.to_lowercase().as_str(),
+                    "moneda" | "divisa" | "currency"
+                )
+                && adjacent(&chars, words[i - 1].end, w.start);
+            if w.digits_attached || amount_before || amount_after || named {
+                foreign.push(upper);
+            }
+        } else if OTHER.contains(&upper.as_str()) {
+            foreign.push(upper);
         }
     }
     // «libras esterlinas»: dos palabras seguidas.
     for pair in words.windows(2) {
-        let (a, b) = (pair[0].to_lowercase(), pair[1].to_lowercase());
+        let (a, b) = (pair[0].text.to_lowercase(), pair[1].text.to_lowercase());
         if matches!(a.as_str(), "libra" | "libras")
             && matches!(b.as_str(), "esterlina" | "esterlinas")
         {
@@ -132,6 +251,63 @@ mod tests {
     }
 
     #[test]
+    fn a_code_glued_to_the_amount_is_found() {
+        for text in [
+            "Total USD500.00",
+            "Total 500USD",
+            "Total 500.00USD",
+            "Total USD500",
+        ] {
+            assert_eq!(foreign(text), ["USD"], "{text}");
+        }
+        // Antes se daba por bueno que `CAD1 2CAD` no se detectaba: era el fallo.
+        assert_eq!(foreign("CAD1 2CAD"), ["CAD"]);
+        assert!(currency_evidence("Total 500EUR").euro);
+        assert!(currency_evidence("Total EUR500").euro);
+        assert!(foreign("Total 500EUR").is_empty());
+    }
+
+    #[test]
+    fn full_width_lowercase_and_named_currencies_are_found() {
+        assert_eq!(foreign("Total ￥1000"), ["JPY"]);
+        assert_eq!(foreign("Total ＄500"), ["USD"]);
+        assert_eq!(foreign("Total ￡20"), ["GBP"]);
+        assert_eq!(foreign("Total ＵＳＤ ５００"), ["USD"]);
+        assert_eq!(foreign("usd 500"), ["USD"]);
+        assert_eq!(foreign("Total 20 dollars"), ["USD"]);
+        assert_eq!(foreign("20 pounds"), ["GBP"]);
+        assert_eq!(foreign("Total 300 kr"), ["KR"]);
+        assert_eq!(foreign("Total 300 SEK"), ["SEK"]);
+        assert_eq!(foreign("Total 300 THB y 20 ZAR"), ["THB", "ZAR"]);
+        // Códigos que solo existen en el resto de ISO 4217 siguen pidiendo mayúsculas.
+        assert!(foreign("thb zar kes").is_empty());
+        // `kr` solo cuenta como palabra completa.
+        assert!(foreign("krypton okra").is_empty());
+    }
+
+    #[test]
+    fn common_words_that_are_codes_need_an_amount_or_a_currency_label() {
+        for text in [
+            "ALL RIGHTS RESERVED",
+            "TOP SECRET",
+            "SOS urgente",
+            "pen drive y PEN drive",
+            "Total 500\nALL RIGHTS",
+            "MAD MAX",
+            "CUP de café, try again",
+            "gel y ron, DOP",
+        ] {
+            assert!(foreign(text).is_empty(), "{text}");
+        }
+        assert_eq!(foreign("Total 500.00 PEN"), ["PEN"]);
+        assert_eq!(foreign("Total PEN 500"), ["PEN"]);
+        assert_eq!(foreign("Total PEN500"), ["PEN"]);
+        assert_eq!(foreign("Moneda: MAD"), ["MAD"]);
+        // En minúsculas, nunca: el texto es corriente.
+        assert!(foreign("total 500 pen").is_empty());
+    }
+
+    #[test]
     fn plain_text_euro_and_words_that_contain_a_code_are_not_foreign() {
         assert_eq!(
             currency_evidence("Total 121,00 €"),
@@ -144,11 +320,13 @@ mod tests {
         assert!(currency_evidence("importe en euros").euro);
         let none = currency_evidence("Total 121.00");
         assert!(none.foreign.is_empty() && !none.euro);
-        // Palabras que contienen un código, o minúsculas: no cuentan.
+        // Palabras que contienen un código: no cuentan.
         for text in [
             "USDA SCAD CADENA MUSDX",
+            "CADENA USDA SCAD",
+            "sin mención",
             "cadena de pen drive try again",
-            "usd_x CAD1 2CAD",
+            "usd_x",
         ] {
             assert!(foreign(text).is_empty(), "{text}");
         }

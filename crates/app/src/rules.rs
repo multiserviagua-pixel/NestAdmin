@@ -44,6 +44,9 @@ pub enum ReasonCode {
     ForeignCurrency,
     /// La tarea no lleva la comprobación local de moneda (tarea anterior a D127).
     CurrencyNotChecked,
+    /// El documento se leyó con OCR y no consta el euro: la moneda no se puede comprobar
+    /// (D127).
+    ScannedCurrency,
 }
 
 /// Resultado de comprobar una regla contra los datos de una tarea. El motivo de no
@@ -89,6 +92,7 @@ impl Explanation {
                 join_ids(&self.facts["currencies"])
             ),
             ReasonCode::CurrencyNotChecked => CURRENCY_UNCHECKED.into(),
+            ReasonCode::ScannedCurrency => SCANNED_CURRENCY.into(),
             ReasonCode::SenderRequired => format!(
                 "la regla no indica remitente; añádalo o valide la opción avanzada (regla: {})",
                 self.facts["rule_ids"]
@@ -132,6 +136,9 @@ impl Explanation {
 
 /// Motivo cuando falta la comprobación local de moneda (D127).
 pub const CURRENCY_UNCHECKED: &str = "no consta la comprobación de moneda; reprocese o revise";
+
+/// Motivo cuando el documento está escaneado y no se lee la moneda (D127).
+pub const SCANNED_CURRENCY: &str = "el documento está escaneado y no se lee la moneda";
 
 fn join_ids(value: &Value) -> String {
     value
@@ -273,6 +280,20 @@ pub fn foreign_currencies(result: &Value) -> Option<Vec<String>> {
     Some(foreign)
 }
 
+/// El documento tiene alguna página leída con OCR y no consta el euro: no se puede afirmar
+/// que sea una factura en euros (D127). Una factura con texto digital sin ninguna marca sigue
+/// contando como euro.
+pub fn scanned_without_euro(result: &Value) -> bool {
+    let evidence = &result["currency_evidence"];
+    let scanned = evidence["ocr"].as_bool() == Some(true)
+        || result["pages"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .any(|p| p["method"].as_str() == Some("ocr"));
+    scanned && evidence["euro"].as_bool() != Some(true)
+}
+
 /// Motivos que impiden automatizar aunque haya una regla.
 fn blockers(action_kind: &str, result: &Value) -> Option<(ReasonCode, Value)> {
     let non_empty = |key: &str| result[key].as_array().is_some_and(|a| !a.is_empty());
@@ -285,6 +306,9 @@ fn blockers(action_kind: &str, result: &Value) -> Option<(ReasonCode, Value)> {
             None => Some((ReasonCode::CurrencyNotChecked, json!({}))),
             Some(list) if !list.is_empty() => {
                 Some((ReasonCode::ForeignCurrency, json!({ "currencies": list })))
+            }
+            Some(_) if scanned_without_euro(result) => {
+                Some((ReasonCode::ScannedCurrency, json!({})))
             }
             Some(_) => None,
         },
@@ -334,6 +358,11 @@ fn mismatch(rule: &Rule, any_sender_ack: bool, result: &Value) -> Option<Mismatc
             let Some(supplier) = condition("supplier") else {
                 return no("la regla no indica proveedor");
             };
+            // Un proveedor vacío en la regla no coincide con una factura sin proveedor: fallo
+            // cerrado.
+            if supplier.trim().is_empty() {
+                return no("la regla tiene un proveedor vacío");
+            }
             let actual = result["fields"]["supplier"].as_str().unwrap_or("");
             if !actual.trim().eq_ignore_ascii_case(supplier.trim()) {
                 return no(if actual.trim().is_empty() {
@@ -431,6 +460,11 @@ fn sender_mismatch(
             "el correo no indica remitente y la regla pide «{wanted}»"
         ));
     };
+    if !is_email_address(actual) {
+        return no(format!(
+            "el remitente «{actual}» no es una dirección de correo simple"
+        ));
+    }
     let same = if key == "sender" {
         actual.eq_ignore_ascii_case(wanted)
     } else {
@@ -481,6 +515,42 @@ pub fn is_email_address(address: &str) -> bool {
         && is_domain(domain)
 }
 
+/// Dominios de correo públicos (gratuitos y masivos) que la interfaz señala: una regla de
+/// remitente con uno de ellos abarca a cualquier usuario del servicio, no a una empresa. Solo
+/// avisa, no bloquea. Sin distinguir mayúsculas ni espacios en los extremos.
+pub fn is_public_mail_domain(domain: &str) -> bool {
+    const PUBLIC: &[&str] = &[
+        "gmail.com",
+        "googlemail.com",
+        "outlook.com",
+        "outlook.es",
+        "hotmail.com",
+        "hotmail.es",
+        "live.com",
+        "msn.com",
+        "yahoo.com",
+        "yahoo.es",
+        "ymail.com",
+        "icloud.com",
+        "me.com",
+        "mac.com",
+        "aol.com",
+        "proton.me",
+        "protonmail.com",
+        "gmx.com",
+        "gmx.es",
+        "gmx.net",
+        "mail.com",
+        "zoho.com",
+        "yandex.com",
+        "telefonica.net",
+        "movistar.es",
+        "orange.es",
+    ];
+    let domain = domain.trim().to_ascii_lowercase();
+    PUBLIC.contains(&domain.as_str())
+}
+
 /// Huella estable de las reglas relevantes para un tipo de acción: ids, versiones, estado
 /// activo y validación avanzada. Dos evaluaciones con la misma huella usaron las mismas
 /// reglas (D129). Las reglas archivadas no entran: no se evalúan.
@@ -523,12 +593,18 @@ pub fn evaluate_result(
     } else {
         None
     };
+    let evaluated = evaluate_with(rules, any_sender, action_kind, result);
     match shortcut {
-        Some(explanation) => Evaluation {
-            decision: RuleDecision::Review(explanation.summary()),
-            explanation,
-        },
-        None => evaluate_with(rules, any_sender, action_kind, result),
+        // Conserva el código del atajo, pero lista también qué reglas coincidían para que
+        // `reviewed` cuente las tareas que una regla habría automatizado (D129).
+        Some(mut explanation) => {
+            explanation.candidates = evaluated.explanation.candidates;
+            Evaluation {
+                decision: RuleDecision::Review(explanation.summary()),
+                explanation,
+            }
+        }
+        None => evaluated,
     }
 }
 
@@ -1045,6 +1121,114 @@ mod tests {
             "alfa.test.",
         ] {
             assert!(!is_domain(bad), "{bad}");
+        }
+    }
+
+    #[test]
+    fn an_empty_supplier_in_the_rule_never_matches_an_invoice_without_supplier() {
+        let mut no_supplier = invoice();
+        no_supplier["fields"]["supplier"] = json!(null);
+        for stored in ["", "  "] {
+            let r = rule(REGISTER_INVOICE, json!({ "supplier": stored }));
+            assert!(!automates(r.clone(), &no_supplier, REGISTER_INVOICE));
+            assert!(!automates(r.clone(), &invoice(), REGISTER_INVOICE));
+            assert_eq!(
+                why(r, &no_supplier).as_deref(),
+                Some("la regla tiene un proveedor vacío")
+            );
+        }
+        let mut blank = invoice();
+        blank["fields"]["supplier"] = json!("   ");
+        let r = rule(REGISTER_INVOICE, json!({ "supplier": "  " }));
+        assert!(!automates(r, &blank, REGISTER_INVOICE));
+    }
+
+    #[test]
+    fn a_scanned_document_needs_a_legible_euro() {
+        let scanned = |euro: bool| {
+            let mut r = invoice();
+            r["currency_evidence"] = json!({ "foreign": [], "euro": euro, "ocr": true });
+            r
+        };
+        for conditions in [
+            json!({ "supplier": "Alfa SL" }),
+            json!({ "supplier": "Alfa SL", "max_total": "500.00" }),
+        ] {
+            let r = || rule(REGISTER_INVOICE, conditions.clone());
+            let e = evaluate(&[r()], REGISTER_INVOICE, &scanned(false));
+            assert_eq!(e.explanation.code, ReasonCode::ScannedCurrency);
+            assert_eq!(
+                e.explanation.summary(),
+                "el documento está escaneado y no se lee la moneda"
+            );
+            assert!(matches!(e.decision, RuleDecision::Review(_)));
+            assert!(automates(r(), &scanned(true), REGISTER_INVOICE));
+            // Con texto digital y sin ninguna marca sigue contando como euro.
+            assert!(automates(r(), &invoice(), REGISTER_INVOICE));
+        }
+        // Otra moneda mencionada manda sobre el escaneo.
+        let mut both = scanned(false);
+        both["currency_evidence"]["foreign"] = json!(["USD"]);
+        let e = evaluate(
+            &[rule(REGISTER_INVOICE, json!({ "supplier": "Alfa SL" }))],
+            REGISTER_INVOICE,
+            &both,
+        );
+        assert_eq!(e.explanation.code, ReasonCode::ForeignCurrency);
+        // Una tarea guardada sin `ocr` en la evidencia pero con una página OCR también cuenta.
+        let mut paged = invoice();
+        paged["pages"] = json!([{ "number": 1, "method": "ocr" }]);
+        assert!(!automates(
+            rule(REGISTER_INVOICE, json!({ "supplier": "Alfa SL" })),
+            &paged,
+            REGISTER_INVOICE
+        ));
+    }
+
+    #[test]
+    fn a_sender_that_is_not_one_simple_address_never_matches_a_domain_rule() {
+        let r =
+            || send_rule(json!({ "category": "solicitud_factura", "sender_domain": "alfa.test" }));
+        assert!(automates(r(), &mail(Some("x@alfa.test")), SEND_DRAFT));
+        for from in [
+            "x@evil.test,y@alfa.test",
+            "x@evil.test y@alfa.test",
+            "<y@alfa.test>",
+            "Nombre <y@alfa.test>",
+        ] {
+            assert!(!automates(r(), &mail(Some(from)), SEND_DRAFT), "{from}");
+        }
+    }
+
+    #[test]
+    fn shortcuts_keep_their_code_and_list_the_matching_rules() {
+        let r = named(
+            "a",
+            true,
+            REGISTER_INVOICE,
+            json!({ "supplier": "Alfa SL" }),
+        );
+        let none = HashSet::new();
+        let mut doubtful = invoice();
+        doubtful["amount_review"] = json!("el total no se lee sin duda");
+        let e = evaluate_result(std::slice::from_ref(&r), &none, REGISTER_INVOICE, &doubtful);
+        assert_eq!(e.explanation.code, ReasonCode::AmountReview);
+        assert!(matches!(e.decision, RuleDecision::Review(_)));
+        assert!(e.explanation.candidates[0].matches);
+        let mut split = invoice();
+        split["part"] = json!({ "index": 2, "of": 3 });
+        let e = evaluate_result(&[r], &none, REGISTER_INVOICE, &split);
+        assert_eq!(e.explanation.code, ReasonCode::SplitInvoice);
+        assert_eq!(e.explanation.candidates.len(), 1);
+    }
+
+    #[test]
+    fn public_mail_domains_are_recognised() {
+        for domain in ["gmail.com", "Outlook.com", " hotmail.com ", "yahoo.com"] {
+            assert!(is_public_mail_domain(domain), "{domain}");
+        }
+        for domain in ["alfa.test", "mail.gmail.com", "gmail.com.evil.test", ""] {
+            assert!(!is_public_mail_domain(domain), "{domain}");
         }
     }
 
