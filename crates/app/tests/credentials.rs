@@ -24,7 +24,7 @@ use nestadmin_ai::{
     build_provider, AiError, CredentialError, CredentialStore, MemoryCredentialStore, Provider,
     ProviderChoice, ProviderKind, Secret,
 };
-use nestadmin_app::{App, AppPaths, INVOICE};
+use nestadmin_app::{AiWait, App, AppPaths, INVOICE};
 use nestadmin_core::TaskState;
 use nestadmin_extract::{ExtractError, Extractor, Ocr};
 use nestadmin_mail::{Gmail, Mailbox, OAuthConfig, PendingAuthorization, TokenSource, Tokens};
@@ -472,19 +472,17 @@ fn groq_key_stays_in_the_store_through_tasks_and_credential_errors() {
         );
     }
 
-    // 2. Clave revocada: `unauthorized` recuperable, sin el secreto y sin otro proveedor.
+    // 2. Clave revocada: la tarea vuelve a la cola sin gastar intento ni fallar, la aplicación
+    //    pide corregir la clave (D101), sin el secreto y sin otro proveedor.
     store.set(GROQ_API_KEY, &Secret::new(GROQ_REVOKED)).unwrap();
     app.select_provider(groq_from_store(&base, store.as_ref()));
     let revoked = app.import_document("t09-2.txt", &invoice(2)).unwrap();
     let failed = app.process_next().unwrap().unwrap();
     assert_eq!(failed.id, revoked.id);
-    assert_eq!(failed.state, TaskState::Failed);
-    let error = failed.error.clone().unwrap();
-    assert_eq!(
-        (error.code.as_str(), error.recoverable),
-        ("unauthorized", true)
-    );
-    assert!(failed.result.is_none());
+    assert_eq!(failed.state, TaskState::Queued);
+    assert_eq!(failed.attempts, 0);
+    assert!(failed.error.is_none() && failed.result.is_none());
+    assert_eq!(app.ai_wait(), Some(AiWait::InvalidKey));
     assert_eq!(
         app.provider().provider,
         ProviderKind::Groq,
@@ -497,9 +495,10 @@ fn groq_key_stays_in_the_store_through_tasks_and_credential_errors() {
     );
     texts.push(serde_json::to_string(&failed).unwrap());
 
-    // 3. Fallo de red: `unavailable`, recuperable, sin el secreto.
+    // 3. Fallo de red: `unavailable`, recuperable, sin el secreto. Cambiar la clave quita la
+    //    espera y la tarea que seguía en cola se retoma.
     app.select_provider(groq(&closed_port(), Secret::new(GROQ_KEY)));
-    app.retry(revoked.id).unwrap();
+    app.set_ai_wait(None);
     let offline = app.process_next().unwrap().unwrap();
     let error = offline.error.clone().unwrap();
     assert_eq!(

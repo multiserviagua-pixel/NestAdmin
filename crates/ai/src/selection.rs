@@ -1,6 +1,8 @@
-//! Selección de proveedor (R03, flujo 4). Local por defecto; el externo solo con una
-//! elección explícita y credencial guardada. Un fallo se devuelve tal cual: no existe ningún
-//! camino de código que pase a otro proveedor.
+//! Selección de proveedor (R03, flujo 4). Por defecto Ollama cloud (D100), que no envía nada
+//! sin clave guardada y destino confirmado; la IA local y los demás externos, por elección
+//! explícita. Un fallo se devuelve tal cual: este módulo no tiene ningún camino de código que
+//! pase a otro proveedor (el único respaldo, del externo elegido al local, vive en la capa de
+//! aplicación, D101).
 
 use std::time::Duration;
 
@@ -43,13 +45,56 @@ impl ProviderChoice {
     pub fn is_local(&self) -> bool {
         matches!(self, Self::Ollama { .. })
     }
+
+    /// Identificador estable del proveedor (la etiqueta de `configuracion.json`).
+    pub fn id(&self) -> &'static str {
+        match self {
+            Self::Ollama { .. } => "ollama",
+            Self::Groq { .. } => "groq",
+            Self::OllamaCloud { .. } => "ollama_cloud",
+            Self::OpenAiCompatible { .. } => "openai_compatible",
+            Self::Anthropic { .. } => "anthropic",
+        }
+    }
+
+    /// Nombre de la credencial en el almacén del sistema; `None` para la IA local o si la URL
+    /// del proveedor compatible no es válida.
+    pub fn credential_name(&self) -> Option<String> {
+        match self {
+            Self::Ollama { .. } => None,
+            Self::Groq { .. } => Some(GROQ_API_KEY.to_owned()),
+            Self::OllamaCloud { .. } => Some(OLLAMA_CLOUD_API_KEY.to_owned()),
+            Self::Anthropic { .. } => Some(ANTHROPIC_API_KEY.to_owned()),
+            Self::OpenAiCompatible { base_url, .. } => {
+                parse_base_url(base_url).ok().map(|b| b.credential_name())
+            }
+        }
+    }
+
+    /// Destino al que salen los datos con esta elección (D100): `None` para la IA local o si
+    /// la URL del proveedor compatible no es válida (entonces nada se envía). Con un puerto
+    /// distinto del 443 se añade, igual que en el nombre de la credencial.
+    pub fn destination(&self) -> Option<String> {
+        match self {
+            Self::Ollama { .. } => None,
+            Self::OllamaCloud { .. } => Some("ollama.com".to_owned()),
+            Self::Anthropic { .. } => Some("api.anthropic.com".to_owned()),
+            Self::Groq { .. } => Some("api.groq.com".to_owned()),
+            Self::OpenAiCompatible { base_url, .. } => parse_base_url(base_url).ok().map(|base| {
+                if base.port == 443 {
+                    base.host
+                } else {
+                    format!("{}:{}", base.host, base.port)
+                }
+            }),
+        }
+    }
 }
 
 impl Default for ProviderChoice {
     fn default() -> Self {
-        Self::Ollama {
-            base_url: ollama::DEFAULT_URL.to_owned(),
-            model: ollama::DEFAULT_MODEL.to_owned(),
+        Self::OllamaCloud {
+            model: ollama::DEFAULT_CLOUD_MODEL.to_owned(),
         }
     }
 }

@@ -998,7 +998,15 @@ fn t08c_03b_ollama_cloud_selected_checks_nothing_local() {
 #[test]
 fn t08c_03e_groq_is_external_and_ollama_is_local() {
     assert_external_checks_nothing_local(&ProviderChoice::Groq { model: "m".into() });
-    assert!(ProviderChoice::default().is_local());
+    assert!(ProviderChoice::Ollama {
+        base_url: "http://127.0.0.1:11434".into(),
+        model: "m".into()
+    }
+    .is_local());
+    assert!(
+        !ProviderChoice::default().is_local(),
+        "D100: externo por defecto"
+    );
 }
 
 #[test]

@@ -238,6 +238,28 @@ impl Store {
         Ok(task)
     }
 
+    /// Toma una tarea concreta en cola y la pasa a `running`, contando el intento.
+    pub fn claim(&mut self, id: i64) -> Result<Task> {
+        self.apply(id, TaskState::Running, "iniciada", None, None)
+    }
+
+    /// Devuelve a la cola una tarea en curso que no pudo ejecutarse por causas ajenas a ella
+    /// (por ejemplo, la IA no está configurada): no gasta intento y deja constancia.
+    pub fn release(&mut self, id: i64, reason: &str) -> Result<Task> {
+        let tx = self.conn.transaction()?;
+        let task = transition(&tx, id, TaskState::Queued, reason, None, None)?;
+        tx.execute(
+            "UPDATE tasks SET attempts = MAX(attempts - 1, 0) WHERE id = ?1",
+            [id],
+        )?;
+        let task = Task {
+            attempts: (task.attempts - 1).max(0),
+            ..task
+        };
+        tx.commit()?;
+        Ok(task)
+    }
+
     pub fn complete(&mut self, id: i64, result: &Value) -> Result<Task> {
         self.apply(id, TaskState::Completed, "completada", Some(result), None)
     }

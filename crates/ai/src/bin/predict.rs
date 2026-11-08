@@ -129,19 +129,10 @@ fn parse_args() -> Result<Args, String> {
         return Err("las expectativas no pueden usarse como entrada".into());
     }
     let choice = match provider.as_deref() {
-        Some("ollama") => {
-            let ProviderChoice::Ollama {
-                base_url,
-                model: default,
-            } = ProviderChoice::default()
-            else {
-                unreachable!()
-            };
-            ProviderChoice::Ollama {
-                base_url: url.unwrap_or(base_url),
-                model: model.unwrap_or(default),
-            }
-        }
+        Some("ollama") => ProviderChoice::Ollama {
+            base_url: url.unwrap_or_else(|| nestadmin_ai::ollama::DEFAULT_URL.to_owned()),
+            model: model.unwrap_or_else(|| nestadmin_ai::ollama::DEFAULT_MODEL.to_owned()),
+        },
         Some("groq") => ProviderChoice::Groq {
             model: model.ok_or("--model es obligatorio con groq")?,
         },

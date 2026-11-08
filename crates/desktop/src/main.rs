@@ -20,7 +20,7 @@ use nestadmin_ai::{CredentialStore, ProviderChoice, Secret};
 use nestadmin_app::accounts::{
     AccountView, FetchReport, MailAccountsView, MailEnv, MailProviderKind,
 };
-use nestadmin_app::{App, AppPaths, ProviderInfo};
+use nestadmin_app::{AiWait, App, AppPaths, ProviderInfo};
 use nestadmin_core::{AuditEntry, Rule, Task};
 use nestadmin_extract::{Extractor, Tesseract};
 use nestadmin_mail::PendingAuthorization;
@@ -32,7 +32,7 @@ use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent}
 use tauri::{AppHandle, Builder, Emitter, Manager, Runtime, State, Window, WindowEvent};
 use tauri_plugin_dialog::DialogExt;
 
-use crate::settings::{credential_store, provider_for, Settings};
+use crate::settings::{credential_store, Settings};
 
 /// Evento que indica a la ventana que vuelva a leer tareas e historial.
 const CHANGED: &str = "nestadmin://changed";
@@ -528,8 +528,16 @@ fn audit_log(shared: State<'_, SharedState>) -> CmdResult<Vec<AuditEntry>> {
 
 #[derive(Serialize)]
 struct SettingsView {
-    choice: ProviderChoice,
+    /// `None`: el usuario debe elegir proveedor (D100).
+    choice: Option<ProviderChoice>,
     active: ProviderInfo,
+    /// Por qué las tareas con IA esperan en la cola, si esperan (D101).
+    ai_wait: Option<AiWait>,
+    ai_wait_message: Option<String>,
+    /// Respaldo automático del externo elegido a la IA local (D101).
+    local_fallback: bool,
+    /// Destino de la elección actual ya confirmado (siempre `true` con la IA local).
+    consented: bool,
     groq_key_saved: bool,
     ollama_cloud_key_saved: bool,
     anthropic_key_saved: bool,
@@ -543,7 +551,18 @@ struct SettingsView {
 
 #[tauri::command]
 fn settings(shared: State<'_, SharedState>) -> CmdResult<SettingsView> {
-    let choice = shared.settings.lock().map_err(text)?.provider.clone();
+    let (choice, local_fallback, consented) = {
+        let settings = shared.settings.lock().map_err(text)?;
+        let consented = settings
+            .provider
+            .as_ref()
+            .is_some_and(|c| c.is_local() || settings.has_consent(c));
+        (
+            settings.provider.clone(),
+            settings.local_fallback,
+            consented,
+        )
+    };
     let ollama_cloud_key_saved = shared
         .credentials
         .get(OLLAMA_CLOUD_API_KEY)
@@ -560,14 +579,22 @@ fn settings(shared: State<'_, SharedState>) -> CmdResult<SettingsView> {
         .map_err(text)?
         .is_some();
     let openai_compatible_key_saved = match &choice {
-        ProviderChoice::OpenAiCompatible { base_url, .. } => {
+        Some(ProviderChoice::OpenAiCompatible { base_url, .. }) => {
             openai_compatible_key_present(&shared, base_url)?
         }
         _ => false,
     };
+    let (active, ai_wait) = {
+        let app = shared.app()?;
+        (app.provider(), app.ai_wait())
+    };
     Ok(SettingsView {
         choice,
-        active: shared.app()?.provider(),
+        active,
+        ai_wait,
+        ai_wait_message: ai_wait.map(|w| w.message().to_owned()),
+        local_fallback,
+        consented,
         groq_key_saved,
         ollama_cloud_key_saved,
         anthropic_key_saved,
@@ -577,24 +604,55 @@ fn settings(shared: State<'_, SharedState>) -> CmdResult<SettingsView> {
     })
 }
 
-/// Cambio explícito de proveedor. Si el elegido no se puede preparar (por ejemplo, un
-/// proveedor externo sin clave), se informa y se mantiene la selección anterior.
+/// Vuelve a calcular el proveedor activo a partir de la configuración y las credenciales
+/// (D100, D101): si falta elegir, la clave o confirmar el destino, la aplicación queda con un
+/// proveedor que no puede enviar y las tareas con IA esperan en la cola; si no, se construye
+/// el elegido y se retoman. Se llama al arrancar y tras cada cambio de proveedor o de clave.
+fn refresh_provider(shared: &Shared) -> CmdResult<()> {
+    let (provider, wait) = {
+        let settings = shared.settings.lock().map_err(text)?;
+        settings::resolve(&settings, shared.credentials.as_ref())
+    };
+    {
+        let mut app = shared.app()?;
+        app.select_provider(provider);
+        app.set_ai_wait(wait);
+    }
+    shared.wake();
+    Ok(())
+}
+
+/// Cambio explícito de proveedor. Con uno externo hace falta la confirmación del destino
+/// (`consent`, que se registra) o una anterior para ese mismo destino (D100). Si el elegido
+/// no se puede preparar (por ejemplo, sin clave), se informa y se mantiene la selección
+/// anterior.
 #[tauri::command]
 fn select_provider(
     shared: State<'_, SharedState>,
     choice: ProviderChoice,
+    consent: bool,
 ) -> CmdResult<ProviderInfo> {
-    let provider = settings::build(&choice, shared.credentials.as_ref()).map_err(text)?;
-    let mut current = shared.settings.lock().map_err(text)?;
-    let updated = Settings {
-        provider: choice,
-        ..current.clone()
-    };
-    updated.save(&shared.data_dir).map_err(text)?;
-    *current = updated;
-    let mut app = shared.app()?;
-    app.select_provider(provider);
-    Ok(app.provider())
+    {
+        let mut current = shared.settings.lock().map_err(text)?;
+        let mut updated = current.clone();
+        if !choice.is_local() {
+            if choice.destination().is_none() {
+                // URL no válida: el error explícito del adaptador, sin leer ninguna clave.
+                settings::build(&choice, shared.credentials.as_ref()).map_err(text)?;
+            }
+            if consent {
+                updated.record_consent(&choice);
+            } else if !updated.has_consent(&choice) {
+                return Err("Confirme antes el destino de los datos".into());
+            }
+        }
+        settings::build(&choice, shared.credentials.as_ref()).map_err(text)?;
+        updated.provider = Some(choice);
+        updated.save(&shared.data_dir).map_err(text)?;
+        *current = updated;
+    }
+    refresh_provider(&shared)?;
+    Ok(shared.app()?.provider())
 }
 
 /// La clave va directa al Administrador de credenciales de Windows; nunca se devuelve.
@@ -607,12 +665,14 @@ fn save_groq_key(shared: State<'_, SharedState>, key: String) -> CmdResult<()> {
     shared
         .credentials
         .set(GROQ_API_KEY, &Secret::new(key))
-        .map_err(text)
+        .map_err(text)?;
+    refresh_provider(&shared)
 }
 
 #[tauri::command]
 fn delete_groq_key(shared: State<'_, SharedState>) -> CmdResult<()> {
-    shared.credentials.delete(GROQ_API_KEY).map_err(text)
+    shared.credentials.delete(GROQ_API_KEY).map_err(text)?;
+    refresh_provider(&shared)
 }
 
 /// Igual que la de Groq (D106): va directa al almacén del sistema y nunca se devuelve.
@@ -625,7 +685,8 @@ fn save_ollama_cloud_key(shared: State<'_, SharedState>, key: String) -> CmdResu
     shared
         .credentials
         .set(OLLAMA_CLOUD_API_KEY, &Secret::new(key))
-        .map_err(text)
+        .map_err(text)?;
+    refresh_provider(&shared)
 }
 
 #[tauri::command]
@@ -633,7 +694,8 @@ fn delete_ollama_cloud_key(shared: State<'_, SharedState>) -> CmdResult<()> {
     shared
         .credentials
         .delete(OLLAMA_CLOUD_API_KEY)
-        .map_err(text)
+        .map_err(text)?;
+    refresh_provider(&shared)
 }
 
 /// Claves de los proveedores externos nuevos (D109, D110): como las demás, van directas al
@@ -647,12 +709,14 @@ fn save_anthropic_key(shared: State<'_, SharedState>, key: String) -> CmdResult<
     shared
         .credentials
         .set(ANTHROPIC_API_KEY, &Secret::new(key))
-        .map_err(text)
+        .map_err(text)?;
+    refresh_provider(&shared)
 }
 
 #[tauri::command]
 fn delete_anthropic_key(shared: State<'_, SharedState>) -> CmdResult<()> {
-    shared.credentials.delete(ANTHROPIC_API_KEY).map_err(text)
+    shared.credentials.delete(ANTHROPIC_API_KEY).map_err(text)?;
+    refresh_provider(&shared)
 }
 
 /// La clave queda ligada al host de `base_url` (acepta la URL base o solo el host): al cambiar
@@ -671,13 +735,15 @@ fn save_openai_compatible_key(
     shared
         .credentials
         .set(&name, &Secret::new(key))
-        .map_err(text)
+        .map_err(text)?;
+    refresh_provider(&shared)
 }
 
 #[tauri::command]
 fn delete_openai_compatible_key(shared: State<'_, SharedState>, base_url: String) -> CmdResult<()> {
     let name = credential_name_for(&base_url).map_err(text)?;
-    shared.credentials.delete(&name).map_err(text)
+    shared.credentials.delete(&name).map_err(text)?;
+    refresh_provider(&shared)
 }
 
 /// Si hay clave para el host de `base_url` (para una URL aún sin seleccionar).
@@ -1019,8 +1085,11 @@ fn start<R: Runtime>(
     } = deps;
     std::fs::create_dir_all(&data_dir)?;
     let settings = Settings::load(&data_dir);
-    let local_provider = settings.provider.is_local();
-    let provider = provider_for(&settings.provider, credentials.as_ref());
+    let local_provider = settings
+        .provider
+        .as_ref()
+        .is_some_and(ProviderChoice::is_local);
+    let (provider, ai_wait) = settings::resolve(&settings, credentials.as_ref());
     let (profiles, mail_clients_error) = mail_clients::load(&data_dir);
     let mail = MailEnv {
         credentials: Arc::clone(&credentials),
@@ -1032,6 +1101,7 @@ fn start<R: Runtime>(
         Arc::new(extractor),
         mail,
     )?;
+    app.set_ai_wait(ai_wait);
     if let Err(error) = app.set_mail_limit(settings.mail_limit) {
         eprintln!("límite de correo no válido en la configuración: {error}");
     }

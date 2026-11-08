@@ -19,7 +19,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use nestadmin_ai::tasks::{
     email_request, extraction_request, parse_email, parse_extraction, parse_other_invoices,
 };
-use nestadmin_ai::{GenerateRequest, GenerateResult, Provider, ProviderKind};
+use nestadmin_ai::{AiError, GenerateRequest, GenerateResult, Provider, ProviderKind};
 use nestadmin_core::{
     ActionRecord, ActionRequest, AuditEntry, Authorization, Connector, ConnectorError, CoreError,
     Rule, Store, Task, TaskError, TaskState,
@@ -105,6 +105,38 @@ pub struct ProviderInfo {
     pub model: String,
 }
 
+/// Por qué las tareas con IA esperan en la cola sin gastar intentos (D100, D101). Mientras
+/// haya una espera, nada se envía a ningún proveedor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AiWait {
+    /// No hay proveedor elegido (por ejemplo, una configuración antigua con Groq).
+    NeedsChoice,
+    /// El proveedor externo elegido no tiene clave guardada.
+    NeedsKey,
+    /// El destino de los datos no está confirmado.
+    NeedsConsent,
+    /// El proveedor rechazó la clave (`unauthorized`): revocada o incorrecta.
+    InvalidKey,
+}
+
+impl AiWait {
+    pub fn message(self) -> &'static str {
+        match self {
+            Self::NeedsChoice => "Falta configurar la IA: elija un proveedor en Configuración",
+            Self::NeedsKey => {
+                "Falta configurar la IA: guarde la clave del proveedor en Configuración"
+            }
+            Self::NeedsConsent => {
+                "Falta configurar la IA: confirme el destino de los datos en Configuración"
+            }
+            Self::InvalidKey => {
+                "La clave de IA no es válida o fue revocada: corríjala en Configuración"
+            }
+        }
+    }
+}
+
 pub struct App {
     store: Store,
     mail: Accounts,
@@ -115,6 +147,8 @@ pub struct App {
     extractor: Arc<Extractor>,
     /// Mientras sea `true`, no empieza ninguna tarea nueva (actualización pendiente, D63).
     paused: bool,
+    /// Si es `Some`, las tareas que necesitan la IA esperan en la cola (D101).
+    ai_wait: Option<AiWait>,
 }
 
 /// Si se puede instalar una actualización sin cortar trabajo (actualizaciones.md, paso 5).
@@ -196,6 +230,9 @@ pub struct Completed {
     outcome: Result<Outcome, TaskError>,
     /// Texto y páginas del documento (método de cada una: texto, PDF u OCR).
     extraction: Option<Extraction>,
+    /// El proveedor devolvió `unauthorized`. Se marca aquí y no por el código del error, porque
+    /// los conectores de correo también usan `unauthorized` y esos fallos siguen siendo fallos.
+    ai_unauthorized: bool,
 }
 
 impl Job {
@@ -209,6 +246,7 @@ impl Job {
             prepared,
         } = self;
         let mut extracted = None;
+        let mut ai_unauthorized = false;
         let outcome = prepared.and_then(|prepared| {
             let request = match prepared {
                 Prepared::Resume(result) => return Ok(Outcome::Resumed(result)),
@@ -229,16 +267,20 @@ impl Job {
             provider
                 .generate(&request)
                 .map(Outcome::Generated)
-                .map_err(|e| TaskError {
-                    code: e.code().to_owned(),
-                    message: e.to_string(),
-                    recoverable: true,
+                .map_err(|e| {
+                    ai_unauthorized = e == AiError::Unauthorized;
+                    TaskError {
+                        code: e.code().to_owned(),
+                        message: e.to_string(),
+                        recoverable: true,
+                    }
                 })
         });
         Completed {
             task,
             outcome,
             extraction: extracted,
+            ai_unauthorized,
         }
     }
 }
@@ -281,6 +323,7 @@ impl App {
             registry: DuplicateRegistry::new(),
             extractor,
             paused: false,
+            ai_wait: None,
         };
         app.store.recover()?;
         app.store.reconcile_actions(SEND_DRAFT, &app.mail)?;
@@ -476,6 +519,16 @@ impl App {
     /// Cambio explícito de proveedor; afecta a las tareas que empiecen después.
     pub fn select_provider(&mut self, provider: Arc<dyn Provider>) {
         self.provider = provider;
+    }
+
+    /// Fija o quita la espera de IA (D101). Con una espera, las tareas que necesitan el
+    /// proveedor se quedan en `queued` sin gastar intentos; al quitarla se retoman.
+    pub fn set_ai_wait(&mut self, wait: Option<AiWait>) {
+        self.ai_wait = wait;
+    }
+
+    pub fn ai_wait(&self) -> Option<AiWait> {
+        self.ai_wait
     }
 
     /// Encola un documento de texto.
@@ -785,7 +838,25 @@ impl App {
         if self.paused {
             return Ok(None);
         }
-        let Some(task) = self.store.claim_next()? else {
+        let claimed = if self.ai_wait.is_none() {
+            self.store.claim_next()?
+        } else {
+            // Sin IA utilizable solo avanzan las tareas que no la necesitan: reanudar una
+            // acción ya intentada (D50) o una factura ya separada (D68).
+            let mut found = None;
+            for queued in self.store.tasks_in(TaskState::Queued)? {
+                let input: Value = serde_json::from_str(&queued.input_ref).unwrap_or(Value::Null);
+                if self.attempted_result(&queued)?.is_some() || split_preset(&input).is_some() {
+                    found = Some(queued.id);
+                    break;
+                }
+            }
+            match found {
+                Some(id) => Some(self.store.claim(id)?),
+                None => None,
+            }
+        };
+        let Some(task) = claimed else {
             return Ok(None);
         };
         let input: Value = serde_json::from_str(&task.input_ref).unwrap_or(Value::Null);
@@ -849,6 +920,12 @@ impl App {
     /// Valida la respuesta, aplica reglas y deja la tarea en su estado siguiente.
     pub fn finish(&mut self, completed: Completed) -> AppResult<Task> {
         let task = completed.task;
+        if completed.ai_unauthorized {
+            // La clave no sirve: la tarea vuelve a la cola sin gastar intento ni fallar y la
+            // ventana pide corregir la clave (D101).
+            self.ai_wait = Some(AiWait::InvalidKey);
+            return Ok(self.store.release(task.id, AiWait::InvalidKey.message())?);
+        }
         let generated = match completed.outcome {
             Ok(Outcome::Generated(generated)) => generated,
             Ok(Outcome::Resumed(result)) => return self.resume(task, result),
@@ -1641,6 +1718,62 @@ pub fn default_data_dir() -> Option<PathBuf> {
 mod tests {
     use super::*;
     use nestadmin_extract::{Method, Page};
+
+    struct Silent;
+
+    impl Provider for Silent {
+        fn kind(&self) -> ProviderKind {
+            ProviderKind::Ollama
+        }
+        fn model(&self) -> &str {
+            "simulado"
+        }
+        fn generate(&self, _: &GenerateRequest) -> Result<GenerateResult, nestadmin_ai::AiError> {
+            unreachable!("la prueba no llama al proveedor")
+        }
+    }
+
+    /// El código `unauthorized` también lo usan los conectores de correo: un fallo así sigue
+    /// siendo un fallo de la tarea y no activa la espera de la IA (solo lo hace el
+    /// `unauthorized` que devuelve el proveedor, marcado en `Completed`).
+    #[test]
+    fn a_connector_unauthorized_still_fails_the_task_and_does_not_make_the_ai_wait() {
+        struct NoOcr;
+        impl nestadmin_extract::Ocr for NoOcr {
+            fn recognize(
+                &self,
+                _: &Path,
+                page: usize,
+            ) -> Result<String, nestadmin_extract::ExtractError> {
+                Err(nestadmin_extract::ExtractError::OcrUnavailable(format!(
+                    "{page}"
+                )))
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let extractor = Extractor::new(dir.path().join("sin-pdfium"), Box::new(NoOcr));
+        let mut app = App::open(
+            &AppPaths::new(dir.path()),
+            Arc::new(Silent),
+            Arc::new(extractor),
+        )
+        .unwrap();
+        app.import_document("a.txt", "texto sintético").unwrap();
+        let job = app.begin_next().unwrap().unwrap();
+        let error = task_error("unauthorized", "sesión de correo caducada", true);
+        let failed = app
+            .finish(Completed {
+                task: job.task,
+                outcome: Err(error),
+                extraction: None,
+                ai_unauthorized: false,
+            })
+            .unwrap();
+        assert_eq!(failed.state, TaskState::Failed);
+        assert_eq!(failed.error.unwrap().code, "unauthorized");
+        assert_eq!(failed.attempts, 1);
+        assert_eq!(app.ai_wait(), None);
+    }
 
     fn page(number: usize, offset: usize) -> Page {
         Page {

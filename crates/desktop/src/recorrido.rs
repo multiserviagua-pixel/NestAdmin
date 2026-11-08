@@ -210,10 +210,10 @@ fn test_deps(data_dir: &Path, ai_url: &str) -> Deps {
 fn select_local(data_dir: &Path, ai_url: &str) {
     std::fs::create_dir_all(data_dir).unwrap();
     let settings = Settings {
-        provider: ProviderChoice::Ollama {
+        provider: Some(ProviderChoice::Ollama {
             base_url: ai_url.to_owned(),
             model: "qwen3:8b".to_owned(),
-        },
+        }),
         ..Settings::default()
     };
     settings.save(data_dir).unwrap();
@@ -376,7 +376,7 @@ fn seeded_records() -> usize {
         let extractor = Extractor::new(dir.path().join("sin-pdfium"), Box::new(NoOcr));
         let app = App::open(
             &AppPaths::new(dir.path()),
-            provider_for(
+            crate::settings::provider_for(
                 &ProviderChoice::default(),
                 &MemoryCredentialStore::default(),
             ),
@@ -806,7 +806,10 @@ fn fallo_del_modelo_es_visible_y_el_reintento_es_explicito() {
 
     let groq = s.call(
         "select_provider",
-        json!({ "choice": { "provider": "groq", "model": "llama-3.3-70b-versatile" } }),
+        json!({
+            "choice": { "provider": "groq", "model": "llama-3.3-70b-versatile" },
+            "consent": true
+        }),
     );
     assert!(groq.is_err(), "Groq sin clave no se puede elegir");
     let settings = s.ok("settings", json!({}));

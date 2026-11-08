@@ -131,12 +131,43 @@ fn body_of(request: &str) -> Value {
 }
 
 #[test]
-fn local_provider_is_the_default_choice() {
-    let ProviderChoice::Ollama { base_url, model } = ProviderChoice::default() else {
-        panic!("el proveedor inicial debe ser local");
+fn ollama_cloud_is_the_default_choice_and_local_keeps_its_constants() {
+    // D100: la selección inicial es externa; la IA local conserva su URL y modelo.
+    assert_eq!(
+        ProviderChoice::default(),
+        ProviderChoice::OllamaCloud {
+            model: "gemma4:31b".into()
+        }
+    );
+    assert_eq!(
+        ProviderChoice::default().destination().as_deref(),
+        Some("ollama.com")
+    );
+    assert_eq!(nestadmin_ai::ollama::DEFAULT_URL, "http://127.0.0.1:11434");
+    assert_eq!(nestadmin_ai::ollama::DEFAULT_MODEL, "qwen3:8b");
+}
+
+#[test]
+fn destinations_name_where_data_goes() {
+    let local = ProviderChoice::Ollama {
+        base_url: "http://127.0.0.1:11434".into(),
+        model: "m".into(),
     };
-    assert_eq!(base_url, "http://127.0.0.1:11434");
-    assert_eq!(model, "qwen3:8b");
+    assert_eq!(local.destination(), None);
+    let claude = ProviderChoice::Anthropic { model: "m".into() };
+    assert_eq!(claude.destination().as_deref(), Some("api.anthropic.com"));
+    let compat = |u: &str| ProviderChoice::OpenAiCompatible {
+        base_url: u.into(),
+        model: "m".into(),
+    };
+    assert_eq!(
+        compat("https://API.Example.com/v1")
+            .destination()
+            .as_deref(),
+        Some("api.example.com")
+    );
+    assert_eq!(compat("https://localhost/v1").destination(), None);
+    assert_eq!(compat("http://api.example.com").destination(), None);
 }
 
 #[test]

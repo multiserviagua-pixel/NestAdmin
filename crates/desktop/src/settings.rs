@@ -1,6 +1,7 @@
-//! Configuración local: la selección de proveedor y el límite de mensajes leídos por cuenta
-//! en cada consulta. Las claves de los proveedores externos y los tokens de correo nunca se
-//! guardan aquí, sino en el almacén de credenciales del sistema (R09, D13, D31).
+//! Configuración local: la selección de proveedor, la confirmación del destino de los datos
+//! de cada proveedor externo (D100), el respaldo local (D101) y el límite de mensajes leídos
+//! por cuenta en cada consulta. Las claves de los proveedores externos y los tokens de correo
+//! nunca se guardan aquí, sino en el almacén de credenciales del sistema (R09, D13, D31).
 
 use std::fs;
 use std::io;
@@ -12,41 +13,145 @@ use nestadmin_ai::{
     build_provider, AiError, CredentialStore, GenerateRequest, GenerateResult, Provider,
     ProviderChoice, ProviderKind,
 };
+use nestadmin_app::AiWait;
 use nestadmin_setup::{explain_timeouts, Memory, System, WindowsSystem};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 const FILE: &str = "configuracion.json";
 /// Plazo por solicitud; una extracción local tarda del orden de decenas de segundos.
 const TIMEOUT: Duration = Duration::from_secs(180);
 
+/// Confirmación del usuario de que sus datos salen hacia un destino (D100). No lleva secretos.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Consent {
+    pub provider: String,
+    pub destination: String,
+}
+
+impl Consent {
+    /// `None` para la IA local o si no hay destino válido.
+    pub fn for_choice(choice: &ProviderChoice) -> Option<Self> {
+        Some(Self {
+            provider: choice.id().to_owned(),
+            destination: choice.destination()?,
+        })
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Settings {
-    pub provider: ProviderChoice,
+    /// `None`: el usuario debe elegir proveedor (por ejemplo, tras una configuración con
+    /// Groq); mientras tanto no se envía nada.
+    pub provider: Option<ProviderChoice>,
     /// Mensajes leídos como mucho por cuenta en cada consulta (D42).
     #[serde(default = "default_mail_limit")]
     pub mail_limit: usize,
+    /// Destinos externos confirmados, uno por proveedor y destino.
+    #[serde(default)]
+    pub external_consent: Vec<Consent>,
+    /// Respaldo automático del proveedor externo elegido a la IA local (D101).
+    #[serde(default = "default_true")]
+    pub local_fallback: bool,
 }
 
 fn default_mail_limit() -> usize {
     nestadmin_app::accounts::DEFAULT_MAIL_LIMIT
 }
 
+fn default_true() -> bool {
+    true
+}
+
 impl Default for Settings {
     fn default() -> Self {
         Self {
-            provider: ProviderChoice::default(),
+            provider: Some(ProviderChoice::default()),
             mail_limit: default_mail_limit(),
+            external_consent: Vec::new(),
+            local_fallback: true,
         }
     }
 }
 
 impl Settings {
-    /// Sin archivo, o con uno ilegible, se usa la selección inicial: Ollama local.
+    /// Sin archivo, o con uno ilegible, se usa la selección inicial (Ollama cloud, D100) sin
+    /// confirmación: nada se envía hasta que el usuario guarde la clave y confirme el destino.
+    /// Se lee como JSON y no como la estructura para decidir sobre la etiqueta en bruto:
+    /// - `provider` nulo, de Groq (retirado) o ilegible deja `None`, conservando el resto, y
+    ///   nunca se sustituye por otro proveedor externo;
+    /// - un archivo anterior con proveedor externo y sin `external_consent` lo da por
+    ///   confirmado para ese destino (las versiones anteriores lo confirmaban en un diálogo).
     pub fn load(data_dir: &Path) -> Self {
-        fs::read_to_string(data_dir.join(FILE))
+        let value = fs::read_to_string(data_dir.join(FILE))
             .ok()
-            .and_then(|text| serde_json::from_str(&text).ok())
-            .unwrap_or_default()
+            .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+            .filter(Value::is_object);
+        let Some(value) = value else {
+            return Self::default();
+        };
+        let saved = value.get("provider");
+        let provider = match saved {
+            None => Some(ProviderChoice::default()),
+            Some(Value::Null) => None,
+            Some(raw) if raw.get("provider").and_then(Value::as_str) == Some("groq") => None,
+            Some(raw) => serde_json::from_value(raw.clone()).ok(),
+        };
+        let mail_limit = value
+            .get("mail_limit")
+            .and_then(Value::as_u64)
+            .map_or_else(default_mail_limit, |n| n as usize);
+        let local_fallback = value
+            .get("local_fallback")
+            .and_then(Value::as_bool)
+            .unwrap_or(true);
+        let external_consent = match value.get("external_consent") {
+            Some(raw) => serde_json::from_value(raw.clone()).unwrap_or_default(),
+            None if saved.is_some() => provider
+                .as_ref()
+                .and_then(Consent::for_choice)
+                .into_iter()
+                .collect(),
+            None => Vec::new(),
+        };
+        Self {
+            provider,
+            mail_limit,
+            external_consent,
+            local_fallback,
+        }
+    }
+
+    pub fn has_consent(&self, choice: &ProviderChoice) -> bool {
+        Consent::for_choice(choice).is_some_and(|c| self.external_consent.contains(&c))
+    }
+
+    /// Registra la confirmación del destino de `choice` (sin efecto con la IA local).
+    pub fn record_consent(&mut self, choice: &ProviderChoice) {
+        if let Some(consent) = Consent::for_choice(choice) {
+            if !self.external_consent.contains(&consent) {
+                self.external_consent.push(consent);
+            }
+        }
+    }
+
+    /// Si la elección actual puede enviar datos: `Ok` con la elección o el motivo de espera
+    /// (D101). El destino confirmado se comprueba antes de leer ninguna clave. Un error del
+    /// almacén de credenciales no es «falta la clave»: se devuelve `Ok` y el error explícito
+    /// sale al construir el proveedor.
+    pub fn readiness(&self, credentials: &dyn CredentialStore) -> Result<&ProviderChoice, AiWait> {
+        let choice = self.provider.as_ref().ok_or(AiWait::NeedsChoice)?;
+        if choice.is_local() {
+            return Ok(choice);
+        }
+        if !self.has_consent(choice) {
+            return Err(AiWait::NeedsConsent);
+        }
+        let name = choice.credential_name().ok_or(AiWait::NeedsConsent)?;
+        match credentials.get(&name) {
+            Ok(None) => Err(AiWait::NeedsKey),
+            Ok(Some(_)) | Err(_) => Ok(choice),
+        }
     }
 
     pub fn save(&self, data_dir: &Path) -> io::Result<()> {
@@ -77,18 +182,43 @@ pub fn provider_for(
     choice: &ProviderChoice,
     credentials: &dyn CredentialStore,
 ) -> Arc<dyn Provider> {
-    build(choice, credentials).unwrap_or_else(|error| {
-        let (kind, model) = match choice {
-            ProviderChoice::Ollama { model, .. } => (ProviderKind::Ollama, model.clone()),
-            ProviderChoice::Groq { model } => (ProviderKind::Groq, model.clone()),
-            ProviderChoice::OllamaCloud { model } => (ProviderKind::OllamaCloud, model.clone()),
-            ProviderChoice::OpenAiCompatible { model, .. } => {
-                (ProviderKind::OpenAiCompatible, model.clone())
-            }
-            ProviderChoice::Anthropic { model } => (ProviderKind::Anthropic, model.clone()),
-        };
-        Arc::new(Unprepared { kind, model, error })
-    })
+    build(choice, credentials).unwrap_or_else(|error| unprepared(choice, error))
+}
+
+/// Proveedor que no puede enviar: cada solicitud devuelve `error`. Conserva el tipo y el
+/// modelo de la elección para mostrarlos.
+pub fn unprepared(choice: &ProviderChoice, error: AiError) -> Arc<dyn Provider> {
+    let (kind, model) = match choice {
+        ProviderChoice::Ollama { model, .. } => (ProviderKind::Ollama, model.clone()),
+        ProviderChoice::Groq { model } => (ProviderKind::Groq, model.clone()),
+        ProviderChoice::OllamaCloud { model } => (ProviderKind::OllamaCloud, model.clone()),
+        ProviderChoice::OpenAiCompatible { model, .. } => {
+            (ProviderKind::OpenAiCompatible, model.clone())
+        }
+        ProviderChoice::Anthropic { model } => (ProviderKind::Anthropic, model.clone()),
+    };
+    Arc::new(Unprepared { kind, model, error })
+}
+
+/// Proveedor de espera: sin elección (o sin permiso para enviar) devuelve `unauthorized` y no
+/// construye ningún cliente.
+pub fn waiting_provider(choice: Option<&ProviderChoice>) -> Arc<dyn Provider> {
+    match choice {
+        Some(choice) => unprepared(choice, AiError::Unauthorized),
+        None => unprepared(&ProviderChoice::default(), AiError::Unauthorized),
+    }
+}
+
+/// Proveedor que corresponde a la configuración y, si no puede enviar todavía, el motivo de
+/// la espera (D101). Sin permiso o sin elección no se lee ni se construye nada para enviar.
+pub fn resolve(
+    settings: &Settings,
+    credentials: &dyn CredentialStore,
+) -> (Arc<dyn Provider>, Option<AiWait>) {
+    match settings.readiness(credentials) {
+        Ok(choice) => (provider_for(choice, credentials), None),
+        Err(wait) => (waiting_provider(settings.provider.as_ref()), Some(wait)),
+    }
 }
 
 /// Proveedor elegido que no se pudo preparar; cada solicitud devuelve el mismo error.
@@ -175,15 +305,22 @@ mod tests {
         let store = MemoryCredentialStore::default();
         store.set(GROQ_API_KEY, &Secret::new(KEY)).unwrap();
         let settings = Settings {
-            provider: ProviderChoice::Groq {
+            provider: Some(ProviderChoice::OllamaCloud {
                 model: "modelo-t09".into(),
-            },
+            }),
             ..Settings::default()
         };
+        let mut settings = settings;
+        settings.record_consent(settings.provider.clone().as_ref().unwrap());
         settings.save(&dir).unwrap();
         let text = fs::read_to_string(dir.join(FILE)).unwrap();
         assert!(!text.contains("PRUEBA_SINTETICA"), "{text}");
+        assert!(text.contains("ollama.com"), "el destino sí consta: {text}");
         assert_eq!(Settings::load(&dir).provider, settings.provider);
+        assert_eq!(
+            Settings::load(&dir).external_consent,
+            settings.external_consent
+        );
         fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -289,7 +426,7 @@ mod tests {
             },
         ] {
             let settings = Settings {
-                provider,
+                provider: Some(provider),
                 ..Settings::default()
             };
             settings.save(&dir).unwrap();
@@ -315,15 +452,259 @@ mod tests {
             )
             .unwrap();
         let settings = Settings {
-            provider: ProviderChoice::OllamaCloud {
+            provider: Some(ProviderChoice::OllamaCloud {
                 model: "modelo-t09".into(),
-            },
+            }),
             ..Settings::default()
         };
         settings.save(&dir).unwrap();
         let text = fs::read_to_string(dir.join(FILE)).unwrap();
         assert!(!text.contains("PRUEBA_SINTETICA"), "{text}");
         assert_eq!(Settings::load(&dir).provider, settings.provider);
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    // ---- D100, D101: elección, confirmación del destino y espera de la IA ----
+
+    fn dir_with(name: &str, json: Option<&str>) -> std::path::PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("nestadmin-t03g-{name}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        if let Some(json) = json {
+            fs::write(dir.join(FILE), json).unwrap();
+        }
+        dir
+    }
+
+    #[test]
+    fn t03g_no_file_selects_ollama_cloud_without_consent_and_waits() {
+        let dir = dir_with("sin-archivo", None);
+        let settings = Settings::load(&dir);
+        assert_eq!(settings.provider, Some(ProviderChoice::default()));
+        assert!(matches!(
+            settings.provider,
+            Some(ProviderChoice::OllamaCloud { .. })
+        ));
+        assert!(settings.external_consent.is_empty());
+        assert!(settings.local_fallback);
+        // Sin confirmación no se mira ni la clave: aunque esté guardada, se espera el permiso.
+        let store = MemoryCredentialStore::default();
+        store
+            .set(
+                nestadmin_ai::credentials::OLLAMA_CLOUD_API_KEY,
+                &Secret::new(KEY),
+            )
+            .unwrap();
+        assert_eq!(
+            settings.readiness(&store).unwrap_err(),
+            AiWait::NeedsConsent
+        );
+        let (provider, wait) = resolve(&settings, &store);
+        assert_eq!(wait, Some(AiWait::NeedsConsent));
+        assert_eq!(provider.generate(&request()), Err(AiError::Unauthorized));
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn t03g_readiness_needs_key_after_consent_and_then_is_ready() {
+        let mut settings = Settings::default();
+        let choice = settings.provider.clone().unwrap();
+        settings.record_consent(&choice);
+        let store = MemoryCredentialStore::default();
+        assert_eq!(settings.readiness(&store).unwrap_err(), AiWait::NeedsKey);
+        store
+            .set(
+                nestadmin_ai::credentials::OLLAMA_CLOUD_API_KEY,
+                &Secret::new(KEY),
+            )
+            .unwrap();
+        assert_eq!(settings.readiness(&store).unwrap(), &choice);
+        let (_, wait) = resolve(&settings, &store);
+        assert_eq!(wait, None);
+    }
+
+    #[test]
+    fn t03g_consent_for_another_destination_does_not_count() {
+        let mut settings = Settings::default();
+        settings.record_consent(&ProviderChoice::Anthropic { model: "m".into() });
+        settings.record_consent(&ProviderChoice::OpenAiCompatible {
+            base_url: "https://api.uno.example/v1".into(),
+            model: "m".into(),
+        });
+        let store = MemoryCredentialStore::default();
+        // Ollama cloud sigue sin confirmar.
+        assert_eq!(
+            settings.readiness(&store).unwrap_err(),
+            AiWait::NeedsConsent
+        );
+        // La URL compatible confirmada no vale para otro host.
+        settings.provider = Some(ProviderChoice::OpenAiCompatible {
+            base_url: "https://api.otro.example/v1".into(),
+            model: "m".into(),
+        });
+        assert_eq!(
+            settings.readiness(&store).unwrap_err(),
+            AiWait::NeedsConsent
+        );
+        settings.provider = Some(ProviderChoice::OpenAiCompatible {
+            base_url: "https://api.uno.example/v1".into(),
+            model: "otro-modelo".into(),
+        });
+        assert_eq!(settings.readiness(&store).unwrap_err(), AiWait::NeedsKey);
+        // Una URL no válida no tiene destino: nunca hay permiso.
+        settings.provider = Some(ProviderChoice::OpenAiCompatible {
+            base_url: "https://localhost/v1".into(),
+            model: "m".into(),
+        });
+        assert_eq!(
+            settings.readiness(&store).unwrap_err(),
+            AiWait::NeedsConsent
+        );
+    }
+
+    #[test]
+    fn t03g_local_choice_needs_neither_consent_nor_key() {
+        let settings = Settings {
+            provider: Some(ProviderChoice::Ollama {
+                base_url: "http://127.0.0.1:11434".into(),
+                model: "m".into(),
+            }),
+            ..Settings::default()
+        };
+        assert!(settings
+            .readiness(&MemoryCredentialStore::default())
+            .is_ok());
+    }
+
+    #[test]
+    fn t03g_saved_groq_needs_a_choice_keeps_the_rest_and_picks_no_other_external() {
+        let dir = dir_with(
+            "groq",
+            Some(
+                r#"{"provider":{"provider":"groq","model":"m"},"mail_limit":7,"local_fallback":false}"#,
+            ),
+        );
+        let settings = Settings::load(&dir);
+        assert_eq!(settings.provider, None);
+        assert_eq!(settings.mail_limit, 7);
+        assert!(!settings.local_fallback);
+        assert!(settings.external_consent.is_empty(), "nada que migrar");
+        let store = MemoryCredentialStore::default();
+        store
+            .set(
+                nestadmin_ai::credentials::OLLAMA_CLOUD_API_KEY,
+                &Secret::new(KEY),
+            )
+            .unwrap();
+        assert_eq!(settings.readiness(&store).unwrap_err(), AiWait::NeedsChoice);
+        let (provider, wait) = resolve(&settings, &store);
+        assert_eq!(wait, Some(AiWait::NeedsChoice));
+        assert_eq!(provider.generate(&request()), Err(AiError::Unauthorized));
+        // Un valor nulo o ilegible también deja la elección pendiente.
+        for raw in [
+            r#"{"provider":null,"mail_limit":9}"#,
+            r#"{"provider":{"provider":"inventado"}}"#,
+        ] {
+            fs::write(dir.join(FILE), raw).unwrap();
+            assert_eq!(Settings::load(&dir).provider, None, "{raw}");
+        }
+        // Guardar de nuevo conserva «sin proveedor».
+        let mut saved = Settings::load(&dir);
+        saved.mail_limit = 11;
+        saved.save(&dir).unwrap();
+        let reloaded = Settings::load(&dir);
+        assert_eq!(reloaded.provider, None);
+        assert_eq!(reloaded.mail_limit, 11);
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn t03g_old_file_with_an_external_provider_and_no_consent_key_migrates_the_consent() {
+        let dir = dir_with(
+            "migracion",
+            Some(r#"{"provider":{"provider":"anthropic","model":"m"},"mail_limit":30}"#),
+        );
+        let settings = Settings::load(&dir);
+        assert_eq!(
+            settings.external_consent,
+            vec![Consent {
+                provider: "anthropic".into(),
+                destination: "api.anthropic.com".into()
+            }]
+        );
+        assert!(settings.local_fallback);
+        let store = MemoryCredentialStore::default();
+        assert_eq!(settings.readiness(&store).unwrap_err(), AiWait::NeedsKey);
+        // Con la clave `external_consent` presente (aunque vacía) no se migra nada.
+        fs::write(
+            dir.join(FILE),
+            r#"{"provider":{"provider":"anthropic","model":"m"},"external_consent":[]}"#,
+        )
+        .unwrap();
+        let settings = Settings::load(&dir);
+        assert!(settings.external_consent.is_empty());
+        assert_eq!(
+            settings.readiness(&store).unwrap_err(),
+            AiWait::NeedsConsent
+        );
+        // Un archivo antiguo con IA local no genera ninguna confirmación.
+        fs::write(
+            dir.join(FILE),
+            r#"{"provider":{"provider":"ollama","base_url":"http://127.0.0.1:11434","model":"m"}}"#,
+        )
+        .unwrap();
+        let settings = Settings::load(&dir);
+        assert!(settings.external_consent.is_empty());
+        assert!(settings.readiness(&store).is_ok());
+        // Un archivo ilegible vuelve a la selección inicial, sin confirmación.
+        fs::write(dir.join(FILE), "{no es json").unwrap();
+        let settings = Settings::load(&dir);
+        assert_eq!(settings.provider, Some(ProviderChoice::default()));
+        assert!(settings.external_consent.is_empty());
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn t03g_a_key_store_error_is_not_a_missing_key() {
+        struct Broken;
+        impl CredentialStore for Broken {
+            fn get(&self, _: &str) -> Result<Option<Secret>, nestadmin_ai::CredentialError> {
+                Err(nestadmin_ai::CredentialError("almacén roto".into()))
+            }
+            fn set(&self, _: &str, _: &Secret) -> Result<(), nestadmin_ai::CredentialError> {
+                unreachable!()
+            }
+            fn delete(&self, _: &str) -> Result<(), nestadmin_ai::CredentialError> {
+                unreachable!()
+            }
+        }
+        let mut settings = Settings::default();
+        let choice = settings.provider.clone().unwrap();
+        settings.record_consent(&choice);
+        let (provider, wait) = resolve(&settings, &Broken);
+        assert_eq!(wait, None, "no se confunde con una clave ausente");
+        assert!(matches!(
+            provider.generate(&request()),
+            Err(AiError::Unavailable(_))
+        ));
+    }
+
+    #[test]
+    fn t03g_saved_consent_never_contains_a_key() {
+        let dir = dir_with("sin-clave", None);
+        let mut settings = Settings::default();
+        let choice = ProviderChoice::Anthropic { model: "m".into() };
+        settings.record_consent(&choice);
+        settings.record_consent(&choice);
+        assert_eq!(settings.external_consent.len(), 1, "sin duplicados");
+        settings.save(&dir).unwrap();
+        let text = fs::read_to_string(dir.join(FILE)).unwrap();
+        assert!(
+            !text.contains(KEY) && !text.contains("PRUEBA_SINTETICA"),
+            "{text}"
+        );
+        assert!(text.contains("api.anthropic.com"), "{text}");
         fs::remove_dir_all(&dir).unwrap();
     }
 }
