@@ -1,12 +1,11 @@
 //! Proveedores de IA de NestAdmin (R03, D06–D08, D12, D100): Ollama cloud por defecto (D106,
-//! con clave y destino confirmado); la IA local (D06), Groq (en retirada), cualquier API
+//! con clave y destino confirmado); la IA local (D06), cualquier API
 //! compatible con OpenAI (D109) y Claude/Anthropic (D110) por selección explícita, con un
 //! contrato común. Ningún adaptador cambia de proveedor por su cuenta; el único respaldo
 //! (del externo elegido al local, D101) lo gestiona la capa de aplicación.
 
 pub mod anthropic;
 pub mod credentials;
-pub mod groq;
 mod http;
 pub mod models;
 pub mod ollama;

@@ -67,9 +67,6 @@ pub fn list_models(
             ANTHROPIC_MODELS,
             key_required(key)?,
         ),
-        ProviderChoice::Groq { .. } => Err(AiError::Unavailable(
-            "Groq se retira: no admite listar modelos".into(),
-        )),
     }
 }
 
@@ -93,9 +90,6 @@ pub fn list_models_with_endpoint(
             openai_models(&agent, endpoint, key_required(key)?)
         }
         ProviderChoice::Anthropic { .. } => anthropic_models(&agent, endpoint, key_required(key)?),
-        ProviderChoice::Groq { .. } => Err(AiError::Unavailable(
-            "Groq se retira: no admite listar modelos".into(),
-        )),
     }
 }
 

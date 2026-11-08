@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>NestAdmin — desktop admin assistant for Windows</title>
-<meta name="description" content="NestAdmin is a Windows desktop app that helps small businesses read email and documents, extract and validate invoice data and prepare reply drafts, with local AI.">
+<meta name="description" content="NestAdmin is a Windows desktop app that helps small businesses read email and documents, extract and validate invoice data and prepare reply drafts, with external AI that you choose (Ollama cloud by default) or local AI.">
 <link rel="canonical" href="https://nestadmin.humannaia.com/en/">
 <link rel="alternate" hreflang="es" href="https://nestadmin.humannaia.com/">
 <link rel="alternate" hreflang="en" href="https://nestadmin.humannaia.com/en/">
@@ -29,7 +29,7 @@
 <h1>NestAdmin</h1>
 <p><strong>A desktop administrative assistant for Windows, built for small businesses.</strong></p>
 
-<p>NestAdmin reads the email and documents your business receives (invoices, PDFs and scanned documents), extracts and validates their data and prepares reply drafts for a person to review. It is installed on your own computer and, by default, all processing happens there.</p>
+<p>NestAdmin reads the email and documents your business receives (invoices, PDFs and scanned documents), extracts and validates their data and prepares reply drafts for a person to review. It is installed on your own computer. Documents, OCR, credentials and working data stay on it; AI analysis is done by an external provider that you choose (by default Ollama cloud, from Ollama Inc.) or by optional local AI.</p>
 
 <h2>What it does</h2>
 <ul>
@@ -43,8 +43,9 @@
 <h2>Privacy by design</h2>
 <ul>
   <li><strong>Runs on your computer.</strong> The publisher of NestAdmin has no servers that receive, store or process your email or documents.</li>
-  <li><strong>Local AI by default.</strong> The language model (Qwen3 8B, via Ollama) runs on your own computer.</li>
-  <li><strong>External AI only if you choose it.</strong> You can explicitly choose Groq as the provider, with your own key. Only then is the processed text sent to Groq. NestAdmin never switches providers on its own.</li>
+  <li><strong>External AI by default, with your key and your confirmation.</strong> NestAdmin proposes Ollama cloud as the AI provider. It sends nothing until you save your own key, pick the model and confirm the destination the text will go to (Ollama Inc., mainly in the US). It then runs a test with synthetic text, without your data. You can choose another provider (OpenAI-compatible or Claude) or local AI.</li>
+  <li><strong>What leaves your computer.</strong> Only the text the task needs: the text already extracted on your computer from the invoice (OCR and PDF reading are always local) or, for an email, its subject, sender, recipients, date and body, together with the instructions. The original file, images, the database, your credentials and your paths are not sent.</li>
+  <li><strong>Optional local AI.</strong> You can install local AI (Qwen3 8B, via Ollama) so the text does not leave your computer, or use it as a fallback if the external provider does not respond. NestAdmin never switches to another external provider on its own.</li>
   <li><strong>Protected credentials.</strong> Google and Microsoft authorizations are obtained with OAuth 2.0 from the app and stored in Windows Credential Manager.</li>
 </ul>
 <p>Details are in the <a href="privacy/">privacy policy</a>.</p>
@@ -55,8 +56,8 @@
 <h2>Requirements</h2>
 <ul>
   <li>Windows 10 or 11, 64-bit.</li>
-  <li>16 GB of RAM recommended for local AI.</li>
-  <li>Internet connection for the initial installation and to work with email accounts.</li>
+  <li>16 GB of RAM recommended only if you install the optional local AI.</li>
+  <li>Internet connection to install, for the external AI provider and to work with email accounts.</li>
 </ul>
 </main>
 

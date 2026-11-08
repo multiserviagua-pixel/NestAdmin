@@ -44,6 +44,7 @@ export type ProviderChoice =
 export type ProviderId = ProviderChoice["provider"];
 
 export interface ProviderInfo {
+  /** `"groq"` solo en resultados antiguos: el proveedor se retiró (D100) y ya no se puede elegir. */
   provider: ProviderId | "groq";
   model: string;
 }

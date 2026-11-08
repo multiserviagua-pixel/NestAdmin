@@ -6,12 +6,12 @@
 # Mientras corre nestadmin-predict, cada medio segundo suma el conjunto de trabajo de los
 # procesos de Ollama (ollama* y llama-server*, que es el que carga el modelo desde Ollama 0.40)
 # y el del propio cliente, y guarda el máximo. Anota también la memoria privada (comprometida):
-# con poca RAM libre Windows recorta el conjunto de trabajo y este se queda corto. Con Groq la memoria del servidor remoto no es observable: solo se mide el cliente.
+# con poca RAM libre Windows recorta el conjunto de trabajo y este se queda corto. Con un proveedor externo la memoria del servidor remoto no es observable: solo se mide el cliente.
 # Escribe las predicciones en evaluation/predictions/, el informe en evaluation/results/ y un
 # resumen en evaluation/results/t12-<proveedor>-<fecha>.txt, todo fuera de Git. No anota datos
 # personales: equipo y usuario no constan.
 param(
-    [Parameter(Mandatory = $true)][ValidateSet('ollama', 'groq', 'ollama-cloud')][string]$Proveedor,
+    [Parameter(Mandatory = $true)][ValidateSet('ollama', 'ollama-cloud')][string]$Proveedor,
     [string]$Modelo = '',
     [int]$PlazoSegundos = 300
 )

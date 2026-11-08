@@ -814,8 +814,8 @@ fn regla_expresa_se_activa_y_desactiva_desde_la_ventana() {
 }
 
 /// R02, R03 y flujo 3: un fallo del modelo local se ve como tarea fallida con su código, no
-/// cambia de proveedor ni se reintenta solo; el reintento explícito la procesa. Elegir Groq sin
-/// clave se rechaza y la selección local se mantiene.
+/// cambia de proveedor ni se reintenta solo; el reintento explícito la procesa. Elegir un externo
+/// sin clave se rechaza y la selección local se mantiene.
 #[test]
 fn fallo_del_modelo_es_visible_y_el_reintento_es_explicito() {
     let dir = tempfile::tempdir().unwrap();
@@ -837,14 +837,14 @@ fn fallo_del_modelo_es_visible_y_el_reintento_es_explicito() {
     assert_eq!(ai.chats(), 1, "sin reintentos automáticos");
     assert_eq!(s.task(id(&task))["state"], "failed");
 
-    let groq = s.call(
+    let external = s.call(
         "select_provider",
         json!({
-            "choice": { "provider": "groq", "model": "llama-3.3-70b-versatile" },
+            "choice": { "provider": "anthropic", "model": "claude-opus-5-5" },
             "consent": true
         }),
     );
-    assert!(groq.is_err(), "Groq sin clave no se puede elegir");
+    assert!(external.is_err(), "un externo sin clave no se puede elegir");
     let settings = s.ok("settings", json!({}));
     assert_eq!(settings["choice"]["provider"], "ollama");
     assert_eq!(settings["active"]["provider"], "ollama");

@@ -6,7 +6,6 @@ use std::fmt;
 use std::sync::Mutex;
 
 pub const SERVICE: &str = "NestAdmin";
-pub const GROQ_API_KEY: &str = "groq_api_key";
 pub const OLLAMA_CLOUD_API_KEY: &str = "ollama_cloud_api_key";
 pub const ANTHROPIC_API_KEY: &str = "anthropic_api_key";
 /// Prefijo de la clave del proveedor compatible con OpenAI (D109): el nombre completo es

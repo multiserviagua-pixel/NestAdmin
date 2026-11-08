@@ -1,12 +1,12 @@
 //! T09 (R09): las credenciales solo viven en el almacén protegido. Con credenciales
 //! sintéticas reconocibles (todas contienen `MARKER`) se recorren los flujos principales —
-//! guardar la clave de Groq, procesar tareas con Groq simulado, iniciar sesión en Gmail
+//! guardar la clave de un proveedor externo, procesar tareas con ese proveedor simulado, iniciar sesión en Gmail
 //! simulado, crear y enviar un borrador— y los errores de red, 401, clave revocada, ausente
 //! o inválida. Después se inspeccionan la base de datos, la cola, los registros de correo y
 //! demás archivos del directorio de datos, junto con todos los textos que la aplicación
 //! mostraría o escribiría en un registro: ninguno contiene la marca.
 //!
-//! Todo es local: Groq, Gmail y el servicio de tokens se simulan en 127.0.0.1 y el almacén
+//! Todo es local: el proveedor externo, Gmail y el servicio de tokens se simulan en 127.0.0.1 y el almacén
 //! es un doble en memoria (el almacén real de Windows se prueba en `crates/ai`).
 
 use std::collections::BTreeSet;
@@ -18,8 +18,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
-use nestadmin_ai::credentials::GROQ_API_KEY;
-use nestadmin_ai::groq::GroqProvider;
+use nestadmin_ai::openai_compatible::OpenAiCompatibleProvider;
 use nestadmin_ai::{
     build_provider, AiError, CredentialError, CredentialStore, MemoryCredentialStore, Provider,
     ProviderChoice, ProviderKind, Secret,
@@ -33,8 +32,12 @@ use serde_json::{json, Value};
 
 /// Marca común a todas las credenciales de prueba: buscarla detecta también fragmentos.
 const MARKER: &str = "PRUEBA_SINTETICA_T09";
-const GROQ_KEY: &str = "gsk_PRUEBA_SINTETICA_T09_clave_groq_0001";
-const GROQ_REVOKED: &str = "gsk_PRUEBA_SINTETICA_T09_revocada_0002";
+/// Proveedor externo de las pruebas: el compatible con OpenAI (Groq se retiró en D100), con la
+/// clave ligada al host de su URL base (D109).
+const KEY_NAME: &str = "openai_compatible_api_key:api.example.com";
+const BASE_URL: &str = "https://api.example.com/v1";
+const API_KEY: &str = "sk-PRUEBA_SINTETICA_T09_clave_proveedor_0001";
+const API_REVOKED: &str = "sk-PRUEBA_SINTETICA_T09_revocada_0002";
 const CLIENT_SECRET: &str = "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";
 const AUTH_CODE: &str = "4/PRUEBA_SINTETICA_T09_codigo";
 const ACCOUNT: &str = "cuenta-t09";
@@ -70,7 +73,7 @@ impl CredentialStore for RecordingStore {
 }
 
 // ---------------------------------------------------------------------------------------
-// Servidor simulado de Groq, Gmail y el servicio de tokens.
+// Servidor simulado del proveedor externo, Gmail y el servicio de tokens.
 
 #[derive(Debug, Clone)]
 struct Req {
@@ -119,8 +122,8 @@ fn percent_decode(text: &str) -> String {
 #[derive(Default)]
 struct World {
     requests: Vec<Req>,
-    /// Única clave de Groq que el servidor acepta.
-    groq_key: String,
+    /// Única clave del proveedor externo que el servidor acepta.
+    api_key: String,
     /// Token de acceso vigente de Gmail.
     access: String,
     issued: u32,
@@ -135,7 +138,7 @@ fn serve() -> (String, Shared) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let base = format!("http://{}", listener.local_addr().unwrap());
     let world = Arc::new(Mutex::new(World {
-        groq_key: GROQ_KEY.into(),
+        api_key: API_KEY.into(),
         ..World::default()
     }));
     let shared = Arc::clone(&world);
@@ -204,7 +207,7 @@ fn route(req: &Req, w: &mut World) -> (u16, Value) {
     let bearer = req.header("authorization").unwrap_or("").to_owned();
     match (req.method.as_str(), req.path.as_str()) {
         ("POST", "/openai/v1/chat/completions") => {
-            if bearer != format!("Bearer {}", w.groq_key) {
+            if bearer != format!("Bearer {}", w.api_key) {
                 return (
                     401,
                     json!({ "error": { "message": format!("Invalid API Key: {bearer}"), "code": bearer } }),
@@ -350,8 +353,8 @@ fn assert_no_secrets(dir: &Path, texts: &[String]) -> Vec<String> {
 
 #[test]
 fn inspection_detects_the_marker_in_any_file_or_encoding() {
-    assert!(contains_marker(GROQ_KEY.as_bytes()));
-    let wide: Vec<u8> = GROQ_KEY.encode_utf16().flat_map(u16::to_le_bytes).collect();
+    assert!(contains_marker(API_KEY.as_bytes()));
+    let wide: Vec<u8> = API_KEY.encode_utf16().flat_map(u16::to_le_bytes).collect();
     assert!(contains_marker(&wide));
     assert!(!contains_marker(b"sin credenciales"));
     let dir = tempfile::tempdir().unwrap();
@@ -362,7 +365,7 @@ fn inspection_detects_the_marker_in_any_file_or_encoding() {
 }
 
 // ---------------------------------------------------------------------------------------
-// Groq: clave guardada, tareas procesadas y errores de credencial.
+// Proveedor externo: clave guardada, tareas procesadas y errores de credencial.
 
 struct NoOcr;
 
@@ -372,8 +375,8 @@ impl Ocr for NoOcr {
     }
 }
 
-fn groq(endpoint: &str, key: Secret) -> Arc<dyn Provider> {
-    Arc::new(GroqProvider::with_endpoint(
+fn external(endpoint: &str, key: Secret) -> Arc<dyn Provider> {
+    Arc::new(OpenAiCompatibleProvider::with_endpoint(
         &format!("{endpoint}/openai/v1"),
         "modelo-t09",
         key,
@@ -382,10 +385,10 @@ fn groq(endpoint: &str, key: Secret) -> Arc<dyn Provider> {
 }
 
 /// Proveedor construido como lo hace la aplicación: con la clave leída del almacén.
-fn groq_from_store(endpoint: &str, store: &dyn CredentialStore) -> Arc<dyn Provider> {
-    groq(
+fn provider_from_store(endpoint: &str, store: &dyn CredentialStore) -> Arc<dyn Provider> {
+    external(
         endpoint,
-        store.get(GROQ_API_KEY).unwrap().expect("clave guardada"),
+        store.get(KEY_NAME).unwrap().expect("clave guardada"),
     )
 }
 
@@ -401,7 +404,7 @@ fn invoice(number: u32) -> String {
     .to_string()
 }
 
-fn groq_hits(world: &Shared) -> usize {
+fn provider_hits(world: &Shared) -> usize {
     world
         .lock()
         .unwrap()
@@ -412,29 +415,35 @@ fn groq_hits(world: &Shared) -> usize {
 }
 
 #[test]
-fn groq_key_stays_in_the_store_through_tasks_and_credential_errors() {
+fn external_key_stays_in_the_store_through_tasks_and_credential_errors() {
     let dir = tempfile::tempdir().unwrap();
     let (base, world) = serve();
     let store = Arc::new(RecordingStore::default());
     let mut texts = Vec::new();
 
-    // Guardar la clave, como el comando `save_groq_key` de la ventana.
-    store.set(GROQ_API_KEY, &Secret::new(GROQ_KEY)).unwrap();
-    let choice = ProviderChoice::Groq {
+    // Guardar la clave, como al guardar la clave desde la ventana (D122).
+    store.set(KEY_NAME, &Secret::new(API_KEY)).unwrap();
+    let choice = ProviderChoice::OpenAiCompatible {
+        base_url: BASE_URL.into(),
         model: "modelo-t09".into(),
     };
     let built = build_provider(&choice, store.as_ref(), Duration::from_secs(5)).unwrap();
     texts.push(format!(
         "{:?}",
-        groq_from_store(&base, store.as_ref()).kind()
+        provider_from_store(&base, store.as_ref()).kind()
     ));
-    texts.push(format!("{:?}", store.get(GROQ_API_KEY).unwrap()));
-    texts.push(format!("{:?}", Secret::new(GROQ_KEY)));
-    texts.push(Secret::new(GROQ_KEY).to_string());
-    assert_eq!(built.kind(), ProviderKind::Groq);
+    texts.push(format!("{:?}", store.get(KEY_NAME).unwrap()));
+    texts.push(format!("{:?}", Secret::new(API_KEY)));
+    texts.push(Secret::new(API_KEY).to_string());
+    assert_eq!(built.kind(), ProviderKind::OpenAiCompatible);
     let provider_debug = format!(
         "{:?}",
-        GroqProvider::with_endpoint(&base, "m", Secret::new(GROQ_KEY), Duration::from_secs(1))
+        OpenAiCompatibleProvider::with_endpoint(
+            &base,
+            "m",
+            Secret::new(API_KEY),
+            Duration::from_secs(1)
+        )
     );
     texts.push(provider_debug);
 
@@ -445,12 +454,12 @@ fn groq_key_stays_in_the_store_through_tasks_and_credential_errors() {
     let paths = AppPaths::new(dir.path());
     let mut app = App::open(
         &paths,
-        groq_from_store(&base, store.as_ref()),
+        provider_from_store(&base, store.as_ref()),
         extractor.clone(),
     )
     .unwrap();
 
-    // 1. Flujo normal con Groq: extracción, revisión y registro; correo con borrador.
+    // 1. Flujo normal con el proveedor externo: extracción, revisión y registro; correo con borrador.
     let task = app.import_document("t09-1.txt", &invoice(1)).unwrap();
     let reviewed = app.process_next().unwrap().unwrap();
     assert_eq!(reviewed.state, TaskState::AwaitingReview, "{reviewed:?}");
@@ -460,22 +469,22 @@ fn groq_key_stays_in_the_store_through_tasks_and_credential_errors() {
     while let Some(task) = app.process_next().unwrap() {
         texts.push(serde_json::to_string(&task).unwrap());
     }
-    let ok_hits = groq_hits(&world);
-    assert!(ok_hits >= 2, "las tareas pasaron por Groq simulado");
+    let ok_hits = provider_hits(&world);
+    assert!(ok_hits >= 2, "las tareas pasaron por el proveedor simulado");
     {
         let w = world.lock().unwrap();
         let auth = w.requests[0].header("authorization").unwrap();
         assert_eq!(
             auth,
-            format!("Bearer {GROQ_KEY}"),
+            format!("Bearer {API_KEY}"),
             "la clave sí viaja al proveedor"
         );
     }
 
     // 2. Clave revocada: la tarea vuelve a la cola sin gastar intento ni fallar, la aplicación
     //    pide corregir la clave (D101), sin el secreto y sin otro proveedor.
-    store.set(GROQ_API_KEY, &Secret::new(GROQ_REVOKED)).unwrap();
-    app.select_provider(groq_from_store(&base, store.as_ref()));
+    store.set(KEY_NAME, &Secret::new(API_REVOKED)).unwrap();
+    app.select_provider(provider_from_store(&base, store.as_ref()));
     let revoked = app.import_document("t09-2.txt", &invoice(2)).unwrap();
     let failed = app.process_next().unwrap().unwrap();
     assert_eq!(failed.id, revoked.id);
@@ -485,11 +494,11 @@ fn groq_key_stays_in_the_store_through_tasks_and_credential_errors() {
     assert_eq!(app.ai_wait(), Some(AiWait::InvalidKey));
     assert_eq!(
         app.provider().provider,
-        ProviderKind::Groq,
+        ProviderKind::OpenAiCompatible,
         "sin cambio de proveedor"
     );
     assert_eq!(
-        groq_hits(&world),
+        provider_hits(&world),
         ok_hits + 1,
         "un único intento, sin reintentos ocultos"
     );
@@ -497,7 +506,7 @@ fn groq_key_stays_in_the_store_through_tasks_and_credential_errors() {
 
     // 3. Fallo de red: `unavailable`, recuperable, sin el secreto. Cambiar la clave quita la
     //    espera y la tarea que seguía en cola se retoma.
-    app.select_provider(groq(&closed_port(), Secret::new(GROQ_KEY)));
+    app.select_provider(external(&closed_port(), Secret::new(API_KEY)));
     app.set_ai_wait(None);
     let offline = app.process_next().unwrap().unwrap();
     let error = offline.error.clone().unwrap();
@@ -509,8 +518,8 @@ fn groq_key_stays_in_the_store_through_tasks_and_credential_errors() {
 
     // 4. Clave con caracteres de control (inválida): se rechaza sin inyectar cabeceras ni
     //    mostrar el secreto.
-    let malformed = format!("{GROQ_KEY}\r\nX-Inyectada: {MARKER}");
-    app.select_provider(groq(&base, Secret::new(malformed)));
+    let malformed = format!("{API_KEY}\r\nX-Inyectada: {MARKER}");
+    app.select_provider(external(&base, Secret::new(malformed)));
     app.retry(revoked.id).unwrap();
     let invalid = app.process_next().unwrap().unwrap();
     assert_eq!(invalid.state, TaskState::Failed);
@@ -524,14 +533,14 @@ fn groq_key_stays_in_the_store_through_tasks_and_credential_errors() {
         .all(|r| r.header("x-inyectada").is_none()));
 
     // 5. Recuperación explícita: el usuario guarda una clave válida y reintenta.
-    store.set(GROQ_API_KEY, &Secret::new(GROQ_KEY)).unwrap();
-    app.select_provider(groq_from_store(&base, store.as_ref()));
+    store.set(KEY_NAME, &Secret::new(API_KEY)).unwrap();
+    app.select_provider(provider_from_store(&base, store.as_ref()));
     app.retry(revoked.id).unwrap();
     let recovered = app.process_next().unwrap().unwrap();
     assert_eq!(recovered.state, TaskState::AwaitingReview);
 
-    // 6. Clave ausente: Groq no se construye y el error lo dice, sin pasar a Ollama.
-    store.delete(GROQ_API_KEY).unwrap();
+    // 6. Clave ausente: el proveedor no se construye y el error lo dice, sin pasar a Ollama.
+    store.delete(KEY_NAME).unwrap();
     let missing = build_provider(&choice, store.as_ref(), Duration::from_secs(5)).err();
     assert_eq!(missing, Some(AiError::Unauthorized));
     texts.push(missing.unwrap().to_string());
@@ -551,7 +560,7 @@ fn groq_key_stays_in_the_store_through_tasks_and_credential_errors() {
     // La clave estuvo en el almacén y solo allí.
     assert_eq!(
         *store.names.lock().unwrap(),
-        BTreeSet::from([GROQ_API_KEY.to_owned()])
+        BTreeSet::from([KEY_NAME.to_owned()])
     );
     let files = assert_no_secrets(dir.path(), &texts);
     for expected in [

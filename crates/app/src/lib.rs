@@ -218,6 +218,13 @@ fn split_preset(input: &Value) -> Option<GenerateResult> {
     })
 }
 
+/// Una factura separada cuyo `preset` no se puede leer, por ejemplo porque se extrajo con un
+/// proveedor que ya no existe (Groq, retirado en D100). No se procesa con el proveedor actual
+/// como si nada: se falla de forma explícita y recuperable con otro intento del documento.
+fn split_preset_unreadable(input: &Value) -> bool {
+    input.get("preset").is_some() && split_preset(input).is_none()
+}
+
 /// Motivo de revisión de una tarea cuyo intento anterior no se confirmó.
 const RESUMED_REASON: &str =
     "el intento anterior no se confirmó; se conserva el contenido aprobado, sin pedir otro a la IA";
@@ -1029,6 +1036,11 @@ impl App {
             }));
         }
         let prepared = match task.kind.as_str() {
+            INVOICE if split_preset_unreadable(&input) => Err(task_error(
+                "preset_unreadable",
+                "esta factura separada se extrajo con un proveedor de IA que ya no existe (Groq, retirado); descarte la tarea y vuelva a importar el documento",
+                false,
+            )),
             INVOICE => match input["path"].as_str() {
                 Some(path) => match split_preset(&input) {
                     Some(generated) => Ok(Prepared::Split(PathBuf::from(path), generated)),
@@ -1945,6 +1957,19 @@ mod tests {
     use super::*;
     use nestadmin_extract::{Method, Page};
 
+    struct NoOcr;
+    impl nestadmin_extract::Ocr for NoOcr {
+        fn recognize(
+            &self,
+            _: &Path,
+            page: usize,
+        ) -> Result<String, nestadmin_extract::ExtractError> {
+            Err(nestadmin_extract::ExtractError::OcrUnavailable(format!(
+                "{page}"
+            )))
+        }
+    }
+
     struct Silent;
 
     impl Provider for Silent {
@@ -1964,18 +1989,6 @@ mod tests {
     /// `unauthorized` que devuelve el proveedor, marcado en `Completed`).
     #[test]
     fn a_connector_unauthorized_still_fails_the_task_and_does_not_make_the_ai_wait() {
-        struct NoOcr;
-        impl nestadmin_extract::Ocr for NoOcr {
-            fn recognize(
-                &self,
-                _: &Path,
-                page: usize,
-            ) -> Result<String, nestadmin_extract::ExtractError> {
-                Err(nestadmin_extract::ExtractError::OcrUnavailable(format!(
-                    "{page}"
-                )))
-            }
-        }
         let dir = tempfile::tempdir().unwrap();
         let extractor = Extractor::new(dir.path().join("sin-pdfium"), Box::new(NoOcr));
         let mut app = App::open(
@@ -2000,6 +2013,47 @@ mod tests {
         assert_eq!(failed.error.unwrap().code, "unauthorized");
         assert_eq!(failed.attempts, 1);
         assert_eq!(app.ai_wait(), None);
+    }
+
+    /// Una factura separada, aún en cola, cuyo `preset` se extrajo con Groq (retirado en D100)
+    /// no se procesa con el proveedor actual como si nada: falla de forma explícita, sin gastar
+    /// una llamada a la IA. Un `preset` de un proveedor vigente sigue reutilizándose (D68).
+    #[test]
+    fn a_split_preset_from_the_retired_groq_fails_explicitly_and_a_current_one_is_reused() {
+        fn input(provider: &str) -> String {
+            json!({
+                "path": "documento.txt",
+                "preset": { "provider": provider, "model": "m", "output": { "invoice_number": "F-9" } },
+            })
+            .to_string()
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = App::open(
+            &AppPaths::new(dir.path()),
+            Arc::new(Silent),
+            Arc::new(Extractor::new(
+                dir.path().join("sin-pdfium"),
+                Box::new(NoOcr),
+            )),
+        )
+        .unwrap();
+        let current: Value = serde_json::from_str(&input("ollama_cloud")).unwrap();
+        let retired: Value = serde_json::from_str(&input("groq")).unwrap();
+        assert!(split_preset(&current).is_some());
+        assert!(!split_preset_unreadable(&current));
+        assert!(split_preset(&retired).is_none());
+        assert!(split_preset_unreadable(&retired));
+        assert!(!split_preset_unreadable(&json!({ "path": "x.txt" })));
+
+        app.store.enqueue(INVOICE, &input("groq")).unwrap();
+        let job = app.begin_next().unwrap().unwrap();
+        let error = job.prepared.err().expect("falla de forma explícita");
+        assert_eq!(error.code, "preset_unreadable");
+        assert!(!error.recoverable);
+
+        app.store.enqueue(INVOICE, &input("ollama_cloud")).unwrap();
+        let job = app.begin_next().unwrap().unwrap();
+        assert!(matches!(job.prepared, Ok(Prepared::Split(..))));
     }
 
     fn page(number: usize, offset: usize) -> Page {

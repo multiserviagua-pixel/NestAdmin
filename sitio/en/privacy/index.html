@@ -32,7 +32,7 @@
 <p>This policy explains what information the NestAdmin desktop app uses, what for, where it is stored and what control you have over it. It applies to the NestAdmin app for Windows and to this website.</p>
 
 <div class="caja">
-<p><strong>In short:</strong> NestAdmin runs on your computer. The publisher has no servers that receive, store or process your email or documents, and no one at the publisher reads them. By default the AI runs on your computer. Your Gmail data is not used for advertising, is not sold and is not used to train AI models.</p>
+<p><strong>In short:</strong> NestAdmin runs on your computer. The publisher has no servers that receive, store or process your email or documents, and no one at the publisher reads them. AI analysis is done by an external provider that you choose (by default Ollama cloud, from Ollama Inc.) with your own key and after you confirm the destination, or by optional local AI; section 7 details which text leaves your computer. Your Gmail data is not used for advertising, is not sold and is not used to train AI models.</p>
 </div>
 
 <h2 id="controller">1. Who is responsible</h2>
@@ -52,7 +52,7 @@
 <p>The text and PDF files (including scanned ones) you add to the app, and the data extracted from them, such as supplier, dates, amounts and taxes.</p>
 
 <h3>Credentials</h3>
-<p>The access and refresh tokens that Google or Microsoft issue when you sign in with OAuth 2.0 and, if you choose Groq, your Groq API key. NestAdmin never sees or stores your email account password: you type it on the provider's own page.</p>
+<p>The access and refresh tokens that Google or Microsoft issue when you sign in with OAuth 2.0 and the API key of the AI provider you choose (by default, Ollama cloud). NestAdmin never sees or stores your email account password: you type it on the provider's own page.</p>
 
 <h3>This website</h3>
 <p>This site uses no cookies, analytics, pixels or tracking, and has no forms. The hosting service may log technical data for each visit (such as the IP address) to deliver the pages and protect against abuse.</p>
@@ -80,7 +80,7 @@
   <li>sending a draft when you approve it, or when a specific rule you created and enabled covers it;</li>
   <li>showing you the history of decisions and actions.</li>
 </ul>
-<p>By default, AI analysis is done by a local language model (Qwen3 8B, via Ollama) running on your computer. Models are only used to process what you ask for; NestAdmin does not train or fine-tune them with your data.</p>
+<p>AI analysis is done by the external provider you have chosen (by default Ollama cloud, through its API; you can also choose an OpenAI-compatible service or Claude) or, if you install it, by a local language model (Qwen3 8B, via Ollama) running on your computer. NestAdmin sends nothing to an external provider until you save your key, pick the model and confirm the destination, and it then runs a test with synthetic text that does not contain your data. Models are only used to process what you ask for; NestAdmin does not train or fine-tune them with your data.</p>
 
 <h2 id="google">5. Google user data</h2>
 <div class="caja">
@@ -101,7 +101,7 @@
 <p>Everything is stored on your computer, not on the publisher's servers:</p>
 <ul>
   <li><strong>Working data</strong> (tasks, processed messages and documents, extracted data, drafts, rules and history): in a local database inside the <code>%LOCALAPPDATA%\NestAdmin</code> folder of your Windows user, together with one file per email account that records which drafts the app created and whether they were sent, so nothing is sent twice, and the list of connected accounts with the name you give them and each mailbox address (to show where each message came from). Documents you import are copied to that folder with their name, the path you imported them from and a SHA-256 fingerprint, so you can open the original and check the data.</li>
-  <li><strong>Credentials</strong> (Google and Microsoft tokens, Groq key): in Windows Credential Manager. They are never written to the database or to logs.</li>
+  <li><strong>Credentials</strong> (Google and Microsoft tokens, AI provider keys): in Windows Credential Manager. They are never written to the database or to logs. Long credentials (such as Microsoft tokens) are split across several Credential Manager entries, because each entry accepts a limited length; they remain there and never in files.</li>
 </ul>
 <p>The original messages remain in your Gmail or Microsoft 365 account; NestAdmin does not move or delete them.</p>
 
@@ -109,16 +109,23 @@
 <p>The publisher neither receives nor shares your data. The app only communicates with:</p>
 <ul>
   <li><strong>Google or Microsoft</strong>, to read email and create and send drafts in the account you connected. Content travels directly between your computer and that account's provider, with no intermediaries.</li>
-  <li><strong>Groq, only if you explicitly choose it</strong> as the AI provider and supply your own key. In that case, the processed text (including that of emails and documents) is sent to Groq to generate the response. NestAdmin never enables Groq on its own or falls back to it if the local AI fails. Groq's processing is governed by its <a href="https://groq.com/privacy-policy/">privacy policy</a>.</li>
-  <li><strong>Installation downloads</strong>: during installation, components (Ollama and the language model) are downloaded from their official sources. These downloads do not include your data.</li>
+  <li><strong>The external AI provider you choose</strong>, by default <strong>Ollama cloud</strong> (Ollama Inc., whose servers are mainly in the US), or an OpenAI-compatible service or Claude (Anthropic). It is only used with your own key and after you confirm the destination; the confirmation is stored per provider and destination, and changing destination requires confirming again. The provider's processing is governed by its own privacy policy (<a href="https://ollama.com/privacy">Ollama</a>); its statements are the provider's and NestAdmin has not verified them.</li>
+  <li><strong>Installation downloads</strong>: components such as Ollama and the local language model, only if you install the optional local AI, from their official sources. These downloads do not include your data.</li>
 </ul>
+<h3>What text is sent to the external AI provider</h3>
+<ul>
+  <li><strong>Sent</strong>: only what each task needs: the instructions and the response schema; the text of a document that NestAdmin has already extracted on your computer; and, for an email, its subject, sender, recipients, date and body as text.</li>
+  <li><strong>Not sent</strong>: the original document file, images, its fingerprint, the database, tokens or email credentials, other keys, your mailbox addresses (unless they appear in the email itself), your account names, the paths on your computer or the history. PDF reading and OCR are always done on your computer. Each key goes only to its own provider.</li>
+  <li><strong>Local alternative.</strong> If you prefer the text not to leave your computer, you can install and choose local AI. If the external provider does not respond and you have the local fallback enabled, NestAdmin repeats that task with the local AI on your computer (and says so in the result); it never switches to another external provider.</li>
+</ul>
+<p>The app is not intended to be used with real third-party data until the review with the publisher's data protection officer (processing agreement and international transfers) is completed. That review is pending.</p>
 <p>The publisher would only disclose information if it held it and a law or competent authority required it; by design, it does not hold your email or documents.</p>
 
 <h2 id="security">8. How data is protected</h2>
 <ul>
   <li>Sign-in uses OAuth 2.0 with PKCE: the app never learns your password.</li>
   <li>Credentials are kept in the protected Windows store and never appear in logs.</li>
-  <li>Communications with Google, Microsoft and Groq use HTTPS. The app refuses to send your token to any server other than the provider's and uses no implicit proxies.</li>
+  <li>Communications with Google, Microsoft and the external AI provider use HTTPS. The app refuses to send your token to any server other than the provider's and uses no implicit proxies.</li>
   <li>The app opens no network ports for incoming connections; during sign-in it briefly listens only on the computer itself (<code>127.0.0.1</code>) to receive the provider's response.</li>
   <li>Protection of stored data also depends on your computer. We recommend protecting your Windows user with a password and encrypting the disk (for example, with BitLocker).</li>
 </ul>
@@ -128,7 +135,7 @@
   <li>Working data is kept on your computer until you delete it. Uninstalling NestAdmin does not delete the <code>%LOCALAPPDATA%\NestAdmin</code> folder, so you don't lose your work; you can delete it yourself after uninstalling.</li>
   <li>When you disconnect an account in the app, its tokens are removed from Windows Credential Manager. You can also remove them from Credential Manager.</li>
   <li>Drafts created in your email account remain there until you send or delete them from your email.</li>
-  <li>If you use Groq, retention of the text sent depends on Groq.</li>
+  <li>If you use an external AI provider, retention of the text sent depends on that provider and its policy.</li>
 </ul>
 
 <h2 id="revoke">10. How to revoke access</h2>

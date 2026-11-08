@@ -1,5 +1,5 @@
 //! Adaptador nativo de la API de Anthropic (D110). Proveedor externo con el mismo estatus que
-//! Groq: solo por selección explícita y con la credencial presente; sin respaldo hacia otro
+//! los demás externos: solo por selección explícita y con la credencial presente; sin respaldo hacia otro
 //! modelo ni proveedor (no se usa el parámetro `fallbacks`).
 //!
 //! Rust no tiene SDK oficial, así que se llama a `POST /v1/messages` directamente.

@@ -341,7 +341,7 @@ fn an_invalid_compatible_url_fails_before_any_request_or_key_is_used() {
 }
 
 #[test]
-fn an_external_provider_without_a_key_is_unauthorized_and_groq_and_remote_local_are_refused() {
+fn an_external_provider_without_a_key_is_unauthorized_and_remote_local_is_refused() {
     for choice in [cloud(), compat(), claude()] {
         assert_eq!(
             list_models(&choice, None, TIMEOUT),
@@ -349,12 +349,6 @@ fn an_external_provider_without_a_key_is_unauthorized_and_groq_and_remote_local_
             "{choice:?}"
         );
     }
-    assert!(list_models(
-        &ProviderChoice::Groq { model: "m".into() },
-        Some(&secret()),
-        TIMEOUT
-    )
-    .is_err());
     let remote = ProviderChoice::Ollama {
         base_url: "http://192.0.2.1:11434".into(),
         model: "m".into(),

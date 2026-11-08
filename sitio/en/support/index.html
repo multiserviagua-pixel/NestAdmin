@@ -37,8 +37,8 @@
 <h2>Requirements</h2>
 <ul>
   <li>Windows 10 or 11, 64-bit.</li>
-  <li>16 GB of RAM recommended for local AI.</li>
-  <li>Internet connection during installation, which downloads Ollama and the language model if they are not already on the computer.</li>
+  <li>16 GB of RAM recommended only for the optional local AI.</li>
+  <li>Internet connection for the external AI provider and for email. Installation does not download local AI; if you decide to install it from the app, Ollama and the language model are downloaded.</li>
 </ul>
 
 <h2>Connecting an email account</h2>
@@ -56,10 +56,10 @@
 </ul>
 
 <h2>Deleting your data from the computer</h2>
-<p>Uninstalling NestAdmin keeps your data so you don't lose your work. To delete it, after uninstalling, remove the <code>%LOCALAPPDATA%\NestAdmin</code> folder. Ollama and the language model are kept because other apps may use them; you can uninstall them from Windows settings.</p>
+<p>Uninstalling NestAdmin keeps your data so you don't lose your work. To delete it, after uninstalling, remove the <code>%LOCALAPPDATA%\NestAdmin</code> folder. If you installed local AI, Ollama and the language model are kept because other apps may use them; you can uninstall them from Windows settings.</p>
 
 <h2>AI provider</h2>
-<p>By default, NestAdmin uses local AI. If you choose Groq, the processed text is sent to Groq with your key. If the local AI fails, NestAdmin tells you and does not switch to Groq on its own.</p>
+<p>By default, NestAdmin proposes Ollama cloud as external AI: after you save your key, pick the model and confirm the destination, the text each task needs is sent to that provider (see the privacy policy). If the provider fails, NestAdmin tells you; it can only repeat the task with the local AI on your computer, if you have it installed and the fallback enabled, and it never switches to another external provider on its own.</p>
 
 <p>More information in the <a href="../privacy/">privacy policy</a> and the <a href="../terms/">terms of service</a>.</p>
 </main>
