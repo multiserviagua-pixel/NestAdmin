@@ -22,6 +22,6 @@ Cada decisión (`D<n>`) tiene un número definitivo desde que se escribe, para q
 | D121–D121 | Credenciales largas repartidas en trozos del Administrador de credenciales (tokens de Microsoft), 2026-11-07 | Asignado |
 | D122–D122 | Lista de modelos de cada proveedor y prueba sintética, 2026-11-08 | Asignado |
 | D123–D135 | `claude/panel-reglas`: panel de reglas, sugerencias y primera lectura | Reservado |
-| D136–D145 | `claude/rediseno-ui`: rediseño visual y separación de Pendientes | Reservado |
+| D136–D145 | `claude/rediseno-ui`: rediseño visual y separación de Pendientes (D136–D138; el resto, hueco), integrado el 2026-11-08 | Asignado |
 
 Siguiente número libre: **D146**.
