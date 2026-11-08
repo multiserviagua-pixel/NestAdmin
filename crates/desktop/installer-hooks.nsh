@@ -1,7 +1,8 @@
-; Ganchos del instalador NSIS de Tauri (D36, D52).
+; Ganchos del instalador NSIS de Tauri (D52, D103).
 ;
-; D36: tras copiar los archivos, el instalador ejecuta la preparación de la IA local y espera;
-; termina con éxito solo cuando el modelo responde.
+; D103: el instalador ya no prepara la IA local (revisa D36): copia el programa y termina.
+; Ollama y el modelo se instalan desde el asistente de primer uso o desde Configuración;
+; `nestadmin.exe --preparar` sigue existiendo para la terminal o un despliegue gestionado.
 ;
 ; D52: el programa se instala en %LOCALAPPDATA%\Programs\NestAdmin y los datos siguen en
 ; %LOCALAPPDATA%\NestAdmin. La plantilla de Tauri propone %LOCALAPPDATA%\NestAdmin (o la carpeta
@@ -78,14 +79,6 @@ FunctionEnd
     ${EndIf}
     ; Solo desaparece si ha quedado vacía (nunca se abrió NestAdmin).
     RMDir "$NestAdminOldDir"
-  ${EndIf}
-
-  DetailPrint "Preparando la IA local de NestAdmin…"
-  ExecWait '"$INSTDIR\${MAINBINARYNAME}.exe" --preparar' $0
-  ${If} $0 != 0
-    DetailPrint "La preparación no terminó (código $0); NestAdmin la ofrecerá al abrirse."
-    IfSilent +2
-    MessageBox MB_ICONINFORMATION|MB_OK "La preparación de la IA local no terminó. NestAdmin la ofrecerá al abrirse."
   ${EndIf}
 !macroend
 

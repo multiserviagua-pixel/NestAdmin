@@ -6,11 +6,16 @@
 #   powershell -NoProfile -ExecutionPolicy Bypass -File t08-registro.ps1 -Silencioso      # instalación /S (T08-08)
 #   powershell -NoProfile -ExecutionPolicy Bypass -File t08-registro.ps1 -Accion Estado   # solo el estado actual
 #   powershell -NoProfile -ExecutionPolicy Bypass -File t08-registro.ps1 -Accion Desinstalar
+#   ... -ComprobarIALocal   # además, una respuesta real de la IA local (solo si se pide; D103)
+#
+# Desde D103 el instalador no prepara la IA local: no descarga Ollama ni el modelo, y el script no
+# exige que el modelo responda. La comprobación de la IA local es opcional (-ComprobarIALocal) y
+# solo tiene sentido si se preparó a mano desde la aplicación o con `nestadmin.exe --preparar`.
 #
 # Espera solo al proceso del instalador, no a sus descendientes: `Start-Process -Wait` de Windows
-# PowerShell espera a todo el árbol, y el instalador deja en marcha `ollama serve` (lo arranca
-# `nestadmin.exe --preparar`) y, si se marca al terminar, NestAdmin en el área de notificación.
-# Con -Wait el script no volvía nunca y no anotaba el estado «Después».
+# PowerShell espera a todo el árbol, y el instalador puede dejar NestAdmin en el área de
+# notificación si se marca al terminar. Con -Wait el script no volvía nunca y no anotaba el
+# estado «Después».
 #
 # No anota el nombre del equipo ni del usuario: las rutas personales se escriben como %USERPROFILE%.
 param(
@@ -18,9 +23,11 @@ param(
     [string]$Accion = 'Instalar',
     [string]$Instalador = 'C:\Instalador\NestAdmin_0.1.0_x64-setup.exe',
     [switch]$Silencioso,
-    # Plazo para el instalador o desinstalador; la descarga del modelo (5,2 GB) va incluida.
+    # Plazo para el instalador o desinstalador.
     [int]$PlazoMinutos = 120,
-    # Modelo que se comprueba con una respuesta real al final.
+    # Comprobación opcional de la IA local (D103): una respuesta real de Ollama al final.
+    [switch]$ComprobarIALocal,
+    # Modelo local que se comprueba con -ComprobarIALocal.
     [string]$Modelo = 'qwen3:8b'
 )
 $ErrorActionPreference = 'Continue'
@@ -214,7 +221,10 @@ switch ($Accion) {
 } finally {
     # También tras Ctrl+C o un error: lo anotado hasta aquí no se pierde.
     if ($Accion -ne 'Estado' -and $exitCode -ne 2) { Write-State 'Después' }
-    if ($Accion -ne 'Desinstalar') { Test-Model }
+    if ($Accion -ne 'Desinstalar') {
+        if ($ComprobarIALocal) { Test-Model }
+        else { Write-Log "IA local: no comprobada (opcional, D103; use -ComprobarIALocal). Esto no acredita que la IA local o el proveedor externo funcionen." }
+    }
 }
 Write-Log ''
 Write-Log "Registro guardado en $Log"

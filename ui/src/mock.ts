@@ -760,7 +760,8 @@ const handlers: Record<string, (a: any, options?: any) => unknown> = {
 };
 
 function startup(): Startup {
-  if (choice?.provider !== "ollama") return { outcome: "not_local" };
+  // `?sinocr` simula un paquete sin componentes de OCR (D103).
+  if (choice?.provider !== "ollama") return new URLSearchParams(location.search).has("sinocr") ? { outcome: "ocr_missing" } : { outcome: "not_local" };
   return modelPresent ? { outcome: "ready" } : { outcome: "needs_preparation", check: { status: "missing", component: "model" } };
 }
 

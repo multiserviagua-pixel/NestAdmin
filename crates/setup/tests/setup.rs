@@ -1010,6 +1010,22 @@ fn t08c_03e_groq_is_external_and_ollama_is_local() {
 }
 
 #[test]
+fn t08c_03f_external_provider_checks_only_the_packaged_ocr_at_opening() {
+    // D103: con un externo elegido, la comprobación al abrir mira el OCR del paquete y nada más.
+    let s = scenario(false, true, "0.40.14", true);
+    std::fs::remove_file(s.dir.path().join("tessdata/spa.traineddata")).unwrap();
+    assert_eq!(s.setup.startup(false), Startup::OcrMissing);
+    // Sin descargar, arrancar ni consultar nada local.
+    assert!(s.calls().is_empty());
+    assert_eq!(s.ollama.lock().unwrap().requests, 0);
+    assert_eq!(s.ollama.lock().unwrap().pulls, 0);
+    // Con el OCR completo sigue sin tocar lo local.
+    let s = scenario(false, true, "0.40.14", true);
+    assert_eq!(s.setup.startup(false), Startup::NotLocal);
+    assert!(s.calls().is_empty());
+}
+
+#[test]
 fn t08c_04_slow_start_is_awaited_off_the_caller_thread() {
     let s = scenario(false, true, "0.40.14", true);
     s.system.lock().unwrap().start_delay = Duration::from_millis(1500);

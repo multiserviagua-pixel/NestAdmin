@@ -2071,6 +2071,11 @@ function render(background = false) {
   if (background && (focused instanceof HTMLTextAreaElement || (focused instanceof HTMLInputElement && focused.type !== "file"))) {
     if (root.contains(focused)) return;
   }
+  // D103: con un proveedor externo, al abrir solo se comprueba el OCR del paquete.
+  const ocrBanner =
+    state.startup?.outcome === "ocr_missing"
+      ? h("div", { class: "notice error", role: "alert" }, h("span", {}, "Faltan componentes de OCR del paquete. Reinstale NestAdmin para recuperarlos; mientras tanto no se podrán leer documentos escaneados."))
+      : null;
   const wait = state.settings?.ai_wait_message;
   const waitBanner =
     wait && (state.view === "review" || state.view === "tasks")
@@ -2080,7 +2085,7 @@ function render(background = false) {
     root.replaceChildren(h("main", { class: "wizard-only" }, wizardView()));
     return;
   }
-  root.replaceChildren(header(), h("div", { class: "body" }, nav(), h("main", {}, notice, waitBanner, views[state.view]())));
+  root.replaceChildren(header(), h("div", { class: "body" }, nav(), h("main", {}, ocrBanner, notice, waitBanner, views[state.view]())));
 }
 
 void (async () => {

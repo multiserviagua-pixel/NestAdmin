@@ -132,6 +132,7 @@ export interface SetupDone {
 
 export type Startup =
   | { outcome: "not_local" }
+  | { outcome: "ocr_missing" }
   | { outcome: "ready" }
   | { outcome: "started" }
   | { outcome: "needs_preparation"; check: SetupCheck }

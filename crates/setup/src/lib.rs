@@ -191,9 +191,12 @@ pub struct Report {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "outcome", rename_all = "snake_case")]
 pub enum Startup {
-    /// Proveedor externo elegido (Groq, Ollama cloud, compatible con OpenAI o Claude): no se
-    /// comprueba nada local.
+    /// Proveedor externo elegido (Ollama cloud, compatible con OpenAI o Claude): el OCR del
+    /// paquete está y no se comprueba ni se arranca nada de la IA local (D103).
     NotLocal,
+    /// Proveedor externo elegido, pero faltan componentes del OCR del paquete (D103): la
+    /// ventana muestra un aviso visible; no se descarga nada, hay que reinstalar.
+    OcrMissing,
     Ready,
     /// Ollama estaba detenido y se arrancó.
     Started,
@@ -397,11 +400,16 @@ impl Setup {
         }
     }
 
-    /// Comprobación al abrir la aplicación (D39): arranca un Ollama detenido; si falta
-    /// algo no descarga nada y pide el asistente.
+    /// Comprobación al abrir la aplicación (D39, D103). Con la IA local elegida arranca un
+    /// Ollama detenido y, si falta algo, no descarga nada y pide el asistente. Con un proveedor
+    /// externo solo comprueba el OCR del paquete: no arranca ni consulta nada local.
     pub fn startup(&self, local_provider: bool) -> Startup {
         if !local_provider {
-            return Startup::NotLocal;
+            return if self.ocr_files_present() {
+                Startup::NotLocal
+            } else {
+                Startup::OcrMissing
+            };
         }
         match self.check() {
             Check::Ready => Startup::Ready,
