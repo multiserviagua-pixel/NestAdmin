@@ -976,6 +976,9 @@ pub struct RuleFinding {
     pub effect: Effect,
     /// Las reglas se pueden unificar (`Equal` o `Contains`).
     pub merge_candidate: bool,
+    /// Otras reglas activas, ajenas al par, que también cubren lo que solo cubre la más amplia
+    /// (la parte que el par dejaría automatizar). En esas tareas también van a revisión.
+    pub others: Vec<FindingRule>,
     /// Tareas que ya coincidieron con las dos reglas (de `rule_evaluations`); lo rellena
     /// `App::rule_findings`. `None` si no aplica (nombre parecido, regla defectuosa).
     pub affected_tasks: Option<usize>,
@@ -1093,6 +1096,7 @@ fn defect_finding(rule: &Rule, defect: Defect) -> RuleFinding {
             data: json!({ "reason": reason }),
         },
         merge_candidate: false,
+        others: Vec::new(),
         affected_tasks: None,
     }
 }
@@ -1104,6 +1108,53 @@ fn severity(f: &RuleFinding) -> u8 {
         (FindingKind::Similar, _) => 2,
         (FindingKind::Defective, _) => 3,
     }
+}
+
+/// Reglas activas, ajenas al par `(i, j)`, que cubren algo de lo que solo cubre la más amplia
+/// (lo que el par dejaría automatizar). Una tercera regla que queda dentro de la más estrecha
+/// no cuenta: esas tareas ya iban a revisión por el par.
+fn region_others(
+    i: usize,
+    j: usize,
+    live: &[&Rule],
+    parsed: &[Result<Cond, Defect>],
+    relation: &Relation,
+) -> Vec<FindingRule> {
+    let Relation::Contains { wider } = relation else {
+        return Vec::new();
+    };
+    let (w, n) = if *wider == Side::First {
+        (i, j)
+    } else {
+        (j, i)
+    };
+    let (Ok(wc), Ok(nc)) = (&parsed[w], &parsed[n]) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for (k, rule) in live.iter().enumerate() {
+        if k == i || k == j || !rule.active || rule.action_kind != live[i].action_kind {
+            continue;
+        }
+        let Ok(kc) = &parsed[k] else { continue };
+        // Debe solaparse con la más amplia (igual o contenida en ella, o que la contenga).
+        let overlaps_wide = matches!(
+            compare_cond(kc, wc),
+            Relation::Equal | Relation::Contains { .. }
+        );
+        // Y no quedar entera dentro de la más estrecha.
+        let inside_narrow = matches!(
+            compare_cond(kc, nc),
+            Relation::Equal
+                | Relation::Contains {
+                    wider: Side::Second
+                }
+        );
+        if overlaps_wide && !inside_narrow {
+            out.push(finding_rule(rule));
+        }
+    }
+    out
 }
 
 /// Contradicciones entre las reglas, un hallazgo por par (y uno por regla que no actúa), de
@@ -1148,6 +1199,11 @@ pub fn analyze(rules: &[Rule], marks: &Marks) -> Vec<RuleFinding> {
                 active_conflict: real && a.active && b.active,
                 effect: pair_effect(&relation, (a, ca), (b, cb)),
                 merge_candidate: real,
+                others: if kind == FindingKind::Overlap {
+                    region_others(i, j, &live, &parsed, &relation)
+                } else {
+                    Vec::new()
+                },
                 affected_tasks: None,
             });
         }
@@ -1230,7 +1286,15 @@ pub struct SimTask {
     pub label: Option<String>,
     /// Total de la factura, si consta.
     pub total: Option<String>,
+    /// Regla que la automatiza hoy, si alguna (resultado real de `evaluate_result`).
+    pub automated_before_by: Option<String>,
+    /// Regla que la automatizaría con la unificación: `(unificada)` es la regla nueva y
+    /// cualquier otro id es una regla ajena a la unificación.
+    pub automated_after_by: Option<String>,
 }
+
+/// Id con el que la regla nueva aparece en `automated_after_by`.
+pub const MERGED_RULE: &str = MERGED;
 
 /// Qué cambiaría en las tareas guardadas, evaluadas con `evaluate_result` como en producción,
 /// si la regla nueva estuviera activa y las originales archivadas.
@@ -1247,6 +1311,9 @@ pub struct MergeSimulation {
     pub stop_automating: Vec<SimTask>,
     pub unchanged_automated: usize,
     pub unchanged_review: usize,
+    /// Facturas cubiertas sin la comprobación local de moneda (tareas anteriores a D127): van
+    /// a revisión con cualquier regla.
+    pub without_currency_check: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -1256,7 +1323,11 @@ pub struct MergePlan {
     pub options: Vec<MergeOption>,
     pub chosen: String,
     pub after: MergeAfter,
+    /// Lo que pasaría con la regla nueva tal como se crea: sin validación avanzada.
     pub simulation: MergeSimulation,
+    /// Solo con «cualquier remitente»: lo que pasaría después de validar la opción avanzada
+    /// de la regla nueva. Es solo una hipótesis: la validación no se da al unificar.
+    pub simulation_if_validated: Option<MergeSimulation>,
     /// Huella de lo que se vio: `merge_rules` rechaza si las reglas cambiaron después.
     pub fingerprint: String,
 }
@@ -1417,8 +1488,23 @@ fn merge_fingerprint(
     digest.iter().take(8).map(|b| format!("{b:02x}")).collect()
 }
 
-fn sim_task(task: &Task, result: &Value, invoice: bool) -> SimTask {
+fn automated_by(decision: &RuleDecision) -> Option<String> {
+    match decision {
+        RuleDecision::Automate { rule_id, .. } => Some(rule_id.clone()),
+        RuleDecision::Review(_) => None,
+    }
+}
+
+fn sim_task(
+    task: &Task,
+    result: &Value,
+    invoice: bool,
+    before: &RuleDecision,
+    after: &RuleDecision,
+) -> SimTask {
     SimTask {
+        automated_before_by: automated_by(before),
+        automated_after_by: automated_by(after),
         task_id: task.id,
         label: if invoice {
             result["document"].as_str()
@@ -1505,24 +1591,73 @@ pub fn merge_plan(
     let invoice = action_kind == REGISTER_INVOICE;
     let task_kind = if invoice { INVOICE } else { EMAIL };
     let of_kind: Vec<&Task> = tasks.iter().filter(|t| t.kind == task_kind).collect();
+    let simulate = |future_marks: &HashSet<String>| {
+        simulate_merge(
+            &current,
+            &future,
+            &marks.any_sender,
+            future_marks,
+            &originals,
+            &action_kind,
+            &of_kind,
+        )
+    };
+    let simulation = simulate(&future_marks);
+    let simulation_if_validated = needs_sender_validation.then(|| {
+        let mut validated = future_marks.clone();
+        validated.insert(MERGED.to_owned());
+        simulate(&validated)
+    });
+    Ok(MergePlan {
+        action_kind,
+        before: members.iter().map(|(r, _)| plan_rule(r, marks)).collect(),
+        options,
+        chosen: chosen.clone(),
+        after: MergeAfter {
+            conditions: merged_conditions,
+            active: false,
+            option_key: chosen,
+            loses_any_sender: loses,
+            needs_sender_validation,
+        },
+        simulation,
+        simulation_if_validated,
+        fingerprint,
+    })
+}
+
+/// Evalúa las tareas con las reglas de hoy y con las de después, con `evaluate_result` como
+/// en producción. Cada grupo lleva la regla que automatiza, para que el texto no deduzca
+/// tramos que los datos no sostienen.
+fn simulate_merge(
+    current: &[Rule],
+    future: &[Rule],
+    current_marks: &HashSet<String>,
+    future_marks: &HashSet<String>,
+    originals: &HashSet<&str>,
+    action_kind: &str,
+    tasks: &[&Task],
+) -> MergeSimulation {
+    let invoice = action_kind == REGISTER_INVOICE;
     let mut simulation = MergeSimulation {
         considered: 0,
-        truncated: of_kind.len() > MERGE_SIMULATION_LIMIT,
+        truncated: tasks.len() > MERGE_SIMULATION_LIMIT,
         skipped_without_result: 0,
         touched: 0,
         start_automating: Vec::new(),
         stop_automating: Vec::new(),
         unchanged_automated: 0,
         unchanged_review: 0,
+        without_currency_check: 0,
     };
-    for task in of_kind.into_iter().take(MERGE_SIMULATION_LIMIT) {
+    for task in tasks.iter().take(MERGE_SIMULATION_LIMIT) {
         let Some(result) = task.result.as_ref().filter(|r| r.is_object()) else {
             simulation.skipped_without_result += 1;
             continue;
         };
         simulation.considered += 1;
-        let before = evaluate_result(&current, &marks.any_sender, &action_kind, result);
-        let after = evaluate_result(&future, &future_marks, &action_kind, result);
+        let before = evaluate_result(current, current_marks, action_kind, result);
+        let after = evaluate_result(future, future_marks, action_kind, result);
         let covered = before
             .explanation
             .candidates
@@ -1537,34 +1672,21 @@ pub fn merge_plan(
             continue;
         }
         simulation.touched += 1;
-        let was = matches!(before.decision, RuleDecision::Automate { .. });
-        let will = matches!(after.decision, RuleDecision::Automate { .. });
-        match (was, will) {
-            (false, true) => simulation
-                .start_automating
-                .push(sim_task(task, result, invoice)),
-            (true, false) => simulation
-                .stop_automating
-                .push(sim_task(task, result, invoice)),
+        if invoice && foreign_currencies(result).is_none() {
+            simulation.without_currency_check += 1;
+        }
+        let item = sim_task(task, result, invoice, &before.decision, &after.decision);
+        match (
+            item.automated_before_by.is_some(),
+            item.automated_after_by.is_some(),
+        ) {
+            (false, true) => simulation.start_automating.push(item),
+            (true, false) => simulation.stop_automating.push(item),
             (true, true) => simulation.unchanged_automated += 1,
             (false, false) => simulation.unchanged_review += 1,
         }
     }
-    Ok(MergePlan {
-        action_kind,
-        before: members.iter().map(|(r, _)| plan_rule(r, marks)).collect(),
-        options,
-        chosen: chosen.clone(),
-        after: MergeAfter {
-            conditions: merged_conditions,
-            active: false,
-            option_key: chosen,
-            loses_any_sender: loses,
-            needs_sender_validation,
-        },
-        simulation,
-        fingerprint,
-    })
+    simulation
 }
 
 #[cfg(test)]
@@ -2990,5 +3112,214 @@ mod conflict_tests {
                 .fingerprint,
             "otra regla del tipo también cuenta"
         );
+    }
+}
+
+#[cfg(test)]
+mod third_rule_tests {
+    use super::*;
+    use nestadmin_core::TaskState;
+    use serde_json::json;
+
+    fn inv(id: &str, max: Option<&str>) -> Rule {
+        let mut c = json!({ "supplier": "Alfa SL" });
+        if let Some(max) = max {
+            c["max_total"] = json!(max);
+        }
+        Rule {
+            id: id.into(),
+            version: 1,
+            action_kind: REGISTER_INVOICE.into(),
+            conditions: c,
+            active: true,
+            created_at: 0,
+        }
+    }
+
+    fn task(id: i64, total: &str, checked: bool) -> Task {
+        let mut result = json!({
+            "document": format!("{id}.txt"),
+            "fields": { "supplier": "Alfa SL", "total": total },
+            "issues": [],
+            "unreadable": [],
+        });
+        if checked {
+            result["currency_evidence"] = json!({ "foreign": [], "euro": true });
+        }
+        Task {
+            id,
+            kind: INVOICE.into(),
+            input_ref: format!("{id}.txt"),
+            state: TaskState::AwaitingReview,
+            attempts: 1,
+            result: Some(result),
+            error: None,
+            created_at: 0,
+            updated_at: 0,
+        }
+    }
+
+    fn ids(list: &[&str]) -> Vec<String> {
+        list.iter().map(|s| (*s).to_owned()).collect()
+    }
+
+    #[test]
+    fn a_third_active_rule_that_covers_the_remaining_range_is_named_in_the_finding() {
+        // A sin límite, B hasta 500 y C hasta 1000, todas activas: con 700 € coinciden A y C.
+        let rules = vec![
+            inv("a", None),
+            inv("b", Some("500.00")),
+            inv("c", Some("1000.00")),
+        ];
+        let findings = analyze(&rules, &Marks::default());
+        let by_key = |key: &str| findings.iter().find(|f| f.key == key).unwrap();
+        let ab = by_key("overlap:a+b");
+        assert_eq!(
+            ab.others.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(),
+            ["c"]
+        );
+        // Para A y C, B (hasta 500) queda dentro de C: no cambia lo que se registra solo.
+        assert!(by_key("overlap:a+c").others.is_empty());
+        // Para B y C, A sí cubre todo lo que solo cubre C.
+        let bc = by_key("overlap:b+c");
+        assert_eq!(
+            bc.others.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(),
+            ["a"]
+        );
+        // Sin tercera regla no hay nada que nombrar; una inactiva tampoco cuenta.
+        let two = analyze(&rules[..2], &Marks::default());
+        assert!(two[0].others.is_empty());
+        let mut inactive = rules.clone();
+        inactive[2].active = false;
+        let findings = analyze(&inactive, &Marks::default());
+        assert!(findings
+            .iter()
+            .find(|f| f.key == "overlap:a+b")
+            .unwrap()
+            .others
+            .is_empty());
+    }
+
+    #[test]
+    fn the_merge_simulation_names_the_rule_that_automates_each_task() {
+        // A hasta 500 y B hasta 1000 se unifican en 500; C hasta 600 queda fuera.
+        let rules = vec![
+            inv("a", Some("500.00")),
+            inv("b", Some("1000.00")),
+            inv("c", Some("600.00")),
+        ];
+        let tasks = vec![
+            task(1, "300.00", true),
+            task(2, "550.00", true),
+            task(3, "800.00", true),
+        ];
+        let plan = merge_plan(
+            &rules,
+            &Marks::default(),
+            &ids(&["a", "b"]),
+            Some("500.00"),
+            &tasks,
+        )
+        .unwrap();
+        let sim = &plan.simulation;
+        // 550 €: hoy coinciden B y C (revisión); después solo C, que no es la regla nueva.
+        assert_eq!(sim.start_automating.len(), 1);
+        assert_eq!(sim.start_automating[0].task_id, 2);
+        assert_eq!(sim.start_automating[0].automated_before_by, None);
+        assert_eq!(
+            sim.start_automating[0].automated_after_by.as_deref(),
+            Some("c")
+        );
+        // 800 €: hoy solo B lo automatiza; después ninguna.
+        assert_eq!(sim.stop_automating.len(), 1);
+        assert_eq!(sim.stop_automating[0].task_id, 3);
+        assert_eq!(
+            sim.stop_automating[0].automated_before_by.as_deref(),
+            Some("b")
+        );
+        assert_eq!(sim.stop_automating[0].automated_after_by, None);
+        // 300 €: hoy coinciden A, B y C; después la nueva y C: sigue en revisión.
+        assert_eq!(sim.unchanged_review, 1);
+        assert!(plan.simulation_if_validated.is_none());
+    }
+
+    #[test]
+    fn any_sender_shows_both_scenarios_and_counts_unchecked_currency() {
+        let send = |id: &str, extra: Value| {
+            let mut c = json!({ "category": "solicitud_factura" });
+            for (k, v) in extra.as_object().unwrap() {
+                c[k] = v.clone();
+            }
+            Rule {
+                id: id.into(),
+                version: 1,
+                action_kind: SEND_DRAFT.into(),
+                conditions: c,
+                active: true,
+                created_at: 0,
+            }
+        };
+        let rules = vec![
+            send("any", json!({})),
+            send("dom", json!({ "sender_domain": "alfa.test" })),
+            send("other", json!({ "sender_domain": "beta.test" })),
+        ];
+        let marks = Marks {
+            any_sender: ["any".to_owned()].into(),
+            archived: HashSet::new(),
+        };
+        let mail = |id: i64, from: &str| Task {
+            id,
+            kind: EMAIL.into(),
+            input_ref: format!("{id}"),
+            state: TaskState::AwaitingReview,
+            attempts: 1,
+            result: Some(json!({
+                "category": "solicitud_factura",
+                "message": { "from": from, "subject": "Asunto" },
+                "draft": { "to": [from] },
+            })),
+            error: None,
+            created_at: 0,
+            updated_at: 0,
+        };
+        let tasks = vec![mail(1, "ana@alfa.test"), mail(2, "luis@beta.test")];
+        let plan = merge_plan(&rules, &marks, &ids(&["any", "dom"]), Some("any"), &tasks).unwrap();
+        // Tal como se crea (sin validar) la regla nueva no actúa: el correo de beta.test lo
+        // automatiza `other`, que queda sola, y el de alfa.test sigue en revisión.
+        let unvalidated = &plan.simulation;
+        assert_eq!(unvalidated.start_automating.len(), 1, "{unvalidated:?}");
+        assert_eq!(unvalidated.start_automating[0].task_id, 2);
+        assert_eq!(
+            unvalidated.start_automating[0]
+                .automated_after_by
+                .as_deref(),
+            Some("other")
+        );
+        assert_eq!(unvalidated.unchanged_review, 1);
+        // Tras validar la opción avanzada, la regla nueva automatiza el de alfa.test y el de
+        // beta.test coincide con las dos y se revisa.
+        let validated = plan.simulation_if_validated.as_ref().unwrap();
+        assert_eq!(validated.start_automating.len(), 1);
+        assert_eq!(validated.start_automating[0].task_id, 1);
+        assert_eq!(
+            validated.start_automating[0].automated_after_by.as_deref(),
+            Some(MERGED_RULE)
+        );
+        assert_eq!(validated.unchanged_review, 1);
+        assert!(plan.after.needs_sender_validation);
+
+        // Facturas sin comprobación de moneda: se cuentan.
+        let invoice_rules = vec![inv("a", None), inv("b", Some("500.00"))];
+        let tasks = vec![task(1, "100.00", false), task(2, "100.00", true)];
+        let plan = merge_plan(
+            &invoice_rules,
+            &Marks::default(),
+            &ids(&["a", "b"]),
+            Some("none"),
+            &tasks,
+        )
+        .unwrap();
+        assert_eq!(plan.simulation.without_currency_check, 1);
     }
 }

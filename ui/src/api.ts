@@ -134,6 +134,8 @@ export const api = {
   ruleFindings: () => invoke<RuleFinding[]>("rule_findings"),
   /** Revisa una unificación sin cambiar nada: antes, opciones y, con la elección hecha, el plan. */
   previewMerge: (ids: string[], chosen: string | null) => invoke<MergePreview>("preview_merge", { ids, chosen }),
+  /** Contradicciones que tendría una regla archivada al restaurarla (solo lectura). */
+  previewRestore: (id: string) => invoke<RuleFinding[]>("preview_restore", { id }),
   /** Unifica en una sola transacción (D131): regla nueva inactiva, originales archivadas.
    * `planFingerprint` es la del plan que se revisó; si las reglas cambiaron, se rechaza. */
   mergeRules: (ids: string[], chosen: string | null, name: string | null, planFingerprint: string) =>

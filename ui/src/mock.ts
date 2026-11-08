@@ -970,7 +970,7 @@ function mockFindings(list: Rule[]): RuleFinding[] {
   const fr = (r: Rule) => ({ id: r.id, version: r.version, active: r.active });
   live.forEach((r, i) => {
     const c = conds[i]!;
-    if ("code" in c) out.push({ key: `defective:${r.id}`, kind: "defective", action_kind: r.action_kind, rules: [fr(r)], active_conflict: false, effect: { code: c.code, data: { reason: c.reason } }, merge_candidate: false, affected_tasks: null });
+    if ("code" in c) out.push({ key: `defective:${r.id}`, kind: "defective", action_kind: r.action_kind, rules: [fr(r)], active_conflict: false, effect: { code: c.code, data: { reason: c.reason } }, merge_candidate: false, others: [], affected_tasks: null });
   });
   for (let i = 0; i < live.length; i++) {
     for (let j = i + 1; j < live.length; j++) {
@@ -980,13 +980,28 @@ function mockFindings(list: Rule[]): RuleFinding[] {
       if (rel === "disjoint") continue;
       const real = rel !== "similar";
       const taskKind = a.action_kind === "register_invoice" ? "invoice" : "email";
-      const both = tasks.filter((t) => t.kind === taskKind && t.result && [a, b].every((x) => matchRule(taskKind, { conditions: x.conditions, ack: metaOf(x.id).any_sender_ack_at !== null }, t.result).matches)).length;
+      // Solo cuentan las tareas que coincidieron con las dos reglas estando las dos activas.
+      const both = !(a.active && b.active) ? 0 : tasks.filter((t) => t.kind === taskKind && t.result && [a, b].every((x) => matchRule(taskKind, { conditions: x.conditions, ack: metaOf(x.id).any_sender_ack_at !== null }, t.result).matches)).length;
       let effect: RuleFinding["effect"];
       if (rel === "similar") effect = { code: "similar_supplier", data: { first: { id: a.id, supplier: (ca as any).supplier }, second: { id: b.id, supplier: (cb as any).supplier } } };
       else if (rel === "equal") effect = { code: "same_conditions", data: ca.kind === "invoice" ? { supplier: ca.supplier, limit: ca.limit } : { category: ca.category, scope: ca.scope, value: ca.value } };
       else {
         const [w, wc, n, nc] = rel === "first" ? [a, ca, b, cb] : [b, cb, a, ca];
         effect = { code: "narrow_blocks_wide", data: { ...(ca.kind === "invoice" ? { supplier: ca.supplier } : { category: ca.category }), wider: mockSide(w, wc), narrower: mockSide(n, nc) } };
+      }
+      // Terceras reglas activas que cubren lo que solo cubre la más amplia.
+      let others: RuleFinding["rules"] = [];
+      if (rel === "first" || rel === "second") {
+        const [wc, nc] = rel === "first" ? [ca, cb] : [cb, ca];
+        others = live
+          .filter((k, idx) => {
+            const kc = conds[idx]!;
+            if (k === a || k === b || !k.active || k.action_kind !== a.action_kind || "code" in kc) return false;
+            const wide = mockRelation(kc, wc);
+            const narrow = mockRelation(kc, nc);
+            return wide !== "disjoint" && wide !== "similar" && narrow !== "equal" && narrow !== "second";
+          })
+          .map(fr);
       }
       out.push({
         key: `${rel === "similar" ? "similar" : rel === "equal" ? "duplicate" : "overlap"}:${a.id}+${b.id}`,
@@ -996,6 +1011,7 @@ function mockFindings(list: Rule[]): RuleFinding[] {
         active_conflict: real && a.active && b.active,
         effect,
         merge_candidate: real,
+        others,
         affected_tasks: real ? both : null,
       });
     }
@@ -1004,12 +1020,15 @@ function mockFindings(list: Rule[]): RuleFinding[] {
   return out.sort((x, y) => rank(x) - rank(y) || (x.key < y.key ? -1 : 1));
 }
 
-/** Decisión de la regla única que coincide, con los bloqueos de la tarea (D125). */
-function mockAutomates(list: Rule[], kind: string, result: any): boolean {
-  const matching = list.filter((r) => r.active && matchRule(kind, { conditions: r.conditions, ack: metaOf(r.id).any_sender_ack_at !== null }, result).matches);
-  if (matching.length !== 1) return false;
-  if (kind === "invoice") return !(result.issues?.length || result.unreadable?.length || result.amount_review || (result.part && result.part.of > 1) || result.currency_evidence?.euro !== true || (foreignOf(result) ?? ["?"]).length);
-  return (result.draft?.to ?? []).length > 0;
+/** Regla única que coincide y automatiza, con los bloqueos de la tarea (D125); `null` si va a revisión. */
+function mockAutomatedBy(list: Rule[], kind: string, result: any, validated = false): string | null {
+  const matching = list.filter((r) => r.active && matchRule(kind, { conditions: r.conditions, ack: r.id === "(unificada)" ? validated : metaOf(r.id).any_sender_ack_at !== null }, result).matches);
+  if (matching.length !== 1) return null;
+  const blocked =
+    kind === "invoice"
+      ? Boolean(result.issues?.length || result.unreadable?.length || result.amount_review || (result.part && result.part.of > 1) || result.currency_evidence?.euro !== true || (foreignOf(result) ?? ["?"]).length)
+      : !(result.draft?.to ?? []).length;
+  return blocked ? null : matching[0]!.id;
 }
 
 function mockOptions(members: Rule[]): MergeOption[] {
@@ -1061,26 +1080,31 @@ function mockPlan(members: Rule[], chosen: string): MergePlan {
   const current = latest().filter((r) => !metaOf(r.id).archived_at && r.action_kind === members[0]!.action_kind);
   const merged: Rule = { id: "(unificada)", version: 1, action_kind: model.action_kind, conditions: model.conditions, active: true, created_at: 0 };
   const future = [...current.filter((r) => !originals.has(r.id)), merged];
-  const simulation = { considered: 0, truncated: false, skipped_without_result: 0, touched: 0, start_automating: [] as MergePlan["simulation"]["start_automating"], stop_automating: [] as MergePlan["simulation"]["stop_automating"], unchanged_automated: 0, unchanged_review: 0 };
   const ofKind = tasks.filter((t) => t.kind === kind).sort((a, b) => b.id - a.id);
-  simulation.truncated = ofKind.length > 200;
-  for (const t of ofKind.slice(0, 200)) {
-    if (!t.result) {
-      simulation.skipped_without_result++;
-      continue;
+  const simulate = (validated: boolean): MergePlan["simulation"] => {
+    const sim: MergePlan["simulation"] = { considered: 0, truncated: ofKind.length > 200, skipped_without_result: 0, touched: 0, start_automating: [], stop_automating: [], unchanged_automated: 0, unchanged_review: 0, without_currency_check: 0 };
+    for (const t of ofKind.slice(0, 200)) {
+      if (!t.result) {
+        sim.skipped_without_result++;
+        continue;
+      }
+      sim.considered++;
+      const covered = [...members, merged].some((r) => matchRule(kind, { conditions: r.conditions, ack: r.id === "(unificada)" ? validated : metaOf(r.id).any_sender_ack_at !== null }, t.result!).matches);
+      if (!covered) continue;
+      sim.touched++;
+      if (kind === "invoice" && foreignOf(t.result) === null) sim.without_currency_check++;
+      const was = mockAutomatedBy(current, kind, t.result);
+      const will = mockAutomatedBy(future, kind, t.result, validated);
+      const item = { task_id: t.id, label: kind === "invoice" ? (t.result.document ?? null) : (t.result.message?.subject ?? null), total: kind === "invoice" ? (t.result.fields?.total ?? null) : null, automated_before_by: was, automated_after_by: will };
+      if (!was && will) sim.start_automating.push(item);
+      else if (was && !will) sim.stop_automating.push(item);
+      else if (was) sim.unchanged_automated++;
+      else sim.unchanged_review++;
     }
-    simulation.considered++;
-    const covered = [...members, merged].some((r) => matchRule(kind, { conditions: r.conditions, ack: r.id !== "(unificada)" && metaOf(r.id).any_sender_ack_at !== null }, t.result!).matches);
-    if (!covered) continue;
-    simulation.touched++;
-    const was = mockAutomates(current, kind, t.result);
-    const will = mockAutomates(future, kind, t.result);
-    const item = { task_id: t.id, label: kind === "invoice" ? (t.result.document ?? null) : (t.result.message?.subject ?? null), total: kind === "invoice" ? (t.result.fields?.total ?? null) : null };
-    if (!was && will) simulation.start_automating.push(item);
-    else if (was && !will) simulation.stop_automating.push(item);
-    else if (was) simulation.unchanged_automated++;
-    else simulation.unchanged_review++;
-  }
+    return sim;
+  };
+  const simulation = simulate(false);
+  const needsValidation = model.action_kind === "send_draft" && chosen === "any";
   return {
     action_kind: model.action_kind,
     before: members.map(mockPlanRule),
@@ -1091,9 +1115,10 @@ function mockPlan(members: Rule[], chosen: string): MergePlan {
       active: false,
       option_key: chosen,
       loses_any_sender: members.filter((r) => metaOf(r.id).any_sender_ack_at !== null).map((r) => r.id),
-      needs_sender_validation: model.action_kind === "send_draft" && chosen === "any",
+      needs_sender_validation: needsValidation,
     },
     simulation,
+    simulation_if_validated: needsValidation ? simulate(true) : null,
     fingerprint: mockFingerprint(members, chosen),
   };
 }
@@ -1405,6 +1430,17 @@ const handlers: Record<string, (a: any, options?: any) => unknown> = {
     return sim;
   },
   rule_findings: (): RuleFinding[] => mockFindings(latest()),
+  preview_restore: ({ id }): RuleFinding[] => {
+    const rule = latest().find((r) => r.id === id);
+    if (!rule || !metaOf(id).archived_at) throw `la regla ${id} no está archivada`;
+    const saved = metaOf(id);
+    setMeta(id, { archived_at: null, any_sender_ack_at: null });
+    try {
+      return mockFindings(latest().map((r) => (r.id === id ? { ...r, active: false } : r))).filter((f) => f.rules.some((r) => r.id === id));
+    } finally {
+      ruleMeta.set(id, saved);
+    }
+  },
   preview_merge: ({ ids, chosen }): MergePreview => {
     const members = mockMembers(ids);
     const options = mockOptions(members);

@@ -2709,3 +2709,84 @@ fn activating_a_rule_reports_the_findings_it_would_create() {
         "la simulación no escribe"
     );
 }
+
+#[test]
+fn findings_count_only_evaluations_made_with_the_current_conditions() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = open(&dir, FakeProvider::new());
+    new_invoice_rule(&mut app, "alfa-libre", "Alfa SL", None, true);
+    new_invoice_rule(&mut app, "alfa-500", "Alfa SL", Some("500.00"), true);
+    app.import_document("1.txt", &invoice("Alfa SL", "F-1", "121.00"))
+        .unwrap();
+    app.process_next().unwrap().unwrap();
+    assert_eq!(app.rule_findings().unwrap()[0].affected_tasks, Some(1));
+
+    // Cambiar el estado no cambia las condiciones: la evaluación sigue valiendo.
+    app.set_rule_active("alfa-500", false).unwrap();
+    app.set_rule_active("alfa-500", true).unwrap();
+    assert_eq!(app.rule_findings().unwrap()[0].affected_tasks, Some(1));
+
+    // Editar las condiciones: lo evaluado con las anteriores ya no cuenta.
+    app.update_rule(
+        "alfa-500",
+        &json!({ "supplier": "Alfa SL", "max_total": "800.00" }),
+    )
+    .unwrap();
+    assert_eq!(app.rule_findings().unwrap()[0].affected_tasks, Some(0));
+    app.import_document("2.txt", &invoice("Alfa SL", "F-2", "121.00"))
+        .unwrap();
+    app.process_next().unwrap().unwrap();
+    assert_eq!(app.rule_findings().unwrap()[0].affected_tasks, Some(1));
+}
+
+#[test]
+fn restoring_an_archived_rule_previews_the_conflicts_without_writing() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = open(&dir, FakeProvider::new());
+    new_invoice_rule(&mut app, "alfa-libre", "Alfa SL", None, true);
+    new_invoice_rule(&mut app, "alfa-500", "Alfa SL", Some("500.00"), true);
+    new_invoice_rule(&mut app, "beta", "Beta SA", None, true);
+    assert!(
+        app.preview_restore("alfa-500").is_err(),
+        "no está archivada"
+    );
+    app.archive_rule("alfa-500").unwrap();
+    let before = dump(&dir, &MERGE_TABLES);
+    let findings = app.preview_restore("alfa-500").unwrap();
+    assert_eq!(dump(&dir, &MERGE_TABLES), before);
+    assert_eq!(findings.len(), 1);
+    assert_eq!(findings[0].key, "overlap:alfa-500+alfa-libre");
+    // Vuelve inactiva: el choque solo ocurriría al activarla.
+    assert!(!findings[0].active_conflict);
+    app.archive_rule("alfa-libre").unwrap();
+    assert!(app.preview_restore("alfa-500").unwrap().is_empty());
+}
+
+#[test]
+fn findings_do_not_count_tasks_evaluated_while_one_of_the_rules_was_inactive() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = open(&dir, FakeProvider::new());
+    new_invoice_rule(&mut app, "alfa-libre", "Alfa SL", None, true);
+    new_invoice_rule(&mut app, "alfa-500", "Alfa SL", Some("500.00"), false);
+    // Con B inactiva, A automatiza la factura: nunca sufrió el choque.
+    app.import_document("1.txt", &invoice("Alfa SL", "F-1", "121.00"))
+        .unwrap();
+    let first = app.process_next().unwrap().unwrap();
+    assert_eq!(first.state, TaskState::Completed);
+    assert_eq!(app.rule_findings().unwrap()[0].affected_tasks, Some(0));
+
+    // Al activar B las condiciones no cambian, pero esa evaluación sigue sin contar.
+    app.set_rule_active("alfa-500", true).unwrap();
+    let finding = &app.rule_findings().unwrap()[0];
+    assert!(finding.active_conflict);
+    assert_eq!(finding.affected_tasks, Some(0));
+
+    // Una factura evaluada con las dos activas sí cuenta.
+    app.import_document("2.txt", &invoice("Alfa SL", "F-2", "121.00"))
+        .unwrap();
+    assert_eq!(
+        app.process_next().unwrap().unwrap().state,
+        TaskState::AwaitingReview
+    );
+    assert_eq!(app.rule_findings().unwrap()[0].affected_tasks, Some(1));
+}

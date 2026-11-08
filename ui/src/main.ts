@@ -39,8 +39,10 @@ import {
   actsOnNothing,
   anyAckReady,
   anySenderConsequences,
+  activationGroups,
   anySenderEditNotice,
   auditMatches,
+  auditStatusLabel,
   categoryLabel,
   conditionsSummary,
   draftConditions,
@@ -56,6 +58,7 @@ import {
   normalizeSearch,
   originText,
   publicDomainWarning,
+  restoreHeading,
   ruleProblem,
   ruleRisk,
   ruleSentence,
@@ -117,6 +120,7 @@ const ACTION_LABEL: Record<string, string> = {
   rule_any_sender: "Opción avanzada de una regla",
   rule_archive: "Archivado de una regla",
   rule_rename: "Nombre de una regla",
+  rule_merge: "Unificación de reglas",
 };
 
 type View = "review" | "tasks" | "rules" | "history" | "mail" | "settings" | "setup";
@@ -184,7 +188,9 @@ const state = {
   ruleEditor: null as null | { mode: "new" } | { mode: "edit"; id: string },
   // Panel dentro de una fila (activar con evidencia, probar, opción avanzada, archivar) y su
   // simulación; la confirmación escrita de la opción avanzada; menú «Más» abierto.
-  rulePanel: null as null | { id: string; kind: "test" | "activate" | "advanced" | "archive" },
+  rulePanel: null as null | { id: string; kind: "test" | "activate" | "advanced" | "archive" | "restore" },
+  // Avisos al restaurar una regla archivada (R23).
+  restoreFindings: [] as RuleFinding[],
   ruleSim: null as null | { key: string; status: "loading" | "done" | "error"; kind: string; sig?: string; sim?: Simulation; error?: string },
   // `skip`: activar sin la comprobación cuando la prueba falló (confirmación expresa).
   ruleAdv: { ack: false, text: "", skip: false },
@@ -1145,25 +1151,28 @@ function exampleList(examples: Array<{ task_id: number; label: string }>): HTMLE
   );
 }
 
-/** Contradicciones que crearía activar la regla, con su porqué (D130). `null` si no crearía ninguna. */
+/** Un hallazgo con qué pasa, por qué y la consecuencia, para el aviso previo a activar o restaurar. */
+function findingLines(f: RuleFinding): HTMLElement {
+  const t = explainFinding(f, ruleName);
+  return h(
+    "div",
+    { class: "finding-lines" },
+    h("p", {}, statusChip(t.badge.text, t.badge.tone), " ", h("strong", {}, t.title)),
+    h("p", {}, t.what),
+    h("p", {}, h("span", { class: "finding-label" }, "Por qué: "), t.why),
+    h("p", {}, h("span", { class: "finding-label" }, "Consecuencia: "), t.consequence),
+    t.timing ? h("p", { class: "meta" }, t.timing) : null,
+    t.tasks ? h("p", { class: "meta" }, t.tasks) : null,
+  );
+}
+
+/** Avisos que traería activar la regla. «Chocaría» solo se dice de reglas activas; el resto se explica aparte. */
 function activationFindings(findings: RuleFinding[]): HTMLElement | null {
   if (!findings.length) return null;
   return h(
     "div",
-    { class: "activation-findings", role: "group", "aria-label": "Contradicciones que crearía esta regla" },
-    h("p", { class: "warn-text" }, h("strong", {}, findings.length === 1 ? "Al activarla chocaría con otra regla:" : `Al activarla chocaría con otras ${findings.length} reglas:`)),
-    ...sortFindings(findings).map((f) => {
-      const t = explainFinding(f, ruleName);
-      return h(
-        "div",
-        { class: "finding-lines" },
-        h("p", {}, statusChip(t.badge.text, t.badge.tone), " ", h("strong", {}, t.title)),
-        h("p", {}, t.what),
-        h("p", {}, h("span", { class: "finding-label" }, "Por qué: "), t.why),
-        h("p", {}, h("span", { class: "finding-label" }, "Consecuencia: "), t.consequence),
-        t.timing ? h("p", { class: "meta" }, t.timing) : null,
-      );
-    }),
+    { class: "activation-findings", role: "group", "aria-label": "Avisos sobre esta regla" },
+    ...activationGroups(findings).flatMap((g) => [h("p", { class: "warn-text" }, h("strong", {}, g.heading)), ...g.findings.map(findingLines)]),
   );
 }
 
@@ -1671,6 +1680,35 @@ function rulePanel(r: RuleView): HTMLElement | null {
     );
   }
 
+  if (panel.kind === "restore") {
+    return box(
+      `Restaurar la regla ${r.name}`,
+      h("h4", {}, "¿Restaurar esta regla?"),
+      h("p", { class: "warn-text" }, h("strong", {}, restoreHeading(r.name, state.restoreFindings))),
+      ...state.restoreFindings.map(findingLines),
+      h("p", { class: "hint" }, "Restaurarla no activa nada: la regla vuelve inactiva y puede archivarla otra vez."),
+      h(
+        "div",
+        { class: "buttons" },
+        h(
+          "button",
+          {
+            class: "primary",
+            type: "button",
+            "data-focus-key": `rule:${r.id}:panel-go`,
+            onclick: () =>
+              void act(async () => {
+                await api.unarchiveRule(r.id);
+                state.rulePanel = null;
+              }, RESTORED),
+          },
+          "Restaurar igualmente",
+        ),
+        cancel(),
+      ),
+    );
+  }
+
   return box(
     `Archivar la regla ${r.name}`,
     h("h4", {}, "¿Archivar esta regla?"),
@@ -1699,6 +1737,27 @@ function rulePanel(r: RuleView): HTMLElement | null {
       cancel(),
     ),
   );
+}
+
+const RESTORED = "Regla restaurada. Queda inactiva: actívela cuando quiera";
+
+/** Restaura una regla archivada; si chocaría con una regla actual, lo explica antes y pide confirmar. */
+async function restoreRule(r: RuleView) {
+  try {
+    const findings = await api.previewRestore(r.id);
+    if (!findings.length) {
+      await act(() => api.unarchiveRule(r.id), RESTORED);
+      return;
+    }
+    state.restoreFindings = findings;
+    state.rulePanel = { id: r.id, kind: "restore" };
+    state.ruleSim = null;
+    state.ruleMore = null;
+    state.focusAfterRender = `rule:${r.id}:panel`;
+    render();
+  } catch (error) {
+    notify("error", error);
+  }
 }
 
 /** Corrección en un clic de una regla antigua sin remitente: abre la edición con el foco ahí. */
@@ -1821,7 +1880,7 @@ function ruleCard(r: RuleView): HTMLElement {
       { class: "rule-actions" },
       ...(archived
         ? [
-            h("button", { "data-focus-key": `rule:${r.id}:restore`, onclick: () => void act(() => api.unarchiveRule(r.id), "Regla restaurada. Queda inactiva: actívela cuando quiera") }, "Restaurar"),
+            h("button", { "data-focus-key": `rule:${r.id}:restore`, onclick: () => void restoreRule(r) }, "Restaurar"),
             h("button", { "data-focus-key": `rule:${r.id}:history`, onclick: () => showHistoryOf(r.id) }, "Ver historial"),
           ]
         : [
@@ -1974,6 +2033,7 @@ function closeMerge() {
 }
 
 let mergeToken = 0;
+let merging = false;
 
 /** Pide el plan (solo lectura) y repinta. Solo cuenta la última petición. */
 function loadMerge(key: string, ids: string[], chosen: string | null) {
@@ -2096,7 +2156,10 @@ function mergePanel(f: RuleFinding): HTMLElement | null {
       "div",
       { class: "sim-box", role: "status", "aria-label": "Qué cambiaría" },
       h("p", { class: "sim-headline" }, "Qué cambiaría con sus tareas guardadas, si la regla nueva estuviera activa:"),
+      t.heading ? h("p", { class: "meta" }, t.heading) : null,
       h("ul", { class: "sim-list" }, ...t.lines.map((line) => h("li", {}, line))),
+      t.validated ? h("p", { class: "sim-headline" }, t.validated.heading) : null,
+      t.validated ? h("ul", { class: "sim-list" }, ...t.validated.lines.map((line) => h("li", {}, line))) : null,
       ...t.notes.map((n) => h("p", { class: "warn-text" }, n)),
       h("p", { class: "sim-disclaimer" }, SIMULATION_DISCLAIMER),
     );
@@ -2109,7 +2172,10 @@ function mergePanel(f: RuleFinding): HTMLElement | null {
       type: "button",
       "data-focus-key": `finding:${f.key}:merge-go`,
       onclick: async () => {
-        if (!plan) return;
+        // Un segundo clic no debe repetir la unificación ni mostrar un error tras el éxito.
+        if (!plan || go.disabled || merging) return;
+        merging = true;
+        go.disabled = true;
         const name = nameInput.value.trim();
         try {
           const view = await api.mergeRules(m.ids, plan.chosen, name || null, plan.fingerprint);
@@ -2123,6 +2189,8 @@ function mergePanel(f: RuleFinding): HTMLElement | null {
           notify("error", error);
           // Si las reglas cambiaron, se vuelve a calcular el plan para revisarlo de nuevo.
           loadMerge(m.key, m.ids, m.chosen);
+        } finally {
+          merging = false;
         }
       },
     },
@@ -2359,7 +2427,7 @@ function historyView() {
             entries.map((e) => [
               e.task_id ?? missing("Sin tarea"),
               ACTION_LABEL[e.action] ?? e.action,
-              e.status,
+              auditStatusLabel(e.action, e.status),
               e.authorization ?? missing(),
               h("div", { class: "detail-cell" }, e.detail ?? missing()),
             ]),

@@ -649,8 +649,8 @@ export function simulationSummary(sim: SimulationLike, actionKind: string): Simu
   if (sim.without_currency_check > 0)
     notes.push(
       sim.without_currency_check === 1
-        ? `1 ${word(1)} no se pudo comprobar en cuanto a la moneda (es anterior a esa comprobación): iría a revisión.`
-        : `${sim.without_currency_check} ${word(sim.without_currency_check)} no se pudieron comprobar en cuanto a la moneda (son anteriores a esa comprobación): irían a revisión.`,
+        ? `1 ${word(1)} no se pudo comprobar en cuanto a la moneda: iría a revisión.`
+        : `${sim.without_currency_check} ${word(sim.without_currency_check)} no se pudieron comprobar en cuanto a la moneda: irían a revisión.`,
     );
   if (sim.truncated) notes.push(`Solo se han mirado las últimas ${sim.limit} tareas: hay más antiguas que no se han comprobado.`);
   if (sim.skipped_without_result > 0)
@@ -801,7 +801,9 @@ export interface FindingLike {
   active_conflict: boolean;
   effect: { code: string; data: Record<string, any> };
   merge_candidate: boolean;
-  /** Tareas que ya coincidieron con las dos reglas; `null` si no aplica. */
+  /** Otras reglas activas, ajenas al par, que también cubren lo que solo cubre la más amplia. */
+  others?: FindingRuleLike[];
+  /** Tareas evaluadas con las dos reglas activas y coincidentes, con sus condiciones actuales; `null` si no aplica. */
   affected_tasks: number | null;
 }
 
@@ -855,17 +857,29 @@ export interface FindingText {
 function inactiveNote(f: FindingLike, nameOf: NameOf): string | null {
   if (f.active_conflict || f.kind === "similar" || f.kind === "defective") return null;
   const inactive = f.rules.filter((r) => !r.active);
-  if (inactive.length >= f.rules.length) return "Todavía no ocurre: las dos reglas están inactivas. Ocurrirá en cuanto active las dos.";
+  if (inactive.length >= f.rules.length) return "Ahora no ocurre: las dos reglas están inactivas. Ocurrirá en cuanto active las dos.";
   const names = inactive.map((r) => ref(r.id, nameOf)).join(" y ");
-  return `Todavía no ocurre: ${names} ${inactive.length === 1 ? "está inactiva" : "están inactivas"}. Ocurrirá en cuanto ${inactive.length === 1 ? "la active" : "las active"}.`;
+  return `Ahora no ocurre: ${names} ${inactive.length === 1 ? "está inactiva" : "están inactivas"}. Ocurrirá en cuanto ${inactive.length === 1 ? "la active" : "las active"}.`;
 }
 
 function tasksNote(f: FindingLike): string | null {
   if (f.kind !== "duplicate" && f.kind !== "overlap") return null;
-  const n = f.affected_tasks ?? 0;
+  // Sin recuento (por ejemplo, una regla que aún no existe) no se afirma nada.
+  if (f.affected_tasks === null || f.affected_tasks === undefined) return null;
+  const n = f.affected_tasks;
   if (n <= 0) return NO_TASKS_AFFECTED;
   const w = noun(f.action_kind, n);
-  return `${n} ${w} ${plural(n, "ya coincidió", "ya coincidieron")} con las dos reglas, según el registro de evaluaciones.`;
+  return `${n} ${w} ${plural(n, "ya coincidió", "ya coincidieron")} con las dos reglas, según el registro de evaluaciones y con las condiciones que tienen hoy (no cuentan las evaluadas con condiciones ya editadas).`;
+}
+
+/** Terceras reglas activas que cubren parte de lo que el par deja a la más amplia. Solo habla de coincidencias, no del resultado global. */
+function exceptOthers(f: FindingLike, nameOf: NameOf, what: "las" | "los"): string {
+  const others = f.others ?? [];
+  if (!others.length) return "";
+  const names = others.map((r) => ref(r.id, nameOf));
+  if (names.length === 1) return `. Si además ${what} cubre ${names[0]}, también coinciden con esa regla y van a revisión`;
+  const list = `${names.slice(0, -1).join(", ")} o ${names[names.length - 1]}`;
+  return `. Si además ${what} cubre alguna de estas reglas (${list}), también coinciden con ella y van a revisión`;
 }
 
 /** Texto completo de un hallazgo: qué pasa, por qué y qué consecuencia tiene. */
@@ -965,8 +979,8 @@ export function explainFinding(f: FindingLike, nameOf: NameOf): FindingText {
           : `${W} llega hasta ${upTo(wider.limit)} y ${N} hasta ${nl}: todo lo que cubre ${N} ya lo cubre ${W}. Esas facturas coinciden con las dos reglas y, con dos reglas activas coincidentes, la aplicación no automatiza.`,
       consequence:
         wider.limit === null
-          ? `Las facturas de ${supplier} de hasta ${nl} van a revisión aunque las dos reglas las permitan. Solo las de más de ${nl} se registran solas.`
-          : `Las facturas de ${supplier} de hasta ${nl} van a revisión aunque las dos reglas las permitan. Solo las de más de ${nl} y hasta ${upTo(wider.limit)} se registran solas; las de más de ${upTo(wider.limit)} siempre se revisan.`,
+          ? `Las facturas de ${supplier} de hasta ${nl} coinciden con las dos reglas y, con dos reglas activas coincidentes, van a revisión aunque las dos las permitan. Las de más de ${nl} las cubre ${W}, no ${N}${exceptOthers(f, nameOf, "las")}.`
+          : `Las facturas de ${supplier} de hasta ${nl} coinciden con las dos reglas y, con dos reglas activas coincidentes, van a revisión aunque las dos las permitan. Las de más de ${nl} y hasta ${upTo(wider.limit)} las cubre ${W}, no ${N}${exceptOthers(f, nameOf, "las")}; las de más de ${upTo(wider.limit)} no las cubre ninguna de las dos.`,
       timing,
       tasks,
     };
@@ -994,14 +1008,14 @@ export function explainFinding(f: FindingLike, nameOf: NameOf): FindingText {
   const nw = who(narrower.scope, narrower.value);
   const rest =
     wider.scope === "domain"
-      ? `los de otras direcciones de @${cleanDomain(String(wider.value ?? ""))}`
-      : "los de los demás remitentes";
+      ? `Los de otras direcciones de @${cleanDomain(String(wider.value ?? ""))}`
+      : "Los de los demás remitentes";
   return {
     title: `Se pisan: ${a} y ${b}`,
     badge,
     what: `Estas dos reglas se pisan porque ambas contestan a los correos de ${nw} clasificados como «${category}».`,
     why: `${W} contesta a ${ww} y ${N} solo a ${nw}, que ya está dentro; por eso esos correos coinciden con las dos reglas y, con dos reglas activas coincidentes, la aplicación no automatiza.`,
-    consequence: `Los correos de ${nw} van a revisión aunque las dos reglas los permitan. Solo se contestan solos ${rest}.`,
+    consequence: `Los correos de ${nw} coinciden con las dos reglas y, con dos reglas activas coincidentes, van a revisión aunque las dos los permitan. ${rest} los cubre ${W}, no ${N}${exceptOthers(f, nameOf, "los")}.`,
     timing,
     tasks,
   };
@@ -1032,6 +1046,26 @@ export interface MergeOptionLike {
   rule_ids: string[];
 }
 
+export interface SimTaskLike {
+  task_id: number;
+  label: string | null;
+  total: string | null;
+  automated_before_by: string | null;
+  automated_after_by: string | null;
+}
+
+export interface MergeSimulationLike {
+  considered: number;
+  truncated: boolean;
+  skipped_without_result: number;
+  touched: number;
+  start_automating: SimTaskLike[];
+  stop_automating: SimTaskLike[];
+  unchanged_automated: number;
+  unchanged_review: number;
+  without_currency_check: number;
+}
+
 export interface MergePlanLike {
   action_kind: string;
   before: Array<{ id: string; version: number; active: boolean; conditions: Record<string, any>; any_sender: boolean }>;
@@ -1044,38 +1078,29 @@ export interface MergePlanLike {
     loses_any_sender: string[];
     needs_sender_validation: boolean;
   };
-  simulation: {
-    considered: number;
-    truncated: boolean;
-    skipped_without_result: number;
-    touched: number;
-    start_automating: Array<{ task_id: number; label: string | null; total: string | null }>;
-    stop_automating: Array<{ task_id: number; label: string | null; total: string | null }>;
-    unchanged_automated: number;
-    unchanged_review: number;
-  };
+  simulation: MergeSimulationLike;
+  simulation_if_validated?: MergeSimulationLike | null;
   fingerprint: string;
 }
 
-function mergeSubject(actionKind: string, conditions: Record<string, any>): string {
-  if (actionKind === "register_invoice") return String(conditions.supplier ?? "");
-  return categoryLabel(String(conditions.category ?? ""));
-}
-
-/** Qué significa elegir esta opción para la regla nueva. */
+/** Qué cubriría la regla nueva por sí sola con esta opción. Lo que haría con las tareas guardadas lo muestra la simulación. */
 export function mergeOptionText(actionKind: string, option: MergeOptionLike, subject: string, nameOf: NameOf): string {
   const has = `La tienen ${option.rule_ids.map((id) => ref(id, nameOf)).join(" y ")}.`;
+  const sim = "Qué haría con sus tareas guardadas, junto a sus demás reglas, lo muestra la simulación.";
   if (actionKind === "register_invoice") {
     const limit = option.scope.limit as string | null;
     return limit === null
-      ? `Sin límite de importe: la regla nueva registrará sola cualquier factura limpia de ${subject}, sea del importe que sea. ${has}`
-      : `Hasta ${upTo(limit)}: la regla nueva registrará sola las facturas limpias de ${subject} de hasta ${upTo(limit)}; las de más importe irán a revisión. ${has}`;
+      ? `Sin límite de importe: por sí sola, la regla nueva cubriría todas las facturas de ${subject}, de cualquier importe. ${sim} ${has}`
+      : `Hasta ${upTo(limit)}: por sí sola, la regla nueva cubriría las facturas de ${subject} de hasta ${upTo(limit)} y no las de más importe. ${sim} ${has}`;
   }
   const scope = String(option.scope.scope);
   const value = (option.scope.value as string | null) ?? null;
-  if (scope === "sender") return `Solo a ${value}: la regla nueva contestará sola solo a esa dirección; los demás remitentes irán a revisión. ${has}`;
-  if (scope === "domain") return `A cualquier dirección de @${cleanDomain(String(value))}: la regla nueva contestará sola a todo ese dominio. ${has}`;
-  return `A cualquier remitente: la regla nueva contestará sola a cualquiera. La regla nueva no hereda la opción avanzada, así que tendrá que validarla de nuevo antes de que actúe. ${has}`;
+  if (scope === "sender") return `Solo a ${value}: por sí sola, la regla nueva cubriría únicamente esa dirección. ${sim} ${has}`;
+  if (scope === "domain") {
+    const warning = publicDomainWarning(cleanDomain(String(value)));
+    return `A cualquier dirección de @${cleanDomain(String(value))}: por sí sola, la regla nueva cubriría todo ese dominio. ${warning ? `${warning} ` : ""}${sim} ${has}`;
+  }
+  return `A cualquier remitente: por sí sola, la regla nueva cubriría a cualquier remitente. La regla nueva no hereda la opción avanzada, así que tendrá que validarla de nuevo antes de que actúe. ${sim} ${has}`;
 }
 
 /** Título corto de una opción, para el selector. */
@@ -1089,65 +1114,84 @@ export function mergeOptionLabel(actionKind: string, option: MergeOptionLike): s
 
 export interface MergeSimulationText {
   empty: boolean;
+  /** Solo con «cualquier remitente»: encabezado del primer bloque, que es el escenario sin validar. */
+  heading: string | null;
   lines: string[];
   notes: string[];
+  /** Solo con «cualquier remitente»: encabezado y frases de lo que pasaría tras validar. */
+  validated: { heading: string; lines: string[] } | null;
+}
+
+/** Id de la regla nueva en `automated_after_by` (`MERGED_RULE` del backend). */
+const MERGED_RULE_ID = "(unificada)";
+
+function groupBy(tasks: SimTaskLike[], key: (t: SimTaskLike) => string | null): Array<[string, number]> {
+  const counts = new Map<string, number>();
+  for (const t of tasks) {
+    const k = key(t) ?? "";
+    counts.set(k, (counts.get(k) ?? 0) + 1);
+  }
+  return [...counts];
+}
+
+/** Frases de una simulación con recuentos ciertos: cada grupo dice qué regla automatiza, sin tramos deducidos. */
+function simulationLines(plan: MergePlanLike, sim: MergeSimulationLike, nameOf: NameOf): string[] {
+  const invoice = plan.action_kind === "register_invoice";
+  const w = (k: number) => noun(plan.action_kind, k);
+  const auto = (k: number) => (invoice ? plural(k, "se registraría sola", "se registrarían solas") : plural(k, "se contestaría solo", "se contestarían solos"));
+  const lines: string[] = [];
+  for (const [rule, n] of groupBy(sim.start_automating, (t) => t.automated_after_by)) {
+    lines.push(
+      rule === MERGED_RULE_ID
+        ? `${n} ${w(n)} ${plural(n, "dejaría", "dejarían")} de revisarse: hoy ${plural(n, "va", "van")} a revisión y con la regla nueva ${auto(n)}.`
+        : `${n} ${w(n)} ${plural(n, "dejaría", "dejarían")} de revisarse, pero no por la regla nueva: ${plural(n, "la automatizaría", "las automatizaría")} ${ref(rule, nameOf)}, una regla ajena a la unificación que hoy ${plural(n, "coincide", "coinciden")} a la vez con alguna de las reglas que se unifican.`,
+    );
+  }
+  for (const [rule, n] of groupBy(sim.stop_automating, (t) => t.automated_before_by)) {
+    lines.push(
+      `${n} ${w(n)} ${plural(n, "dejaría", "dejarían")} de automatizarse: hoy ${plural(n, "la automatiza", "las automatiza")} ${ref(rule, nameOf)} y con la regla nueva ${plural(n, "iría", "irían")} a revisión.`,
+    );
+  }
+  if (sim.unchanged_automated > 0)
+    lines.push(
+      `${sim.unchanged_automated} ${w(sim.unchanged_automated)} ${plural(sim.unchanged_automated, "seguiría", "seguirían")} ${invoice ? "registrándose" : "contestándose"} ${invoice ? plural(sim.unchanged_automated, "sola", "solas") : plural(sim.unchanged_automated, "solo", "solos")}.`,
+    );
+  if (sim.unchanged_review > 0) lines.push(`${sim.unchanged_review} ${w(sim.unchanged_review)} ${plural(sim.unchanged_review, "seguiría", "seguirían")} en revisión.`);
+  if (sim.touched === 0)
+    lines.push(
+      sim.considered === 0
+        ? "No hay tareas guardadas con resultado: no se puede decir qué cambiaría."
+        : `Estas reglas no cubren lo guardado (${sim.considered} ${w(sim.considered)} con resultado): no cambiaría nada.`,
+    );
+  return lines;
 }
 
 /** Simulación de la unificación en frases con recuento real. Supone la regla nueva ya activa. */
 export function mergeSimulationText(plan: MergePlanLike, nameOf: NameOf): MergeSimulationText {
   const sim = plan.simulation;
-  const invoice = plan.action_kind === "register_invoice";
   const notes: string[] = [];
-  const lines: string[] = [];
-  const chosenLimit = invoice ? ((plan.after.conditions.max_total as string | undefined) ?? null) : null;
-  const subject = mergeSubject(plan.action_kind, plan.after.conditions);
-  const sender = plan.after.conditions;
-  const target = invoice
-    ? `de ${subject}`
-    : sender.sender
-      ? `de ${sender.sender}`
-      : sender.sender_domain
-        ? `de cualquier dirección de @${cleanDomain(String(sender.sender_domain))}`
-        : "de cualquier remitente";
-  const n = sim.start_automating.length;
-  const m = sim.stop_automating.length;
-  const startRange = chosenLimit ? ` de hasta ${upTo(chosenLimit)}` : "";
-  const stopRange = chosenLimit ? ` de más de ${upTo(chosenLimit)}` : "";
   const w = (k: number) => noun(plan.action_kind, k);
-  if (n > 0)
-    lines.push(
-      invoice
-        ? `${n} ${w(n)} ${target}${startRange} ${plural(n, "dejaría", "dejarían")} de revisarse: ${plural(n, "se registraría sola", "se registrarían solas")}.`
-        : `${n} ${w(n)} ${target} ${plural(n, "dejaría", "dejarían")} de revisarse: ${plural(n, "se contestaría solo", "se contestarían solos")}.`,
-    );
-  if (m > 0)
-    lines.push(
-      `${m} ${w(m)} ${target}${stopRange} ${plural(m, "dejaría", "dejarían")} de automatizarse: hoy ${plural(m, invoice ? "se registra sola" : "se contesta solo", invoice ? "se registran solas" : "se contestan solos")} y con la regla nueva ${plural(m, "iría", "irían")} a revisión.`,
-    );
-  if (sim.unchanged_automated > 0)
-    lines.push(
-      `${sim.unchanged_automated} ${w(sim.unchanged_automated)} ${plural(sim.unchanged_automated, "seguiría", "seguirían")} ${invoice ? "registrándose" : "contestándose"} ${invoice ? plural(sim.unchanged_automated, "sola", "solas") : plural(sim.unchanged_automated, "solo", "solos")}.`,
-    );
-  if (sim.unchanged_review > 0)
-    lines.push(`${sim.unchanged_review} ${w(sim.unchanged_review)} ${plural(sim.unchanged_review, "seguiría", "seguirían")} en revisión.`);
-  const empty = sim.touched === 0;
-  if (empty) {
-    lines.push(
-      sim.considered === 0
-        ? "No hay tareas guardadas con resultado: no se puede decir qué cambiaría."
-        : `Ninguna de las ${sim.considered} ${w(sim.considered)} guardadas está cubierta por estas reglas: no cambiaría nada.`,
-    );
-  }
   if (plan.after.loses_any_sender.length)
     notes.push(
       `${plan.after.loses_any_sender.map((id) => ref(id, nameOf)).join(" y ")} ${plan.after.loses_any_sender.length === 1 ? "tenía" : "tenían"} la opción avanzada «cualquier remitente»: la regla nueva no la hereda.`,
     );
-  if (plan.after.needs_sender_validation)
-    notes.push("La regla nueva no indica remitente: no contestará a nadie hasta que valide la opción avanzada, por eso en esta simulación no se automatiza ningún correo.");
+  if (sim.without_currency_check > 0)
+    notes.push(
+      `${sim.without_currency_check} ${w(sim.without_currency_check)} ${plural(sim.without_currency_check, "no se pudo comprobar", "no se pudieron comprobar")} en cuanto a la moneda: con cualquier regla ${plural(sim.without_currency_check, "iría", "irían")} a revisión.`,
+    );
   if (sim.truncated) notes.push(`Solo se han mirado las últimas ${200} tareas: hay más antiguas que no se han comprobado.`);
   if (sim.skipped_without_result > 0)
     notes.push(`${sim.skipped_without_result} ${plural(sim.skipped_without_result, "tarea no tiene", "tareas no tienen")} resultado todavía y no se ${plural(sim.skipped_without_result, "ha contado", "han contado")}.`);
-  return { empty, lines, notes };
+  const validated = plan.simulation_if_validated
+    ? {
+        heading: "Si después valida la opción avanzada de la regla nueva (es solo una hipótesis: no se valida al unificar):",
+        lines: simulationLines(plan, plan.simulation_if_validated, nameOf),
+      }
+    : null;
+  const heading = plan.after.needs_sender_validation
+    ? "Sin validar la opción avanzada, la regla nueva no contesta a nadie, y esa validación no se da al unificar. Con esa condición:"
+    : null;
+  return { empty: sim.touched === 0, heading, lines: simulationLines(plan, sim, nameOf), notes, validated };
 }
 
 /** Mensaje tras unificar, con el siguiente paso. */
@@ -1165,4 +1209,56 @@ export function originText(origin: OriginLike | null | undefined, nameOf: NameOf
   if (!origin || origin.kind !== "merge" || !origin.sources?.length) return null;
   const list = origin.sources.map((s) => `«${nameOf(s.id)}» (versión ${s.version})`);
   return `Creada al unificar ${list.length === 1 ? list[0] : `${list.slice(0, -1).join(", ")} y ${list[list.length - 1]}`}.`;
+}
+
+// ---- Avisos al activar y al restaurar (R23) ----
+
+export interface FindingGroup<T extends FindingLike> {
+  /** Encabezado que dice solo lo que los datos sostienen: «chocaría» únicamente con reglas activas. */
+  heading: string;
+  findings: T[];
+}
+
+/** Separa lo que chocaría de verdad (las dos activas) de lo que solo chocará si se activan y de las preguntas de nombre parecido. */
+export function activationGroups<T extends FindingLike>(findings: T[]): Array<FindingGroup<T>> {
+  const sorted = sortFindings(findings);
+  const real = sorted.filter((f) => (f.kind === "duplicate" || f.kind === "overlap") && f.active_conflict);
+  const pending = sorted.filter((f) => (f.kind === "duplicate" || f.kind === "overlap") && !f.active_conflict);
+  const similar = sorted.filter((f) => f.kind === "similar");
+  const groups: Array<FindingGroup<T>> = [];
+  if (real.length)
+    groups.push({ heading: real.length === 1 ? "Al activarla chocaría con otra regla activa:" : `Al activarla chocaría con otras ${real.length} reglas activas:`, findings: real });
+  if (pending.length)
+    groups.push({
+      heading: pending.length === 1 ? "Se pisa con una regla que hoy está inactiva; solo chocarían si activa también esa:" : `Se pisa con ${pending.length} reglas que hoy están inactivas; solo chocarían si activa también esas:`,
+      findings: pending,
+    });
+  if (similar.length)
+    groups.push({ heading: "Su proveedor se escribe casi igual que el de otra regla (no es un choque, es una pregunta):", findings: similar });
+  return groups;
+}
+
+/** Encabezado del aviso al restaurar una regla archivada. */
+export function restoreHeading(name: string, findings: FindingLike[]): string {
+  const n = findings.length;
+  return `«${name}» volvería inactiva, pero ${n === 1 ? "tiene 1 aviso" : `tiene ${n} avisos`} con las reglas actuales:`;
+}
+
+// ---- Historial de reglas ----
+
+const RULE_AUDIT_STATUS: Record<string, string> = {
+  // El estado es el de la versión que se guardó (también al crear o editar), no un cambio.
+  active: "Versión activa",
+  inactive: "Versión inactiva",
+  acknowledged: "Opción avanzada validada",
+  revoked: "Opción avanzada retirada",
+  archived: "Archivada",
+  unarchived: "Restaurada",
+  renamed: "Renombrada",
+  merged: "Unificada",
+};
+
+/** Estado en palabras de una entrada del historial que viene de una regla; el resto se deja tal cual. */
+export function auditStatusLabel(action: string, status: string): string {
+  return action.startsWith("rule") ? (RULE_AUDIT_STATUS[status] ?? status) : status;
 }

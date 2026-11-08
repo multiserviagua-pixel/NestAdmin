@@ -91,7 +91,9 @@ export interface RuleFinding {
   active_conflict: boolean;
   effect: { code: string; data: Record<string, any> };
   merge_candidate: boolean;
-  /** Tareas que ya coincidieron con las dos reglas; `null` si no aplica. */
+  /** Otras reglas activas, ajenas al par, que también cubren lo que solo cubre la más amplia. */
+  others: Array<{ id: string; version: number; active: boolean }>;
+  /** Tareas que ya coincidieron con las dos reglas con sus condiciones actuales; `null` si no aplica. */
   affected_tasks: number | null;
 }
 
@@ -114,6 +116,22 @@ export interface SimTask {
   task_id: number;
   label: string | null;
   total: string | null;
+  /** Regla que la automatiza hoy (resultado real), si alguna. */
+  automated_before_by: string | null;
+  /** Regla que la automatizaría con la unificación: `(unificada)` es la regla nueva. */
+  automated_after_by: string | null;
+}
+
+export interface MergeSimulation {
+  considered: number;
+  truncated: boolean;
+  skipped_without_result: number;
+  touched: number;
+  start_automating: SimTask[];
+  stop_automating: SimTask[];
+  unchanged_automated: number;
+  unchanged_review: number;
+  without_currency_check: number;
 }
 
 export interface MergePlan {
@@ -128,16 +146,9 @@ export interface MergePlan {
     loses_any_sender: string[];
     needs_sender_validation: boolean;
   };
-  simulation: {
-    considered: number;
-    truncated: boolean;
-    skipped_without_result: number;
-    touched: number;
-    start_automating: SimTask[];
-    stop_automating: SimTask[];
-    unchanged_automated: number;
-    unchanged_review: number;
-  };
+  simulation: MergeSimulation;
+  /** Solo con «cualquier remitente»: qué pasaría después de validar la opción avanzada. */
+  simulation_if_validated: MergeSimulation | null;
   fingerprint: string;
 }
 

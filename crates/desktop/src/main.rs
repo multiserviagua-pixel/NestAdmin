@@ -603,6 +603,12 @@ fn rule_findings(shared: State<'_, SharedState>) -> CmdResult<Vec<RuleFinding>> 
     shared.app()?.rule_findings().map_err(text)
 }
 
+/// Contradicciones que tendría una regla archivada al restaurarla (D128, D130). Solo lectura.
+#[tauri::command]
+fn preview_restore(shared: State<'_, SharedState>, id: String) -> CmdResult<Vec<RuleFinding>> {
+    shared.app()?.preview_restore(&id).map_err(text)
+}
+
 /// Revisa una unificación (D131) sin cambiar nada: antes, opciones y, con la elección hecha,
 /// el plan con su simulación.
 #[tauri::command]
@@ -1424,6 +1430,7 @@ fn configure<R: Runtime>(builder: Builder<R>, prepare_only: bool) -> Builder<R> 
             simulate_rule,
             rule_findings,
             preview_merge,
+            preview_restore,
             merge_rules,
             audit_log,
             settings,

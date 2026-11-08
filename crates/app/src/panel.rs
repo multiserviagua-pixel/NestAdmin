@@ -625,26 +625,71 @@ impl App {
     pub fn rule_findings(&self) -> AppResult<Vec<RuleFinding>> {
         let (rules, marks) = self.analysis_inputs()?;
         let mut findings = analyze(&rules, &marks);
+        self.fill_affected(&mut findings)?;
+        Ok(findings)
+    }
+
+    /// Recuento de tareas afectadas de cada choque: la última evaluación de cada tarea, solo
+    /// si las dos reglas estaban activas y coincidieron, con las condiciones que tienen hoy
+    /// (las evaluaciones de versiones con otras condiciones ya editadas no cuentan).
+    fn fill_affected(&self, findings: &mut [RuleFinding]) -> AppResult<()> {
         let mut latest: HashMap<i64, Value> = HashMap::new();
         for row in self.store.rule_evaluations()? {
             latest.insert(row.task_id, row.checks);
         }
-        for finding in &mut findings {
+        for finding in findings.iter_mut() {
             if !matches!(finding.kind, FindingKind::Duplicate | FindingKind::Overlap) {
                 continue;
             }
+            // Versiones de cada regla cuyas condiciones son las vigentes.
+            let mut current_versions: Vec<(String, HashSet<i64>)> = Vec::new();
+            for fr in &finding.rules {
+                let history = self.store.rule_history(&fr.id)?;
+                let now = history.iter().find(|r| r.version == fr.version);
+                let versions = history
+                    .iter()
+                    .filter(|r| now.is_some_and(|n| n.conditions == r.conditions))
+                    .map(|r| r.version)
+                    .collect();
+                current_versions.push((fr.id.clone(), versions));
+            }
             let both = |checks: &Value| {
-                finding.rules.iter().all(|fr| {
+                current_versions.iter().all(|(id, versions)| {
                     checks["candidates"]
                         .as_array()
                         .into_iter()
                         .flatten()
-                        .any(|c| c["id"].as_str() == Some(&fr.id) && c["matches"] == json!(true))
+                        .any(|c| {
+                            c["id"].as_str() == Some(id.as_str())
+                                && c["matches"] == json!(true)
+                                // El choque solo ocurre si las dos estaban activas.
+                                && c["active"] == json!(true)
+                                && c["version"].as_i64().is_some_and(|v| versions.contains(&v))
+                        })
                 })
             };
-            let count = latest.values().filter(|c| both(c)).count();
-            finding.affected_tasks = Some(count);
+            finding.affected_tasks = Some(latest.values().filter(|c| both(c)).count());
         }
+        Ok(())
+    }
+
+    /// Contradicciones que tendría una regla archivada si se restaurara (D128): la regla
+    /// vuelve inactiva, así que el choque solo ocurriría al activarla. Solo lectura.
+    pub fn preview_restore(&self, id: &str) -> AppResult<Vec<RuleFinding>> {
+        let (mut rules, mut marks) = self.analysis_inputs()?;
+        if !marks.archived.remove(id) {
+            return Err(AppError::Invalid(format!(
+                "la regla {id} no está archivada"
+            )));
+        }
+        for rule in rules.iter_mut().filter(|r| r.id == id) {
+            rule.active = false;
+        }
+        let mut findings: Vec<RuleFinding> = analyze(&rules, &marks)
+            .into_iter()
+            .filter(|f| f.rules.iter().any(|r| r.id == id))
+            .collect();
+        self.fill_affected(&mut findings)?;
         Ok(findings)
     }
 

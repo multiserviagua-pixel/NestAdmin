@@ -7,12 +7,15 @@ import {
   NO_FINDINGS,
   NO_TASKS_AFFECTED,
   SIMULATED_RULE,
+  activationGroups,
+  auditStatusLabel,
   explainFinding,
   mergeOptionLabel,
   mergeOptionText,
   mergeSimulationText,
   mergedDone,
   originText,
+  restoreHeading,
   similarClarification,
   sortFindings,
 } from "../src/rules-text.ts";
@@ -45,17 +48,19 @@ test("un solape de facturas explica qué pasa, por qué y la consecuencia con lo
   assert.match(t.why, /coinciden con las dos reglas/);
   assert.equal(
     t.consequence,
-    "Las facturas de Alfa SL de hasta 500,00 € van a revisión aunque las dos reglas las permitan. Solo las de más de 500,00 € se registran solas.",
+    "Las facturas de Alfa SL de hasta 500,00 € coinciden con las dos reglas y, con dos reglas activas coincidentes, van a revisión aunque las dos las permitan. Las de más de 500,00 € las cubre «Alfa libre», no «Alfa hasta 500».",
   );
+  assert.doesNotMatch(t.consequence, /siempre|Solo/);
   assert.equal(t.timing, null);
 });
 
-test("con dos límites, la consecuencia nombra el tramo que sí se registra solo", () => {
+test("con dos límites, la consecuencia nombra qué tramo cubre cada regla", () => {
   const t = explainFinding(
     overlap({ effect: { code: "narrow_blocks_wide", data: { supplier: "Alfa SL", wider: { id: "alfa-libre", limit: "1000.00" }, narrower: { id: "alfa-500", limit: "500.00" } } } }),
     nameOf,
   );
-  assert.match(t.consequence, /Solo las de más de 500,00 € y hasta 1\.000,00 € se registran solas; las de más de 1\.000,00 € siempre se revisan\./);
+  assert.match(t.consequence, /Las de más de 500,00 € y hasta 1\.000,00 € las cubre «Alfa libre», no «Alfa hasta 500»; las de más de 1\.000,00 € no las cubre ninguna de las dos\./);
+  assert.doesNotMatch(t.consequence, /siempre|se registran solas/);
 });
 
 test("el recuento de tareas afectadas es real o dice que aún no hay", () => {
@@ -63,8 +68,10 @@ test("el recuento de tareas afectadas es real o dice que aún no hay", () => {
   assert.equal(NO_TASKS_AFFECTED, "Aún no hay tareas afectadas.");
   assert.equal(
     explainFinding(overlap({ affected_tasks: 3 }), nameOf).tasks,
-    "3 facturas ya coincidieron con las dos reglas, según el registro de evaluaciones.",
+    "3 facturas ya coincidieron con las dos reglas, según el registro de evaluaciones y con las condiciones que tienen hoy (no cuentan las evaluadas con condiciones ya editadas).",
   );
+  // Sin recuento no se afirma nada, ni siquiera que no haya tareas.
+  assert.equal(explainFinding(overlap({ affected_tasks: null }), nameOf).tasks, null);
   assert.match(explainFinding(overlap({ affected_tasks: 1 }), nameOf).tasks, /^1 factura ya coincidió/);
   const mail = explainFinding(
     { ...sender(), affected_tasks: 2 },
@@ -73,13 +80,13 @@ test("el recuento de tareas afectadas es real o dice que aún no hay", () => {
   assert.match(mail.tasks, /^2 correos ya coincidieron/);
 });
 
-test("un solape con una regla inactiva dice que todavía no ocurre y cuándo ocurrirá", () => {
+test("un solape con una regla inactiva dice que ahora no ocurre y cuándo ocurrirá", () => {
   const t = explainFinding(
     overlap({ active_conflict: false, rules: rules(["alfa-500", false], ["alfa-libre", true]) }),
     nameOf,
   );
   assert.equal(t.badge.text, "Solo si se activan");
-  assert.equal(t.timing, "Todavía no ocurre: «Alfa hasta 500» está inactiva. Ocurrirá en cuanto la active.");
+  assert.equal(t.timing, "Ahora no ocurre: «Alfa hasta 500» está inactiva. Ocurrirá en cuanto la active.");
   const both = explainFinding(overlap({ active_conflict: false, rules: rules(["alfa-500", false], ["alfa-libre", false]) }), nameOf);
   assert.match(both.timing, /las dos reglas están inactivas/);
 });
@@ -133,8 +140,9 @@ test("un solape de envío nombra la dirección, el dominio y la categoría", () 
   assert.match(t.why, /«Dominio Alfa» contesta a cualquier dirección de @alfa\.test y «Ana Alfa» solo a ana@alfa\.test, que ya está dentro/);
   assert.equal(
     t.consequence,
-    "Los correos de ana@alfa.test van a revisión aunque las dos reglas los permitan. Solo se contestan solos los de otras direcciones de @alfa.test.",
+    "Los correos de ana@alfa.test coinciden con las dos reglas y, con dos reglas activas coincidentes, van a revisión aunque las dos los permitan. Los de otras direcciones de @alfa.test los cubre «Dominio Alfa», no «Ana Alfa».",
   );
+  assert.doesNotMatch(t.consequence, /Solo|siempre/);
   const any = explainFinding(
     sender({
       effect: {
@@ -146,7 +154,7 @@ test("un solape de envío nombra la dirección, el dominio y la categoría", () 
   );
   assert.match(any.what, /correos de cualquier dirección de @alfa\.test clasificados como «Consulta de pago»/);
   assert.match(any.why, /contesta a cualquier remitente/);
-  assert.match(any.consequence, /Solo se contestan solos los de los demás remitentes\./);
+  assert.match(any.consequence, /Los de los demás remitentes los cubre «Dominio Alfa», no «Ana Alfa»\./);
 });
 
 test("un nombre de proveedor parecido es una pregunta, no una contradicción", () => {
@@ -236,64 +244,192 @@ test("cada opción de unificación explica qué significa elegirla", () => {
   const capped = { key: "500.00", scope: { limit: "500.00" }, rule_ids: ["alfa-500"] };
   assert.equal(mergeOptionLabel("register_invoice", free), "Sin límite");
   assert.equal(mergeOptionLabel("register_invoice", capped), "Hasta 500,00 €");
-  assert.match(mergeOptionText("register_invoice", free, "Alfa SL", nameOf), /cualquier factura limpia de Alfa SL, sea del importe que sea\. La tienen «Alfa libre»\./);
-  assert.match(mergeOptionText("register_invoice", capped, "Alfa SL", nameOf), /de hasta 500,00 €; las de más importe irán a revisión\. La tienen «Alfa hasta 500»\./);
+  const freeText = mergeOptionText("register_invoice", free, "Alfa SL", nameOf);
+  assert.match(freeText, /^Sin límite de importe: por sí sola, la regla nueva cubriría todas las facturas de Alfa SL, de cualquier importe\. Qué haría con sus tareas guardadas, junto a sus demás reglas, lo muestra la simulación\. La tienen «Alfa libre»\./);
+  const cappedText = mergeOptionText("register_invoice", capped, "Alfa SL", nameOf);
+  assert.match(cappedText, /por sí sola, la regla nueva cubriría las facturas de Alfa SL de hasta 500,00 € y no las de más importe\. Qué haría con sus tareas guardadas, junto a sus demás reglas, lo muestra la simulación\./);
+  // Nada que otra regla activa pueda desmentir: ni «irán a revisión» ni «sea del importe que sea».
+  for (const text of [freeText, cappedText]) assert.doesNotMatch(text, /irán a revisión|sea del importe|limpia/);
   const any = { key: "any", scope: { scope: "any", value: null }, rule_ids: ["sin"] };
   assert.match(mergeOptionText("send_draft", any, "Solicitud de factura", nameOf), /no hereda la opción avanzada/);
-  assert.match(mergeOptionText("send_draft", { key: "sender:ana@alfa.test", scope: { scope: "sender", value: "ana@alfa.test" }, rule_ids: ["direccion"] }, "x", nameOf), /Solo a ana@alfa\.test/);
+  const senderText = mergeOptionText("send_draft", { key: "sender:ana@alfa.test", scope: { scope: "sender", value: "ana@alfa.test" }, rule_ids: ["direccion"] }, "x", nameOf);
+  assert.match(senderText, /Solo a ana@alfa\.test: por sí sola, la regla nueva cubriría únicamente esa dirección\./);
+  assert.doesNotMatch(senderText, /irán a revisión/);
   assert.equal(mergeOptionLabel("send_draft", { key: "domain:alfa.test", scope: { scope: "domain", value: "alfa.test" }, rule_ids: [] }), "Todo @alfa.test");
 });
 
+const task = (id, before, after) => ({ task_id: id, label: `${id}.txt`, total: null, automated_before_by: before, automated_after_by: after });
+const simulation = (over = {}) => ({
+  considered: 8,
+  truncated: false,
+  skipped_without_result: 0,
+  touched: 7,
+  start_automating: [],
+  stop_automating: [],
+  unchanged_automated: 0,
+  unchanged_review: 0,
+  without_currency_check: 0,
+  ...over,
+});
 const plan = (over = {}) => ({
   action_kind: "register_invoice",
   before: [],
   options: [],
   chosen: "500.00",
   after: { conditions: { supplier: "Alfa SL", max_total: "500.00" }, active: false, option_key: "500.00", loses_any_sender: [], needs_sender_validation: false },
-  simulation: { considered: 8, truncated: false, skipped_without_result: 0, touched: 7, start_automating: new Array(5).fill({}), stop_automating: new Array(2).fill({}), unchanged_automated: 0, unchanged_review: 0 },
+  simulation: simulation({
+    start_automating: [1, 2, 3, 4, 5].map((i) => task(i, null, "(unificada)")),
+    stop_automating: [6, 7].map((i) => task(i, "alfa-libre", null)),
+  }),
+  simulation_if_validated: null,
   fingerprint: "abc",
   ...over,
 });
 
-test("la simulación de unificar dice cuántas dejan de revisarse y cuántas dejan de automatizarse", () => {
+test("la simulación de unificar da recuentos ciertos y nombra la regla que automatiza cada grupo, sin tramos de importe", () => {
   const t = mergeSimulationText(plan(), nameOf);
   assert.equal(t.empty, false);
-  assert.equal(t.lines[0], "5 facturas de Alfa SL de hasta 500,00 € dejarían de revisarse: se registrarían solas.");
-  assert.equal(
-    t.lines[1],
-    "2 facturas de Alfa SL de más de 500,00 € dejarían de automatizarse: hoy se registran solas y con la regla nueva irían a revisión.",
-  );
-  // Sin límite elegido no se inventan tramos de importe.
-  const free = mergeSimulationText(
-    plan({ after: { conditions: { supplier: "Alfa SL" }, active: false, option_key: "none", loses_any_sender: [], needs_sender_validation: false }, simulation: { ...plan().simulation, stop_automating: [], unchanged_automated: 2 } }),
+  assert.equal(t.lines[0], "5 facturas dejarían de revisarse: hoy van a revisión y con la regla nueva se registrarían solas.");
+  assert.equal(t.lines[1], "2 facturas dejarían de automatizarse: hoy las automatiza «Alfa libre» y con la regla nueva irían a revisión.");
+  // El texto no deduce ningún tramo del límite elegido.
+  assert.doesNotMatch(t.lines.join(" "), /hasta|más de/);
+});
+
+test("si otra regla ajena a la unificación es la que automatiza, el texto lo dice y no atribuye el cambio a la nueva", () => {
+  // A ≤500 y B ≤1000 se unifican en 500; C ≤600 sigue activa: una factura de 550 € pasa a automatizarla C.
+  const t = mergeSimulationText(
+    plan({ simulation: simulation({ start_automating: [task(2, null, "alfa-sin-limite")], stop_automating: [task(3, "alfa-500", null)], unchanged_review: 1 }) }),
     nameOf,
   );
-  assert.equal(free.lines[0], "5 facturas de Alfa SL dejarían de revisarse: se registrarían solas.");
-  assert.equal(free.lines[1], "2 facturas seguirían registrándose solas.");
+  assert.equal(
+    t.lines[0],
+    "1 factura dejaría de revisarse, pero no por la regla nueva: la automatizaría «alfa-sin-limite», una regla ajena a la unificación que hoy coincide a la vez con alguna de las reglas que se unifican.",
+  );
+  assert.doesNotMatch(t.lines[0], /hasta 500/);
+  assert.match(t.lines[1], /hoy la automatiza «Alfa hasta 500»/);
+  assert.equal(t.lines[2], "1 factura seguiría en revisión.");
 });
 
 test("sin tareas cubiertas la ausencia es explícita", () => {
-  const none = mergeSimulationText(plan({ simulation: { ...plan().simulation, considered: 0, touched: 0, start_automating: [], stop_automating: [] } }), nameOf);
+  const none = mergeSimulationText(plan({ simulation: simulation({ considered: 0, touched: 0 }) }), nameOf);
   assert.equal(none.empty, true);
   assert.match(none.lines[0], /No hay tareas guardadas con resultado/);
-  const uncovered = mergeSimulationText(plan({ simulation: { ...plan().simulation, considered: 4, touched: 0, start_automating: [], stop_automating: [] } }), nameOf);
-  assert.match(uncovered.lines[0], /Ninguna de las 4 facturas guardadas está cubierta/);
+  const uncovered = mergeSimulationText(plan({ simulation: simulation({ considered: 4, touched: 0 }) }), nameOf);
+  assert.match(uncovered.lines[0], /no cubren lo guardado \(4 facturas con resultado\)/);
 });
 
-test("la unificación avisa de la opción avanzada que no hereda y de la regla sin remitente", () => {
+test("con «cualquier remitente» se muestran las dos hipótesis, con datos reales y sin afirmar que no se automatiza nada", () => {
   const t = mergeSimulationText(
     plan({
       action_kind: "send_draft",
       after: { conditions: { category: "solicitud_factura" }, active: false, option_key: "any", loses_any_sender: ["sin"], needs_sender_validation: true },
-      simulation: { ...plan().simulation, start_automating: [], stop_automating: [{}], unchanged_review: 1, truncated: true, skipped_without_result: 2 },
+      simulation: simulation({ start_automating: [task(2, null, "otra")], stop_automating: [task(3, "sin", null)], unchanged_review: 1, truncated: true, skipped_without_result: 2, without_currency_check: 0 }),
+      simulation_if_validated: simulation({ start_automating: [task(1, null, "(unificada)")], unchanged_review: 1 }),
     }),
     nameOf,
   );
   assert.match(t.notes[0], /«Sin remitente» tenía la opción avanzada «cualquier remitente»: la regla nueva no la hereda\./);
-  assert.match(t.notes[1], /no contestará a nadie hasta que valide la opción avanzada/);
+  // La nota va en el encabezado del primer bloque, sin referencias de posición ni «tal como se crea».
+  assert.equal(t.heading, "Sin validar la opción avanzada, la regla nueva no contesta a nadie, y esa validación no se da al unificar. Con esa condición:");
+  assert.doesNotMatch(`${t.heading} ${t.notes.join(" ")}`, /ningún correo|de arriba|tal como se crea/);
   assert.match(t.notes.join(" "), /hay más antiguas/);
   assert.match(t.notes.join(" "), /2 tareas no tienen resultado/);
-  assert.match(t.lines[0], /1 correo de cualquier remitente dejaría de automatizarse: hoy se contesta solo/);
+  assert.equal(mergeSimulationText(plan(), nameOf).heading, null);
+  assert.match(t.lines[0], /1 correo dejaría de revisarse, pero no por la regla nueva: la automatizaría «otra»/);
+  assert.match(t.lines[1], /1 correo dejaría de automatizarse: hoy la automatiza «Sin remitente»/);
+  assert.match(t.validated.heading, /Si después valida la opción avanzada/);
+  assert.match(t.validated.heading, /no se valida al unificar/);
+  assert.equal(t.validated.lines[0], "1 correo dejaría de revisarse: hoy va a revisión y con la regla nueva se contestaría solo.");
+});
+
+test("las facturas sin comprobación de moneda se anotan", () => {
+  const t = mergeSimulationText(plan({ simulation: simulation({ without_currency_check: 2, start_automating: [], stop_automating: [] }) }), nameOf);
+  assert.match(t.notes[0], /^2 facturas no se pudieron comprobar en cuanto a la moneda: con cualquier regla irían a revisión\.$/);
+  assert.doesNotMatch(t.notes[0], /anteriores/);
+});
+
+test("la opción de dominio avisa de un dominio de correo público", () => {
+  const gmail = { key: "domain:gmail.com", scope: { scope: "domain", value: "gmail.com" }, rule_ids: ["dominio"] };
+  assert.match(mergeOptionText("send_draft", gmail, "Solicitud de factura", nameOf), /gmail\.com abarca a cualquier usuario de Gmail/);
+  const own = { key: "domain:alfa.test", scope: { scope: "domain", value: "alfa.test" }, rule_ids: ["dominio"] };
+  assert.doesNotMatch(mergeOptionText("send_draft", own, "x", nameOf), /abarca a/);
+});
+
+test("la consecuencia nombra a las terceras reglas activas: A sin límite, B hasta 500 y C hasta 1000", () => {
+  // Con 700 € coinciden A y C: por eso «solo las de más de 500 se registran solas» no es toda la verdad.
+  const finding = overlap({ others: [{ id: "alfa-1000", version: 1, active: true }] });
+  const t = explainFinding(finding, (id) => (id === "alfa-1000" ? "Alfa hasta 1000" : nameOf(id)));
+  assert.equal(
+    t.consequence,
+    "Las facturas de Alfa SL de hasta 500,00 € coinciden con las dos reglas y, con dos reglas activas coincidentes, van a revisión aunque las dos las permitan. Las de más de 500,00 € las cubre «Alfa libre», no «Alfa hasta 500». Si además las cubre «Alfa hasta 1000», también coinciden con esa regla y van a revisión.",
+  );
+  // Sin terceras reglas se mantiene la frase.
+  assert.doesNotMatch(explainFinding(overlap({ others: [] }), nameOf).consequence, /Si además/);
+  // Varias: coincide con alguna de ellas, no con todas (con 900 € solo coincide una).
+  const two = explainFinding(overlap({ others: [{ id: "a", version: 1, active: true }, { id: "b", version: 1, active: true }] }), nameOf);
+  assert.match(two.consequence, /Si además las cubre alguna de estas reglas \(«a» o «b»\), también coinciden con ella y van a revisión/);
+  assert.doesNotMatch(two.consequence, /«a» y «b»/);
+  // Envío: lo mismo con los correos.
+  const mail = explainFinding(sender({ others: [{ id: "otra", version: 1, active: true }] }), nameOf);
+  assert.match(mail.consequence, /Los de otras direcciones de @alfa\.test los cubre «Dominio Alfa», no «Ana Alfa»\. Si además los cubre «otra»/);
+});
+
+test("B hasta 500 y C hasta 1000 con A sin límite: no se afirma nada de lo que hay más allá de 1000 ni que solo ciertos correos se contesten", () => {
+  // Hallazgo B+C: la regla A (sin límite) también está activa y cubre más allá de C.
+  const bc = explainFinding(
+    overlap({
+      key: "overlap:alfa-1000+alfa-500",
+      rules: rules(["alfa-500", true], ["alfa-1000", true]),
+      effect: { code: "narrow_blocks_wide", data: { supplier: "Alfa SL", wider: { id: "alfa-1000", limit: "1000.00" }, narrower: { id: "alfa-500", limit: "500.00" } } },
+      others: [{ id: "alfa-libre", version: 1, active: true }],
+    }),
+    (id) => (id === "alfa-1000" ? "Alfa hasta 1000" : nameOf(id)),
+  );
+  assert.match(bc.consequence, /las de más de 1\.000,00 € no las cubre ninguna de las dos\./);
+  assert.match(bc.consequence, /Si además las cubre «Alfa libre»/);
+  assert.doesNotMatch(bc.consequence, /siempre|se registran solas|se revisan/);
+  // Envío: dominio, dirección y una tercera «cualquier remitente»: lo de @beta.test no se afirma.
+  const mail = explainFinding(sender({ others: [{ id: "cualquiera", version: 1, active: true }] }), nameOf);
+  assert.doesNotMatch(mail.consequence, /Solo|solos|siempre/);
+  assert.equal(
+    mail.consequence,
+    "Los correos de ana@alfa.test coinciden con las dos reglas y, con dos reglas activas coincidentes, van a revisión aunque las dos los permitan. Los de otras direcciones de @alfa.test los cubre «Dominio Alfa», no «Ana Alfa». Si además los cubre «cualquiera», también coinciden con esa regla y van a revisión.",
+  );
+});
+
+test("al activar, «chocaría» solo se dice de reglas activas; lo inactivo y lo parecido se explican aparte", () => {
+  const f = (key, kind, active_conflict) => ({ key, kind, active_conflict, action_kind: "register_invoice", rules: [], effect: { code: "x", data: {} }, merge_candidate: false, affected_tasks: null });
+  const groups = activationGroups([f("similar:a+b", "similar", false), f("overlap:a+b", "overlap", false), f("overlap:c+d", "overlap", true)]);
+  assert.equal(groups.length, 3);
+  assert.equal(groups[0].heading, "Al activarla chocaría con otra regla activa:");
+  assert.match(groups[1].heading, /hoy está inactiva; solo chocarían si activa también esa/);
+  assert.doesNotMatch(groups[1].heading, /^Al activarla chocaría/);
+  assert.match(groups[2].heading, /no es un choque, es una pregunta/);
+  assert.doesNotMatch(groups[2].heading, /chocaría/);
+  assert.deepEqual(activationGroups([]), []);
+});
+
+test("al restaurar una regla archivada se avisa con el mismo texto de hallazgo", () => {
+  assert.equal(restoreHeading("Alfa hasta 500", [overlap()]), "«Alfa hasta 500» volvería inactiva, pero tiene 1 aviso con las reglas actuales:");
+  assert.match(restoreHeading("X", [overlap(), overlap()]), /tiene 2 avisos/);
+  const t = explainFinding(overlap({ active_conflict: false, affected_tasks: null, rules: rules(["alfa-500", false], ["alfa-libre", true]) }), nameOf);
+  assert.match(t.timing, /Ahora no ocurre: «Alfa hasta 500» está inactiva/);
+  assert.equal(t.tasks, null);
+  // Al restaurar sí puede haber recuento: el choque ocurrió antes y la nota no lo niega.
+  const past = explainFinding(overlap({ active_conflict: false, affected_tasks: 1, rules: rules(["alfa-500", false], ["alfa-libre", true]) }), nameOf);
+  assert.match(past.timing, /^Ahora no ocurre:/);
+  assert.match(past.tasks, /^1 factura ya coincidió/);
+});
+
+test("el historial dice en palabras qué pasó con una regla", () => {
+  assert.equal(auditStatusLabel("rule_merge", "merged"), "Unificada");
+  assert.equal(auditStatusLabel("rule_archive", "unarchived"), "Restaurada");
+  assert.equal(auditStatusLabel("rule_any_sender", "revoked"), "Opción avanzada retirada");
+  // Es el estado de la versión guardada, también al crear o editar: no se dice «activada».
+  assert.equal(auditStatusLabel("rule", "active"), "Versión activa");
+  assert.equal(auditStatusLabel("rule", "inactive"), "Versión inactiva");
+  // Lo que no es de una regla se deja tal cual.
+  assert.equal(auditStatusLabel("register_invoice", "confirmed"), "confirmed");
 });
 
 test("avisos fijos de la unificación y origen de la regla nueva", () => {
