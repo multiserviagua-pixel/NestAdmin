@@ -1004,7 +1004,7 @@ function ruleForm(): HTMLElement {
   } catch {
     draft = draftOf(editing);
   }
-  const id = h("input", { name: "id", "data-focus-key": "rule-form:id", required: true, placeholder: "p. ej. alfa-mensual", pattern: "[a-z0-9-]+", autocomplete: "off" }) as HTMLInputElement;
+  const id = h("input", { name: "id", "data-focus-key": "rule-form:id", required: true, placeholder: "p. ej. alfa-mensual", pattern: "[a-z0-9\\-]+", autocomplete: "off" }) as HTMLInputElement;
   const kind = h(
     "select",
     { name: "kind", "data-focus-key": "rule-form:kind" },
