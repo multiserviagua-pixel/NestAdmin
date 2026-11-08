@@ -23,7 +23,7 @@ import type {
   Task,
 } from "./types";
 
-import { actionBar, emptyState, h, icon, statusChip, tabs, type Child, type IconName } from "./components";
+import { actionBar, dataTable, emptyState, h, icon, sectionHeader, statusChip, tabs, type Child, type IconName, type Tone } from "./components";
 import { ageText, chooseTab, emailFlags, formatAmount, invoiceFlags, isKnownKind, nextSelection, sortForReview, splitByTab, tabOf, type Flag, type ReviewTab } from "./pendientes-text";
 
 const STATE_LABEL: Record<string, string> = {
@@ -253,10 +253,6 @@ function safeJson(text: string): Record<string, any> {
   }
 }
 
-function badge(taskState: string) {
-  return h("span", { class: `badge state-${taskState}` }, STATE_LABEL[taskState] ?? taskState);
-}
-
 /** Avisa una vez de cada factura que llega con importes dudosos (D120). */
 function announceDoubtfulAmounts() {
   for (const t of state.tasks) {
@@ -279,8 +275,8 @@ function openInReview(task: Task) {
   render();
 }
 
-function missing() {
-  return h("span", { class: "missing" }, "No consta");
+function missing(text = "No consta") {
+  return h("span", { class: "missing" }, text);
 }
 
 // ---- Vistas ----
@@ -853,60 +849,62 @@ function emailDetail(task: Task) {
   );
 }
 
+const TASK_TONE: Record<string, Tone> = {
+  queued: "info",
+  running: "info",
+  awaiting_review: "warn",
+  completed: "ok",
+  failed: "error",
+  cancelled: "neutral",
+};
+
 function tasksView() {
   return h(
     "section",
     { class: "page" },
     h("h2", {}, "Tareas"),
-    state.tasks.length === 0 ? h("p", { class: "empty" }, "Todavía no hay tareas. Importe un documento o consulte el correo.") : null,
-    state.tasks.length
-      ? h(
-          "table",
-          { class: "grid" },
-          h("thead", {}, h("tr", {}, ...["#", "Tipo", "Elemento", "Estado", "Intentos", "Detalle", ""].map((c) => h("th", {}, c)))),
-          h(
-            "tbody",
-            {},
-            ...state.tasks.map((t) =>
-              h(
-                "tr",
-                {},
-                h("td", {}, t.id),
-                h("td", {}, t.kind === "invoice" ? "Factura" : "Correo"),
-                h("td", {}, title(t)),
-                h("td", {}, badge(t.state)),
-                h("td", {}, t.attempts),
-                h(
-                  "td",
-                  { class: "detail-cell" },
-                  t.error
-                    ? h("span", { class: "error-text" }, t.error.message)
-                    : t.state === "queued" && state.settings?.ai_wait_message
-                      ? h("span", { class: "warn-text" }, state.settings.ai_wait_message)
-                      : t.result?.issues?.length
-                        ? t.result.issues.map((i: string) => ISSUE_LABEL[i] ?? i).join(", ")
-                        : "",
-                  t.result?.fallback ? h("span", { class: "meta" }, ` ${fallbackText(t.result.fallback)}`) : null,
-                ),
-                h(
-                  "td",
-                  {},
-                  t.state === "failed" ? h("button", { onclick: () => void act(() => api.retry(t.id), "Tarea reencolada") }, "Reintentar") : null,
-                  t.state === "awaiting_review"
-                    ? h(
-                        "button",
-                        {
-                          onclick: () => openInReview(t),
-                        },
-                        "Revisar",
-                      )
-                    : null,
-                ),
-              ),
+    state.tasks.length === 0
+      ? emptyState("Todavía no hay tareas", "Importe un documento o consulte el correo para crear la primera.")
+      : dataTable(
+          [
+            { label: "#", numeric: true },
+            { label: "Tipo" },
+            { label: "Elemento" },
+            { label: "Estado" },
+            { label: "Intentos", numeric: true },
+            { label: "Motivo o detalle" },
+            { label: "Acciones" },
+          ],
+          state.tasks.map((t) => [
+            t.id,
+            isKnownKind(t.kind) ? (t.kind === "invoice" ? "Factura" : "Correo") : "Tipo no reconocido",
+            h("span", { class: "cell-title" }, title(t)),
+            statusChip(STATE_LABEL[t.state] ?? t.state, TASK_TONE[t.state] ?? "neutral"),
+            t.attempts,
+            h(
+              "div",
+              { class: "detail-cell" },
+              t.error
+                ? h("span", { class: "error-text" }, t.error.message)
+                : t.state === "failed"
+                  ? missing("Motivo no consta")
+                  : t.state === "queued" && state.settings?.ai_wait_message
+                    ? h("span", { class: "warn-text" }, state.settings.ai_wait_message)
+                    : t.result?.issues?.length
+                      ? t.result.issues.map((i: string) => ISSUE_LABEL[i] ?? i).join(", ")
+                      : null,
+              t.result?.fallback ? h("span", { class: "meta" }, ` ${fallbackText(t.result.fallback)}`) : null,
             ),
-          ),
-        )
-      : null,
+            h(
+              "div",
+              { class: "row-actions" },
+              t.state === "failed"
+                ? h("button", { "data-focus-key": `task:retry:${t.id}`, onclick: () => void act(() => api.retry(t.id), "Tarea reencolada") }, "Reintentar")
+                : null,
+              t.state === "awaiting_review" ? h("button", { "data-focus-key": `task:review:${t.id}`, onclick: () => openInReview(t) }, "Revisar") : null,
+            ),
+          ]),
+        ),
   );
 }
 
@@ -1008,27 +1006,17 @@ function historyView() {
     h("h2", {}, "Historial"),
     h("p", { class: "intro" }, "Acciones ejecutadas en las cuentas de correo y el simulador de administración, y cambios de reglas, con su autorización."),
     state.audit.length
-      ? h(
-          "table",
-          { class: "grid" },
-          h("thead", {}, h("tr", {}, ...["Tarea", "Acción", "Resultado", "Autorización", "Detalle"].map((c) => h("th", {}, c)))),
-          h(
-            "tbody",
-            {},
-            ...[...state.audit].reverse().map((e) =>
-              h(
-                "tr",
-                {},
-                h("td", {}, e.task_id ?? "—"),
-                h("td", {}, ACTION_LABEL[e.action] ?? e.action),
-                h("td", {}, e.status),
-                h("td", {}, e.authorization ?? "—"),
-                h("td", {}, e.detail ?? ""),
-              ),
-            ),
-          ),
+      ? dataTable(
+          [{ label: "Tarea", numeric: true }, { label: "Acción" }, { label: "Resultado" }, { label: "Autorización" }, { label: "Detalle" }],
+          [...state.audit].reverse().map((e) => [
+            e.task_id ?? missing("Sin tarea"),
+            ACTION_LABEL[e.action] ?? e.action,
+            e.status,
+            e.authorization ?? missing(),
+            h("div", { class: "detail-cell" }, e.detail ?? missing()),
+          ]),
         )
-      : h("p", { class: "empty" }, "Aún no hay acciones registradas."),
+      : emptyState("Aún no hay acciones registradas", "Aquí aparecerá cada acción ejecutada, con su autorización."),
   );
 }
 
@@ -1165,7 +1153,7 @@ function issueText(error: { code: string; message: string }) {
 }
 
 function fetchNotice(report: FetchReport): { kind: "ok" | "error"; text: string } {
-  if (report.accounts.length === 0) return { kind: "error", text: "No hay cuentas de correo. Añada una en la sección Correo." };
+  if (report.accounts.length === 0) return { kind: "error", text: "No hay cuentas de correo. Añada una en la sección Cuentas de correo." };
   const failed = report.accounts.filter((a) => a.error);
   const imported = report.accounts.reduce((sum, a) => sum + (a.attachments?.imported ?? 0), 0);
   const skipped = report.accounts.flatMap((a) => a.attachments?.skipped ?? []);
@@ -1211,6 +1199,55 @@ function signIn(provider: MailProviderKind, label: string, account?: MailAccount
   });
 }
 
+function accountRow(a: MailAccount, m: MailView, busy: boolean) {
+  const [statusText, statusClass] = ACCOUNT_STATUS[a.status] ?? [a.status, "state-failed"];
+  const real = a.provider !== "simulator";
+  const configured = a.provider === "google" ? m.google_configured : m.microsoft_configured;
+  const renew = real && configured && (a.status !== "connected" || a.last_fetch?.error?.code === "unauthorized");
+  return h(
+    "li",
+    { class: "account" },
+    h(
+      "div",
+      { class: "account-main" },
+      h("div", { class: "account-name" }, h("strong", {}, a.label), statusChip(statusText, statusClass === "state-completed" ? "ok" : "error")),
+      h("div", { class: "meta" }, PROVIDER_LABEL[a.provider], " · ", a.address ?? missing("dirección no consta")),
+      h("div", { class: "meta" }, "Última consulta: ", lastFetch(a)),
+      h("div", { class: "meta mono" }, a.id),
+    ),
+    h(
+      "div",
+      { class: "row-actions" },
+      h(
+        "button",
+        {
+          "data-focus-key": `mail:rename:${a.id}`,
+          onclick: () => {
+            const label = prompt(`Nombre de la cuenta ${a.address ?? a.id}.\nDéjelo vacío para volver al predeterminado.`, a.label);
+            if (label !== null) void act(() => api.renameMailAccount(a.id, label), "Nombre de la cuenta guardado");
+          },
+        },
+        "Renombrar",
+      ),
+      renew ? h("button", { "data-focus-key": `mail:renew:${a.id}`, disabled: busy, onclick: () => signIn(a.provider, a.label, a) }, "Volver a iniciar sesión") : null,
+      h(
+        "button",
+        {
+          class: "danger",
+          "data-focus-key": `mail:remove:${a.id}`,
+          onclick: () => {
+            const what = real
+              ? `Se borrarán los tokens de «${a.label}» de este equipo y NestAdmin dejará de leer esa cuenta. Las tareas ya creadas seguirán visibles, pero no podrán enviar respuestas.`
+              : "NestAdmin dejará de leer el correo simulado. Puede volver a añadirlo.";
+            if (confirm(`${what} ¿Desconectar?`)) void act(() => api.removeMailAccount(a.id), `Cuenta «${a.label}» desconectada`);
+          },
+        },
+        "Desconectar",
+      ),
+    ),
+  );
+}
+
 function mailView() {
   const m = state.mail;
   if (!m) return h("section", { class: "page" }, h("p", {}, "Cargando…"));
@@ -1222,6 +1259,7 @@ function mailView() {
       "button",
       {
         class: "primary",
+        "data-focus-key": `mail:connect:${provider}`,
         disabled: busy || !configured,
         title: configured ? undefined : "El editor no ha configurado este proveedor en esta instalación",
         onclick: () => signIn(provider, label.value),
@@ -1243,77 +1281,12 @@ function mailView() {
     ),
     m.clients_error ? h("div", { class: "notice error", role: "alert" }, h("span", {}, m.clients_error)) : null,
     m.accounts.length
-      ? h(
-          "table",
-          { class: "grid" },
-          h("thead", {}, h("tr", {}, ...["Cuenta", "Proveedor", "Estado", "Última consulta", ""].map((c) => h("th", {}, c)))),
-          h(
-            "tbody",
-            {},
-            ...m.accounts.map((a) => {
-              const [statusText, statusClass] = ACCOUNT_STATUS[a.status] ?? [a.status, "state-failed"];
-              const real = a.provider !== "simulator";
-              const configured = a.provider === "google" ? m.google_configured : m.microsoft_configured;
-              const renew = real && configured && (a.status !== "connected" || a.last_fetch?.error?.code === "unauthorized");
-              return h(
-                "tr",
-                {},
-                h(
-                  "td",
-                  {},
-                  h("strong", {}, a.label),
-                  " ",
-                  h(
-                    "button",
-                    {
-                      class: "link",
-                      title: "Cambiar el nombre con que se muestra esta cuenta",
-                      onclick: () => {
-                        const label = prompt(
-                          `Nombre de la cuenta ${a.address ?? a.id}.
-Déjelo vacío para volver al predeterminado.`,
-                          a.label,
-                        );
-                        if (label !== null) void act(() => api.renameMailAccount(a.id, label), "Nombre de la cuenta guardado");
-                      },
-                    },
-                    "Renombrar",
-                  ),
-                  h("div", { class: "meta" }, a.address ?? h("span", { class: "missing" }, "dirección no consta")),
-                  h("div", { class: "meta mono" }, a.id),
-                ),
-                h("td", {}, PROVIDER_LABEL[a.provider]),
-                h("td", {}, h("span", { class: `badge ${statusClass}` }, statusText)),
-                h("td", { class: "detail-cell" }, lastFetch(a)),
-                h(
-                  "td",
-                  {},
-                  renew
-                    ? h("button", { disabled: busy, onclick: () => signIn(a.provider, a.label, a) }, "Volver a iniciar sesión")
-                    : null,
-                  h(
-                    "button",
-                    {
-                      class: "danger",
-                      onclick: () => {
-                        const what = real
-                          ? `Se borrarán los tokens de «${a.label}» de este equipo y NestAdmin dejará de leer esa cuenta. Las tareas ya creadas seguirán visibles, pero no podrán enviar respuestas.`
-                          : "NestAdmin dejará de leer el correo simulado. Puede volver a añadirlo.";
-                        if (confirm(`${what} ¿Desconectar?`)) void act(() => api.removeMailAccount(a.id), `Cuenta «${a.label}» desconectada`);
-                      },
-                    },
-                    "Desconectar",
-                  ),
-                ),
-              );
-            }),
-          ),
-        )
-      : h("p", { class: "empty" }, "No hay cuentas de correo. Conecte una cuenta de Google o Microsoft para consultar su bandeja de entrada."),
+      ? h("ul", { class: "accounts" }, ...m.accounts.map((a) => accountRow(a, m, busy)))
+      : emptyState("No hay cuentas de correo", "Conecte una cuenta de Google o Microsoft para consultar su bandeja de entrada."),
     h(
-      "div",
-      { class: "card" },
-      h("h3", {}, "Añadir cuenta"),
+      "section",
+      { class: "section" },
+      sectionHeader("Añadir cuenta"),
       h(
         "p",
         { class: "intro" },
@@ -1327,7 +1300,7 @@ Déjelo vacío para volver al predeterminado.`,
         providerButton("microsoft", m.microsoft_configured),
         m.accounts.some((a) => a.provider === "simulator")
           ? null
-          : h("button", { disabled: busy, onclick: () => void act(() => api.addSimulatedMailAccount(), "Correo simulado añadido") }, "Añadir correo simulado"),
+          : h("button", { "data-focus-key": "mail:add-simulated", disabled: busy, onclick: () => void act(() => api.addSimulatedMailAccount(), "Correo simulado añadido") }, "Añadir correo simulado"),
       ),
       busy
         ? h(
@@ -1339,7 +1312,7 @@ Déjelo vacío para volver al predeterminado.`,
               "Esperando al navegador… ",
               state.signInUrl ? h("span", {}, "Si no se abrió, copie esta dirección en su navegador: ", h("span", { class: "mono" }, state.signInUrl)) : null,
             ),
-            h("button", { onclick: () => void act(() => api.mailSignInCancel()) }, "Cancelar"),
+            h("button", { "data-focus-key": "mail:cancel", onclick: () => void act(() => api.mailSignInCancel()) }, "Cancelar"),
           )
         : null,
       unconfigured.length
@@ -1351,14 +1324,15 @@ Déjelo vacío para volver al predeterminado.`,
         : null,
     ),
     h(
-      "div",
-      { class: "card" },
-      h("h3", {}, "Mensajes por consulta"),
+      "section",
+      { class: "section" },
+      sectionHeader("Mensajes por consulta"),
       h("p", { class: "intro" }, "Cada vez que pulse «Consultar correo», NestAdmin lee como mucho este número de mensajes recientes de cada cuenta (de 1 a 500)."),
       h("div", { class: "row" }, h("label", {}, "Límite por cuenta", limit)),
       h(
         "button",
         {
+          "data-focus-key": "mail:save-limit",
           onclick: () => void act(() => api.setMailLimit(Number(limit.value)), `Límite guardado: ${limit.value} mensajes por cuenta`),
         },
         "Guardar límite",
@@ -1665,6 +1639,7 @@ function providerBlock(kind: Kind, opts: BlockOptions = {}): HTMLElement {
     "button",
     {
       disabled: checkDisabled(),
+      "data-focus-key": `provider:check:${kind}`,
       "aria-busy": b.loading ? "true" : undefined,
       onclick: () => void loadModels(kind, b.key.trim() || null),
     },
@@ -1730,7 +1705,7 @@ function providerBlock(kind: Kind, opts: BlockOptions = {}): HTMLElement {
         "p",
         {},
         b.listError ? "Ollama no está disponible en esta dirección. " : "Ollama no tiene ningún modelo instalado. ",
-        h("button", { class: "primary", onclick: goInstallLocal }, "Instalar IA local"),
+        h("button", { class: "primary", "data-focus-key": "provider:install-local", onclick: goInstallLocal }, "Instalar IA local"),
       ),
     );
   }
@@ -1769,10 +1744,10 @@ function providerBlock(kind: Kind, opts: BlockOptions = {}): HTMLElement {
       { class: "buttons" },
       h(
         "button",
-        { class: "primary", disabled: !ready, "aria-busy": b.busy ? "true" : undefined, onclick: () => void useProvider(kind, opts) },
+        { class: "primary", "data-focus-key": `provider:use:${kind}`, disabled: !ready, "aria-busy": b.busy ? "true" : undefined, onclick: () => void useProvider(kind, opts) },
         b.busy ? "Probando el proveedor…" : "Usar este proveedor",
       ),
-      external && b.saved ? h("button", { class: "danger", disabled: b.busy, onclick: () => void deleteKey(kind) }, "Eliminar clave") : null,
+      external && b.saved ? h("button", { class: "danger", "data-focus-key": `provider:delete-key:${kind}`, disabled: b.busy, onclick: () => void deleteKey(kind) }, "Eliminar clave") : null,
     ),
     b.outcome ? h("div", { class: `notice ${b.outcome.kind}`, role: b.outcome.kind === "error" ? "alert" : "status" }, h("span", {}, b.outcome.text)) : null,
   );
@@ -1794,9 +1769,9 @@ function settingsView() {
     { class: "page" },
     h("h2", {}, "Configuración"),
     h(
-      "div",
-      { class: "card" },
-      h("h3", {}, "Proveedor activo"),
+      "section",
+      { class: "section" },
+      sectionHeader("Proveedor activo"),
       h("p", {}, h("strong", {}, s.choice ? providerLabel(s.active.provider, s.active.model) : "Ninguno elegido")),
       s.ai_wait_message ? h("div", { class: "notice warn", role: "status" }, h("span", {}, s.ai_wait_message)) : null,
       h(
@@ -1804,6 +1779,7 @@ function settingsView() {
         { class: "choice" },
         h("input", {
           type: "checkbox",
+          "data-focus-key": "settings:local-fallback",
           checked: s.local_fallback,
           disabled: !externalChosen,
           onchange: (event) => {
@@ -1821,9 +1797,9 @@ function settingsView() {
     ),
     s.offer_external ? externalOffer() : null,
     h(
-      "div",
-      { class: "card" },
-      h("h3", {}, "Proveedor de IA"),
+      "section",
+      { class: "section" },
+      sectionHeader("Proveedor de IA"),
       h("p", { class: "intro" }, "Elija el proveedor. Solo se envía contenido a un proveedor externo si usted confirma su destino. OCR y extracción de texto se hacen siempre en este equipo."),
       ...KIND_ORDER.map((kind) =>
         h(
@@ -1836,6 +1812,7 @@ function settingsView() {
               type: "radio",
               name: "provider",
               value: kind,
+              "data-focus-key": `provider:pick:${kind}`,
               checked: pick === kind,
               onchange: () => {
                 state.pick = kind;
@@ -1848,7 +1825,7 @@ function settingsView() {
         ),
       ),
     ),
-    h("div", { class: "card" }, h("h3", {}, "Datos locales"), h("p", { class: "mono" }, s.data_dir)),
+    h("section", { class: "section" }, sectionHeader("Datos locales"), h("p", { class: "mono" }, s.data_dir || missing())),
   );
 }
 
@@ -1856,10 +1833,11 @@ function settingsView() {
 /// la persona termina el bloque (clave, modelo, destino y prueba).
 function externalOffer() {
   return h(
-    "div",
-    { class: "banner", role: "status" },
+    "section",
+    { class: "section", role: "status" },
+    sectionHeader("Ollama cloud"),
     h(
-      "span",
+      "p",
       {},
       "NestAdmin ahora puede trabajar con Ollama cloud, un proveedor externo que no necesita preparar nada en este equipo. Seguirá usando la IA local y no cambiará nada hasta que usted termine de configurarlo y confirme el destino de los datos.",
     ),
@@ -1870,6 +1848,7 @@ function externalOffer() {
         "button",
         {
           class: "primary",
+          "data-focus-key": "offer:accept",
           onclick: () => {
             state.pick = "ollama_cloud";
             void act(() => api.dismissExternalOffer());
@@ -1877,7 +1856,7 @@ function externalOffer() {
         },
         "Pasar a Ollama cloud",
       ),
-      h("button", { onclick: () => void act(() => api.dismissExternalOffer()) }, "No, gracias"),
+      h("button", { "data-focus-key": "offer:dismiss", onclick: () => void act(() => api.dismissExternalOffer()) }, "No, gracias"),
     ),
   );
 }
@@ -1894,7 +1873,7 @@ function closeWizard(notice?: string) {
 }
 
 function wizardView() {
-  const later = h("button", { onclick: () => closeWizard() }, "Ahora no");
+  const later = h("button", { "data-focus-key": "wizard:later", onclick: () => closeWizard() }, "Ahora no");
   const done = () => closeWizard("Proveedor listo: la IA responde y las tareas en espera se reanudan");
   const head = h(
     "div",
@@ -1911,9 +1890,9 @@ function wizardView() {
       "section",
       { class: "page wizard" },
       head,
-      h("h3", {}, "Ollama cloud"),
+      sectionHeader("Ollama cloud"),
       providerBlock("ollama_cloud", { auto: true, onDone: done }),
-      h("div", { class: "buttons" }, h("button", { onclick: () => ((state.wizardStep = "choose"), render()) }, "Volver"), later),
+      h("div", { class: "buttons" }, h("button", { "data-focus-key": "wizard:back", onclick: () => ((state.wizardStep = "choose"), render()) }, "Volver"), later),
     );
   }
   if (state.wizardStep === "other") {
@@ -1922,7 +1901,7 @@ function wizardView() {
       "section",
       { class: "page wizard" },
       head,
-      h("h3", {}, "Otro proveedor externo"),
+      sectionHeader("Otro proveedor externo"),
       ...kinds.map((kind) =>
         h(
           "div",
@@ -1944,7 +1923,7 @@ function wizardView() {
           state.wizardOther === kind ? h("div", { class: "indent" }, providerBlock(kind, { auto: true, onDone: done })) : null,
         ),
       ),
-      h("div", { class: "buttons" }, h("button", { onclick: () => ((state.wizardStep = "choose"), render()) }, "Volver"), later),
+      h("div", { class: "buttons" }, h("button", { "data-focus-key": "wizard:back", onclick: () => ((state.wizardStep = "choose"), render()) }, "Volver"), later),
     );
   }
   return h(
@@ -1952,25 +1931,25 @@ function wizardView() {
     { class: "page wizard" },
     head,
     h(
-      "div",
-      { class: "card" },
-      h("h3", {}, "Ollama cloud (recomendado)"),
+      "section",
+      { class: "section" },
+      sectionHeader("Ollama cloud (recomendado)"),
       h("p", { class: "intro" }, "Proveedor externo por defecto: no hay que instalar nada. Necesita su clave de Ollama y que usted confirme qué contenido sale del equipo."),
-      h("button", { class: "primary", onclick: () => ((state.wizardStep = "cloud"), render()) }, "Configurar Ollama cloud"),
+      h("button", { class: "primary", "data-focus-key": "wizard:cloud", onclick: () => ((state.wizardStep = "cloud"), render()) }, "Configurar Ollama cloud"),
     ),
     h(
-      "div",
-      { class: "card" },
-      h("h3", {}, "Otro proveedor externo"),
+      "section",
+      { class: "section" },
+      sectionHeader("Otro proveedor externo"),
       h("p", { class: "intro" }, "Un servicio compatible con OpenAI o Claude de Anthropic, con su propia clave."),
-      h("button", { onclick: () => ((state.wizardStep = "other"), render()) }, "Elegir otro proveedor externo"),
+      h("button", { "data-focus-key": "wizard:other", onclick: () => ((state.wizardStep = "other"), render()) }, "Elegir otro proveedor externo"),
     ),
     h(
-      "div",
-      { class: "card" },
-      h("h3", {}, "Usar la IA local"),
+      "section",
+      { class: "section" },
+      sectionHeader("Usar la IA local"),
       h("p", { class: "intro" }, "Ollama en este equipo: el contenido no sale de él. Hay que instalar Ollama y descargar un modelo de varios GB (Preparación)."),
-      h("button", { onclick: goInstallLocal }, "Usar la IA local"),
+      h("button", { "data-focus-key": "wizard:local", onclick: goInstallLocal }, "Usar la IA local"),
     ),
     h("div", { class: "buttons" }, later),
   );
@@ -2088,19 +2067,18 @@ function applyStartup() {
   render(true);
 }
 
+const STEP_ORDER: SetupStep[] = ["ocr", "ollama", "service", "model", "verify"];
+
+const STEP_TONE: Record<SetupEvent["state"], Tone> = { running: "info", done: "ok", skipped: "ok", failed: "error" };
+
 function stepRow(step: SetupStep) {
   const event = state.steps[step];
   const running = event?.state === "running";
   return h(
-    "div",
+    "li",
     { class: "component" },
-    h(
-      "span",
-      { class: "name" },
-      STEP_LABEL[step],
-      event ? h("span", { class: `badge step-${event.state}` }, STEP_STATE[event.state]) : h("span", { class: "badge" }, "Pendiente"),
-    ),
-    h("div", { class: "side" }),
+    h("span", { class: "name" }, `Paso ${STEP_ORDER.indexOf(step) + 1}. ${STEP_LABEL[step]}`),
+    event ? statusChip(STEP_STATE[event.state], STEP_TONE[event.state]) : statusChip("Pendiente", "neutral"),
     event
       ? h(
           "span",
@@ -2123,7 +2101,7 @@ function memoryNotice() {
     h("span", {}, m.warning),
     state.prepareOnly || state.preparing || m.level === "recommended"
       ? null
-      : h("button", { onclick: () => ((state.view = "settings"), render()) }, "Ir a Configuración"),
+      : h("button", { "data-focus-key": "setup:to-settings", onclick: () => ((state.view = "settings"), render()) }, "Ir a Configuración"),
   );
 }
 
@@ -2133,20 +2111,21 @@ function setupView() {
   const report = done?.report;
   const check = state.check;
   const startupFailed = state.startup?.outcome === "failed" ? state.startup.error : null;
+  const finished = STEP_ORDER.filter((s) => state.steps[s]?.state === "done" || state.steps[s]?.state === "skipped").length;
   const buttons: Child[] = [];
   if (state.preparing) {
-    buttons.push(h("button", { onclick: () => void api.setupCancel() }, "Cancelar"));
+    buttons.push(h("button", { "data-focus-key": "setup:cancel", onclick: () => void api.setupCancel() }, "Cancelar"));
   } else if (!report || !state.prepareOnly) {
     buttons.push(
       h(
         "button",
-        { class: "primary", onclick: () => void startPreparation() },
+        { class: "primary", "data-focus-key": "setup:start", onclick: () => void startPreparation() },
         error ? "Reintentar" : report ? "Comprobar de nuevo" : "Preparar ahora",
       ),
     );
   }
   if (state.prepareOnly && !report) {
-    buttons.push(h("button", { onclick: () => void api.setupAbandon() }, "Cerrar sin terminar"));
+    buttons.push(h("button", { "data-focus-key": "setup:abandon", onclick: () => void api.setupAbandon() }, "Cerrar sin terminar"));
   }
   return h(
     "section",
@@ -2163,7 +2142,8 @@ function setupView() {
     !state.preparing && !done && check?.status === "ready" ? h("p", { class: "ok-line" }, "La IA local está lista.") : null,
     startupFailed && !done ? h("p", { class: "error-text", role: "alert" }, `Ollama no arrancó: ${startupFailed.message}`) : null,
     memoryNotice(),
-    h("div", { class: "components" }, ...(["ocr", "ollama", "service", "model", "verify"] as SetupStep[]).map(stepRow)),
+    h("p", { class: "meta", role: "status" }, `${finished} de ${STEP_ORDER.length} pasos completados`),
+    h("ol", { class: "components" }, ...STEP_ORDER.map(stepRow)),
     report
       ? h(
           "p",
