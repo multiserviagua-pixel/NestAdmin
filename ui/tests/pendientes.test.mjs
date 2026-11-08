@@ -11,6 +11,7 @@ import {
   sortForReview,
   splitByTab,
   tabOf,
+  totalIsProposed,
 } from "../src/pendientes-text.ts";
 
 const labels = (flags) => flags.map((f) => f.label);
@@ -42,12 +43,19 @@ test("importes en formato español, ausencia explícita y literal si no es núme
   assert.equal(formatAmount("10.00", "euros"), "10,00");
 });
 
-test("antigüedad", () => {
-  const day = 86400;
-  assert.equal(ageText(1000, 1000), "hoy");
-  assert.equal(ageText(1000 + day, 1000), "hoy");
-  assert.equal(ageText(1000, 1000 + day), "ayer");
-  assert.equal(ageText(1000, 1000 + 5 * day), "hace 5 días");
+test("antigüedad con marcas en milisegundos, como Task.created_at", () => {
+  const day = 86_400_000;
+  const now = 1_794_000_000_000;
+  assert.equal(ageText(now, now), "hoy");
+  assert.equal(ageText(now + day, now), "hoy");
+  assert.equal(ageText(now - day, now), "ayer");
+  assert.equal(ageText(now - 30 * day, now), "hace 30 días");
+});
+
+test("el total recuperado se reconoce como propuesta", () => {
+  assert.equal(totalIsProposed({ recovered: [{ field: "total" }] }), true);
+  assert.equal(totalIsProposed({ recovered: [{ field: "tax" }] }), false);
+  assert.equal(totalIsProposed(null), false);
 });
 
 test("una factura sin problemas no tiene marcas; sin resultado tampoco falla", () => {
