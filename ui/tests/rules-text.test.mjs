@@ -9,16 +9,16 @@ import {
   ruleRisk,
   ruleSentence,
   searchText,
-} from "./rules-text.ts";
+} from "../src/rules-text.ts";
 
-const invoice = (conditions: Record<string, unknown>) => ({
+const invoice = (conditions) => ({
   id: "r",
   version: 1,
   action_kind: "register_invoice",
   conditions,
   active: false,
 });
-const send = (conditions: Record<string, unknown>) => ({ ...invoice(conditions), action_kind: "send_draft" });
+const send = (conditions) => ({ ...invoice(conditions), action_kind: "send_draft" });
 
 test("importes en formato español", () => {
   assert.equal(formatAmount("500.00"), "500,00 €");

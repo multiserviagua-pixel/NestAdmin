@@ -428,18 +428,41 @@ task(
   "invoice",
   { document: "factura-beta-escaneada.pdf" },
   "awaiting_review",
-  invoiceResult("factura-beta-escaneada.pdf", "125.00", ["total_mismatch"], {
-    ...fileOrigin("factura-beta-escaneada.pdf", null, 0),
-    kind: "email",
-    account: origin("google-1"),
-    message_id: "google-1:18c2-sintetico",
-    from: "facturas@proveedor-alfa.test",
-    subject: "Factura FS-2026-015",
-    attachment: "factura-beta-escaneada.pdf",
-  } as DocumentOrigin),
+  (() => {
+    const result = invoiceResult("factura-beta-escaneada.pdf", "125.00", ["total_mismatch"], {
+      ...fileOrigin("factura-beta-escaneada.pdf", null, 0),
+      kind: "email",
+      account: origin("google-1"),
+      message_id: "google-1:18c2-sintetico",
+      from: "facturas@proveedor-alfa.test",
+      subject: "Factura FS-2026-015",
+      attachment: "factura-beta-escaneada.pdf",
+    } as DocumentOrigin);
+    // Nombre largo y OCR de baja calidad en una página (D93).
+    result.fields.supplier = "Distribuciones y Suministros Industriales Beta del Norte, Sociedad Limitada";
+    result.fields.invoice_number = "FS-2026-015";
+    (result.pages[1] as Record<string, unknown>).low_confidence = true;
+    return result;
+  })(),
 );
-// Importado antes de que se registrara el origen: se dice que no consta.
-task("invoice", { document: "factura-antigua.txt" }, "awaiting_review", invoiceResult("factura-antigua.txt", "121.00", [], null));
+// Importado antes de que se registrara el origen y con datos sin leer: se dice que no consta.
+task(
+  "invoice",
+  { document: "factura-antigua.txt" },
+  "awaiting_review",
+  (() => {
+    const result = invoiceResult("factura-antigua.txt", "121.00", [], null) as { fields: Record<string, string | null> };
+    Object.assign(result.fields, { supplier: null, invoice_number: null, date: null, total: null, currency: null });
+    return result;
+  })(),
+);
+// `?muchos`: lista grande, para comprobar el desplazamiento de la lista y del detalle.
+if (new URLSearchParams(location.search).has("muchos")) {
+  for (let i = 1; i <= 24; i++) {
+    const name = `factura-lote-${i}.pdf`;
+    task("invoice", { document: name }, "awaiting_review", invoiceResult(name, `${100 + i}.00`, [], fileOrigin(name, null, i)));
+  }
+}
 task("email", { message_id: "simulador:M-0005", account: "simulador" }, "awaiting_review", {
   type: "email",
   version: 1,

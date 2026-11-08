@@ -35,25 +35,8 @@ import {
   searchText,
 } from "./rules-text";
 
-// ---- Utilidades de DOM: todo el texto se inserta como texto, nunca como HTML. ----
-
-type Child = Node | string | number | null | undefined | false;
-type Attrs = Record<string, string | boolean | ((event: Event) => void) | undefined>;
-
-function h(tag: string, attrs: Attrs = {}, ...children: Child[]): HTMLElement {
-  const el = document.createElement(tag);
-  for (const [key, value] of Object.entries(attrs)) {
-    if (value === undefined || value === false) continue;
-    if (typeof value === "function") el.addEventListener(key.replace(/^on/, ""), value);
-    else if (value === true) el.setAttribute(key, "");
-    else el.setAttribute(key, value);
-  }
-  for (const child of children) {
-    if (child === null || child === undefined || child === false) continue;
-    el.append(child instanceof Node ? child : String(child));
-  }
-  return el;
-}
+import { actionBar, emptyState, h, helpTip, icon, sectionHeader, statusChip, tabs, type Child, type IconName } from "./components";
+import { ageText, chooseTab, emailFlags, formatAmount, invoiceFlags, isKnownKind, nextSelection, sortForReview, splitByTab, tabOf, type Flag, type ReviewTab } from "./pendientes-text";
 
 const STATE_LABEL: Record<string, string> = {
   queued: "En cola",
@@ -125,7 +108,12 @@ const MAIL_ERROR: Record<string, string> = {
 
 const state = {
   view: "review" as View,
-  selected: null as number | null,
+  // Pendientes (D137): pestaña, seleccionado de cada una y orden mostrado, para pasar al siguiente.
+  reviewTab: null as ReviewTab | null,
+  selected: { invoices: null, emails: null } as Record<ReviewTab, number | null>,
+  reviewOrder: { invoices: [], emails: [] } as Record<ReviewTab, number[]>,
+  // Clave del control que debe recibir el foco tras el repintado (flechas de la lista).
+  focusAfterRender: null as string | null,
   // Filtro de la lista de pendientes por origen: "" (todo), "file" o el ID de una cuenta.
   originFilter: "",
   tasks: [] as Task[],
@@ -140,7 +128,7 @@ const state = {
   mail: null as MailView | null,
   // Dirección del inicio de sesión en curso, por si el navegador no se abrió solo.
   signInUrl: null as string | null,
-  notice: null as { kind: "ok" | "error" | "warn"; text: string } | null,
+  notice: null as { kind: "ok" | "error" | "warn"; text: string; task?: number } | null,
   /** Tareas cuyos importes dudosos ha confirmado la persona antes de aprobar. */
   amountsChecked: {} as Record<number, boolean>,
   // Borradores editados y aún no guardados, para no perderlos al refrescar.
@@ -284,8 +272,20 @@ function announceDoubtfulAmounts() {
     const message = t.result?.amount_review;
     if (t.state !== "awaiting_review" || !message || announced.has(t.id)) continue;
     announced.add(t.id);
-    state.notice = { kind: "warn", text: message };
+    // El detalle da la ruta y los importes; el aviso, una línea con el documento y cómo llegar.
+    state.notice = { kind: "warn", text: `Importes dudosos en «${title(t)}»: revíselos antes de aprobar. Solo se registra con su aprobación.`, task: t.id };
   }
+}
+
+/** Abre una tarea en su pestaña de Pendientes, quitando el filtro si la ocultara. */
+function openInReview(task: Task) {
+  const tab = tabOf(task.kind);
+  state.view = "review";
+  state.reviewTab = tab;
+  state.selected[tab] = task.id;
+  state.originFilter = "";
+  state.notice = null;
+  render();
 }
 
 function missing() {
@@ -295,7 +295,6 @@ function missing() {
 // ---- Vistas ----
 
 function header() {
-  const pending = state.tasks.filter((t) => t.state === "awaiting_review").length;
   const working = state.tasks.filter((t) => t.state === "queued" || t.state === "running").length;
   const active = state.settings?.active;
   const fileInput = h("input", {
@@ -319,7 +318,6 @@ function header() {
     h(
       "div",
       { class: "status" },
-      h("span", { class: "pill" }, `${pending} pendientes`),
       working ? h("span", { class: "pill working" }, `${working} en proceso`) : null,
       state.settings?.ai_wait_message
         ? h("button", { class: "pill provider waiting", title: state.settings.ai_wait_message, onclick: goToSettings }, "IA sin configurar")
@@ -374,63 +372,155 @@ function header() {
 }
 
 function nav() {
-  const items: Array<[View, string, number?]> = [
-    ["review", "Pendientes", state.tasks.filter((t) => t.state === "awaiting_review").length],
-    ["tasks", "Tareas"],
-    ["rules", "Reglas"],
-    ["history", "Historial"],
-    ["mail", "Correo", state.mail?.accounts.some(needsAttention) ? 1 : undefined],
-    ["settings", "Configuración"],
-    ["setup", "Preparación", (state.check && state.check.status !== "ready") || state.memory?.level === "insufficient" ? 1 : undefined],
+  // Entrada: vista, etiqueta, icono, contador y si el contador avisa de un problema.
+  type Entry = [View, string, IconName, number?, boolean?];
+  const groups: Array<[string, Entry[]]> = [
+    [
+      "Trabajo",
+      [
+        ["review", "Pendientes", "inbox", state.tasks.filter((t) => t.state === "awaiting_review").length],
+        ["tasks", "Tareas", "tasks"],
+        ["history", "Historial", "history"],
+      ],
+    ],
+    ["Automatización", [["rules", "Reglas", "rules"]]],
+    [
+      "Sistema",
+      [
+        ["mail", "Cuentas de correo", "mail", state.mail?.accounts.some(needsAttention) ? 1 : undefined, true],
+        ["settings", "Configuración", "settings"],
+        ["setup", "Preparación", "setup", (state.check && state.check.status !== "ready") || state.memory?.level === "insufficient" ? 1 : undefined, true],
+      ],
+    ],
   ];
   return h(
     "nav",
     { class: "sidebar", "aria-label": "Secciones" },
-    ...items.map(([view, label, count]) =>
-      h(
-        "button",
-        {
-          class: state.view === view ? "nav active" : "nav",
-          "aria-current": state.view === view ? "page" : undefined,
-          onclick: () => {
-            state.view = view;
-            state.notice = null;
-            if (view === "settings") resetBlocks();
-            render();
+    ...groups.flatMap(([group, entries]) => [
+      h("div", { class: "nav-group" }, group),
+      ...entries.map(([view, label, iconName, count, attention]) =>
+        h(
+          "button",
+          {
+            class: state.view === view ? "nav active" : "nav",
+            title: label,
+            "aria-current": state.view === view ? "page" : undefined,
+            "data-focus-key": `nav:${view}`,
+            onclick: () => {
+              state.view = view;
+              state.notice = null;
+              if (view === "settings") resetBlocks();
+              render();
+            },
           },
-        },
-        label,
-        count ? h("span", { class: "count" }, count) : null,
+          icon(iconName),
+          h("span", { class: "nav-label" }, label),
+          count ? h("span", { class: attention ? "count attention" : "count" }, count) : null,
+        ),
       ),
-    ),
+    ]),
     isPreview ? h("p", { class: "preview-note" }, "Vista previa en navegador con datos sintéticos.") : null,
   );
 }
 
+const TAB_NAME: Record<ReviewTab, string> = { invoices: "Facturas", emails: "Correos" };
+
+/** Fecha corta de una fila. Sin dato, «Sin fecha». */
+function shortDate(value: unknown): string {
+  if (typeof value !== "string" && typeof value !== "number") return "Sin fecha";
+  const date = typeof value === "number" ? new Date(value * 1000) : new Date(value);
+  if (Number.isNaN(date.getTime())) return String(value);
+  return date.toLocaleDateString("es-ES", { day: "2-digit", month: "short", ...(typeof value === "string" && /^\d{4}-\d{2}-\d{2}$/.test(value) ? { timeZone: "UTC" } : {}) });
+}
+
+function flagChips(flags: Flag[]) {
+  return flags.map((f) => statusChip(f.label, f.tone));
+}
+
+/** Fila de una factura: quién e importe, número y fecha, de dónde viene y qué falla. */
+function invoiceRow(task: Task, ageLabel: string): Child[] {
+  const fields = task.result?.fields ?? {};
+  const flags = invoiceFlags(task.result);
+  const input = safeJson(task.input_ref);
+  const origin: DocumentOrigin | undefined = task.result?.origin ?? input.origin;
+  const source = origin?.kind === "email" ? `Adjunto de ${origin.from ?? "remitente no consta"}` : title(task);
+  const part = task.result?.part?.of > 1 ? ` · parte ${task.result?.part.index} de ${task.result?.part.of}` : "";
+  return [
+    h(
+      "span",
+      { class: "item-line" },
+      fields.supplier ? h("span", { class: "item-title" }, fields.supplier) : h("span", { class: "item-title missing" }, "Proveedor no consta"),
+      h("span", { class: "item-amount" }, formatAmount(fields.total, fields.currency) ?? h("span", { class: "missing" }, "Total no consta")),
+    ),
+    h("span", { class: "item-sub" }, `${fields.invoice_number ?? "Sin número"} · ${shortDate(fields.date)}${part}`),
+    h("span", { class: "item-sub" }, `${source} · ${ageLabel}`),
+    flags.length ? h("span", { class: "item-flags" }, ...flagChips(flags)) : null,
+  ];
+}
+
+/** Fila de un correo (R13, D48): remitente, asunto y cuenta, categoría y qué falla. */
+function emailRow(task: Task): Child[] {
+  const input = safeJson(task.input_ref);
+  const message = task.result?.message ?? input.message ?? {};
+  const account = accountShort(taskMailOrigin(task), accountId(message.id ?? input.message_id));
+  const category = task.result?.category;
+  return [
+    h(
+      "span",
+      { class: "item-line" },
+      message.from ? h("span", { class: "item-title" }, message.from) : h("span", { class: "item-title missing" }, "Remitente no consta"),
+      h("span", { class: "item-side" }, shortDate(message.date)),
+    ),
+    h("span", { class: "item-sub" }, message.subject ?? "(sin asunto)"),
+    h("span", { class: "item-sub" }, `Cuenta: ${account}`),
+    h(
+      "span",
+      { class: "item-flags" },
+      isKnownKind(task.kind) ? null : statusChip("Tipo no reconocido", "error"),
+      category ? statusChip(CATEGORY_LABEL[category] ?? category) : null,
+      ...flagChips(emailFlags(task.result)),
+    ),
+  ];
+}
+
 function reviewView() {
-  const all = state.tasks.filter((t) => t.state === "awaiting_review");
-  // Orígenes presentes en la lista, para el filtro: archivos importados y cada cuenta.
+  const all = sortForReview(state.tasks.filter((t) => t.state === "awaiting_review"));
+  const split = splitByTab(all);
+  const tab = chooseTab(state.reviewTab, { invoices: split.invoices.length, emails: split.emails.length });
+  state.reviewTab = tab;
+  const inTab = split[tab];
+  // Orígenes de esta pestaña, para el filtro: archivos importados y cada cuenta.
   const origins = new Map<string, string>();
-  for (const t of all) {
+  for (const t of inTab) {
     const key = originKey(t);
     if (!origins.has(key)) origins.set(key, key === "file" ? "Archivos importados" : accountShort(taskMailOrigin(t), key));
   }
   if (state.originFilter && !origins.has(state.originFilter)) state.originFilter = "";
-  const pending = all.filter((t) => !state.originFilter || originKey(t) === state.originFilter);
-  if (state.selected === null || !pending.some((t) => t.id === state.selected)) state.selected = pending[0]?.id ?? null;
-  const selected = pending.find((t) => t.id === state.selected);
+  const pending = inTab.filter((t) => !state.originFilter || originKey(t) === state.originFilter);
+  const ids = pending.map((t) => t.id);
+  state.selected[tab] = nextSelection(state.reviewOrder[tab], ids, state.selected[tab]);
+  state.reviewOrder[tab] = ids;
+  const selected = pending.find((t) => t.id === state.selected[tab]);
+  const now = Date.now() / 1000;
+  const otherTab: ReviewTab = tab === "invoices" ? "emails" : "invoices";
+  const moveTo = (id: number | undefined) => {
+    if (id === undefined) return;
+    state.selected[tab] = id;
+    render();
+  };
   const filter = h(
     "select",
     {
       "aria-label": "Filtrar por origen",
+      "data-focus-key": "review-filter",
       onchange: (event) => {
         state.originFilter = (event.target as HTMLSelectElement).value;
         render();
       },
     },
-    h("option", { value: "" }, `Todos los orígenes (${all.length})`),
+    h("option", { value: "" }, `Todos los orígenes (${inTab.length})`),
     ...[...origins].map(([key, label]) =>
-      h("option", { value: key, selected: key === state.originFilter }, `${label} (${all.filter((t) => originKey(t) === key).length})`),
+      h("option", { value: key, selected: key === state.originFilter }, `${label} (${inTab.filter((t) => originKey(t) === key).length})`),
     ),
   );
   return h(
@@ -439,27 +529,89 @@ function reviewView() {
     h(
       "div",
       { class: "list" },
-      h("h2", {}, "Pendientes de revisión"),
-      origins.size > 1 ? h("label", { class: "filter" }, "Origen ", filter) : null,
-      all.length === 0 ? h("p", { class: "empty" }, "No hay nada pendiente. Las tareas nuevas aparecerán aquí.") : null,
-      ...pending.map((t) =>
-        h(
-          "button",
-          {
-            class: t.id === state.selected ? "item selected" : "item",
-            onclick: () => {
-              state.selected = t.id;
-              render();
-            },
+      h(
+        "div",
+        { class: "list-head" },
+        h("h2", {}, "Pendientes de revisión"),
+        tabs({
+          label: "Tipo de pendiente",
+          panelId: "review-list",
+          active: tab,
+          items: (["invoices", "emails"] as ReviewTab[]).map((key) => ({ key, label: TAB_NAME[key], count: split[key].length })),
+          onSelect: (key) => {
+            state.reviewTab = key;
+            state.originFilter = "";
+            render();
           },
-          h("span", { class: "kind" }, t.kind === "invoice" ? "Factura" : "Correo"),
-          h("span", { class: "item-title" }, title(t)),
-          (t.result?.issues?.length ?? 0) > 0 ? h("span", { class: "warn-dot", title: "Con incidencias" }, "!") : null,
-          h("span", { class: "item-origin" }, itemOrigin(t)),
+        }),
+      ),
+      origins.size > 1 ? h("label", { class: "filter" }, "Origen", filter) : null,
+      h(
+        "div",
+        { class: "list-items", id: "review-list", role: "tabpanel", "aria-label": TAB_NAME[tab], "data-scroll-key": `list:${tab}` },
+        all.length === 0
+          ? emptyState("No hay nada pendiente", "Las tareas nuevas aparecerán aquí.")
+          : inTab.length === 0
+            ? emptyState(
+                `No hay ${TAB_NAME[tab].toLowerCase()} pendientes`,
+                null,
+                h(
+                  "button",
+                  {
+                    onclick: () => {
+                      state.reviewTab = otherTab;
+                      render();
+                    },
+                  },
+                  `Ver ${TAB_NAME[otherTab].toLowerCase()} (${split[otherTab].length})`,
+                ),
+              )
+            : null,
+        ...pending.map((t, index) =>
+          h(
+            "button",
+            {
+              class: t.id === state.selected[tab] ? "item selected" : "item",
+              "aria-current": t.id === state.selected[tab] ? "true" : undefined,
+              "data-focus-key": `item:${t.id}`,
+              onclick: () => moveTo(t.id),
+              // Las flechas solo mueven la selección: aprobar o descartar nunca tienen atajo (D138).
+              onkeydown: (event) => {
+                const key = (event as KeyboardEvent).key;
+                const target = key === "ArrowDown" ? index + 1 : key === "ArrowUp" ? index - 1 : key === "Home" ? 0 : key === "End" ? pending.length - 1 : -1;
+                if (target < 0 || target >= pending.length) return;
+                event.preventDefault();
+                state.focusAfterRender = `item:${pending[target]!.id}`;
+                moveTo(pending[target]!.id);
+              },
+            },
+            ...(tabOf(t.kind) === "invoices" ? invoiceRow(t, ageText(t.created_at, now)) : emailRow(t)),
+          ),
         ),
       ),
     ),
-    h("div", { class: "detail" }, selected ? (selected.kind === "invoice" ? invoiceDetail(selected) : emailDetail(selected)) : null),
+    selected ? (tabOf(selected.kind) === "invoices" ? invoiceDetail(selected) : emailDetail(selected)) : h("div", { class: "detail" }),
+  );
+}
+
+/** Lista de incidencias con su porqué siempre a la vista (lo crítico nunca va en una ayuda). */
+function flagList(flags: Flag[]) {
+  const shown = flags.filter((f) => !f.recovery);
+  return shown.length
+    ? h("ul", { class: "flag-list" }, ...shown.map((f) => h("li", {}, statusChip(f.label, f.tone), h("span", {}, f.why))))
+    : null;
+}
+
+function openOriginal(task: Task) {
+  return h(
+    "button",
+    {
+      onclick: () =>
+        isPreview
+          ? ((state.notice = { kind: "ok", text: "Vista previa: en la aplicación se abriría la copia guardada con el visor del sistema." }), render())
+          : void act(() => api.openOriginal(task.id)),
+    },
+    "Abrir original",
   );
 }
 
@@ -519,13 +671,23 @@ function invoiceDetail(task: Task) {
   const ocrPages = pages.filter((p) => p.method === "ocr").map((p) => p.number);
   const sources: Record<string, FieldSource> = r.sources ?? {};
   const origin: DocumentOrigin | null = r.origin ?? safeJson(task.input_ref).origin ?? null;
-  return h(
+  const needsConfirmation = r.recovery?.needs_confirmation === true;
+  const article = h(
     "article",
     {},
-    h("h2", {}, title(task)),
+    h(
+      "div",
+      { class: "detail-head" },
+      h(
+        "div",
+        {},
+        h("h2", {}, fields.supplier ?? h("span", { class: "missing" }, "Proveedor no consta")),
+        h("p", { class: "detail-sub" }, `${fields.invoice_number ?? "Sin número"} · ${title(task)}`),
+      ),
+      h("div", { class: "detail-amount" }, formatAmount(fields.total, fields.currency) ?? h("span", { class: "missing" }, "Total no consta")),
+    ),
     provenance(r),
     fallbackNotice(r),
-    documentOrigin(task, origin),
     r.part && r.part.of > 1
       ? h(
           "p",
@@ -562,9 +724,6 @@ function invoiceDetail(task: Task) {
                 ),
               )
             : null,
-          issues.includes("total_mismatch")
-            ? h("p", {}, `Base ${fields.subtotal ?? "?"} + IVA ${fields.tax ?? "?"} no coincide con el total ${fields.total ?? "?"}.`)
-            : null,
           h(
             "label",
             { class: "confirm" },
@@ -581,30 +740,20 @@ function invoiceDetail(task: Task) {
         )
       : h("p", { class: "reason" }, `Motivo de la revisión: ${r.review_reason ?? "requiere aprobación"}`),
     recoveryBox(task, "registrar"),
-    issues.length
-      ? h("ul", { class: "issues" }, ...issues.map((i) => h("li", {}, ISSUE_LABEL[i] ?? i)))
-      : h("p", { class: "ok-line" }, "Sin incidencias en los importes."),
-    (r.duplicates ?? []).length
-      ? h(
-          "p",
-          { class: "dup" },
-          "Se parece a: ",
-          (r.duplicates as Array<{ existing_id: string }>).map((d) => `tarea ${d.existing_id}`).join(", "),
-          ". No se ha descartado; decida usted.",
-        )
-      : null,
+    flagList(invoiceFlags(r)) ?? (issues.length ? null : h("p", { class: "ok-line" }, "Sin incidencias en los importes.")),
+    h("h3", {}, "Datos extraídos"),
     h(
       "table",
       { class: "fields" },
+      h("thead", {}, h("tr", {}, h("th", { scope: "col" }, "Campo"), h("th", { scope: "col" }, "Valor"), h("th", { scope: "col" }, "Dónde aparece en el original"))),
       h(
         "tbody",
         {},
-        h("tr", {}, h("th", {}, "Campo"), h("th", {}, "Valor extraído"), h("th", {}, "Dónde aparece en el original")),
         ...Object.keys(FIELD_LABEL).map((key) =>
           h(
             "tr",
             {},
-            h("th", {}, FIELD_LABEL[key]),
+            h("th", { scope: "row" }, FIELD_LABEL[key]),
             h(
               "td",
               {},
@@ -617,19 +766,25 @@ function invoiceDetail(task: Task) {
         ),
       ),
     ),
-    h(
-      "div",
-      { class: "buttons" },
+    h("h3", {}, "Origen del documento"),
+    documentOrigin(origin),
+  );
+  return h(
+    "div",
+    { class: "detail" },
+    h("div", { class: "detail-scroll", "data-scroll-key": `detail:${task.id}` }, article),
+    actionBar(
+      !checked ? "Para aprobar, confirme antes los importes con el documento." : needsConfirmation ? "Para aprobar, confirme primero que el intento anterior no se envió." : null,
       h(
         "button",
         {
           class: "primary",
-          disabled: !checked || r.recovery?.needs_confirmation === true,
-          ...(checked ? {} : { title: "Confirme antes los importes con el documento" }),
+          disabled: !checked || needsConfirmation,
           onclick: () => void act(async () => afterApproval(await api.approve(task.id, r.version ?? 1), "Factura registrada en el simulador")),
         },
         "Aprobar y registrar",
       ),
+      openOriginal(task),
       h("button", { class: "danger", onclick: () => void act(() => api.reject(task.id), "Tarea descartada") }, "Descartar"),
     ),
   );
@@ -642,15 +797,23 @@ function emailDetail(task: Task) {
   const body = h("textarea", {
     rows: "10",
     "aria-label": "Borrador de respuesta",
+    "data-focus-key": `draft:${task.id}`,
     oninput: () => (state.drafts[task.id] = body.value),
   }) as HTMLTextAreaElement;
   body.value = state.drafts[task.id] ?? draft.body ?? "";
   const recipients: string[] = draft.to ?? [];
-  return h(
+  const needsConfirmation = r.recovery?.needs_confirmation === true;
+  const article = h(
     "article",
     {},
-    h("h2", {}, message.subject ?? h("span", { class: "missing" }, "(sin asunto)")),
+    h(
+      "div",
+      { class: "detail-head" },
+      h("h2", {}, message.subject ?? h("span", { class: "missing" }, "(sin asunto)")),
+      r.category ? statusChip(CATEGORY_LABEL[r.category] ?? r.category) : null,
+    ),
     provenance(r),
+    isKnownKind(task.kind) ? null : h("div", { class: "notice error", role: "alert" }, h("span", {}, `Tipo de tarea no reconocido: ${task.kind}. Se muestra como correo; compruébelo antes de aprobar.`)),
     fallbackNotice(r),
     h("p", { class: "reason" }, `Motivo de la revisión: ${r.review_reason ?? "requiere aprobación"}`),
     recoveryBox(task, "enviar"),
@@ -667,19 +830,22 @@ function emailDetail(task: Task) {
       h("dd", {}, message.date ? dateText(message.date) : missing()),
     ),
     h("div", { class: "message" }, h("p", {}, message.body ?? missing())),
-    h("p", {}, "Categoría: ", h("strong", {}, CATEGORY_LABEL[r.category] ?? r.category)),
-    h("h3", {}, "Borrador"),
+    h("h3", {}, "Borrador de respuesta"),
     h("p", { class: "meta" }, "Para: ", recipients.length ? recipients.join(", ") : h("span", { class: "missing" }, "sin destinatario; no se puede enviar")),
     body,
-    h(
-      "div",
-      { class: "buttons" },
+  );
+  return h(
+    "div",
+    { class: "detail" },
+    h("div", { class: "detail-scroll", "data-scroll-key": `detail:${task.id}` }, article),
+    actionBar(
+      recipients.length === 0 ? "Sin destinatario: no se puede enviar." : needsConfirmation ? "Para aprobar, confirme primero que el intento anterior no se envió." : null,
       h(
         "button",
         {
           class: "primary",
           // Con el borrador anterior desaparecido, primero hay que confirmar que no se envió.
-          disabled: recipients.length === 0 || r.recovery?.needs_confirmation === true,
+          disabled: recipients.length === 0 || needsConfirmation,
           onclick: () =>
             void act(async () => {
               let version = r.version ?? 1;
@@ -739,11 +905,7 @@ function tasksView() {
                     ? h(
                         "button",
                         {
-                          onclick: () => {
-                            state.view = "review";
-                            state.selected = t.id;
-                            render();
-                          },
+                          onclick: () => openInReview(t),
                         },
                         "Revisar",
                       )
@@ -757,69 +919,7 @@ function tasksView() {
   );
 }
 
-// ---- Ayuda accesible (WCAG 1.4.13): aparece al pasar el ratón y al recibir foco, se cierra con Esc
-// sin mover foco ni ratón y sigue abierta si el ratón pasa a la propia ayuda. ----
-
 let helpSeq = 0;
-const openHelps = new Map<HTMLElement, { close: () => void; place: () => void }>();
-
-document.addEventListener("keydown", (event) => {
-  if (event.key !== "Escape") return;
-  for (const { close } of [...openHelps.values()]) close();
-});
-document.addEventListener("click", (event) => {
-  for (const [wrap, { close }] of [...openHelps]) if (!wrap.contains(event.target as Node)) close();
-});
-const placeAllHelps = () => openHelps.forEach(({ place }) => place());
-window.addEventListener("resize", placeAllHelps);
-window.addEventListener("scroll", placeAllHelps, true);
-
-function helpTip(text: string, label = "Ayuda"): HTMLElement {
-  const id = `help-${++helpSeq}`;
-  const tip = h("span", { id, role: "tooltip", class: "help-tip", hidden: true }, text);
-  const button = h("button", { type: "button", class: "help-btn", "aria-describedby": id, "aria-label": label }, "?");
-  const wrap = h("span", { class: "help" }, button, tip);
-  let hover = false;
-  let focus = false;
-  let pinned = false;
-  // La ayuda usa posición fija: ningún contenedor con desbordamiento oculto la recorta.
-  const place = () => {
-    tip.style.left = "0px";
-    tip.style.top = "0px";
-    const b = button.getBoundingClientRect();
-    const t = tip.getBoundingClientRect();
-    const vw = document.documentElement.clientWidth;
-    const vh = window.innerHeight;
-    const left = Math.max(8, Math.min(b.left + b.width / 2 - t.width / 2, vw - t.width - 8));
-    const below = b.bottom + 6 + t.height <= vh - 8 || b.top - 6 - t.height < 8;
-    const top = below ? b.bottom + 6 : b.top - 6 - t.height;
-    tip.dataset.placement = below ? "below" : "above";
-    tip.style.left = `${left}px`;
-    tip.style.top = `${Math.max(8, top)}px`;
-  };
-  const close = () => {
-    hover = focus = pinned = false;
-    sync();
-  };
-  function sync() {
-    const open = hover || focus || pinned;
-    if (open === !tip.hidden) return;
-    tip.hidden = !open;
-    if (open) {
-      openHelps.set(wrap, { close, place });
-      place();
-    } else {
-      openHelps.delete(wrap);
-    }
-  }
-  wrap.addEventListener("mouseenter", () => ((hover = true), sync()));
-  wrap.addEventListener("mouseleave", () => ((hover = false), sync()));
-  button.addEventListener("focus", () => ((focus = true), sync()));
-  button.addEventListener("blur", () => ((focus = false), (pinned = false), sync()));
-  // Clic o Intro: para quien no usa el ratón. Otro clic la cierra.
-  button.addEventListener("click", () => (pinned ? close() : ((pinned = true), sync())));
-  return wrap;
-}
 
 /** Etiqueta con su ayuda al lado: la ayuda va fuera de `<label>` para no activar el campo. */
 function field(labelText: string, control: HTMLElement, helpText: string, tag?: string): HTMLElement {
@@ -904,18 +1004,18 @@ function ruleForm(): HTMLElement {
   } catch {
     draft = draftOf(editing);
   }
-  const id = h("input", { name: "id", required: true, placeholder: "p. ej. alfa-mensual", pattern: "[a-z0-9-]+", autocomplete: "off" }) as HTMLInputElement;
+  const id = h("input", { name: "id", "data-focus-key": "rule-form:id", required: true, placeholder: "p. ej. alfa-mensual", pattern: "[a-z0-9-]+", autocomplete: "off" }) as HTMLInputElement;
   const kind = h(
     "select",
-    { name: "kind" },
+    { name: "kind", "data-focus-key": "rule-form:kind" },
     h("option", { value: "register_invoice" }, "Registrar factura"),
     h("option", { value: "send_draft" }, "Enviar respuesta"),
   ) as HTMLSelectElement;
-  const supplier = h("input", { name: "supplier", required: true, placeholder: "Nombre exacto del proveedor", autocomplete: "off" }) as HTMLInputElement;
-  const maxTotal = h("input", { name: "max_total", placeholder: "p. ej. 500.00", inputmode: "decimal", autocomplete: "off" }) as HTMLInputElement;
+  const supplier = h("input", { name: "supplier", "data-focus-key": "rule-form:supplier", required: true, placeholder: "Nombre exacto del proveedor", autocomplete: "off" }) as HTMLInputElement;
+  const maxTotal = h("input", { name: "max_total", "data-focus-key": "rule-form:max_total", placeholder: "p. ej. 500.00", inputmode: "decimal", autocomplete: "off" }) as HTMLInputElement;
   const category = h(
     "select",
-    { name: "category" },
+    { name: "category", "data-focus-key": "rule-form:category" },
     ...Object.entries(CATEGORY_LABEL).map(([value, label]) => h("option", { value }, label)),
   ) as HTMLSelectElement;
   id.value = draft.id;
@@ -1050,7 +1150,7 @@ function ruleRow(r: Rule): HTMLElement {
     ),
     h("td", {}, ACTION_LABEL[r.action_kind] ?? r.action_kind),
     h("td", {}, conditionsSummary(r)),
-    h("td", {}, h("span", { class: r.active ? "badge state-completed" : "badge state-cancelled" }, r.active ? "Activa" : "Inactiva")),
+    h("td", {}, statusChip(r.active ? "Activa" : "Inactiva", r.active ? "ok" : "neutral")),
     h(
       "td",
       {},
@@ -1059,12 +1159,12 @@ function ruleRow(r: Rule): HTMLElement {
         { class: "row-actions" },
         h(
           "button",
-          { onclick: () => void act(() => api.setRuleActive(r.id, !r.active), r.active ? "Regla desactivada" : "Regla activada") },
+          { "data-focus-key": `rule:${r.id}:toggle`, onclick: () => void act(() => api.setRuleActive(r.id, !r.active), r.active ? "Regla desactivada" : "Regla activada") },
           r.active ? "Desactivar" : "Activar",
         ),
-        isKnownAction(r.action_kind) ? h("button", { onclick: () => openRuleEditor({ mode: "edit", id: r.id }, undefined) }, "Editar") : null,
+        isKnownAction(r.action_kind) ? h("button", { "data-focus-key": `rule:${r.id}:edit`, onclick: () => openRuleEditor({ mode: "edit", id: r.id }, undefined) }, "Editar") : null,
         isKnownAction(r.action_kind)
-          ? h("button", { onclick: () => openRuleEditor({ mode: "new" }, { ...draftOf(r), id: "" }) }, "Duplicar")
+          ? h("button", { "data-focus-key": `rule:${r.id}:dup`, onclick: () => openRuleEditor({ mode: "new" }, { ...draftOf(r), id: "" }) }, "Duplicar")
           : null,
       ),
     ),
@@ -1081,17 +1181,16 @@ function rulesList(): HTMLElement {
     const filtered = Boolean(f.text.trim() || f.action || f.status || f.category);
     results.replaceChildren(
       !state.rules.length
-        ? h("p", { class: "empty" }, "Todavía no hay reglas: todas las acciones requieren su aprobación en Pendientes. Cree una con «Nueva regla».")
+        ? emptyState("Todavía no hay reglas", "Todas las acciones requieren su aprobación en Pendientes. Cree una con «Nueva regla».")
         : !rows.length
-          ? h(
-              "p",
-              { class: "empty" },
-              "Ninguna regla coincide con la búsqueda y los filtros elegidos. ",
-              filtered ? h("button", { class: "link", onclick: clearRuleFilter }, "Quitar filtros") : null,
+          ? emptyState(
+              "Ninguna regla coincide con la búsqueda y los filtros elegidos.",
+              undefined,
+              filtered ? h("button", { "data-focus-key": "rules:clear", onclick: clearRuleFilter }, "Quitar filtros") : null,
             )
           : h("p", { class: "meta" }, `${rows.length} de ${state.rules.length} reglas`),
       ...(rows.length
-        ? [h("div", { class: "table-scroll" }, h(
+        ? [h("div", { class: "table-wrap" }, h(
             "table",
             { class: "grid rules-grid" },
             h(
@@ -1115,6 +1214,7 @@ function rulesList(): HTMLElement {
   const search = h("input", {
     type: "search",
     id: "rule-search",
+    "data-focus-key": "rules:search",
     placeholder: "Proveedor, categoría o identificador",
     autocomplete: "off",
     oninput: () => ((state.ruleFilter.text = search.value), fill()),
@@ -1123,7 +1223,7 @@ function rulesList(): HTMLElement {
   const select = (name: keyof typeof state.ruleFilter, options: Array<[string, string]>) => {
     const el = h(
       "select",
-      { onchange: () => ((state.ruleFilter[name] = el.value), fill()) },
+      { "data-focus-key": `rules:filter:${name}`, onchange: () => ((state.ruleFilter[name] = el.value), fill()) },
       ...options.map(([value, label]) => h("option", { value }, label)),
     ) as HTMLSelectElement;
     el.value = state.ruleFilter[name];
@@ -1168,7 +1268,7 @@ function categoriesPanel(): HTMLElement {
       { class: "intro" },
       "La IA clasifica cada correo recibido en una de estas cinco categorías; no se pueden añadir ni cambiar. Una regla de envío se aplica a los correos de la categoría que elija.",
     ),
-    h("div", { class: "table-scroll" }, h(
+    h("div", { class: "table-wrap" }, h(
       "table",
       { class: "grid" },
       h(
@@ -1223,44 +1323,6 @@ function categoriesPanel(): HTMLElement {
   );
 }
 
-/** Pestañas accesibles (tablist, roving tabindex, flechas, Inicio y Fin). Aislada: se puede
- *  sustituir por otra implementación con la misma firma sin tocar `rulesView`. */
-function tabs<T extends string>(items: Array<[T, string]>, selected: T, onSelect: (tab: T) => void, panel: HTMLElement, label: string): HTMLElement[] {
-  const tabId = (tab: string) => `tab-${tab}`;
-  const onKey = (event: Event) => {
-    const key = (event as KeyboardEvent).key;
-    const index = items.findIndex(([tab]) => tab === selected);
-    const next = key === "ArrowRight" ? index + 1 : key === "ArrowLeft" ? index - 1 : key === "Home" ? 0 : key === "End" ? items.length - 1 : null;
-    if (next === null) return;
-    event.preventDefault();
-    const target = items[(next + items.length) % items.length][0];
-    onSelect(target);
-    document.getElementById(tabId(target))?.focus();
-  };
-  return [
-    h(
-      "div",
-      { class: "tabs", role: "tablist", "aria-label": label, onkeydown: onKey },
-      ...items.map(([tab, text]) =>
-        h(
-          "button",
-          {
-            role: "tab",
-            id: tabId(tab),
-            class: "tab",
-            "aria-selected": String(selected === tab),
-            "aria-controls": "tab-panel",
-            tabindex: selected === tab ? "0" : "-1",
-            onclick: () => (onSelect(tab), document.getElementById(tabId(tab))?.focus()),
-          },
-          text,
-        ),
-      ),
-    ),
-    h("div", { role: "tabpanel", id: "tab-panel", "aria-labelledby": tabId(selected), class: "tabpanel" }, panel),
-  ];
-}
-
 function rulesView() {
   const panel =
     state.rulesTab === "mine"
@@ -1272,7 +1334,12 @@ function rulesView() {
             { class: "intro" },
             "Por defecto todo se revisa. Una regla activa permite enviar o registrar sin revisión solo cuando es la única que coincide y los datos no tienen incidencias. Cada cambio crea una versión nueva y queda en el historial.",
           ),
-          state.ruleEditor ? ruleForm() : h("div", { class: "buttons" }, h("button", { class: "primary", onclick: () => openRuleEditor({ mode: "new" }, undefined) }, "Nueva regla")),
+          state.ruleEditor
+            ? ruleForm()
+            : sectionHeader(
+                "Reglas guardadas",
+                h("button", { class: "primary", "data-focus-key": "rules:new", onclick: () => openRuleEditor({ mode: "new" }, undefined) }, "Nueva regla"),
+              ),
           rulesList(),
         )
       : categoriesPanel();
@@ -1280,16 +1347,17 @@ function rulesView() {
     "section",
     { class: "page" },
     h("h2", {}, "Reglas"),
-    ...tabs(
-      [
-        ["mine", "Mis reglas"],
-        ["categories", "Categorías"],
+    tabs({
+      label: "Secciones de reglas",
+      items: [
+        { key: "mine", label: "Mis reglas" },
+        { key: "categories", label: "Categorías" },
       ],
-      state.rulesTab,
-      setRulesTab,
-      panel,
-      "Secciones de reglas",
-    ),
+      active: state.rulesTab,
+      panelId: "rules-panel",
+      onSelect: setRulesTab,
+    }),
+    h("div", { role: "tabpanel", id: "rules-panel", class: "tabpanel", "aria-label": state.rulesTab === "mine" ? "Mis reglas" : "Categorías" }, panel),
   );
 }
 
@@ -1396,19 +1464,6 @@ function originKey(task: Task): string {
   return accountId(task.result?.message?.id ?? input.message_id);
 }
 
-// Segunda línea de cada pendiente: de qué buzón y de quién viene, o de qué archivo.
-function itemOrigin(task: Task): string {
-  const input = safeJson(task.input_ref);
-  if (task.kind === "invoice") {
-    const origin: DocumentOrigin | undefined = task.result?.origin ?? input.origin;
-    if (origin?.kind === "email")
-      return `Adjunto de ${origin.from ?? "remitente no consta"} · ${accountShort(mailOrigin(origin.account, `${origin.account.account}:`), origin.account.account)}`;
-    return origin ? `Archivo importado${origin.imported_at ? ` el ${dateText(origin.imported_at)}` : ""}` : "Archivo importado (origen no registrado)";
-  }
-  const message = task.result?.message ?? input.message ?? {};
-  return `${message.from ?? "Remitente no consta"} → ${accountShort(taskMailOrigin(task), accountId(message.id ?? input.message_id))}`;
-}
-
 function dateText(value: string | number): string {
   const date = typeof value === "number" ? new Date(value * 1000) : new Date(value);
   if (Number.isNaN(date.getTime())) return String(value);
@@ -1422,17 +1477,7 @@ function fileSize(bytes: number) {
 }
 
 // Origen de un documento (D49): archivo importado o adjunto de un correo, con su huella.
-function documentOrigin(task: Task, origin: DocumentOrigin | null) {
-  const open = h(
-    "button",
-    {
-      onclick: () =>
-        isPreview
-          ? ((state.notice = { kind: "ok", text: "Vista previa: en la aplicación se abriría la copia guardada con el visor del sistema." }), render())
-          : void act(() => api.openOriginal(task.id)),
-    },
-    "Abrir original",
-  );
+function documentOrigin(origin: DocumentOrigin | null) {
   const rows: Array<[string, Child]> = [];
   if (!origin) {
     rows.push(["Origen", h("span", { class: "missing" }, "No consta (documento importado antes de registrar el origen)")]);
@@ -1458,7 +1503,7 @@ function documentOrigin(task: Task, origin: DocumentOrigin | null) {
     "div",
     { class: "origin-box" },
     h("dl", { class: "origin" }, ...rows.flatMap(([label, value]) => [h("dt", {}, label), h("dd", {}, value)])),
-    h("div", { class: "buttons" }, open, h("span", { class: "meta" }, "Abre la copia guardada en NestAdmin con el visor del sistema.")),
+    h("p", { class: "meta" }, "«Abrir original» abre la copia guardada en NestAdmin con el visor del sistema."),
   );
 }
 
@@ -2513,17 +2558,19 @@ function render(background = false) {
     settings: settingsView,
     setup: setupView,
   };
+  const reviewable = state.notice?.task !== undefined ? state.tasks.find((t) => t.id === state.notice?.task && t.state === "awaiting_review") : undefined;
   const notice = state.notice
     ? h(
         "div",
         { class: `notice ${state.notice.kind}`, role: state.notice.kind === "error" ? "alert" : "status" },
         h("span", {}, state.notice.text),
+        reviewable ? h("button", { onclick: () => openInReview(reviewable) }, "Ver") : null,
         h("button", { class: "close", "aria-label": "Cerrar aviso", onclick: () => ((state.notice = null), render()) }, "×"),
       )
     : null;
   // Una actualización de fondo no borra lo que el usuario está escribiendo.
   const focused = document.activeElement;
-  if (background && (focused instanceof HTMLTextAreaElement || (focused instanceof HTMLInputElement && focused.type !== "file"))) {
+  if (background && (focused instanceof HTMLTextAreaElement || focused instanceof HTMLSelectElement || (focused instanceof HTMLInputElement && focused.type !== "file"))) {
     if (root.contains(focused)) return;
   }
   // D103: con un proveedor externo, al abrir solo se comprueba el OCR del paquete.
@@ -2540,7 +2587,41 @@ function render(background = false) {
     root.replaceChildren(h("main", { class: "wizard-only" }, wizardView()));
     return;
   }
-  root.replaceChildren(header(), h("div", { class: "body" }, nav(), h("main", {}, ocrBanner, notice, waitBanner, views[state.view]())));
+  const restore = keepPosition();
+  root.replaceChildren(
+    header(),
+    h(
+      "div",
+      { class: "body" },
+      nav(),
+      h("main", { class: state.view === "review" ? "fill" : undefined, "data-scroll-key": `main:${state.view}` }, ocrBanner, notice, waitBanner, views[state.view]()),
+    ),
+  );
+  restore();
+}
+
+/**
+ * El repintado sustituye el DOM (D138): guarda el desplazamiento de cada panel y el foco, y
+ * devuelve la función que los repone. Un panel de otro elemento tiene otra clave y empieza arriba.
+ */
+function keepPosition(): () => void {
+  const scroll = new Map<string, number>();
+  for (const el of root.querySelectorAll<HTMLElement>("[data-scroll-key]")) scroll.set(el.dataset.scrollKey!, el.scrollTop);
+  const active = document.activeElement as HTMLElement | null;
+  const focusKey = state.focusAfterRender ?? active?.dataset?.focusKey ?? null;
+  state.focusAfterRender = null;
+  const selection = active instanceof HTMLTextAreaElement ? ([active.selectionStart, active.selectionEnd] as const) : null;
+  return () => {
+    for (const el of root.querySelectorAll<HTMLElement>("[data-scroll-key]")) {
+      const top = scroll.get(el.dataset.scrollKey!);
+      if (top) el.scrollTop = top;
+    }
+    if (!focusKey) return;
+    const target = [...root.querySelectorAll<HTMLElement>("[data-focus-key]")].find((el) => el.dataset.focusKey === focusKey);
+    if (!target) return;
+    target.focus();
+    if (selection && target instanceof HTMLTextAreaElement) target.setSelectionRange(selection[0], selection[1]);
+  };
 }
 
 void (async () => {
