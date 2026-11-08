@@ -2150,3 +2150,176 @@ fn simulating_with_the_any_sender_hypothesis_never_writes_the_mark() {
     assert_eq!(assumed.would_review.get("sender_required"), None);
     assert_eq!(dump(&dir, &["rule_meta", "audit_log", "rules"]), before);
 }
+
+// ---- update_rule_with_ack (D126) ----
+
+fn new_send_rule(app: &mut App, id: &str, conditions: &Value) {
+    app.create_rule_full(NewRule {
+        id: Some(id),
+        name: None,
+        action_kind: "send_draft",
+        conditions,
+        allow_any_sender: false,
+    })
+    .unwrap();
+}
+
+#[test]
+fn update_with_ack_saves_conditions_name_and_validation_and_audits_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = open(&dir, FakeProvider::new());
+    new_send_rule(
+        &mut app,
+        "envio",
+        &json!({ "category": "solicitud_factura", "sender": "a@alfa.test" }),
+    );
+    let view = app
+        .update_rule_with_ack(
+            "envio",
+            Some("Sin remitente"),
+            &json!({ "category": "solicitud_factura" }),
+            true,
+        )
+        .unwrap();
+    assert_eq!(view.rule.version, 2);
+    assert_eq!(view.name, "Sin remitente");
+    assert!(view.any_sender_ack_at.is_some());
+    let audit = app.audit_log().unwrap();
+    let entry = audit
+        .iter()
+        .find(|e| e.action == "rule_any_sender" && e.status == "acknowledged")
+        .expect("la validación consta en el historial");
+    assert!(entry.detail.as_deref().unwrap().starts_with("envio v2"));
+}
+
+#[test]
+fn update_with_ack_rejects_an_archived_rule_without_changes() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = open(&dir, FakeProvider::new());
+    new_send_rule(
+        &mut app,
+        "envio",
+        &json!({ "category": "solicitud_factura", "sender": "a@alfa.test" }),
+    );
+    app.archive_rule("envio").unwrap();
+    let before = dump(&dir, &["rules", "rule_meta", "audit_log"]);
+    let error = app
+        .update_rule_with_ack(
+            "envio",
+            None,
+            &json!({ "category": "otros", "sender": "b@alfa.test" }),
+            false,
+        )
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("envio"), "{error}");
+    assert_eq!(dump(&dir, &["rules", "rule_meta", "audit_log"]), before);
+}
+
+#[test]
+fn update_with_ack_never_validates_a_register_rule_or_a_rule_with_sender() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = open(&dir, FakeProvider::new());
+    app.create_rule_full(NewRule {
+        id: Some("registro"),
+        name: None,
+        action_kind: "register_invoice",
+        conditions: &json!({ "supplier": "Alfa SL" }),
+        allow_any_sender: false,
+    })
+    .unwrap();
+    new_send_rule(
+        &mut app,
+        "envio",
+        &json!({ "category": "solicitud_factura", "sender": "a@alfa.test" }),
+    );
+    let before = dump(&dir, &["rules", "rule_meta", "audit_log"]);
+    assert!(app
+        .update_rule_with_ack("registro", None, &json!({ "supplier": "Beta SL" }), true)
+        .is_err());
+    assert!(app
+        .update_rule_with_ack(
+            "envio",
+            None,
+            &json!({ "category": "otros", "sender": "b@alfa.test" }),
+            true,
+        )
+        .is_err());
+    assert_eq!(dump(&dir, &["rules", "rule_meta", "audit_log"]), before);
+    // Un registro sin la validación se guarda con normalidad.
+    let view = app
+        .update_rule_with_ack("registro", None, &json!({ "supplier": "Beta SL" }), false)
+        .unwrap();
+    assert_eq!(view.rule.version, 2);
+    assert!(view.any_sender_ack_at.is_none());
+}
+
+#[test]
+fn update_with_ack_without_the_acknowledgement_does_not_validate_a_rule_without_sender() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = open(&dir, FakeProvider::new());
+    new_send_rule(
+        &mut app,
+        "envio",
+        &json!({ "category": "solicitud_factura", "sender": "a@alfa.test" }),
+    );
+    let before = dump(&dir, &["rules", "rule_meta", "audit_log"]);
+    let error = app
+        .update_rule_with_ack(
+            "envio",
+            Some("Nombre nuevo"),
+            &json!({ "category": "solicitud_factura" }),
+            false,
+        )
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("remitente"), "{error}");
+    assert_eq!(dump(&dir, &["rules", "rule_meta", "audit_log"]), before);
+    let view = app
+        .rule_views()
+        .unwrap()
+        .into_iter()
+        .find(|v| v.rule.id == "envio")
+        .unwrap();
+    assert!(view.any_sender_ack_at.is_none());
+    assert_eq!(view.name, "envio");
+}
+
+#[test]
+fn a_failure_halfway_through_update_with_ack_saves_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = open(&dir, FakeProvider::new());
+    new_send_rule(
+        &mut app,
+        "envio",
+        &json!({ "category": "solicitud_factura", "sender": "a@alfa.test" }),
+    );
+    // Un fallo de la base al auditar la validación, cuando la versión nueva, el nombre y la
+    // marca ya se escribieron dentro de la transacción.
+    let conn = rusqlite::Connection::open(dir.path().join("nestadmin.db")).unwrap();
+    conn.execute_batch(
+        "CREATE TRIGGER fail_ack BEFORE INSERT ON audit_log
+         WHEN NEW.action = 'rule_any_sender'
+         BEGIN SELECT RAISE(ABORT, 'fallo simulado'); END;",
+    )
+    .unwrap();
+    drop(conn);
+    let before = dump(&dir, &["rules", "rule_meta", "audit_log"]);
+    assert!(app
+        .update_rule_with_ack(
+            "envio",
+            Some("Otro nombre"),
+            &json!({ "category": "solicitud_factura" }),
+            true,
+        )
+        .is_err());
+    assert_eq!(dump(&dir, &["rules", "rule_meta", "audit_log"]), before);
+    let view = app
+        .rule_views()
+        .unwrap()
+        .into_iter()
+        .find(|v| v.rule.id == "envio")
+        .unwrap();
+    assert_eq!(view.rule.version, 1);
+    assert!(view.any_sender_ack_at.is_none());
+}

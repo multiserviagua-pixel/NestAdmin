@@ -166,15 +166,35 @@ fn adjacent(chars: &[char], a_end: usize, b_start: usize) -> bool {
             .all(|c| matches!(c, ' ' | '\u{a0}' | ':' | '\t' | '(' | ')'))
 }
 
-/// `S/` (soles) delante de una cifra: `S/ 500`, `S/.500`. No cuenta `S/N` ni `A/S`.
+/// `S/` (soles) delante de un importe: `S/ 500`, `S/.500`, `S/ 500,00`. No cuenta `S/N`,
+/// `A/S` ni una referencia como `S/2026-001`.
 fn is_soles_symbol(chars: &[char], i: usize) -> bool {
     if chars[i] != 'S' || chars.get(i + 1) != Some(&'/') || (i > 0 && is_word(chars[i - 1])) {
         return false;
     }
-    chars[i + 2..]
-        .iter()
-        .find(|c| !matches!(c, ' ' | '\u{a0}' | '.' | '\t'))
-        .is_some_and(char::is_ascii_digit)
+    let mut j = i + 2;
+    while chars
+        .get(j)
+        .is_some_and(|c| matches!(c, ' ' | '\u{a0}' | '.' | '\t'))
+    {
+        j += 1;
+    }
+    if !chars.get(j).is_some_and(char::is_ascii_digit) {
+        return false;
+    }
+    while j < chars.len() {
+        let digit = chars[j].is_ascii_digit();
+        let sep =
+            matches!(chars[j], '.' | ',') && chars.get(j + 1).is_some_and(char::is_ascii_digit);
+        if !digit && !sep {
+            break;
+        }
+        j += 1;
+    }
+    // Una cifra seguida de `-`, `/` o letras es una referencia, no un importe.
+    !chars
+        .get(j)
+        .is_some_and(|c| matches!(c, '-' | '/' | '_') || c.is_alphabetic())
 }
 
 /// Busca en `text` menciones de otras monedas y del euro. No distingue dónde aparecen: un
@@ -215,7 +235,16 @@ pub fn currency_evidence(text: &str) -> CurrencyEvidence {
         if matches!(lower.as_str(), "eur" | "euro" | "euros") {
             euro = true;
         } else if let Some((_, code)) = NAMES.iter().find(|(n, _)| *n == lower) {
-            foreign.push((*code).to_owned());
+            // Palabras corrientes en español: solo con un importe delante (`300 libras`).
+            let common = matches!(
+                lower.as_str(),
+                "pesos" | "reales" | "francos" | "soles" | "libras"
+            );
+            let amount_before =
+                i > 0 && words[i - 1].has_digit && adjacent(&chars, words[i - 1].end, w.start);
+            if !common || amount_before {
+                foreign.push((*code).to_owned());
+            }
         } else if STRONG.contains(&upper.as_str()) {
             foreign.push(upper);
         } else if w.text != upper {
@@ -370,6 +399,20 @@ mod tests {
         assert_eq!(foreign("Total 2500 Kč"), ["CZK"]);
         assert_eq!(foreign("合計 5000円"), ["JPY"]);
         assert_eq!(foreign("合计 300元"), ["CNY"]);
+        assert_eq!(foreign("Total 500,00 pesos"), ["PESO"]);
+        assert_eq!(foreign("Total 300 libras"), ["GBP"]);
+        assert_eq!(foreign("Total S/ 500,00"), ["PEN"]);
+        // Palabras corrientes y referencias sin importe: no son moneda.
+        for text in [
+            "consumos reales 121,00 €",
+            "pesos de transporte",
+            "Factura S/2026-001",
+            "las libras y los soles",
+            "Ref. S/2026-001 total 100 €",
+        ] {
+            assert!(foreign(text).is_empty(), "{text}");
+        }
+        assert!(currency_evidence("consumos reales 121,00 €").euro);
         // `S/N` y `A/S` no son soles.
         assert!(foreign("Ref. S/N 123 y Nordic A/S").is_empty());
     }

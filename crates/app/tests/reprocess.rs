@@ -780,6 +780,69 @@ fn a_rule_send_reconciled_after_a_person_approves_stays_attributed_to_the_rule()
     assert_eq!(facturas.applied, 1);
 }
 
+/// La regla envía y se pierde la respuesta; al aprobar, `lookup` falla y la tarea queda
+/// fallida; al reprocesar consta enviado. El resultado debe decir que lo envió la regla
+/// (D129), como `actions` y el historial.
+#[test]
+fn a_rule_send_found_on_reprocess_after_a_failed_approval_stays_attributed_to_the_rule() {
+    let fixture = Fixture::new();
+    let mut app = fixture.open();
+    app.add_mail_account(MailProviderKind::Microsoft, "Oficina", &expiring_tokens())
+        .unwrap();
+    app.remove_mail_account("simulador").unwrap();
+    app.create_rule(
+        "facturas",
+        "send_draft",
+        &json!({ "category": "solicitud_factura", "sender": "facturas@proveedor-g.test" }),
+    )
+    .unwrap();
+    app.set_rule_active("facturas", true).unwrap();
+    app.fetch_mail().unwrap();
+
+    fixture.world().drop_send = true;
+    process_all(&mut app);
+    let task = task_for(&app, "microsoft-1:g1");
+    assert_eq!(task.state, TaskState::Failed);
+
+    // Sin red al reintentar: vuelve a revisión. Al aprobar tampoco hay red y falla.
+    fixture.world().unavailable = true;
+    app.retry(task.id).unwrap();
+    process_all(&mut app);
+    assert_eq!(
+        task_for(&app, "microsoft-1:g1").state,
+        TaskState::AwaitingReview
+    );
+    let failed = app.approve(task.id, 1);
+    let state = match failed {
+        Ok(t) => t.state,
+        Err(_) => task_for(&app, "microsoft-1:g1").state,
+    };
+    assert_eq!(state, TaskState::Failed);
+
+    // Con la red de vuelta, reprocesar encuentra el envío hecho por la regla.
+    fixture.world().unavailable = false;
+    app.retry(task.id).unwrap();
+    process_all(&mut app);
+    let done = task_for(&app, "microsoft-1:g1");
+    assert_eq!(done.state, TaskState::Completed);
+    assert_eq!(fixture.world().sends, [proposal(1)], "un solo envío");
+    let result = done.result.unwrap();
+    assert_eq!(result["authorization"]["type"], "rule", "{result}");
+    assert_eq!(result["authorization"]["rule_id"], "facturas");
+    let conn = rusqlite::Connection::open(fixture.dir.path().join("nestadmin.db")).unwrap();
+    let authorization: String = conn
+        .query_row(
+            "SELECT authorization FROM actions WHERE task_id = ?1",
+            [task.id],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert!(
+        authorization.starts_with("regla facturas"),
+        "{authorization}"
+    );
+}
+
 #[test]
 fn a_new_text_after_a_lost_send_never_sends_a_second_version() {
     for kind in REAL {

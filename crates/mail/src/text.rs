@@ -112,14 +112,18 @@ fn tidy(text: &str) -> String {
     lines.join("\n")
 }
 
-/// Dirección simple `usuario@dominio.tld` sin espacios ni saltos de línea.
+/// Dirección simple `usuario@dominio.tld` sin espacios ni saltos de línea, ni `;`, `:`, `"`
+/// o una segunda `@` (`a@alfa.test;x@evil.test` no es una dirección).
 pub fn is_address(address: &str) -> bool {
     match address.split_once('@') {
         Some((user, domain)) => {
             !user.is_empty()
                 && domain.contains('.')
+                && !domain.contains('@')
                 && !address.contains(|c: char| {
-                    c.is_whitespace() || c.is_control() || c == '<' || c == '>' || c == ','
+                    c.is_whitespace()
+                        || c.is_control()
+                        || matches!(c, '<' | '>' | ',' | ';' | ':' | '"')
                 })
         }
         None => false,
@@ -142,8 +146,23 @@ pub fn single_address(header: &str) -> Option<String> {
     let parts = split_header(header);
     match parts.as_slice() {
         [only] => part_address(only),
-        _ => None,
+        _ => unquoted_name_address(header),
     }
+}
+
+/// Nombre visible sin comillas con comas (`Pérez, Ana <ana@x.test>`): vale si hay exactamente
+/// una dirección entre `<...>` al final, y el nombre no contiene ninguna `@` ni otro ángulo.
+/// Dos direcciones entre ángulos o una lista sin ellos no identifican a nadie.
+fn unquoted_name_address(header: &str) -> Option<String> {
+    let header = header.trim();
+    let start = header.find('<')?;
+    let inner = header[start + 1..].strip_suffix('>')?;
+    let name = &header[..start];
+    if name.contains(['@', '<', '>', ';']) || inner.contains(['<', '>']) {
+        return None;
+    }
+    let inner = inner.trim();
+    is_address(inner).then(|| inner.to_owned())
 }
 
 /// Partes de una cabecera de direcciones, separadas por comas fuera de comillas.
@@ -257,6 +276,48 @@ mod tests {
         );
         assert!(!is_address("ana@cliente.test\r\nBcc: x@y.test"));
         assert!(!is_address("sin-arroba.test"));
+    }
+
+    #[test]
+    fn an_address_cannot_hide_a_second_one() {
+        for bad in [
+            "a@alfa.test;x@evil.test",
+            "a@alfa.test:x@evil.test",
+            "\"a\"@alfa.test",
+            "a@alfa.test@evil.test",
+            "a@b@alfa.test",
+        ] {
+            assert!(!is_address(bad), "{bad}");
+            assert_eq!(single_address(bad), None, "{bad}");
+        }
+        for good in ["ana@cliente.test", "ana.b+x@mail.cliente.test"] {
+            assert!(is_address(good), "{good}");
+        }
+        assert_eq!(
+            single_address("Ana <ana@cliente.test>").as_deref(),
+            Some("ana@cliente.test")
+        );
+    }
+
+    #[test]
+    fn single_address_takes_the_only_angle_address_even_with_commas_in_the_name() {
+        assert_eq!(
+            single_address("Pérez, Ana <ana@x.test>").as_deref(),
+            Some("ana@x.test")
+        );
+        assert_eq!(
+            single_address("\"Pérez, Ana\" <ana@x.test>").as_deref(),
+            Some("ana@x.test")
+        );
+        for none in [
+            "A <a@x.test>, B <b@y.test>",
+            "y@alfa.test, x@evil.test",
+            "y@alfa.test, Ana <x@evil.test>",
+            "Pérez, Ana",
+            "",
+        ] {
+            assert_eq!(single_address(none), None, "{none}");
+        }
     }
 
     #[test]

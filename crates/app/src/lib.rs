@@ -621,8 +621,16 @@ impl App {
             .unwrap_or(1);
         let (error, missing) = match self.check_previous(&task, None, None)? {
             Previous::Done {
-                version, receipt, ..
-            } => return self.complete_with(task.id, result, version, receipt),
+                version,
+                receipt,
+                authorization: done_by,
+            } => {
+                // Misma regla que en `execute` (D129): si lo envió la regla, consta la regla.
+                if done_by.starts_with("regla ") && result["rule_attempt"]["type"] == "rule" {
+                    result["authorization"] = result["rule_attempt"].clone();
+                }
+                return self.complete_with(task.id, result, version, receipt);
+            }
             Previous::Unknown { error, .. } => {
                 let missing = error.code == nestadmin_simulators::codes::NOT_FOUND;
                 (Some(error.code), missing)
