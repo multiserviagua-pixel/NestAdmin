@@ -64,3 +64,16 @@ Mismo equipo objetivo y mismo corpus sintético (`synthetic-v1`), `scripts/t12-m
 | Memoria en el equipo | 0,01 GB (cliente) |
 
 Las instrucciones explícitas resuelven el fallo de los 20 correos. El corpus es sintético y pequeño: no mide la calidad con correo real, donde ya se observó que el modelo local propone responder a remitentes automáticos (T13). La latencia depende de la red y de la carga del servicio. Las predicciones y el informe quedan fuera de Git.
+
+## 2026-11-08: panel real con Ollama cloud (versión de desarrollo)
+
+Carpeta de datos nueva y temporal, solo con el correo simulado (borrada al terminar), con la clave de Ollama cloud ya guardada en el Administrador de credenciales. Código de `f5d395d`.
+
+- Sin `configuracion.json` se abre el asistente de primer uso.
+- Bloque de Ollama cloud: la lista responde con la clave guardada y `gemma4:31b` queda elegido. No se pudo leer la lista completa con la automatización de la ventana.
+- Tras confirmar el destino, la prueba sintética responde («Proveedor listo»). `configuracion.json` guarda la elección y la confirmación, sin la clave.
+- Consulta del correo simulado: 7 tareas en revisión, las 7 con `ollama_cloud` y `gemma4:31b`, sin errores y sin respaldo.
+
+No se ha probado con proveedor real: clave inválida, respaldo local, compatible con OpenAI ni Claude. El rechazo de clave solo se comprobó con pruebas y con la vista simulada.
+
+Instalador de cierre construido con `scripts/build-clean.ps1` desde `f5d395d` (todas sus comprobaciones correctas; SHA-256 `7405C75A7AF935EDD124004557B5A7FE365DC6DC2FE86CFBE093CE70842F9715`). No se ha instalado: T08e pide un Windows limpio sin clave guardada, y este equipo tiene Ollama y claves. No incluye el rediseño visual integrado después en `main` (`5c17a02`).
