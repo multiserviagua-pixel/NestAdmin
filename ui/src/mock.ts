@@ -384,6 +384,8 @@ const fileOrigin = (name: string, path: string | null, daysAgo: number): Documen
 });
 
 const invoiceResult = (document: string, total: string, issues: string[], source: DocumentOrigin | null) => ({
+  // Comprobación local de moneda (D127): solo códigos y booleanos.
+  currency_evidence: { foreign: [] as string[], euro: !issues.length, ocr: issues.length > 0 },
   type: "invoice",
   version: 1,
   document,
@@ -558,6 +560,113 @@ task("invoice", { document: "escaneada.txt" }, "failed", null, {
 });
 task("email", { message_id: "simulador:M-0001", account: "simulador" }, "queued", null);
 
+// Correo de un remitente de correo público: una regla inactiva habría aplicado (R22).
+task("email", { message_id: "google-1:18c2-sintetico-9", account: "google-1" }, "awaiting_review", {
+  type: "email",
+  version: 1,
+  origin: origin("google-1"),
+  message: {
+    id: "google-1:18c2-sintetico-9",
+    subject: "Duplicado de la factura FS-2026-020",
+    from: "lucia.perez@gmail.com",
+    to: ["oficina@empresa.test"],
+    body: "Buenos días: ¿pueden enviarme otra copia de la factura FS-2026-020?",
+    date: "2026-11-05T10:30:00Z",
+  },
+  category: "solicitud_factura",
+  draft: {
+    to: ["lucia.perez@gmail.com"],
+    subject: "Re: Duplicado de la factura FS-2026-020",
+    body: "Buenos días:\n\nLe enviamos una copia de la factura FS-2026-020.\n\nUn saludo.",
+  },
+  provider: "ollama",
+  model: "qwen3:8b",
+  review_reason: "ninguna regla activa coincide",
+  action: { kind: "send_draft" },
+});
+
+// Evaluación guardada con cada tarea (D125): reglas comprobadas, si coincidían y por qué. Las
+// tareas sin ella son anteriores al registro y el panel lo dice.
+const check = (id: string, active: boolean, matches: boolean, mismatch: string | null = null, sender_required = false) => ({
+  id,
+  version: 1,
+  active,
+  matches,
+  mismatch,
+  ...(sender_required ? { sender_required } : {}),
+});
+function setEvaluation(documentOrSubject: string, reviewReason: string, evaluation: Record<string, unknown>) {
+  const t = tasks.find((t) => t.result && (t.result.document === documentOrSubject || t.result.message?.subject === documentOrSubject));
+  if (!t) return;
+  t.result = { ...t.result, review_reason: reviewReason, evaluation };
+}
+setEvaluation("factura-alfa.pdf", "no consta la comprobación de moneda; reprocese o revise", {
+  code: "currency_not_checked",
+  facts: {},
+  candidates: [
+    check("alfa-hasta-500", true, true),
+    check("beta-sin-limite", false, false, "el proveedor es «Suministros Alfa SL» y la regla pide «Beta Servicios SL»"),
+  ],
+});
+// Tarea anterior a la comprobación de moneda: sin `currency_evidence`.
+{
+  const alfa = tasks.find((t) => t.result?.document === "factura-alfa.pdf");
+  if (alfa?.result) delete alfa.result.currency_evidence;
+}
+setEvaluation("factura-beta-escaneada.pdf", "la factura tiene incidencias", {
+  code: "invoice_issues",
+  facts: { issues: ["total_mismatch"] },
+  candidates: [
+    check("alfa-hasta-500", true, false, "el proveedor es «Distribuciones y Suministros Industriales Beta del Norte, Sociedad Limitada» y la regla pide «Suministros Alfa SL»"),
+    check("beta-sin-limite", false, false, "el proveedor es «Distribuciones y Suministros Industriales Beta del Norte, Sociedad Limitada» y la regla pide «Beta Servicios SL»"),
+  ],
+});
+setEvaluation("Cambio de horario", "ninguna regla activa coincide", {
+  code: "no_active_rule_matches",
+  facts: {},
+  candidates: [
+    check("consulta-pago-cliente", true, false, "la categoría es «otros» y la regla pide «consulta_pago»"),
+    check("consulta-pago-dominio", true, false, "la categoría es «otros» y la regla pide «consulta_pago»"),
+    check("consulta-pago-auto", true, false, "la categoría es «otros» y la regla pide «consulta_pago»"),
+    check("contesta-gmail", false, false, "la categoría es «otros» y la regla pide «solicitud_factura»"),
+  ],
+});
+setEvaluation("Consulta sobre el pedido 2231", "2 reglas coinciden; la decisión no es inequívoca", {
+  code: "several_rules_match",
+  facts: { matching: 2, rule_ids: ["consulta-pago-cliente", "consulta-pago-dominio"] },
+  candidates: [
+    check("consulta-pago-cliente", true, true),
+    check("consulta-pago-dominio", true, true),
+    check("consulta-pago-auto", true, false, "la regla no indica remitente; añádalo o valide la opción avanzada", true),
+    check("contesta-gmail", false, false, "la categoría es «consulta_pago» y la regla pide «solicitud_factura»"),
+  ],
+});
+setEvaluation("Duplicado de la factura FS-2026-020", "ninguna regla activa coincide", {
+  code: "no_active_rule_matches",
+  facts: {},
+  candidates: [
+    check("contesta-gmail", false, true),
+    check("consulta-pago-cliente", true, false, "la categoría es «solicitud_factura» y la regla pide «consulta_pago»"),
+    check("consulta-pago-dominio", true, false, "la categoría es «solicitud_factura» y la regla pide «consulta_pago»"),
+    check("consulta-pago-auto", true, false, "la categoría es «solicitud_factura» y la regla pide «consulta_pago»"),
+  ],
+});
+{
+  const dudosa = tasks.find((t) => t.result?.document === "factura-dudosa.txt");
+  if (dudosa?.result)
+    dudosa.result = {
+      ...dudosa.result,
+      evaluation: {
+        code: "amount_review",
+        facts: { message: dudosa.result.amount_review },
+        candidates: [
+          check("alfa-hasta-500", true, false, "el total 1210.00 supera el máximo 500.00"),
+          check("beta-sin-limite", false, false, "el proveedor es «Suministros Alfa SL» y la regla pide «Beta Servicios SL»"),
+        ],
+      },
+    };
+}
+
 function find(id: number) {
   const t = tasks.find((t) => t.id === id);
   if (!t) throw `tarea ${id} inexistente`;
@@ -606,12 +715,13 @@ const slug = (name: string) =>
 function ruleView(rule: Rule): RuleView {
   const meta = metaOf(rule.id);
   const applied = tasks.filter((t) => t.result?.authorization?.rule_id === rule.id && t.state === "completed");
+  const seed = seedStats.get(rule.id) ?? {};
   const stats: RuleStats = {
     rule_id: rule.id,
-    applied: applied.length,
-    last_applied_at: applied.length ? Math.max(...applied.map((t) => t.updated_at)) : null,
-    reviewed: 0,
-    unclassified: 0,
+    applied: (seed.applied ?? 0) + applied.length,
+    last_applied_at: applied.length ? Math.max(...applied.map((t) => Math.floor(t.updated_at / 1000))) : (seed.last_applied_at ?? null),
+    reviewed: seed.reviewed ?? 0,
+    unclassified: seed.unclassified ?? 0,
   };
   return { ...rule, name: meta.name ?? rule.id, archived_at: meta.archived_at, any_sender_ack_at: meta.any_sender_ack_at, stats };
 }
@@ -641,15 +751,120 @@ function checkConditions(kind: string, conditions: Record<string, unknown>, allo
     throw "el total máximo debe ser un importe, por ejemplo 500.00";
 }
 
-// Reglas sintéticas de cada tipo para la vista previa (más un tipo que la aplicación no reconoce).
-const seedRules: Array<Omit<Rule, "version" | "created_at">> = [
-  { id: "alfa-hasta-500", action_kind: "register_invoice", conditions: { supplier: "Suministros Alfa SL", max_total: "500.00" }, active: true },
+// Reglas sintéticas para la vista previa (D124-D129): con dirección, con dominio, con dominio
+// público, antigua sin remitente (no actúa), con la opción avanzada, archivada, con contadores
+// y sin ellos, y un tipo que la aplicación no reconoce.
+interface SeedRule extends Omit<Rule, "version" | "created_at"> {
+  name?: string;
+  archived?: boolean;
+  anySender?: boolean;
+  stats?: Partial<RuleStats>;
+}
+const DAY = 86400;
+const seedRules: SeedRule[] = [
+  {
+    id: "alfa-hasta-500",
+    name: "Facturas de Alfa hasta 500 €",
+    action_kind: "register_invoice",
+    conditions: { supplier: "Suministros Alfa SL", max_total: "500.00", currency: "EUR" },
+    active: true,
+    stats: { applied: 3, last_applied_at: Math.floor(now() / 1000) - 5 * DAY, reviewed: 1 },
+  },
   { id: "beta-sin-limite", action_kind: "register_invoice", conditions: { supplier: "Beta Servicios SL" }, active: false },
-  { id: "consulta-pago-auto", action_kind: "send_draft", conditions: { category: "consulta_pago" }, active: true },
-  { id: "documentacion-auto", action_kind: "send_draft", conditions: { category: "documentacion" }, active: false },
+  {
+    id: "consulta-pago-cliente",
+    name: "Consultas de pago de Beta",
+    action_kind: "send_draft",
+    conditions: { category: "consulta_pago", sender: "cliente.beta@ejemplo.test" },
+    active: true,
+  },
+  {
+    id: "consulta-pago-dominio",
+    name: "Consultas de pago de ejemplo.test",
+    action_kind: "send_draft",
+    conditions: { category: "consulta_pago", sender_domain: "ejemplo.test" },
+    active: true,
+    stats: { applied: 0, reviewed: 2 },
+  },
+  {
+    id: "contesta-gmail",
+    name: "Solicitudes desde Gmail",
+    action_kind: "send_draft",
+    conditions: { category: "solicitud_factura", sender_domain: "gmail.com" },
+    active: false,
+  },
+  // Regla antigua: sin remitente ni marca, no actúa aunque esté activa.
+  {
+    id: "consulta-pago-auto",
+    action_kind: "send_draft",
+    conditions: { category: "consulta_pago" },
+    active: true,
+    stats: { applied: 2, last_applied_at: Math.floor(now() / 1000) - 40 * DAY, reviewed: 0, unclassified: 2 },
+  },
+  {
+    id: "documentacion-cualquiera",
+    name: "Documentación a cualquier remitente",
+    action_kind: "send_draft",
+    conditions: { category: "documentacion" },
+    active: true,
+    anySender: true,
+    stats: { applied: 1, last_applied_at: Math.floor(now() / 1000) - 2 * DAY, reviewed: 0 },
+  },
+  { id: "alfa-antigua", name: "Alfa (regla antigua)", action_kind: "register_invoice", conditions: { supplier: "Suministros Alfa SL" }, active: false, archived: true },
   { id: "emitir-recurrente", action_kind: "issue_recurring", conditions: {}, active: false },
 ];
-for (const rule of seedRules) addRule({ ...rule, version: 1, created_at: now() });
+const seedStats = new Map<string, Partial<RuleStats>>();
+for (const { name, archived, anySender, stats, ...rule } of seedRules) {
+  addRule({ ...rule, version: 1, created_at: now() });
+  setMeta(rule.id, { name: name ?? null, archived_at: archived ? now() : null, any_sender_ack_at: anySender ? now() : null });
+  if (stats) seedStats.set(rule.id, stats);
+}
+// Historial de ejemplo: acciones autorizadas por reglas y aprobadas por una persona.
+for (const [task_id, id] of [
+  [101, "alfa-hasta-500"],
+  [102, "alfa-hasta-500"],
+  [103, "alfa-hasta-500"],
+  [104, "consulta-pago-auto"],
+] as const) {
+  audit.push({
+    task_id,
+    action: id === "alfa-hasta-500" ? "register_invoice" : "send_draft",
+    status: "confirmed",
+    authorization: `regla ${id} v1`,
+    detail: null,
+  });
+}
+audit.push({ task_id: 105, action: "register_invoice", status: "confirmed", authorization: "aprobación", detail: null });
+
+/** Coincidencia de unas condiciones con el resultado de una tarea, como `evaluate` (D125, D126). */
+function matchRule(
+  kind: string,
+  rule: { conditions: Record<string, string>; ack: boolean },
+  result: any,
+): { matches: boolean; mismatch?: string; senderRequired?: boolean } {
+  const c = rule.conditions;
+  const no = (mismatch: string, senderRequired = false) => ({ matches: false, mismatch, senderRequired });
+  if (kind === "invoice") {
+    const actual = String(result.fields?.supplier ?? "").trim();
+    if (actual.toLowerCase() !== String(c.supplier ?? "").trim().toLowerCase())
+      return no(actual ? `el proveedor es «${actual}» y la regla pide «${c.supplier}»` : `la factura no indica proveedor y la regla pide «${c.supplier}»`);
+    const foreign: string[] = result.currency_evidence?.foreign ?? [];
+    if (c.max_total && foreign.length) return no(`el documento menciona ${foreign.join(", ")} y el límite está en EUR`);
+    if (c.max_total && Number(result.fields?.total) > Number(String(c.max_total).replace(",", ".")))
+      return no(`el total ${result.fields?.total} supera el máximo ${c.max_total}`);
+    return { matches: true };
+  }
+  if (result.category !== c.category) return no(`la categoría es «${result.category ?? "sin categoría"}» y la regla pide «${c.category}»`);
+  const from = String(result.message?.from ?? "").trim();
+  if (c.sender) {
+    return from.toLowerCase() === c.sender.toLowerCase() ? { matches: true } : no(`el remitente es «${from}» y la regla pide «${c.sender}»`);
+  }
+  if (c.sender_domain) {
+    const domain = from.split("@")[1] ?? "";
+    return domain.toLowerCase() === c.sender_domain.toLowerCase() ? { matches: true } : no(`el remitente es «${from}», de otro dominio que «${c.sender_domain}»`);
+  }
+  return rule.ack ? { matches: true } : no("la regla no indica remitente; añádalo o valide la opción avanzada", true);
+}
 
 const handlers: Record<string, (a: any, options?: any) => unknown> = {
   tasks: () => structuredClone(tasks),
@@ -832,8 +1047,9 @@ const handlers: Record<string, (a: any, options?: any) => unknown> = {
     return ruleView(r);
   },
   rule_stats: (): RuleStats[] => latest().map((r) => ruleView(r).stats),
-  // Simulación aproximada con las tareas sintéticas; la real la hace la capa Rust.
-  simulate_rule: ({ actionKind, conditions, limit }): Simulation => {
+  // Simulación con las tareas sintéticas: replica la lógica de la capa Rust (D125, D126, D129)
+  // sin llamar a nada; la real la hace el backend.
+  simulate_rule: ({ actionKind, conditions, limit, assumeAnySenderAck }): Simulation => {
     checkConditions(actionKind, conditions, true);
     const max = limit ?? 200;
     const kind = actionKind === "register_invoice" ? "invoice" : "email";
@@ -853,6 +1069,8 @@ const handlers: Record<string, (a: any, options?: any) => unknown> = {
       would_block_other: [],
       items,
     };
+    const blocked = new Map<string, number[]>();
+    const live = latest().filter((r) => r.active && r.action_kind === actionKind && !metaOf(r.id).archived_at);
     for (const t of ofKind.slice(0, max)) {
       const r = t.result;
       if (!r) {
@@ -861,21 +1079,41 @@ const handlers: Record<string, (a: any, options?: any) => unknown> = {
       }
       sim.considered++;
       const label = kind === "invoice" ? (r.document ?? null) : (r.message?.subject ?? null);
-      const fits =
-        kind === "invoice"
-          ? String(r.fields?.supplier ?? "").toLowerCase() === String(conditions.supplier ?? "").toLowerCase()
-          : r.category === conditions.category;
-      if (!fits) {
-        sim.no_match++;
-        items.push({ task_id: t.id, label, outcome: "no_match", reason_code: null, explanation: "la regla no coincide", overlapping_rules: [] });
-      } else if (kind === "email" && !hasSender(conditions)) {
-        sim.would_review.sender_required = (sim.would_review.sender_required ?? 0) + 1;
-        items.push({ task_id: t.id, label, outcome: "review", reason_code: "sender_required", explanation: "la regla no indica remitente; añádalo o valide la opción avanzada", overlapping_rules: [] });
-      } else {
+      const unchecked = kind === "invoice" && !r.currency_evidence;
+      if (unchecked) sim.without_currency_check++;
+      const mine = matchRule(kind, { conditions, ack: Boolean(assumeAnySenderAck) }, r);
+      const push = (outcome: SimulationItem["outcome"], reason_code: string | null, explanation: string, overlapping_rules: string[] = []) =>
+        items.push({ task_id: t.id, label, outcome, reason_code, explanation, overlapping_rules });
+      if (!mine.matches) {
+        if (mine.senderRequired) {
+          sim.would_review.sender_required = (sim.would_review.sender_required ?? 0) + 1;
+          push("review", "sender_required", "la regla no indica remitente; añádalo o valide la opción avanzada");
+        } else {
+          sim.no_match++;
+          push("no_match", null, mine.mismatch ?? "la regla no coincide");
+        }
+        continue;
+      }
+      const others = live
+        .filter((o) => matchRule(kind, { conditions: o.conditions, ack: metaOf(o.id).any_sender_ack_at !== null }, r).matches)
+        .map((o) => o.id);
+      const review = (code: string, text: string) => {
+        sim.would_review[code] = (sim.would_review[code] ?? 0) + 1;
+        push("review", code, text);
+      };
+      if (others.length) {
+        sim.overlaps++;
+        push("overlap", "several_rules_match", `${others.length + 1} reglas coinciden; la decisión no es inequívoca`, others);
+        for (const o of others) blocked.set(o, [...(blocked.get(o) ?? []), t.id]);
+      } else if (kind === "invoice" && r.issues?.length) review("invoice_issues", "la factura tiene incidencias");
+      else if (unchecked) review("currency_not_checked", "no consta la comprobación de moneda; reprocese o revise");
+      else if (kind === "email" && !(r.draft?.to ?? []).length) review("no_recipient", "el borrador no tiene destinatario");
+      else {
         sim.would_automate++;
-        items.push({ task_id: t.id, label, outcome: "automate", reason_code: "automated", explanation: "la regla la automatizaría", overlapping_rules: [] });
+        push("automate", "automated", "la regla la automatizaría");
       }
     }
+    sim.would_block_other = [...blocked].map(([rule_id, task_ids]) => ({ rule_id, task_ids }));
     return sim;
   },
   audit_log: () => structuredClone(audit),

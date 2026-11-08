@@ -572,17 +572,24 @@ fn rule_stats(shared: State<'_, SharedState>) -> CmdResult<Vec<RuleStats>> {
     shared.app()?.rule_stats().map_err(text)
 }
 
-/// Solo lectura: no escribe nada ni llama a la IA.
+/// Solo lectura: no escribe nada ni llama a la IA. `assume_any_sender_ack` es solo una
+/// hipótesis (D126): nunca guarda la marca.
 #[tauri::command]
 fn simulate_rule(
     shared: State<'_, SharedState>,
     action_kind: String,
     conditions: Value,
     limit: Option<usize>,
+    assume_any_sender_ack: Option<bool>,
 ) -> CmdResult<Simulation> {
     shared
         .app()?
-        .simulate_rule(&action_kind, &conditions, limit, false)
+        .simulate_rule(
+            &action_kind,
+            &conditions,
+            limit,
+            assume_any_sender_ack.unwrap_or(false),
+        )
         .map_err(text)
 }
 

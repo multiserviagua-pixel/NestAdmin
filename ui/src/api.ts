@@ -117,9 +117,11 @@ export const api = {
   archiveRule: (id: string) => invoke<RuleView>("archive_rule", { id }),
   unarchiveRule: (id: string) => invoke<RuleView>("unarchive_rule", { id }),
   ruleStats: () => invoke<RuleStats[]>("rule_stats"),
-  /** Solo lectura: no escribe nada ni llama a la IA. */
-  simulateRule: (actionKind: string, conditions: Record<string, string>, limit: number | null) =>
-    invoke<Simulation>("simulate_rule", { actionKind, conditions, limit }),
+  /** Solo lectura: no escribe nada ni llama a la IA. `assumeAnySenderAck` es solo una hipótesis
+   * (D126): ve qué haría una regla de envío sin remitente si tuviera la opción avanzada; nunca
+   * guarda la marca. */
+  simulateRule: (actionKind: string, conditions: Record<string, string>, limit: number | null, assumeAnySenderAck = false) =>
+    invoke<Simulation>("simulate_rule", { actionKind, conditions, limit, assumeAnySenderAck }),
   updateRule: (id: string, conditions: Record<string, string>) => invoke<Rule>("update_rule", { id, conditions }),
   setRuleActive: (id: string, active: boolean) => invoke<Rule>("set_rule_active", { id, active }),
   auditLog: () => invoke<AuditEntry[]>("audit_log"),

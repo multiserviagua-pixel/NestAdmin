@@ -8,6 +8,10 @@ export interface RuleLike {
   action_kind: string;
   conditions: Record<string, unknown>;
   active: boolean;
+  /** Marca de la opción avanzada (D126): la regla de envío contesta a cualquier remitente. */
+  any_sender_ack_at?: number | null;
+  archived_at?: number | null;
+  name?: string;
 }
 
 export const CATEGORY_LABEL: Record<string, string> = {
@@ -53,31 +57,44 @@ export const CATEGORY_HELP: Record<string, CategoryHelp> = {
 
 /** Ayuda de cada campo del formulario y de cada columna de la lista. */
 export const FIELD_HELP: Record<string, string> = {
-  id: "Nombre corto para reconocer la regla en el historial. Solo admite minúsculas, números y guiones, y no se puede cambiar después.",
+  name: "Obligatorio. Nombre claro para reconocer la regla en la lista y en el historial, por ejemplo «Facturas de Alfa hasta 500 €». Puede cambiarlo cuando quiera. El identificador interno se genera solo a partir del nombre.",
+  id: "Nombre corto interno de la regla. Se genera solo a partir del nombre y no se puede cambiar. Aparece en el historial.",
   action:
     "Qué hará la regla cuando coincida: registrar una factura en el sistema administrativo o enviar la respuesta que redactó la IA. No se puede cambiar después.",
   supplier:
     "Obligatorio. Nombre del proveedor tal como lo lee la aplicación en la factura. Debe coincidir exactamente, sin importar mayúsculas: «Alfa SL» no coincide con «Alfa, S.L.». Si el nombre no coincide, la factura se queda en Pendientes para que usted la revise.",
   max_total:
-    "Opcional. Importe máximo, en euros, hasta el cual se registra sin revisión; escriba, por ejemplo, 500.00. Las facturas con un total mayor se quedan en Pendientes. Sin máximo, se registrarán sin revisión facturas de cualquier importe de ese proveedor.",
+    "Opcional. Importe máximo, en euros, hasta el cual se registra sin revisión; escriba, por ejemplo, 500.00. Las facturas con un total mayor se quedan en Pendientes. Hoy la aplicación solo registra facturas en euros: si el documento menciona otra moneda, se revisa siempre. Sin máximo, se registrarán sin revisión facturas de cualquier importe de ese proveedor.",
   category:
-    "Categoría en la que la IA clasifica el correo recibido. La regla se aplica a todos los correos que la IA clasifique así, sea quien sea el remitente.",
-  search: "Busca por el texto de la regla, su identificador, el proveedor o la categoría.",
+    "Categoría en la que la IA clasifica el correo recibido. La regla se aplica a los correos que la IA clasifique así y que vengan del remitente que usted indique.",
+  scope:
+    "Obligatorio. Con quién se usa la regla. «Una dirección exacta» solo vale para los correos de esa dirección. «Todo un dominio» vale para cualquier dirección que acabe en @ese-dominio (sin subdominios). El remitente de un correo se puede suplantar: indicarlo reduce el riesgo, no lo elimina.",
+  sender: "Dirección completa del remitente, por ejemplo compras@cliente.test. No distingue mayúsculas de minúsculas.",
+  sender_domain:
+    "Parte de la dirección que va después de la @, por ejemplo cliente.test. Vale para cualquier dirección de ese dominio, pero no para sus subdominios.",
+  advanced:
+    "Para casos excepcionales: permite que una regla de envío conteste a cualquier remitente. Exige una confirmación expresa y se puede retirar en cualquier momento.",
+  search: "Busca por el nombre, el texto de la regla, su identificador, el remitente, el proveedor o la categoría.",
   filter_action: "Muestra solo las reglas que registran facturas o solo las que envían respuestas.",
   filter_status: "Una regla inactiva no hace nada: solo una regla activa puede actuar sin revisión.",
   filter_category: "Muestra solo las reglas de envío que se aplican a los correos de esta categoría.",
+  filter_archived:
+    "Las reglas archivadas no actúan ni se pueden editar, pero su historial se conserva. Por defecto no se muestran.",
   column_rule:
-    "La frase describe lo que hará la regla. El aviso de debajo recuerda su riesgo y el identificador sirve para encontrarla en el historial.",
+    "El nombre y la frase describen lo que hará la regla. El aviso de debajo recuerda su riesgo y el identificador sirve para encontrarla en el historial.",
   column_action: "Lo que la regla hace sin preguntarle cuando coincide.",
   column_conditions: "Datos que deben coincidir para que la regla actúe. Si alguno no coincide, la tarea queda en Pendientes.",
   column_status:
-    "Activa: puede actuar sin revisión. Inactiva: no hace nada. Una regla nueva nace inactiva hasta que usted la active.",
+    "Activa: puede actuar sin revisión. Inactiva: no hace nada. Una regla nueva nace inactiva hasta que usted la active. «No actúa» indica que la regla está incompleta.",
   column_version:
     "Número interno para el historial: sube también al activar o desactivar la regla, aunque no cambie lo que hace.",
-  column_actions: "Activar o desactivar, editar las condiciones o crear una regla nueva a partir de esta.",
+  column_actions: "Activar o desactivar, editar, duplicar, probar con sus datos o archivar. «Más» reúne las acciones menos habituales.",
+  stats:
+    "«Aplicada» cuenta las veces que la regla ha registrado o enviado algo sin revisión. «Pasó a revisión» cuenta las tareas que la regla habría automatizado pero que se quedaron en Pendientes por otro motivo, por ejemplo una incidencia. «Sin clasificar» son acciones de versiones anteriores de la aplicación que citan la regla de una forma que no se puede leer.",
   category_name: "Clasificación que la IA asigna a cada correo recibido. Son cinco y no se pueden cambiar.",
   category_count: "Correos que constan en este equipo con esa categoría, incluidos los ya tratados.",
   category_rules: "Reglas de envío que se aplican a los correos de esta categoría.",
+  history_filter: "Muestra solo las acciones de una regla, o las que aprobó una persona. Incluye también los cambios de esa regla.",
 };
 
 const FALLBACK_UNKNOWN = "Tipo de regla no reconocido";
@@ -115,6 +132,81 @@ export function isKnownAction(kind: string): boolean {
   return kind === "register_invoice" || kind === "send_draft";
 }
 
+// ---- Remitente (D126) ----
+
+/** Dominios de correo público, igual que `is_public_mail_domain` en `crates/app/src/rules.rs`
+ * (una prueba comprueba que las dos listas coinciden). */
+export const PUBLIC_MAIL_DOMAINS: readonly string[] = [
+  "gmail.com",
+  "googlemail.com",
+  "outlook.com",
+  "outlook.es",
+  "hotmail.com",
+  "hotmail.es",
+  "live.com",
+  "msn.com",
+  "yahoo.com",
+  "yahoo.es",
+  "ymail.com",
+  "icloud.com",
+  "me.com",
+  "mac.com",
+  "aol.com",
+  "proton.me",
+  "protonmail.com",
+  "gmx.com",
+  "gmx.es",
+  "gmx.net",
+  "mail.com",
+  "zoho.com",
+  "yandex.com",
+  "telefonica.net",
+  "movistar.es",
+  "orange.es",
+];
+
+/** Dominio sin la `@` inicial ni espacios. */
+export function cleanDomain(value: string): string {
+  return value.trim().replace(/^@+/, "").trim();
+}
+
+export function isPublicMailDomain(domain: string): boolean {
+  return PUBLIC_MAIL_DOMAINS.includes(cleanDomain(domain).toLowerCase());
+}
+
+/** Aviso de un dominio de correo público, o `null`. */
+export function publicDomainWarning(domain: string): string | null {
+  const d = cleanDomain(domain).toLowerCase();
+  if (!isPublicMailDomain(d)) return null;
+  const who = d === "gmail.com" ? "cualquier usuario de Gmail" : `cualquier usuario de ${d}`;
+  return `${d} abarca a ${who}, no solo a una empresa. Si quiere acotar más, indique una dirección exacta.`;
+}
+
+export function isEmailAddress(value: string): boolean {
+  return /^[^\s@,<>;()"]{1,64}@[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)+$/.test(value.trim());
+}
+
+export function isDomainName(value: string): boolean {
+  return /^[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)+$/.test(cleanDomain(value));
+}
+
+export type SenderKind = "sender" | "domain" | "any" | "missing";
+
+/** A quién contesta una regla de envío: dirección, dominio, cualquiera (opción avanzada) o nadie. */
+export function senderKind(rule: RuleLike): SenderKind {
+  const c = rule.conditions ?? {};
+  if (text(c.sender)) return "sender";
+  if (text(c.sender_domain)) return "domain";
+  return rule.any_sender_ack_at ? "any" : "missing";
+}
+
+/** Una regla de envío antigua sin remitente ni marca avanzada no actúa (D126). */
+export function actsOnNothing(rule: RuleLike): boolean {
+  return rule.action_kind === "send_draft" && senderKind(rule) === "missing";
+}
+
+export const NOT_ACTING = "No actúa: falta el remitente";
+
 /** Frase que describe lo que hace la regla. No inventa datos que la regla no tiene. */
 export function ruleSentence(rule: RuleLike): string {
   const c = rule.conditions ?? {};
@@ -126,25 +218,61 @@ export function ruleSentence(rule: RuleLike): string {
   }
   if (rule.action_kind === "send_draft") {
     const category = text(c.category);
-    const which = category ? `como ${categoryLabel(category)}` : "(la regla no indica categoría)";
-    return `Enviar sin revisión la respuesta redactada por la IA a los correos clasificados ${which}`;
+    const when = category ? `cuando se clasifique como ${categoryLabel(category)}` : "(la regla no indica categoría)";
+    const base = "Enviar sin revisión la respuesta redactada por la IA";
+    switch (senderKind(rule)) {
+      case "sender":
+        return `${base} a ${text(c.sender)} ${when}`;
+      case "domain":
+        return `${base} a cualquier dirección de @${cleanDomain(text(c.sender_domain))} ${when}`;
+      case "any":
+        return `${base} a cualquier remitente ${when}`;
+      default:
+        return `${base} ${when}, sin remitente indicado`;
+    }
   }
   return FALLBACK_UNKNOWN;
 }
 
-/** Aviso que debe verse siempre junto a la regla. */
+/** Aviso que debe verse siempre junto a la regla. Dice la verdad sobre a quién alcanza. */
 export function ruleRisk(rule: RuleLike): string {
   if (rule.action_kind === "send_draft") {
     const c = rule.conditions ?? {};
-    const sender = text(c.sender);
-    const domain = text(c.sender_domain);
-    if (sender) return `Enviará correos sin preguntarle a los mensajes de ${sender} que la IA clasifique en esta categoría.`;
-    if (domain) return `Enviará correos sin preguntarle a los mensajes de cualquier dirección de @${domain} que la IA clasifique en esta categoría.`;
-    return "Enviará correos sin preguntarle a cualquier remitente que la IA clasifique en esta categoría.";
+    const spoof = "El remitente de un correo se puede suplantar: indicarlo reduce el riesgo, no lo elimina.";
+    switch (senderKind(rule)) {
+      case "sender":
+        return `Enviará sin preguntarle la respuesta de la IA a los correos de ${text(c.sender)} que la IA clasifique en esta categoría. ${spoof}`;
+      case "domain": {
+        const domain = cleanDomain(text(c.sender_domain));
+        const warning = publicDomainWarning(domain);
+        return `Enviará sin preguntarle la respuesta de la IA a los correos de cualquier dirección de @${domain} que la IA clasifique en esta categoría. ${warning ? `${warning} ` : ""}${spoof}`;
+      }
+      case "any":
+        return "Contesta a cualquier remitente: cualquier persona, también un desconocido, que escriba un correo que la IA clasifique en esta categoría recibe sin revisión la respuesta redactada por la IA.";
+      default:
+        return `${NOT_ACTING}. Añada una dirección o un dominio para que pueda actuar.`;
+    }
   }
   if (rule.action_kind === "register_invoice")
-    return "Registrará la factura sin preguntarle si coincide y no tiene incidencias.";
+    return "Registrará la factura sin preguntarle si coincide y no tiene incidencias. Hoy solo se registran facturas en euros.";
   return "La aplicación no reconoce este tipo de regla, así que no la aplicará.";
+}
+
+export interface StatusChip {
+  text: string;
+  tone: "neutral" | "ok" | "warn";
+}
+
+/** Estado de la regla para la lista: una regla de envío sin remitente ni marca no actúa. */
+export function ruleStatus(rule: RuleLike): { primary: StatusChip; extra: StatusChip | null } {
+  if (rule.archived_at) return { primary: { text: "Archivada", tone: "neutral" }, extra: null };
+  if (actsOnNothing(rule)) {
+    return {
+      primary: { text: NOT_ACTING, tone: "warn" },
+      extra: { text: rule.active ? "Activa" : "Inactiva", tone: "neutral" },
+    };
+  }
+  return { primary: { text: rule.active ? "Activa" : "Inactiva", tone: rule.active ? "ok" : "neutral" }, extra: null };
 }
 
 /** Problema de la regla que impide que actúe (fallo cerrado, D123), o `null`. */
@@ -158,7 +286,11 @@ export function ruleProblem(rule: RuleLike): string | null {
   if (rule.action_kind === "register_invoice" && !text(c.supplier)) return "La regla no indica proveedor: no actuará.";
   if (rule.action_kind === "register_invoice" && "max_total" in c && typeof c.max_total !== "string")
     return "El máximo de la regla no es un importe válido: no actuará.";
+  if (rule.action_kind === "register_invoice" && "currency" in c && c.currency !== "EUR")
+    return "Hoy la aplicación solo registra facturas en euros: la regla no actuará.";
   if (rule.action_kind === "send_draft" && !text(c.category)) return "La regla no indica categoría: no actuará.";
+  if (rule.action_kind === "send_draft" && text(c.sender) && text(c.sender_domain))
+    return "La regla indica a la vez una dirección y un dominio: no actuará.";
   return null;
 }
 
@@ -168,11 +300,17 @@ export function conditionsSummary(rule: RuleLike): string {
   if (rule.action_kind === "register_invoice") {
     const supplier = text(c.supplier);
     const max = text(c.max_total);
-    return `Proveedor ${supplier ? `«${supplier}»` : "sin indicar"}${max ? `, total ≤ ${formatAmount(max)}` : ", sin máximo"}, sin incidencias`;
+    return `Proveedor ${supplier ? `«${supplier}»` : "sin indicar"}${max ? `, total ≤ ${formatAmount(max)}` : ", sin máximo"}, en euros, sin incidencias`;
   }
   if (rule.action_kind === "send_draft") {
     const category = text(c.category);
-    return `Categoría ${category ? `«${categoryLabel(category)}»` : "sin indicar"}, con destinatario`;
+    const from = {
+      sender: `remitente ${text(c.sender)}`,
+      domain: `dominio @${cleanDomain(text(c.sender_domain))}`,
+      any: "cualquier remitente (opción avanzada)",
+      missing: "sin remitente indicado",
+    }[senderKind(rule)];
+    return `Categoría ${category ? `«${categoryLabel(category)}»` : "sin indicar"}, ${from}, con destinatario`;
   }
   return "Sin datos comparables";
 }
@@ -181,9 +319,417 @@ export function conditionsSummary(rule: RuleLike): string {
 export function searchText(rule: RuleLike): string {
   const c = rule.conditions ?? {};
   const category = text(c.category);
-  return normalizeSearch([ruleSentence(rule), rule.id, text(c.supplier), category, category ? categoryLabel(category) : ""].join(" "));
+  return normalizeSearch(
+    [ruleSentence(rule), rule.name ?? "", rule.id, text(c.supplier), text(c.sender), text(c.sender_domain), category, category ? categoryLabel(category) : ""].join(" "),
+  );
 }
 
 export function normalizeSearch(value: string): string {
   return value.normalize("NFD").replace(/[̀-ͯ]/g, "").toLowerCase();
+}
+
+// ---- Borrador del formulario (D124, D126, D127) ----
+
+export type SenderScope = "sender" | "domain" | "any";
+
+export interface RuleDraft {
+  id: string;
+  name: string;
+  kind: string;
+  supplier: string;
+  max_total: string;
+  /** Moneda guardada en la regla; el formulario no la edita, pero no la pierde. */
+  currency: string;
+  category: string;
+  scope: SenderScope;
+  sender: string;
+  sender_domain: string;
+  /** Confirmación de la opción avanzada, en dos pasos: casilla y texto. */
+  ack: boolean;
+  ack_text: string;
+}
+
+export const ANY_SENDER_CONFIRMATION = "CUALQUIER REMITENTE";
+
+/** Consecuencias de contestar a cualquier remitente, con la categoría de la regla. */
+export function anySenderConsequences(category: string): string {
+  const which = category ? categoryLabel(category) : "la categoría elegida";
+  return `Cualquiera, también un desconocido, que escriba un correo que la IA clasifique como ${which} recibirá sin revisión la respuesta redactada por la IA. Esa persona puede influir en la clasificación con lo que escribe. Puede desactivarla en cualquier momento, pero lo enviado no se puede deshacer.`;
+}
+
+export function anyAckReady(d: Pick<RuleDraft, "ack" | "ack_text">): boolean {
+  return d.ack && d.ack_text.trim() === ANY_SENDER_CONFIRMATION;
+}
+
+/** Borrador para editar o duplicar una regla. Conserva remitente, dominio y moneda. */
+export function draftOf(rule: RuleLike | null): RuleDraft {
+  const c = rule?.conditions ?? {};
+  const kind = rule?.action_kind ?? "register_invoice";
+  const scope: SenderScope = text(c.sender)
+    ? "sender"
+    : text(c.sender_domain)
+      ? "domain"
+      : rule && kind === "send_draft" && rule.any_sender_ack_at
+        ? "any"
+        : "sender";
+  return {
+    id: rule?.id ?? "",
+    name: rule?.name && rule.name !== rule.id ? rule.name : "",
+    kind,
+    supplier: text(c.supplier),
+    max_total: text(c.max_total),
+    currency: text(c.currency),
+    category: text(c.category) || Object.keys(CATEGORY_LABEL)[0],
+    scope,
+    sender: text(c.sender),
+    sender_domain: text(c.sender_domain),
+    ack: false,
+    ack_text: "",
+  };
+}
+
+/** Condiciones que se envían al guardar. Solo las de su tipo de regla. */
+export function draftConditions(d: RuleDraft): Record<string, string> {
+  if (d.kind === "register_invoice") {
+    return Object.fromEntries(
+      Object.entries({ supplier: d.supplier.trim(), max_total: d.max_total.trim(), currency: d.currency.trim() }).filter(([, v]) => v),
+    );
+  }
+  const out: Record<string, string> = { category: d.category };
+  if (d.scope === "sender" && d.sender.trim()) out.sender = d.sender.trim();
+  if (d.scope === "domain" && cleanDomain(d.sender_domain)) out.sender_domain = cleanDomain(d.sender_domain);
+  return out;
+}
+
+/** Lo que falta o está mal en el borrador, en palabras claras. Vacío: se puede guardar. */
+export function draftProblems(d: RuleDraft, creating: boolean, options: { ignoreAck?: boolean } = {}): string[] {
+  const out: string[] = [];
+  if (creating && !d.name.trim()) out.push("Escriba un nombre para la regla.");
+  if (d.name.trim().length > 80) out.push("El nombre admite hasta 80 caracteres.");
+  if (d.kind === "register_invoice") {
+    if (!d.supplier.trim()) out.push("Indique el proveedor.");
+    if (d.max_total.trim() && !/^\d{1,12}([.,]\d{1,2})?$/.test(d.max_total.trim())) out.push("El total máximo debe ser un importe, por ejemplo 500.00.");
+  } else {
+    if (d.scope === "sender" && !isEmailAddress(d.sender)) out.push("Indique la dirección completa del remitente, por ejemplo compras@cliente.test.");
+    if (d.scope === "domain" && !isDomainName(d.sender_domain)) out.push("Indique el dominio, por ejemplo cliente.test (sin comodines ni @ en medio).");
+    if (d.scope === "any" && !options.ignoreAck && !anyAckReady(d)) out.push(`Para contestar a cualquier remitente, marque «Entiendo las consecuencias» y escriba ${ANY_SENDER_CONFIRMATION}.`);
+  }
+  return out;
+}
+
+/** Aviso al editar una regla con la opción avanzada: guardar borra la validación (D126). */
+export function anySenderEditNotice(rule: RuleLike | null, d: RuleDraft): string | null {
+  if (!rule || !rule.any_sender_ack_at || rule.action_kind !== "send_draft") return null;
+  if (d.scope === "any")
+    return "Esta regla tiene validada la opción avanzada. Guardar cualquier cambio borra esa validación: dejará de enviar hasta que vuelva a confirmarla (más abajo, en «Opciones avanzadas»).";
+  return "Esta regla tenía validada la opción avanzada. Al indicar un remitente ya no la necesita y la validación se borra al guardar.";
+}
+
+// ---- Contadores (D129) ----
+
+export interface StatsLike {
+  applied: number;
+  last_applied_at: number | null;
+  reviewed: number;
+  unclassified: number;
+}
+
+function times(n: number): string {
+  return n === 1 ? "1 vez" : `${n} veces`;
+}
+
+/** «03/11/2026» a partir de segundos desde 1970, en hora local. */
+export function formatDate(seconds: number): string {
+  const d = new Date(seconds * 1000);
+  const two = (n: number) => String(n).padStart(2, "0");
+  return `${two(d.getDate())}/${two(d.getMonth() + 1)}/${d.getFullYear()}`;
+}
+
+/** Los contadores de una regla en una línea, y aparte lo que no se pudo clasificar. */
+export function statsText(stats: StatsLike | null | undefined): { main: string; unclassified: string | null } {
+  const s = stats ?? { applied: 0, last_applied_at: null, reviewed: 0, unclassified: 0 };
+  const unclassified = s.unclassified > 0 ? `${s.unclassified} sin clasificar (versión anterior)` : null;
+  if (s.applied === 0 && s.reviewed === 0) return { main: "Aún no se ha aplicado", unclassified };
+  const parts: string[] = [];
+  if (s.applied === 0) parts.push("Aún no se ha aplicado");
+  else {
+    parts.push(`Aplicada ${times(s.applied)}`);
+    if (s.last_applied_at) parts.push(`última el ${formatDate(s.last_applied_at)}`);
+  }
+  parts.push(`pasó a revisión ${times(s.reviewed)}`);
+  return { main: parts.join(" · "), unclassified };
+}
+
+// ---- Motivos de la evaluación (D125, R22) ----
+
+/** Códigos de motivo de `Explanation` (`ReasonCode` en `crates/app/src/rules.rs`). */
+export const REASON_CODES = [
+  "automated",
+  "no_active_rule_matches",
+  "invoice_issues",
+  "unreadable_fields",
+  "no_recipient",
+  "several_rules_match",
+  "split_invoice",
+  "amount_review",
+  "sender_required",
+  "foreign_currency",
+  "currency_not_checked",
+  "scanned_currency",
+] as const;
+
+export type ReasonCode = (typeof REASON_CODES)[number];
+
+function idList(value: unknown): string {
+  return Array.isArray(value) ? value.filter((v): v is string => typeof v === "string" && v !== "").join(", ") : "";
+}
+
+/** Motivo en una cláusula en minúsculas («la regla no indica remitente»), con los datos del hecho
+ * cuando constan. Un código desconocido se dice como tal, sin inventar. */
+export function reasonText(code: string, facts?: Record<string, unknown> | null): string {
+  const f = facts ?? {};
+  switch (code as ReasonCode) {
+    case "automated":
+      return "una regla activa coincide y no hay nada que revisar";
+    case "no_active_rule_matches":
+      return "ninguna regla activa coincide";
+    case "invoice_issues":
+      return "la factura tiene incidencias";
+    case "unreadable_fields":
+      return "hay campos que no se han podido leer";
+    case "no_recipient":
+      return "el borrador no tiene destinatario";
+    case "several_rules_match": {
+      const n = typeof f.matching === "number" ? f.matching : null;
+      return `${n ? `${n} reglas activas coinciden` : "coinciden varias reglas activas"} y la decisión no es inequívoca`;
+    }
+    case "split_invoice":
+      return "la factura procede de un documento con varias facturas separadas por la IA";
+    case "amount_review":
+      return typeof f.message === "string" && f.message ? f.message : "algún importe es dudoso y debe confirmarlo una persona";
+    case "sender_required": {
+      const ids = idList(f.rule_ids);
+      return `la regla no indica remitente; añádalo o valide la opción avanzada${ids ? ` (regla: ${ids})` : ""}`;
+    }
+    case "foreign_currency": {
+      const list = idList(f.currencies);
+      return `el documento menciona ${list || "otra moneda"}; hoy la aplicación solo registra facturas en euros`;
+    }
+    case "currency_not_checked":
+      return "no consta la comprobación de moneda; reprocese o revise";
+    case "scanned_currency":
+      return "el documento está escaneado y no se lee la moneda";
+    default:
+      return `motivo no reconocido (${code})`;
+  }
+}
+
+export function capitalize(value: string): string {
+  return value ? value[0].toUpperCase() + value.slice(1) : value;
+}
+
+// ---- Simulación (D129) ----
+
+export interface SimulationLike {
+  considered: number;
+  truncated: boolean;
+  limit: number;
+  skipped_without_result: number;
+  without_currency_check: number;
+  would_automate: number;
+  would_review: Record<string, number>;
+  overlaps: number;
+  no_match: number;
+  would_block_other: Array<{ rule_id: string; task_ids: number[] }>;
+  items: Array<{
+    task_id: number;
+    label: string | null;
+    outcome: string;
+    reason_code: string | null;
+    explanation: string;
+    overlapping_rules: string[];
+  }>;
+}
+
+export interface ReviewGroup {
+  code: string;
+  count: number;
+  text: string;
+  /** Tareas de esta causa, con la etiqueta mínima que consta. */
+  examples: Array<{ task_id: number; label: string }>;
+}
+
+export interface SimulationSummary {
+  empty: boolean;
+  headline: string;
+  automate: number;
+  groups: ReviewGroup[];
+  noMatch: number;
+  blocked: Array<{ rule_id: string; count: number }>;
+  notes: string[];
+  automateExamples: Array<{ task_id: number; label: string }>;
+}
+
+function taskWord(kind: string, n: number): string {
+  const one = kind === "register_invoice" ? "factura" : "correo";
+  return n === 1 ? one : `${one}s`;
+}
+
+function exampleLabel(item: SimulationLike["items"][number]): { task_id: number; label: string } {
+  return { task_id: item.task_id, label: item.label ?? "(sin nombre)" };
+}
+
+/** Resumen en lenguaje normal de una simulación, agrupado por motivo. */
+export function simulationSummary(sim: SimulationLike, actionKind: string, selfId?: string): SimulationSummary {
+  const word = (n: number) => taskWord(actionKind, n);
+  // Una regla ya activa coincide consigo misma en la prueba: esas tareas no son un solapamiento real.
+  const own = selfId ? sim.items.filter((i) => i.outcome === "overlap" && i.overlapping_rules.length > 0 && i.overlapping_rules.every((r) => r === selfId)) : [];
+  const realOverlaps = sim.overlaps - own.length;
+  const notes: string[] = [];
+  const groups: ReviewGroup[] = [];
+  const reviewCodes = Object.keys(sim.would_review).sort((a, b) => sim.would_review[b] - sim.would_review[a]);
+  for (const code of reviewCodes) {
+    const count = sim.would_review[code];
+    if (!count) continue;
+    const items = sim.items.filter((i) => i.outcome === "review" && i.reason_code === code);
+    groups.push({ code, count, text: reasonText(code), examples: items.map(exampleLabel) });
+  }
+  if (realOverlaps > 0) {
+    groups.push({
+      code: "several_rules_match",
+      count: realOverlaps,
+      text: reasonText("several_rules_match"),
+      examples: sim.items.filter((i) => i.outcome === "overlap" && !own.includes(i)).map(exampleLabel),
+    });
+  }
+  const blocked = sim.would_block_other.filter((b) => b.rule_id !== selfId).map((b) => ({ rule_id: b.rule_id, count: b.task_ids.length }));
+  if (own.length > 0)
+    notes.push(
+      `${own.length} ${word(own.length)} ${own.length === 1 ? "coincide" : "coinciden"} solo con esta misma regla, que ya está activa: se tratarían como hasta ahora y no se pueden contar aquí como automatizadas ni como revisadas.`,
+    );
+  if (sim.without_currency_check > 0)
+    notes.push(
+      sim.without_currency_check === 1
+        ? `1 ${word(1)} no se pudo comprobar en cuanto a la moneda (es anterior a esa comprobación): iría a revisión.`
+        : `${sim.without_currency_check} ${word(sim.without_currency_check)} no se pudieron comprobar en cuanto a la moneda (son anteriores a esa comprobación): irían a revisión.`,
+    );
+  if (sim.truncated) notes.push(`Solo se han mirado las últimas ${sim.limit} tareas: hay más antiguas que no se han comprobado.`);
+  if (sim.skipped_without_result > 0)
+    notes.push(
+      `${sim.skipped_without_result} ${sim.skipped_without_result === 1 ? "tarea no tiene" : "tareas no tienen"} resultado todavía (fallidas o sin procesar) y no se han contado.`,
+    );
+  const empty = sim.considered === 0;
+  const reviewCount = groups.reduce((n, g) => n + g.count, 0);
+  const headline = empty
+    ? "No hay tareas con resultado para comprobar la regla: no se puede decir qué haría. Pruébela de nuevo cuando haya tareas."
+    : `De las últimas ${sim.considered} ${word(sim.considered)} con resultado, la regla automatizaría ${sim.would_automate} y mandaría ${reviewCount} a revisión; ${sim.no_match} no coinciden con la regla.`;
+  return {
+    empty,
+    headline,
+    automate: sim.would_automate,
+    groups,
+    noMatch: sim.no_match,
+    blocked,
+    notes,
+    automateExamples: sim.items.filter((i) => i.outcome === "automate").map(exampleLabel),
+  };
+}
+
+export const SIMULATION_DISCLAIMER = "Es una prueba: no se ha enviado ni registrado nada.";
+
+// ---- Por qué está aquí (R22) ----
+
+export interface CandidateLike {
+  id: string;
+  version: number;
+  active: boolean;
+  matches: boolean;
+  mismatch?: string | null;
+  sender_required?: boolean;
+}
+
+export interface EvaluationLike {
+  code: string;
+  facts?: Record<string, unknown> | null;
+  candidates: CandidateLike[];
+}
+
+export function isEvaluation(value: unknown): value is EvaluationLike {
+  if (!value || typeof value !== "object") return false;
+  const v = value as Record<string, unknown>;
+  return typeof v.code === "string" && Array.isArray(v.candidates);
+}
+
+export type CandidateOutcome = "matched" | "would_apply" | "needs_sender" | "no_match";
+
+export interface CandidateExplanation {
+  id: string;
+  version: number;
+  outcome: CandidateOutcome;
+  text: string;
+}
+
+export function sentenceEnd(value: string): string {
+  const t = capitalize(value.trim());
+  return /[.!?]$/.test(t) ? t : `${t}.`;
+}
+
+/** Cada regla comprobada, con si coincidía y el motivo concreto. Solo usa lo que guardó la evaluación. */
+export function explainEvaluation(evaluation: unknown): { headline: string; candidates: CandidateExplanation[] } | null {
+  if (!isEvaluation(evaluation)) return null;
+  const several = evaluation.code === "several_rules_match";
+  const rank: Record<CandidateOutcome, number> = { matched: 0, would_apply: 1, needs_sender: 2, no_match: 3 };
+  const candidates = evaluation.candidates
+    .map((c): CandidateExplanation => {
+      let outcome: CandidateOutcome;
+      let detail: string;
+      if (c.matches && c.active) {
+        outcome = "matched";
+        detail = several ? "Coincidía, pero coincidían varias reglas activas y entonces no se automatiza." : "Coincidía.";
+      } else if (c.matches) {
+        outcome = "would_apply";
+        detail = "Habría aplicado, pero está inactiva.";
+      } else if (c.sender_required) {
+        outcome = "needs_sender";
+        detail = sentenceEnd(c.mismatch ?? reasonText("sender_required"));
+      } else {
+        outcome = "no_match";
+        detail = `No coincidía: ${(c.mismatch ?? "sin motivo guardado").trim().replace(/\.$/, "")}.`;
+      }
+      return { id: c.id, version: c.version, outcome, text: detail };
+    })
+    .sort((a, b) => rank[a.outcome] - rank[b.outcome]);
+  return { headline: sentenceEnd(reasonText(evaluation.code, evaluation.facts)), candidates };
+}
+
+export const NO_EVALUATION = "Esta tarea es anterior a este registro: no consta qué reglas se comprobaron.";
+
+// ---- Historial por regla ----
+
+export interface AuditLike {
+  task_id: number | null;
+  action: string;
+  status: string;
+  authorization: string | null;
+  detail: string | null;
+}
+
+export const APPROVED_BY_PERSON = "__aprobacion__";
+export const AUTHORIZED_BY_RULE = "__regla__";
+
+/** ¿La entrada del historial es de esta regla? Acciones que autorizó y cambios de la propia regla. */
+export function auditMentionsRule(entry: AuditLike, ruleId: string): boolean {
+  if (entry.authorization && /^regla (.+) v\d+$/.exec(entry.authorization)?.[1] === ruleId) return true;
+  if (entry.action.startsWith("rule")) {
+    const detail = entry.detail ?? "";
+    return detail.startsWith(`${ruleId} v`) || detail.startsWith(`${ruleId}:`);
+  }
+  return false;
+}
+
+export function auditMatches(entry: AuditLike, filter: string): boolean {
+  if (!filter) return true;
+  if (filter === APPROVED_BY_PERSON) return entry.authorization === "aprobación";
+  if (filter === AUTHORIZED_BY_RULE) return /^regla .+ v\d+$/.test(entry.authorization ?? "");
+  return auditMentionsRule(entry, filter);
 }

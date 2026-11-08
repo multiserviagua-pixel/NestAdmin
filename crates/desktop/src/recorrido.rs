@@ -941,6 +941,19 @@ fn panel_de_reglas_nombre_remitente_archivo_y_simulacion_desde_la_ventana() {
     assert_eq!((s.tasks(), s.audit()), before);
     assert_eq!(s.registered(), 0);
 
+    // La hipótesis de «cualquier remitente» no escribe la marca y se puede pedir por el comando.
+    let hypothetical = s.ok(
+        "simulate_rule",
+        json!({
+            "actionKind": "send_draft",
+            "conditions": { "category": "consulta_pago" },
+            "limit": null,
+            "assumeAnySenderAck": true,
+        }),
+    );
+    assert_eq!(hypothetical["action_kind"], "send_draft");
+    assert_eq!((s.tasks(), s.audit()), before);
+
     let stats = s.ok("rule_stats", json!({}));
     assert_eq!(stats.as_array().unwrap().len(), 2);
     s.close();

@@ -12,8 +12,9 @@ import type {
   Memory,
   ProviderChoice,
   ProviderInfo,
-  Rule,
+  RuleView,
   SettingsView,
+  Simulation,
   SetupCheck,
   SetupDone,
   SetupErrorCode,
@@ -23,16 +24,37 @@ import type {
   Task,
 } from "./types";
 import {
+  ANY_SENDER_CONFIRMATION,
+  APPROVED_BY_PERSON,
+  AUTHORIZED_BY_RULE,
   CATEGORY_HELP,
   CATEGORY_LABEL,
   FIELD_HELP,
+  NO_EVALUATION,
+  SIMULATION_DISCLAIMER,
+  actsOnNothing,
+  anyAckReady,
+  anySenderConsequences,
+  anySenderEditNotice,
+  auditMatches,
+  categoryLabel,
   conditionsSummary,
+  draftConditions,
+  draftOf,
+  draftProblems,
+  explainEvaluation,
   isKnownAction,
   normalizeSearch,
+  publicDomainWarning,
   ruleProblem,
   ruleRisk,
   ruleSentence,
+  ruleStatus,
   searchText,
+  simulationSummary,
+  statsText,
+  type CandidateOutcome,
+  type RuleDraft,
 } from "./rules-text";
 
 import { actionBar, dataTable, emptyState, h, helpTip, icon, sectionHeader, statusChip, tabs, type Child, type IconName, type Tone } from "./components";
@@ -80,6 +102,9 @@ const ACTION_LABEL: Record<string, string> = {
   register_invoice: "Registrar factura",
   send_draft: "Enviar respuesta",
   rule: "Regla",
+  rule_any_sender: "Opción avanzada de una regla",
+  rule_archive: "Archivado de una regla",
+  rule_rename: "Nombre de una regla",
 };
 
 type View = "review" | "tasks" | "rules" | "history" | "mail" | "settings" | "setup";
@@ -117,7 +142,7 @@ const state = {
   // Filtro de la lista de pendientes por origen: "" (todo), "file" o el ID de una cuenta.
   originFilter: "",
   tasks: [] as Task[],
-  rules: [] as Rule[],
+  rules: [] as RuleView[],
   audit: [] as AuditEntry[],
   settings: null as SettingsView | null,
   // Proveedor desplegado en Configuración (null: el elegido) y asistente de primer uso.
@@ -138,6 +163,16 @@ const state = {
   rulesTab: "mine" as "mine" | "categories",
   ruleFilter: { text: "", action: "", status: "", category: "" },
   ruleEditor: null as null | { mode: "new" } | { mode: "edit"; id: string },
+  // Panel dentro de una fila (activar con evidencia, probar, opción avanzada, archivar) y su
+  // simulación; la confirmación escrita de la opción avanzada; menú «Más» abierto.
+  rulePanel: null as null | { id: string; kind: "test" | "activate" | "advanced" | "archive" },
+  ruleSim: null as null | { key: string; status: "loading" | "done" | "error"; kind: string; sim?: Simulation; error?: string },
+  ruleAdv: { ack: false, text: "" },
+  ruleMore: null as string | null,
+  advancedOpen: false,
+  // «Por qué está aquí» desplegado, por tarea; filtro del Historial (regla, aprobadas o todo).
+  whyOpen: {} as Record<number, boolean>,
+  auditFilter: "",
   // Preparación (R08): modo instalador, última comprobación y la ejecución en curso.
   prepareOnly: false,
   check: null as SetupCheck | null,
@@ -262,7 +297,7 @@ async function refresh(background = false) {
   try {
     const [tasks, rules, audit, settings, mail] = await Promise.all([
       api.tasks(),
-      api.rules(),
+      api.ruleViews(),
       api.auditLog(),
       api.settings(),
       api.mailAccounts(),
@@ -772,6 +807,7 @@ function invoiceDetail(task: Task) {
           ),
         )
       : h("p", { class: "reason" }, `Motivo de la revisión: ${r.review_reason ?? "requiere aprobación"}`),
+    whyHere(task),
     recoveryBox(task, "registrar"),
     flagList(invoiceFlags(r)) ?? (issues.length ? null : h("p", { class: "ok-line" }, "Sin incidencias en los importes.")),
     h("h3", {}, "Datos extraídos"),
@@ -849,6 +885,7 @@ function emailDetail(task: Task) {
     isKnownKind(task.kind) ? null : h("div", { class: "notice error", role: "alert" }, h("span", {}, `Tipo de tarea no reconocido: ${task.kind}. Se muestra como correo; compruébelo antes de aprobar.`)),
     fallbackNotice(r),
     h("p", { class: "reason" }, `Motivo de la revisión: ${r.review_reason ?? "requiere aprobación"}`),
+    whyHere(task),
     recoveryBox(task, "enviar"),
     h(
       "dl",
@@ -982,33 +1019,10 @@ function field(labelText: string, control: HTMLElement, helpText: string, tag?: 
 
 // ---- Panel de reglas (R21, R22) ----
 
-interface RuleDraft {
-  id: string;
-  kind: string;
-  supplier: string;
-  max_total: string;
-  category: string;
-}
-
 const newDraftKey = "rule:new";
 const editDraftKey = (id: string) => `rule:edit:${id}`;
 
-function draftOf(rule: Rule | null): RuleDraft {
-  return {
-    id: rule?.id ?? "",
-    kind: rule?.action_kind ?? "register_invoice",
-    supplier: rule?.conditions.supplier ?? "",
-    max_total: rule?.conditions.max_total ?? "",
-    category: rule?.conditions.category ?? Object.keys(CATEGORY_LABEL)[0],
-  };
-}
-
-function draftConditions(d: RuleDraft): Record<string, string> {
-  if (d.kind === "register_invoice") {
-    return Object.fromEntries(Object.entries({ supplier: d.supplier.trim(), max_total: d.max_total.trim() }).filter(([, v]) => v));
-  }
-  return { category: d.category };
-}
+const noRuleFilter = () => ({ text: "", action: "", status: "", category: "" });
 
 function setRulesTab(tab: "mine" | "categories") {
   state.rulesTab = tab;
@@ -1017,13 +1031,37 @@ function setRulesTab(tab: "mine" | "categories") {
 
 /** Lleva a «Mis reglas» filtradas por una categoría. */
 function showRulesOf(category: string) {
-  state.ruleFilter = { text: "", action: "", status: "", category };
+  state.ruleFilter = { ...noRuleFilter(), category };
   state.rulesTab = "mine";
   render();
 }
 
+/** Lleva a «Mis reglas» con esa regla buscada (también si está archivada). */
+function showRule(id: string) {
+  const rule = state.rules.find((r) => r.id === id);
+  state.ruleFilter = { ...noRuleFilter(), text: id, status: rule?.archived_at ? "archived" : "" };
+  state.view = "rules";
+  state.rulesTab = "mine";
+  state.notice = null;
+  render();
+}
+
+/** Abre el Historial filtrado: por una regla (su identificador) o por quien aprobó. */
+function showHistoryOf(filter: string) {
+  state.auditFilter = filter;
+  state.view = "history";
+  state.notice = null;
+  render();
+}
+
+function ruleName(id: string): string {
+  return state.rules.find((r) => r.id === id)?.name ?? id;
+}
+
 function openRuleEditor(editor: NonNullable<typeof state.ruleEditor>, draft?: RuleDraft) {
   state.ruleEditor = editor;
+  state.rulePanel = null;
+  state.ruleSim = null;
   if (draft) state.drafts[editor.mode === "new" ? newDraftKey : editDraftKey(editor.id)] = JSON.stringify(draft);
   state.rulesTab = "mine";
   render();
@@ -1033,7 +1071,126 @@ function closeRuleEditor() {
   const editor = state.ruleEditor;
   if (editor) delete state.drafts[editor.mode === "new" ? newDraftKey : editDraftKey(editor.id)];
   state.ruleEditor = null;
+  state.ruleSim = null;
 }
+
+// -- Simulación (solo lectura): nunca envía ni registra nada --
+
+let simToken = 0;
+
+/** Lanza la simulación y repinta al empezar y al terminar. Solo cuenta la última petición. */
+function runSimulation(key: string, kind: string, conditions: Record<string, string>, assumeAnySender: boolean) {
+  const token = ++simToken;
+  state.ruleSim = { key, status: "loading", kind };
+  render();
+  api.simulateRule(kind, conditions, null, assumeAnySender).then(
+    (sim) => {
+      if (token !== simToken) return;
+      state.ruleSim = { key, status: "done", kind, sim };
+      render();
+    },
+    (error) => {
+      if (token !== simToken) return;
+      state.ruleSim = { key, status: "error", kind, error: String(error) };
+      render();
+    },
+  );
+}
+
+function exampleList(examples: Array<{ task_id: number; label: string }>): HTMLElement | null {
+  if (!examples.length) return null;
+  const shown = examples.slice(0, 10);
+  return h(
+    "details",
+    { class: "sim-examples" },
+    h("summary", { "data-focus-key": `sim:examples:${examples[0]!.task_id}:${examples.length}` }, `Ver ${examples.length === 1 ? "el ejemplo" : `los ejemplos (${examples.length})`}`),
+    h(
+      "ul",
+      {},
+      ...shown.map((e) => h("li", {}, `${e.label} (tarea ${e.task_id})`)),
+      examples.length > shown.length ? h("li", { class: "meta" }, `y ${examples.length - shown.length} más`) : null,
+    ),
+  );
+}
+
+/** Resultado de la simulación de la clave dada, o `null` si no hay ninguna en curso. */
+function simulationBox(key: string, kind: string, selfId?: string): HTMLElement | null {
+  const s = state.ruleSim;
+  if (!s || s.key !== key || s.kind !== kind) return null;
+  if (s.status === "loading") return h("div", { class: "sim-box", role: "status" }, h("p", { class: "meta" }, "Comprobando la regla con sus tareas…"));
+  if (s.status === "error" || !s.sim)
+    return h("div", { class: "sim-box", role: "status" }, h("p", { class: "error-text" }, `No se ha podido hacer la prueba: ${s.error ?? "error desconocido"}. No hay datos para decir qué haría la regla.`));
+  const summary = simulationSummary(s.sim, kind, selfId);
+  return h(
+    "div",
+    { class: "sim-box", role: "status" },
+    h("p", { class: "sim-headline" }, summary.headline),
+    summary.empty
+      ? null
+      : h(
+          "ul",
+          { class: "sim-list" },
+          h("li", {}, h("strong", {}, `Se automatizarían sin revisión: ${summary.automate}`), exampleList(summary.automateExamples)),
+          ...summary.groups.map((g) =>
+            h("li", {}, h("strong", {}, `Irían a revisión: ${g.count}`), ` porque ${g.text}.`, exampleList(g.examples)),
+          ),
+          summary.noMatch ? h("li", {}, `No coinciden con la regla: ${summary.noMatch}.`) : null,
+          ...summary.blocked.map((b) =>
+            h("li", { class: "warn-text" }, `«${ruleName(b.rule_id)}» dejaría de actuar en ${b.count} ${b.count === 1 ? "tarea" : "tareas"}: coincidirían dos reglas activas y entonces no se automatiza.`),
+          ),
+        ),
+    ...summary.notes.map((n) => h("p", { class: "meta" }, n)),
+    h("p", { class: "sim-disclaimer" }, SIMULATION_DISCLAIMER),
+  );
+}
+
+// -- Confirmación de la opción avanzada (D126): casilla y texto escrito --
+
+function ackControls(
+  category: string,
+  value: () => { ack: boolean; text: string },
+  set: (ack: boolean, text: string) => void,
+  onChange: () => void,
+  keyPrefix: string,
+): HTMLElement {
+  const check = h("input", {
+    type: "checkbox",
+    "data-focus-key": `${keyPrefix}:ack`,
+    onchange: () => {
+      set(check.checked, value().text);
+      onChange();
+    },
+  }) as HTMLInputElement;
+  const typed = h("input", {
+    type: "text",
+    id: `${keyPrefix}-ack-text`,
+    autocomplete: "off",
+    spellcheck: "false",
+    "data-focus-key": `${keyPrefix}:ack_text`,
+    "aria-describedby": `${keyPrefix}-ack-hint`,
+    oninput: () => {
+      set(value().ack, typed.value);
+      onChange();
+    },
+  }) as HTMLInputElement;
+  check.checked = value().ack;
+  typed.value = value().text;
+  return h(
+    "div",
+    { class: "ack-box" },
+    h("p", { class: "ack-warning", role: "note" }, anySenderConsequences(category)),
+    h("label", { class: "choice" }, check, " Entiendo las consecuencias"),
+    h(
+      "div",
+      { class: "field" },
+      h("div", { class: "field-head" }, h("label", { for: `${keyPrefix}-ack-text` }, `Para confirmar, escriba ${ANY_SENDER_CONFIRMATION}`)),
+      typed,
+      h("p", { class: "hint", id: `${keyPrefix}-ack-hint` }, "Escríbalo tal cual, en mayúsculas."),
+    ),
+  );
+}
+
+// -- Formulario --
 
 function ruleForm(): HTMLElement {
   const editor = state.ruleEditor!;
@@ -1041,29 +1198,41 @@ function ruleForm(): HTMLElement {
   const key = editor.mode === "new" ? newDraftKey : editDraftKey(editor.id);
   let draft: RuleDraft;
   try {
-    draft = state.drafts[key] ? (JSON.parse(state.drafts[key]) as RuleDraft) : draftOf(editing);
+    draft = state.drafts[key] ? { ...draftOf(editing), ...(JSON.parse(state.drafts[key]) as Partial<RuleDraft>) } : draftOf(editing);
   } catch {
     draft = draftOf(editing);
   }
-  const id = h("input", { name: "id", "data-focus-key": "rule-form:id", required: true, placeholder: "p. ej. alfa-mensual", pattern: "[a-z0-9\\-]+", autocomplete: "off" }) as HTMLInputElement;
+  const name = h("input", { name: "name", "data-focus-key": "rule-form:name", required: true, maxlength: "80", placeholder: "p. ej. Facturas de Alfa hasta 500 €", autocomplete: "off" }) as HTMLInputElement;
   const kind = h(
     "select",
     { name: "kind", "data-focus-key": "rule-form:kind" },
     h("option", { value: "register_invoice" }, "Registrar factura"),
     h("option", { value: "send_draft" }, "Enviar respuesta"),
   ) as HTMLSelectElement;
-  const supplier = h("input", { name: "supplier", "data-focus-key": "rule-form:supplier", required: true, placeholder: "Nombre exacto del proveedor", autocomplete: "off" }) as HTMLInputElement;
+  const supplier = h("input", { name: "supplier", "data-focus-key": "rule-form:supplier", placeholder: "Nombre exacto del proveedor", autocomplete: "off" }) as HTMLInputElement;
   const maxTotal = h("input", { name: "max_total", "data-focus-key": "rule-form:max_total", placeholder: "p. ej. 500.00", inputmode: "decimal", autocomplete: "off" }) as HTMLInputElement;
   const category = h(
     "select",
     { name: "category", "data-focus-key": "rule-form:category" },
     ...Object.entries(CATEGORY_LABEL).map(([value, label]) => h("option", { value }, label)),
   ) as HTMLSelectElement;
-  id.value = draft.id;
+  const scopeSender = h("input", { type: "radio", name: "scope", value: "sender", "data-focus-key": "rule-form:scope:sender" }) as HTMLInputElement;
+  const scopeDomain = h("input", { type: "radio", name: "scope", value: "domain", "data-focus-key": "rule-form:scope:domain" }) as HTMLInputElement;
+  const sender = h("input", { name: "sender", type: "email", "data-focus-key": "rule-form:sender", placeholder: "p. ej. compras@cliente.test", autocomplete: "off", spellcheck: "false" }) as HTMLInputElement;
+  const domain = h("input", { name: "sender_domain", "data-focus-key": "rule-form:sender_domain", placeholder: "p. ej. cliente.test", autocomplete: "off", spellcheck: "false" }) as HTMLInputElement;
+  const useAny = h("input", { type: "checkbox", "data-focus-key": "rule-form:any" }) as HTMLInputElement;
+
+  name.value = draft.name;
   kind.value = draft.kind;
   supplier.value = draft.supplier;
   maxTotal.value = draft.max_total;
   category.value = draft.category;
+  scopeDomain.checked = draft.scope === "domain";
+  scopeSender.checked = draft.scope !== "domain";
+  sender.value = draft.sender;
+  domain.value = draft.sender_domain;
+  useAny.checked = draft.scope === "any";
+  let ack = { ack: draft.ack, text: draft.ack_text };
 
   const invoiceFields = h(
     "div",
@@ -1074,71 +1243,172 @@ function ruleForm(): HTMLElement {
       { class: "hint" },
       "Escríbalo tal como lo lee la aplicación en la factura: «Alfa SL» no coincide con «Alfa, S.L.». No distingue mayúsculas de minúsculas.",
     ),
-    field("Total máximo", maxTotal, FIELD_HELP.max_total, "opcional"),
+    field("Total máximo (en euros)", maxTotal, FIELD_HELP.max_total, "opcional"),
+    h("p", { class: "hint" }, "Hoy la aplicación solo registra facturas en euros."),
+    draft.currency ? h("p", { class: "hint" }, `Moneda guardada en la regla: ${draft.currency}. Se conserva al guardar.`) : null,
   );
-  const emailFields = h("div", { class: "field-group" }, field("Categoría del correo", category, FIELD_HELP.category, "obligatorio"));
+
+  const publicWarning = h("p", { class: "rule-risk", role: "status" });
+  const fromGroup = h(
+    "fieldset",
+    { class: "from-group" },
+    h("legend", {}, "¿De quién? ", h("span", { class: "tag" }, "obligatorio"), helpTip(FIELD_HELP.scope, "Ayuda sobre el remitente")),
+    h("label", { class: "choice" }, scopeSender, " Una dirección exacta"),
+    field("Dirección del remitente", sender, FIELD_HELP.sender),
+    h("label", { class: "choice" }, scopeDomain, " Todo un dominio"),
+    field("Dominio del remitente", domain, FIELD_HELP.sender_domain),
+    publicWarning,
+    h(
+      "p",
+      { class: "hint" },
+      "El remitente de un correo se puede suplantar. Indicarlo reduce el riesgo, pero no lo elimina: revise siempre qué reglas activa.",
+    ),
+  );
+  const emailFields = h("div", { class: "field-group" }, field("Categoría del correo", category, FIELD_HELP.category, "obligatorio"), fromGroup);
+
+  // Opciones avanzadas: cerradas por defecto (D126).
+  const anyBox = h("div", { class: "any-box" });
+  const advanced = h(
+    "details",
+    {
+      class: "advanced",
+      ontoggle: () => (state.advancedOpen = advanced.open),
+    },
+    h("summary", { "data-focus-key": "rule-form:advanced" }, "Opciones avanzadas"),
+    h("p", { class: "hint" }, FIELD_HELP.advanced),
+    h("label", { class: "choice" }, useAny, " Quiero que la regla conteste a cualquier remitente"),
+    anyBox,
+  ) as HTMLDetailsElement;
+  advanced.open = state.advancedOpen || draft.scope === "any";
+
   const previewSentence = h("p", { class: "rule-sentence" });
   const previewRisk = h("p", { class: "rule-risk" });
   const previewProblem = h("p", { class: "rule-problem" });
   const preview = h("div", { class: "rule-preview", "aria-live": "polite" }, h("p", { class: "meta" }, "Vista previa de la regla"), previewSentence, previewRisk, previewProblem);
+  const editNotice = h("p", { class: "meta warn", role: "status" });
+  const problems = h("ul", { class: "form-problems", id: "rule-form-problems", "aria-live": "polite" });
+  const simSlot = h("div", { class: "sim-slot" });
 
   const read = (): RuleDraft => ({
-    id: editing ? editing.id : id.value.trim(),
+    id: editing ? editing.id : "",
+    name: name.value,
     kind: editing ? editing.action_kind : kind.value,
     supplier: supplier.value,
     max_total: maxTotal.value,
+    currency: draft.currency,
     category: category.value,
+    scope: useAny.checked ? "any" : scopeDomain.checked ? "domain" : "sender",
+    sender: sender.value,
+    sender_domain: domain.value,
+    ack: ack.ack,
+    ack_text: ack.text,
   });
+
+  const submit = h("button", { class: "primary", type: "submit", "aria-describedby": "rule-form-problems" }, editing ? "Guardar cambios" : "Crear regla") as HTMLButtonElement;
+  const testButton = h("button", { type: "button", "data-focus-key": "rule-form:test" }, "Probar con mis datos") as HTMLButtonElement;
+
   const sync = () => {
     const d = read();
     state.drafts[key] = JSON.stringify(d);
-    invoiceFields.hidden = d.kind !== "register_invoice";
-    emailFields.hidden = d.kind === "register_invoice";
-    supplier.required = d.kind === "register_invoice";
-    const rule = { id: d.id, version: 0, action_kind: d.kind, conditions: draftConditions(d), active: false };
+    const isInvoice = d.kind === "register_invoice";
+    invoiceFields.hidden = !isInvoice;
+    emailFields.hidden = isInvoice;
+    advanced.hidden = isInvoice;
+    // La dirección y el dominio solo se editan con su opción elegida; con «cualquier remitente»
+    // quedan desactivados.
+    sender.disabled = d.scope !== "sender";
+    domain.disabled = d.scope !== "domain";
+    scopeSender.disabled = scopeDomain.disabled = d.scope === "any";
+    const warning = d.scope === "domain" ? publicDomainWarning(d.sender_domain) : null;
+    publicWarning.textContent = warning ?? "";
+    publicWarning.hidden = !warning;
+    anyBox.hidden = d.scope !== "any";
+    const rule = { id: d.id, version: 0, action_kind: d.kind, conditions: draftConditions(d), active: false, any_sender_ack_at: d.scope === "any" ? 1 : null };
     previewSentence.textContent = ruleSentence(rule);
     previewRisk.textContent = `Aviso: ${ruleRisk(rule)}`;
     const problem = ruleProblem(rule);
     previewProblem.textContent = problem ?? "";
     previewProblem.hidden = !problem;
+    const notice = anySenderEditNotice(editing, d);
+    editNotice.textContent = notice ?? "";
+    editNotice.hidden = !notice;
+    const issues = draftProblems(d, !editing);
+    problems.replaceChildren(...issues.map((i) => h("li", {}, i)));
+    problems.hidden = issues.length === 0;
+    submit.disabled = issues.length > 0;
+    testButton.disabled = draftProblems(d, false, { ignoreAck: true }).filter((p) => !p.startsWith("Escriba un nombre")).length > 0;
+    simSlot.hidden = state.ruleSim?.kind !== d.kind;
   };
+  anyBox.append(
+    ackControls(
+      draft.category,
+      () => ack,
+      (a, t) => (ack = { ack: a, text: t }),
+      sync,
+      "rule-form",
+    ),
+  );
+  testButton.addEventListener("click", () => {
+    const d = read();
+    runSimulation("form", d.kind, draftConditions(d), d.scope === "any");
+  });
+  const formSim = simulationBox("form", draft.kind);
+  if (formSim) simSlot.append(formSim);
 
   const wasActive = editing?.active ?? false;
   const form = h(
     "form",
     {
       class: "card rule-form",
-      "aria-label": editing ? `Editar la regla ${editing.id}` : "Nueva regla",
+      novalidate: true,
+      "aria-label": editing ? `Editar la regla ${editing.name}` : "Nueva regla",
       oninput: sync,
       onchange: sync,
       onsubmit: (event) => {
         event.preventDefault();
         const d = read();
+        if (draftProblems(d, !editing).length) return;
         const conditions = draftConditions(d);
         if (editing) {
           void act(async () => {
+            const clean = d.name.trim();
+            if (clean !== (editing.name === editing.id ? "" : editing.name)) await api.renameRule(editing.id, clean || null);
             await api.updateRule(editing.id, conditions);
+            // Guardar borra la validación avanzada: si se mantiene la opción, se confirma de nuevo.
+            if (d.scope === "any" && editing.action_kind === "send_draft") await api.setRuleAnySender(editing.id, true);
             closeRuleEditor();
           }, wasActive ? "Regla guardada; sigue activa y se aplicará a las tareas que se procesen desde ahora" : "Regla guardada; sigue inactiva");
         } else {
           void act(async () => {
-            await api.createRule(d.id, d.kind, conditions, { name: null, acknowledgeAnySender: false });
+            await api.createRule(null, d.kind, conditions, { name: d.name.trim(), acknowledgeAnySender: d.kind === "send_draft" && d.scope === "any" });
             closeRuleEditor();
-          }, "Regla creada inactiva; actívela cuando la haya comprobado");
+          }, "Regla creada inactiva; compruébela con «Probar» y actívela cuando quiera");
         }
       },
     },
-    h("h3", {}, editing ? `Editar la regla ${editing.id}` : "Nueva regla"),
+    h("h3", {}, editing ? `Editar la regla ${editing.name}` : "Nueva regla"),
+    h("div", { class: "field-group" }, field("Nombre", name, FIELD_HELP.name, "obligatorio")),
     editing
       ? h(
           "p",
           { class: "meta" },
-          `Identificador: ${editing.id} · Acción: ${ACTION_LABEL[editing.action_kind] ?? editing.action_kind}. Ninguno de los dos se puede cambiar; para otro tipo de regla, cree una nueva.`,
+          `Identificador: `,
+          h("code", {}, editing.id),
+          ` · Acción: ${ACTION_LABEL[editing.action_kind] ?? editing.action_kind}. Ni el identificador ni la acción se pueden cambiar; para otro tipo de regla, cree una nueva.`,
         )
-      : h("div", { class: "field-group" }, field("Identificador", id, FIELD_HELP.id, "obligatorio"), field("Acción", kind, FIELD_HELP.action)),
+      : h("div", { class: "field-group" }, field("Acción", kind, FIELD_HELP.action)),
     invoiceFields,
     emailFields,
+    advanced,
     preview,
+    editNotice,
+    h(
+      "div",
+      { class: "sim-try" },
+      h("p", { class: "hint" }, "Antes de guardar, puede probar la regla con sus tareas anteriores. Es solo una prueba: no se envía ni se registra nada."),
+      testButton,
+      simSlot,
+    ),
     editing
       ? h(
           "p",
@@ -1148,68 +1418,298 @@ function ruleForm(): HTMLElement {
             : "Esta regla está inactiva y seguirá inactiva al guardar; actívela desde la lista cuando la haya comprobado.",
         )
       : h("p", { class: "hint" }, "La regla se crea inactiva: no hará nada hasta que usted la active desde la lista."),
+    problems,
     h(
       "div",
       { class: "buttons" },
-      h("button", { class: "primary", type: "submit" }, editing ? "Guardar cambios" : "Crear regla"),
+      submit,
       h("button", { type: "button", onclick: () => (closeRuleEditor(), render()) }, "Cancelar"),
     ),
   );
-  if (editing) {
-    // Los datos fijos no se editan.
-    id.disabled = true;
-    kind.disabled = true;
-  }
+  if (editing) kind.disabled = true;
   sync();
   return form;
 }
 
-function filteredRules(): Rule[] {
+// -- Lista --
+
+function filteredRules(): RuleView[] {
   const f = state.ruleFilter;
   const query = normalizeSearch(f.text.trim());
   return state.rules.filter(
     (r) =>
+      (f.status === "archived" ? Boolean(r.archived_at) : !r.archived_at) &&
       (!f.action || r.action_kind === f.action) &&
-      (!f.status || (f.status === "active") === r.active) &&
+      (!f.status || f.status === "archived" || (f.status === "active") === r.active) &&
       (!f.category || r.conditions.category === f.category) &&
       (!query || searchText(r).includes(query)),
   );
 }
 
-function ruleRow(r: Rule): HTMLElement {
-  const problem = ruleProblem(r);
-  return h(
-    "tr",
-    {},
+function closeRulePanel() {
+  const id = state.rulePanel?.id;
+  state.rulePanel = null;
+  state.ruleSim = null;
+  simToken++;
+  if (id) state.focusAfterRender = `rule:${id}:more`;
+  render();
+}
+
+function openRulePanel(r: RuleView, kind: NonNullable<typeof state.rulePanel>["kind"]) {
+  state.rulePanel = { id: r.id, kind };
+  state.ruleAdv = { ack: false, text: "" };
+  state.ruleMore = null;
+  state.ruleSim = null;
+  state.focusAfterRender = `rule:${r.id}:panel`;
+  const simulate = kind !== "archive" && isKnownAction(r.action_kind) && !(kind === "activate" && actsOnNothing(r));
+  // La hipótesis de «cualquier remitente» vale si la regla ya lo tiene validado o se va a validar.
+  if (simulate) runSimulation(`${kind}:${r.id}`, r.action_kind, r.conditions, kind === "advanced" || r.any_sender_ack_at != null);
+  else render();
+}
+
+/** Panel dentro de la fila: activar con evidencia, probar, validar la opción avanzada o archivar. */
+function rulePanel(r: RuleView): HTMLElement | null {
+  const panel = state.rulePanel;
+  if (!panel || panel.id !== r.id) return null;
+  const key = `${panel.kind}:${r.id}`;
+  const box = (label: string, ...children: Child[]) =>
     h(
-      "td",
-      {},
+      "div",
+      {
+        class: "row-panel",
+        role: "group",
+        "aria-label": label,
+        tabindex: "-1",
+        "data-focus-key": `rule:${r.id}:panel`,
+        onkeydown: (event) => {
+          if ((event as KeyboardEvent).key === "Escape") {
+            event.stopPropagation();
+            closeRulePanel();
+          }
+        },
+      },
+      ...children,
+    );
+  const cancel = (label = "Cancelar") => h("button", { type: "button", "data-focus-key": `rule:${r.id}:panel-cancel`, onclick: closeRulePanel }, label);
+
+  if (panel.kind === "test") {
+    return box(
+      `Prueba de la regla ${r.name}`,
+      h("h4", {}, "Probar con sus tareas"),
+      h("p", { class: "rule-sentence" }, ruleSentence(r)),
+      r.active ? h("p", { class: "hint" }, "Esta regla ya está activa: la prueba cuenta sus coincidencias con las tareas que hay en este equipo.") : null,
+      simulationBox(key, r.action_kind, r.active ? r.id : undefined),
+      h("div", { class: "buttons" }, cancel("Cerrar")),
+    );
+  }
+
+  if (panel.kind === "activate") {
+    const blocked = actsOnNothing(r) ? "Esta regla no indica remitente y no podría actuar. Añada un remitente o valide la opción avanzada antes de activarla." : ruleProblem(r);
+    return box(
+      `Activar la regla ${r.name}`,
+      h("h4", {}, "¿Activar esta regla?"),
       h("p", { class: "rule-sentence" }, ruleSentence(r)),
       h("p", { class: "rule-risk" }, "Aviso: ", ruleRisk(r)),
-      problem ? h("p", { class: "rule-problem" }, problem) : null,
-      h("p", { class: "meta" }, "Identificador: ", h("code", {}, r.id), ` · Versión ${r.version}`, helpTip(FIELD_HELP.column_version, "Ayuda sobre la versión")),
-    ),
-    h("td", {}, ACTION_LABEL[r.action_kind] ?? r.action_kind),
-    h("td", {}, conditionsSummary(r)),
-    h("td", {}, statusChip(r.active ? "Activa" : "Inactiva", r.active ? "ok" : "neutral")),
-    h(
-      "td",
-      {},
+      blocked ? h("p", { class: "rule-problem" }, blocked) : h("p", { class: "meta" }, "Esto es lo que habría hecho con sus tareas anteriores:"),
+      blocked ? null : simulationBox(key, r.action_kind),
+      blocked ? null : h("p", { class: "hint" }, "Desactivarla después es siempre un solo clic."),
       h(
         "div",
-        { class: "row-actions" },
-        h(
-          "button",
-          { "data-focus-key": `rule:${r.id}:toggle`, onclick: () => void act(() => api.setRuleActive(r.id, !r.active), r.active ? "Regla desactivada" : "Regla activada") },
-          r.active ? "Desactivar" : "Activar",
-        ),
-        isKnownAction(r.action_kind) ? h("button", { "data-focus-key": `rule:${r.id}:edit`, onclick: () => openRuleEditor({ mode: "edit", id: r.id }, undefined) }, "Editar") : null,
-        isKnownAction(r.action_kind)
-          ? h("button", { "data-focus-key": `rule:${r.id}:dup`, onclick: () => openRuleEditor({ mode: "new" }, { ...draftOf(r), id: "" }) }, "Duplicar")
-          : null,
+        { class: "buttons" },
+        blocked
+          ? actsOnNothing(r)
+            ? h("button", { class: "primary", type: "button", "data-focus-key": `rule:${r.id}:panel-go`, onclick: () => addSender(r) }, "Añadir remitente")
+            : null
+          : h(
+              "button",
+              {
+                class: "primary",
+                type: "button",
+                "data-focus-key": `rule:${r.id}:panel-go`,
+                onclick: () =>
+                  void act(async () => {
+                    await api.setRuleActive(r.id, true);
+                    state.rulePanel = null;
+                    state.ruleSim = null;
+                  }, "Regla activada: actuará sin revisión en las tareas que se procesen desde ahora"),
+              },
+              "Activar regla",
+            ),
+        cancel(),
       ),
+    );
+  }
+
+  if (panel.kind === "advanced") {
+    const go = h(
+      "button",
+      {
+        class: "danger",
+        type: "button",
+        "data-focus-key": `rule:${r.id}:panel-go`,
+        onclick: () =>
+          void act(async () => {
+            await api.setRuleAnySender(r.id, true);
+            state.rulePanel = null;
+            state.ruleSim = null;
+          }, "Opción avanzada validada: la regla contesta a cualquier remitente cuando esté activa. Queda en el historial y puede retirarla cuando quiera"),
+      },
+      "Validar la opción avanzada",
+    ) as HTMLButtonElement;
+    const sync = () => (go.disabled = !anyAckReady({ ack: state.ruleAdv.ack, ack_text: state.ruleAdv.text }));
+    sync();
+    return box(
+      `Opción avanzada de la regla ${r.name}`,
+      h("h4", {}, "Contestar a cualquier remitente"),
+      h("p", { class: "rule-sentence" }, `Enviar sin revisión la respuesta redactada por la IA a cualquier remitente cuando se clasifique como ${categoryLabel(r.conditions.category ?? "")}`),
+      ackControls(r.conditions.category ?? "", () => ({ ack: state.ruleAdv.ack, text: state.ruleAdv.text }), (a, t) => (state.ruleAdv = { ack: a, text: t }), sync, `rule:${r.id}`),
+      h("p", { class: "meta" }, "Esto es lo que habría hecho con sus tareas anteriores:"),
+      simulationBox(key, r.action_kind),
+      h("div", { class: "buttons" }, go, cancel()),
+    );
+  }
+
+  return box(
+    `Archivar la regla ${r.name}`,
+    h("h4", {}, "¿Archivar esta regla?"),
+    h(
+      "p",
+      {},
+      `«${r.name}» quedará inactiva y fuera de la lista. No se podrá activar ni editar hasta que la restaure, y al restaurarla seguirá inactiva.${r.any_sender_ack_at ? " Se retirará también su opción avanzada." : ""} Su historial se conserva.`,
+    ),
+    h(
+      "div",
+      { class: "buttons" },
+      h(
+        "button",
+        {
+          class: "danger",
+          type: "button",
+          "data-focus-key": `rule:${r.id}:panel-go`,
+          onclick: () =>
+            void act(async () => {
+              await api.archiveRule(r.id);
+              state.rulePanel = null;
+            }, "Regla archivada. Puede verla con el filtro «Archivadas» y restaurarla cuando quiera"),
+        },
+        "Archivar",
+      ),
+      cancel(),
     ),
   );
+}
+
+/** Corrección en un clic de una regla antigua sin remitente: abre la edición con el foco ahí. */
+function addSender(r: RuleView) {
+  state.focusAfterRender = "rule-form:sender";
+  openRuleEditor({ mode: "edit", id: r.id }, { ...draftOf(r), scope: "sender", ack: false, ack_text: "" });
+}
+
+function statsLine(r: RuleView): HTMLElement {
+  const t = statsText(r.stats);
+  return h(
+    "p",
+    { class: "meta rule-stats" },
+    t.main,
+    t.unclassified ? ` · ${t.unclassified}` : "",
+    helpTip(FIELD_HELP.stats, "Ayuda sobre los contadores de la regla"),
+  );
+}
+
+function moreMenu(r: RuleView, items: Array<[string, string, () => void]>): HTMLElement {
+  const menu = h(
+    "details",
+    {
+      class: "more-menu",
+      ontoggle: () => {
+        if (menu.open) state.ruleMore = r.id;
+        else if (state.ruleMore === r.id) state.ruleMore = null;
+      },
+      onkeydown: (event) => {
+        if ((event as KeyboardEvent).key === "Escape" && menu.open) {
+          event.stopPropagation();
+          menu.open = false;
+          (menu.querySelector("summary") as HTMLElement).focus();
+        }
+      },
+    },
+    h("summary", { "data-focus-key": `rule:${r.id}:more`, "aria-label": `Más acciones de ${r.name}` }, "Más"),
+    h(
+      "div",
+      { class: "more-items" },
+      ...items.map(([focus, label, run]) => h("button", { type: "button", "data-focus-key": `rule:${r.id}:${focus}`, onclick: run }, label)),
+    ),
+  ) as HTMLDetailsElement;
+  menu.open = state.ruleMore === r.id;
+  return menu;
+}
+
+function ruleRow(r: RuleView): Child[] {
+  const problem = ruleProblem(r);
+  const known = isKnownAction(r.action_kind);
+  const status = ruleStatus(r);
+  const archived = Boolean(r.archived_at);
+  const missingSender = actsOnNothing(r) && !archived;
+  const toggle = () => {
+    if (r.active) void act(() => api.setRuleActive(r.id, false), "Regla desactivada");
+    else if (known) openRulePanel(r, "activate");
+    else void act(() => api.setRuleActive(r.id, true), "Regla activada");
+  };
+  const more: Array<[string, string, () => void]> = [];
+  if (known && !archived) more.push(["dup", "Duplicar", () => openRuleEditor({ mode: "new" }, { ...draftOf(r), id: "", name: r.name === r.id ? "" : `${r.name} (copia)`, ack: false, ack_text: "" })]);
+  more.push(["history", "Ver historial", () => showHistoryOf(r.id)]);
+  if (!archived) more.push(["archive", "Archivar", () => openRulePanel(r, "archive")]);
+
+  const info = h(
+    "div",
+    { class: "rule-info" },
+    h("p", { class: "cell-title" }, r.name),
+    h("p", { class: "meta" }, "Identificador: ", h("code", {}, r.id), ` · Versión ${r.version}`, helpTip(FIELD_HELP.column_version, "Ayuda sobre la versión")),
+    h("p", { class: "rule-sentence" }, ruleSentence(r)),
+    h("p", { class: missingSender || r.any_sender_ack_at ? "rule-problem" : "rule-risk" }, "Aviso: ", ruleRisk(r)),
+    problem ? h("p", { class: "rule-problem" }, problem) : null,
+    statsLine(r),
+    missingSender
+      ? h("p", { class: "meta" }, h("button", { class: "link", type: "button", "data-focus-key": `rule:${r.id}:advanced`, onclick: () => openRulePanel(r, "advanced") }, "Contestar a cualquier remitente (opción avanzada)"))
+      : null,
+    r.any_sender_ack_at && !archived
+      ? h(
+          "p",
+          { class: "meta" },
+          h("button", { class: "link", type: "button", "data-focus-key": `rule:${r.id}:retract`, onclick: () => void act(() => api.setRuleAnySender(r.id, false), "Opción avanzada retirada: la regla vuelve a exigir remitente y no actuará hasta que lo añada") }, "Retirar la opción avanzada"),
+        )
+      : null,
+    rulePanel(r),
+  );
+
+  return [
+    info,
+    ACTION_LABEL[r.action_kind] ?? r.action_kind,
+    conditionsSummary(r),
+    h(
+      "div",
+      { class: "status-cell" },
+      statusChip(status.primary.text, status.primary.tone),
+      status.extra ? statusChip(status.extra.text, status.extra.tone) : null,
+      r.any_sender_ack_at && !archived ? statusChip("Contesta a cualquier remitente", "warn") : null,
+    ),
+    h(
+      "div",
+      { class: "row-actions" },
+      ...(archived
+        ? [
+            h("button", { "data-focus-key": `rule:${r.id}:restore`, onclick: () => void act(() => api.unarchiveRule(r.id), "Regla restaurada. Queda inactiva: actívela cuando quiera") }, "Restaurar"),
+            h("button", { "data-focus-key": `rule:${r.id}:history`, onclick: () => showHistoryOf(r.id) }, "Ver historial"),
+          ]
+        : [
+            missingSender ? h("button", { class: "primary", "data-focus-key": `rule:${r.id}:add-sender`, onclick: () => addSender(r) }, "Añadir remitente") : null,
+            h("button", { "data-focus-key": `rule:${r.id}:toggle`, onclick: toggle }, r.active ? "Desactivar" : "Activar"),
+            known ? h("button", { "data-focus-key": `rule:${r.id}:edit`, onclick: () => openRuleEditor({ mode: "edit", id: r.id }, undefined) }, "Editar") : null,
+            known ? h("button", { "data-focus-key": `rule:${r.id}:test`, onclick: () => openRulePanel(r, "test") }, "Probar") : null,
+            moreMenu(r, more),
+          ]),
+    ),
+  ];
 }
 
 /** Lista con buscador y filtros; al escribir solo se rehace la lista, para conservar el foco. */
@@ -1220,35 +1720,40 @@ function rulesList(): HTMLElement {
     const rows = filteredRules();
     const f = state.ruleFilter;
     const filtered = Boolean(f.text.trim() || f.action || f.status || f.category);
+    const hiddenArchived = state.rules.filter((r) => r.archived_at).length;
+    const live = state.rules.filter((r) => !r.archived_at).length;
+    const col = (label: string, helpKey: string) => ({ label: h("span", {}, `${label} `, helpTip(FIELD_HELP[helpKey]!, `Ayuda sobre la columna ${label}`)) });
     results.replaceChildren(
       !state.rules.length
         ? emptyState("Todavía no hay reglas", "Todas las acciones requieren su aprobación en Pendientes. Cree una con «Nueva regla».")
         : !rows.length
           ? emptyState(
-              "Ninguna regla coincide con la búsqueda y los filtros elegidos.",
+              f.status === "archived" ? "No hay reglas archivadas con esa búsqueda." : "Ninguna regla coincide con la búsqueda y los filtros elegidos.",
               undefined,
               filtered ? h("button", { "data-focus-key": "rules:clear", onclick: clearRuleFilter }, "Quitar filtros") : null,
             )
-          : h("p", { class: "meta" }, `${rows.length} de ${state.rules.length} reglas`),
-      ...(rows.length
-        ? [h("div", { class: "table-wrap" }, h(
-            "table",
-            { class: "grid rules-grid" },
-            h(
-              "thead",
-              {},
-              h(
-                "tr",
-                {},
-                h("th", {}, "Regla ", helpTip(FIELD_HELP.column_rule, "Ayuda sobre la columna Regla")),
-                h("th", {}, "Acción ", helpTip(FIELD_HELP.column_action, "Ayuda sobre la columna Acción")),
-                h("th", {}, "Condiciones ", helpTip(FIELD_HELP.column_conditions, "Ayuda sobre la columna Condiciones")),
-                h("th", {}, "Estado ", helpTip(FIELD_HELP.column_status, "Ayuda sobre la columna Estado")),
-                h("th", {}, "Acciones ", helpTip(FIELD_HELP.column_actions, "Ayuda sobre la columna Acciones")),
-              ),
+          : h(
+              "p",
+              { class: "meta" },
+              f.status === "archived" ? `${rows.length} de ${hiddenArchived} reglas archivadas` : `${rows.length} de ${live} reglas`,
+              ...(f.status !== "archived" && hiddenArchived
+                ? [
+                    ` · ${hiddenArchived} ${hiddenArchived === 1 ? "archivada oculta" : "archivadas ocultas"} `,
+                    h("button", { class: "link", type: "button", "data-focus-key": "rules:show-archived", onclick: () => ((state.ruleFilter = { ...noRuleFilter(), status: "archived" }), render()) }, "Ver archivadas"),
+                  ]
+                : []),
             ),
-            h("tbody", {}, ...rows.map(ruleRow)),
-          ))]
+      ...(rows.length
+        ? [
+            (() => {
+              const table = dataTable(
+                [col("Regla", "column_rule"), col("Acción", "column_action"), col("Condiciones", "column_conditions"), col("Estado", "column_status"), col("Acciones", "column_actions")],
+                rows.map(ruleRow),
+              );
+              table.querySelector("table")?.classList.add("rules-grid");
+              return table;
+            })(),
+          ]
         : []),
     );
   };
@@ -1256,7 +1761,7 @@ function rulesList(): HTMLElement {
     type: "search",
     id: "rule-search",
     "data-focus-key": "rules:search",
-    placeholder: "Proveedor, categoría o identificador",
+    placeholder: "Nombre, proveedor, remitente o categoría",
     autocomplete: "off",
     oninput: () => ((state.ruleFilter.text = search.value), fill()),
   }) as HTMLInputElement;
@@ -1271,10 +1776,10 @@ function rulesList(): HTMLElement {
     return el;
   };
   const action = select("action", [["", "Todas las acciones"], ["register_invoice", "Registrar factura"], ["send_draft", "Enviar respuesta"]]);
-  const status = select("status", [["", "Activas e inactivas"], ["active", "Solo activas"], ["inactive", "Solo inactivas"]]);
+  const status = select("status", [["", "Activas e inactivas"], ["active", "Solo activas"], ["inactive", "Solo inactivas"], ["archived", "Archivadas"]]);
   const category = select("category", [["", "Todas las categorías"], ...Object.entries(CATEGORY_LABEL)]);
   function clearRuleFilter() {
-    state.ruleFilter = { text: "", action: "", status: "", category: "" };
+    state.ruleFilter = noRuleFilter();
     render();
   }
   box.append(
@@ -1283,7 +1788,7 @@ function rulesList(): HTMLElement {
       { class: "filters", role: "search" },
       h("div", { class: "field grow" }, h("div", { class: "field-head" }, h("label", { for: "rule-search" }, "Buscar"), helpTip(FIELD_HELP.search, "Ayuda sobre el buscador")), search),
       h("div", { class: "field" }, h("div", { class: "field-head" }, h("label", {}, "Acción", action), helpTip(FIELD_HELP.filter_action, "Ayuda sobre el filtro de acción"))),
-      h("div", { class: "field" }, h("div", { class: "field-head" }, h("label", {}, "Estado", status), helpTip(FIELD_HELP.filter_status, "Ayuda sobre el filtro de estado"))),
+      h("div", { class: "field" }, h("div", { class: "field-head" }, h("label", {}, "Estado", status), helpTip(FIELD_HELP.filter_status + " " + FIELD_HELP.filter_archived, "Ayuda sobre el filtro de estado"))),
       h("div", { class: "field" }, h("div", { class: "field-head" }, h("label", {}, "Categoría", category), helpTip(FIELD_HELP.filter_category, "Ayuda sobre el filtro de categoría"))),
     ),
     results,
@@ -1307,53 +1812,35 @@ function categoriesPanel(): HTMLElement {
     h(
       "p",
       { class: "intro" },
-      "La IA clasifica cada correo recibido en una de estas cinco categorías; no se pueden añadir ni cambiar. Una regla de envío se aplica a los correos de la categoría que elija.",
+      "La IA clasifica cada correo recibido en una de estas cinco categorías; no se pueden añadir ni cambiar. Una regla de envío se aplica a los correos de la categoría que elija, de los remitentes que usted indique.",
     ),
-    h("div", { class: "table-wrap" }, h(
-      "table",
-      { class: "grid" },
-      h(
-        "thead",
-        {},
-        h(
-          "tr",
-          {},
-          h("th", {}, "Categoría ", helpTip(FIELD_HELP.category_name, "Ayuda sobre las categorías")),
-          h("th", {}, "Qué significa"),
-          h("th", {}, "Ejemplo inventado"),
-          h("th", {}, "Correos ", helpTip(FIELD_HELP.category_count, "Ayuda sobre el recuento")),
-          h("th", {}, "Reglas que la usan ", helpTip(FIELD_HELP.category_rules, "Ayuda sobre las reglas que la usan")),
-        ),
-      ),
-      h(
-        "tbody",
-        {},
-        ...Object.entries(CATEGORY_LABEL).map(([key, label]) => {
-          const using = state.rules.filter((r) => r.action_kind === "send_draft" && r.conditions.category === key);
-          const info = CATEGORY_HELP[key];
-          return h(
-            "tr",
-            {},
-            h("td", {}, h("strong", {}, label)),
-            h("td", {}, info.description),
-            h("td", {}, h("em", {}, info.example)),
-            h("td", {}, String(counts[key] ?? 0)),
-            h(
-              "td",
-              {},
-              using.length
-                ? h(
-                    "span",
-                    {},
-                    `${using.length} ${using.length === 1 ? "regla" : "reglas"}: ${using.map((r) => r.id).join(", ")} `,
-                    h("button", { class: "link", onclick: () => showRulesOf(key) }, "Ver reglas"),
-                  )
-                : "Ninguna",
-            ),
-          );
-        }),
-      ),
-    )),
+    dataTable(
+      [
+        { label: h("span", {}, "Categoría ", helpTip(FIELD_HELP.category_name, "Ayuda sobre las categorías")) },
+        { label: "Qué significa" },
+        { label: "Ejemplo inventado" },
+        { label: h("span", {}, "Correos ", helpTip(FIELD_HELP.category_count, "Ayuda sobre el recuento")) },
+        { label: h("span", {}, "Reglas que la usan ", helpTip(FIELD_HELP.category_rules, "Ayuda sobre las reglas que la usan")) },
+      ],
+      Object.entries(CATEGORY_LABEL).map(([key, label]) => {
+        const using = state.rules.filter((r) => r.action_kind === "send_draft" && !r.archived_at && r.conditions.category === key);
+        const info = CATEGORY_HELP[key];
+        return [
+          h("strong", {}, label),
+          info.description,
+          h("em", {}, info.example),
+          String(counts[key] ?? 0),
+          using.length
+            ? h(
+                "span",
+                {},
+                `${using.length} ${using.length === 1 ? "regla" : "reglas"}: ${using.map((r) => r.name).join(", ")} `,
+                h("button", { class: "link", onclick: () => showRulesOf(key) }, "Ver reglas"),
+              )
+            : "Ninguna",
+        ];
+      }),
+    ),
     h(
       "p",
       { class: "meta" },
@@ -1402,23 +1889,102 @@ function rulesView() {
   );
 }
 
+// -- Por qué está aquí (R22) --
+
+const OUTCOME_CHIP: Record<CandidateOutcome, [string, Tone]> = {
+  matched: ["Coincidía", "ok"],
+  would_apply: ["Habría aplicado", "warn"],
+  needs_sender: ["Falta el remitente", "warn"],
+  no_match: ["No coincidía", "neutral"],
+};
+
+/** Bloque desplegable con las reglas que se comprobaron para esta tarea y por qué no se automatizó. */
+function whyHere(task: Task): HTMLElement {
+  const info = explainEvaluation(task.result?.evaluation);
+  const details = h(
+    "details",
+    {
+      class: "why",
+      ontoggle: () => (state.whyOpen[task.id] = details.open),
+    },
+    h("summary", { "data-focus-key": `why:${task.id}` }, "Por qué está aquí"),
+    !info
+      ? h("p", { class: "meta" }, NO_EVALUATION)
+      : h(
+          "div",
+          {},
+          h("p", {}, "Resultado: ", info.headline),
+          info.candidates.length
+            ? h(
+                "ul",
+                { class: "why-list" },
+                ...info.candidates.map((c) => {
+                  const rule = state.rules.find((r) => r.id === c.id);
+                  const [label, tone] = OUTCOME_CHIP[c.outcome];
+                  return h(
+                    "li",
+                    {},
+                    h("div", { class: "why-head" }, h("strong", {}, rule?.name ?? c.id), statusChip(label, tone), rule ? h("button", { class: "link", type: "button", "data-focus-key": `why:${task.id}:${c.id}`, onclick: () => showRule(c.id) }, "Ver regla") : h("span", { class: "missing" }, "(la regla ya no consta)")),
+                    rule ? h("p", { class: "meta" }, ruleSentence(rule)) : null,
+                    h("p", {}, c.text),
+                    rule && rule.version !== c.version ? h("p", { class: "meta" }, `Se comprobó la versión ${c.version}; hoy la regla va por la ${rule.version}.`) : null,
+                  );
+                }),
+              )
+            : h("p", { class: "meta" }, "No había reglas de este tipo que comprobar."),
+        ),
+  ) as HTMLDetailsElement;
+  details.open = Boolean(state.whyOpen[task.id]);
+  return details;
+}
+
 function historyView() {
+  const filter = state.auditFilter;
+  const entries = [...state.audit].reverse().filter((e) => auditMatches(e, filter));
+  const options: Array<[string, string]> = [
+    ["", "Todo el historial"],
+    [APPROVED_BY_PERSON, "Aprobadas por una persona"],
+    [AUTHORIZED_BY_RULE, "Autorizadas por una regla"],
+  ];
+  const select = h(
+    "select",
+    {
+      "data-focus-key": "history:filter",
+      onchange: () => ((state.auditFilter = select.value), render()),
+    },
+    ...options.map(([value, label]) => h("option", { value }, label)),
+    h(
+      "optgroup",
+      { label: "De una regla" },
+      ...state.rules.map((r) => h("option", { value: r.id }, r.archived_at ? `${r.name} (archivada)` : r.name)),
+      ...(filter && ![...options.map((o) => o[0]), ...state.rules.map((r) => r.id)].includes(filter) ? [h("option", { value: filter }, filter)] : []),
+    ),
+  ) as HTMLSelectElement;
+  select.value = filter;
   return h(
     "section",
     { class: "page" },
     h("h2", {}, "Historial"),
     h("p", { class: "intro" }, "Acciones ejecutadas en las cuentas de correo y el simulador de administración, y cambios de reglas, con su autorización."),
+    h(
+      "div",
+      { class: "filters", role: "search" },
+      h("div", { class: "field" }, h("div", { class: "field-head" }, h("label", {}, "Mostrar", select), helpTip(FIELD_HELP.history_filter, "Ayuda sobre el filtro del historial"))),
+      filter ? h("div", { class: "field" }, h("button", { "data-focus-key": "history:clear", onclick: () => ((state.auditFilter = ""), render()) }, "Quitar filtro")) : null,
+    ),
     state.audit.length
-      ? dataTable(
-          [{ label: "Tarea", numeric: true }, { label: "Acción" }, { label: "Resultado" }, { label: "Autorización" }, { label: "Detalle" }],
-          [...state.audit].reverse().map((e) => [
-            e.task_id ?? missing("Sin tarea"),
-            ACTION_LABEL[e.action] ?? e.action,
-            e.status,
-            e.authorization ?? missing(),
-            h("div", { class: "detail-cell" }, e.detail ?? missing()),
-          ]),
-        )
+      ? entries.length
+        ? dataTable(
+            [{ label: "Tarea", numeric: true }, { label: "Acción" }, { label: "Resultado" }, { label: "Autorización" }, { label: "Detalle" }],
+            entries.map((e) => [
+              e.task_id ?? missing("Sin tarea"),
+              ACTION_LABEL[e.action] ?? e.action,
+              e.status,
+              e.authorization ?? missing(),
+              h("div", { class: "detail-cell" }, e.detail ?? missing()),
+            ]),
+          )
+        : emptyState("Ninguna entrada coincide con el filtro", "Pruebe con otra regla o quite el filtro.")
       : emptyState("Aún no hay acciones registradas", "Aquí aparecerá cada acción ejecutada, con su autorización."),
   );
 }
