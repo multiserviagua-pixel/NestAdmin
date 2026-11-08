@@ -21,10 +21,12 @@ use serde_json::{json, Value};
 const USAGE: &str =
     "uso: nestadmin-predict --provider ollama|ollama-cloud|openai-compatible|anthropic \
 --out ARCHIVO.jsonl [--model MODELO] [--url URL_OLLAMA] [--base-url URL_HTTPS] \
-[--inputs DIR] \
+[--inputs DIR] [--task completa|afinado] \
 [--timeout-secs N]";
 
 struct Args {
+    /// `afinado` evalúa solo `refine_suggestions` (D134) con `refine_suggestions.json`.
+    refine: bool,
     choice: ProviderChoice,
     out: PathBuf,
     inputs: PathBuf,
@@ -39,6 +41,7 @@ fn parse_args() -> Result<Args, String> {
     let mut out = None;
     let mut inputs = PathBuf::from("evaluation/data/inputs");
     let mut timeout = 300;
+    let mut refine = false;
     let mut args = std::env::args().skip(1);
     while let Some(flag) = args.next() {
         let mut value = || {
@@ -52,6 +55,13 @@ fn parse_args() -> Result<Args, String> {
             "--base-url" => base_url = Some(value()?),
             "--out" => out = Some(PathBuf::from(value()?)),
             "--inputs" => inputs = PathBuf::from(value()?),
+            "--task" => {
+                refine = match value()?.as_str() {
+                    "completa" => false,
+                    "afinado" => true,
+                    _ => return Err("--task debe ser completa o afinado".into()),
+                }
+            }
             "--timeout-secs" => timeout = value()?.parse().map_err(|_| "timeout inválido")?,
             other => return Err(format!("argumento desconocido: {other}")),
         }
@@ -83,6 +93,7 @@ fn parse_args() -> Result<Args, String> {
         }
     };
     Ok(Args {
+        refine,
         choice,
         out: out.ok_or("--out es obligatorio")?,
         inputs,
@@ -150,10 +161,84 @@ fn main() {
     }
 }
 
+/// Evaluación de `refine_suggestions` (D134): cada caso es una lista de candidatas agregadas, la
+/// misma forma que viaja en la aplicación. La salida se escribe tal como la devolvió el modelo,
+/// sin validar: el evaluador aplica el esquema cerrado y mide la validez. Nunca se leen las
+/// expectativas.
+fn run_refine(
+    args: &Args,
+    provider: &dyn nestadmin_ai::Provider,
+    mut out: fs::File,
+) -> Result<(), String> {
+    use nestadmin_ai::refine::{content, request};
+    let name = "refine_suggestions.json";
+    let text = fs::read_to_string(args.inputs.join(name)).map_err(|e| format!("{name}: {e}"))?;
+    let cases: Vec<Value> = serde_json::from_str(&text).map_err(|e| format!("{name}: {e}"))?;
+    let started = Instant::now();
+    let (mut errors, mut models) = (0, std::collections::BTreeSet::new());
+    for case in &cases {
+        let id = case["id"].as_str().ok_or(format!("{name}: caso sin id"))?;
+        let candidates = case["input"]["candidates"]
+            .as_array()
+            .ok_or(format!("{name}: {id} sin candidatas"))?;
+        let discarded = case["input"]["discarded_by_user"].as_u64().unwrap_or(0);
+        let body = content(candidates, u32::try_from(discarded).unwrap_or(0));
+        let t0 = Instant::now();
+        let line = match provider.generate(&request(id, &body)) {
+            Ok(result) => {
+                models.insert(result.model.clone());
+                json!({ "id": id, "result": result.output, "latency_ms": result.latency_ms })
+            }
+            Err(error) => {
+                errors += 1;
+                error_line(id, &error, t0.elapsed().as_millis())
+            }
+        };
+        writeln!(out, "{line}").map_err(|e| e.to_string())?;
+        eprintln!(
+            "{id}: {}",
+            if line.get("error").is_some() {
+                "error"
+            } else {
+                "ok"
+            }
+        );
+    }
+    let meta = json!({
+        "corpus": "synthetic-refine-v1",
+        "choice": args.choice,
+        "models_reported": models,
+        "cases": cases.len(),
+        "errors": errors,
+        "duration_ms": started.elapsed().as_millis() as u64,
+        "timeout_secs": args.timeout.as_secs(),
+        "concurrency": 1,
+        "memory": "no medida",
+    });
+    let meta_path = args.out.with_extension("meta.json");
+    fs::write(
+        &meta_path,
+        serde_json::to_string_pretty(&meta).unwrap() + "\n",
+    )
+    .map_err(|e| e.to_string())?;
+    eprintln!(
+        "Predicciones: {}\nMetadatos: {}",
+        args.out.display(),
+        meta_path.display()
+    );
+    Ok(())
+}
+
 fn run() -> Result<(), String> {
     let args = parse_args()?;
-    let invoices = load_inputs(&args.inputs, "invoices.json")?;
-    let emails = load_inputs(&args.inputs, "emails.json")?;
+    let (invoices, emails) = if args.refine {
+        (Vec::new(), Vec::new())
+    } else {
+        (
+            load_inputs(&args.inputs, "invoices.json")?,
+            load_inputs(&args.inputs, "emails.json")?,
+        )
+    };
     // El almacén del sistema solo se abre si se eligió el proveedor externo.
     let store: Box<dyn CredentialStore> = match args.choice {
         ProviderChoice::OllamaCloud { .. }
@@ -165,6 +250,9 @@ fn run() -> Result<(), String> {
         build_provider(&args.choice, store.as_ref(), args.timeout).map_err(|e| e.to_string())?;
     let mut out =
         fs::File::create(&args.out).map_err(|e| format!("{}: {e}", args.out.display()))?;
+    if args.refine {
+        return run_refine(&args, provider.as_ref(), out);
+    }
     let started_unix = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())

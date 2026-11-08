@@ -13,6 +13,9 @@ import type {
   MergePreview,
   ProviderChoice,
   ProviderInfo,
+  LimitProposal,
+  RefinePreview,
+  RefinementView,
   RuleFinding,
   RuleView,
   SettingsView,
@@ -79,6 +82,25 @@ import {
   sortFindings,
   statsText,
   suggestionAccepted,
+  acceptedWithModelLimit,
+  aiCommentText,
+  applyRefinement,
+  droppedText,
+  groupQuestion,
+  hiddenBlockTitle,
+  hiddenReasonText,
+  modelLimitButtonLabel,
+  modelLimitText,
+  refineButton,
+  refineModeText,
+  refinePreviewLines,
+  refinementStatus,
+  AI_COMMENT_LABEL,
+  AI_COMMENT_NOTE,
+  consentLines,
+  consentStatusText,
+  refineLoadError,
+  HIDDEN_BLOCK_NOTE,
   suggestionLimitText,
   suggestionOutlierWarning,
   suggestionSupplierNote,
@@ -211,6 +233,15 @@ const state = {
   suggestions: null as Suggestions | null,
   suggestionsError: null as string | null,
   suggestionBusy: {} as Record<string, boolean>,
+  // Afinado con IA (D134): su estado, lo que se enviaría, si se está confirmando el envío o
+  // afinando, y las sugerencias que la persona devolvió a la lista principal.
+  refinement: null as RefinementView | null,
+  refinePreview: null as RefinePreview | null,
+  refineConfirming: false,
+  refineConsentConfirming: false,
+  refineError: null as string | null,
+  refineBusy: false,
+  restoredFromAi: new Set<string>(),
   thresholdText: {} as Partial<Record<"invoice" | "reply", string>>,
   ruleFilter: { text: "", action: "", status: "", category: "" },
   ruleEditor: null as null | { mode: "new" } | { mode: "edit"; id: string },
@@ -353,7 +384,8 @@ async function refresh(background = false) {
   try {
     let findingsError: string | null = null;
     let suggestionsError: string | null = null;
-    const [tasks, rules, findings, suggestions, audit, settings, mail] = await Promise.all([
+    let refineError: string | null = null;
+    const [tasks, rules, findings, suggestions, refinement, refinePreview, audit, settings, mail] = await Promise.all([
       api.tasks(),
       api.ruleViews(),
       api.ruleFindings().catch((error) => {
@@ -364,11 +396,19 @@ async function refresh(background = false) {
         suggestionsError = String(error);
         return null;
       }),
+      api.suggestionRefinement().catch((error) => {
+        refineError = String(error);
+        return null;
+      }),
+      api.refinementPreview().catch((error) => {
+        refineError = String(error);
+        return null;
+      }),
       api.auditLog(),
       api.settings(),
       api.mailAccounts(),
     ]);
-    Object.assign(state, { tasks, rules, findings, findingsError, suggestions, suggestionsError, audit, settings, mail });
+    Object.assign(state, { tasks, rules, findings, findingsError, suggestions, suggestionsError, refinement, refinePreview, refineError, audit, settings, mail });
     announceDoubtfulAmounts();
   } catch (error) {
     state.notice = { kind: "error", text: String(error) };
@@ -2244,8 +2284,9 @@ function mergePanel(f: RuleFinding): HTMLElement | null {
 
 // -- Sugeridas (D132, R24): calculadas por código; crear una regla la deja inactiva --
 
-function suggestionCard(c: Suggestion): HTMLElement {
+function suggestionCard(c: Suggestion, extra: { proposal?: LimitProposal; hiddenReason?: string } = {}): HTMLElement {
   const busy = Boolean(state.suggestionBusy[c.fingerprint]);
+  const proposal = extra.proposal;
   const limit = suggestionLimitText(c);
   const outlier = suggestionOutlierWarning(c);
   const supplierNote = suggestionSupplierNote(c);
@@ -2262,6 +2303,36 @@ function suggestionCard(c: Suggestion): HTMLElement {
     },
     "Crear regla (inactiva)",
   );
+  const createWithModelLimit = proposal
+    ? h(
+        "button",
+        {
+          type: "button",
+          "data-focus-key": `sugg:${c.fingerprint}:create-ai`,
+          disabled: busy,
+          onclick: () =>
+            resolveSuggestion(c.fingerprint, async () => {
+              const rule = await api.acceptSuggestion(c.fingerprint, proposal.shown, null, proposal.max_total);
+              return acceptedWithModelLimit(rule.name, rule.conditions.max_total, proposal.max_total);
+            }),
+        },
+        modelLimitButtonLabel(proposal.max_total),
+      )
+    : null;
+  const restore = extra.hiddenReason
+    ? h(
+        "button",
+        {
+          type: "button",
+          "data-focus-key": `sugg:${c.fingerprint}:restore`,
+          onclick: () => {
+            state.restoredFromAi.add(c.fingerprint);
+            render();
+          },
+        },
+        "Devolver a la lista principal",
+      )
+    : null;
   const discard = h(
     "button",
     {
@@ -2285,11 +2356,226 @@ function suggestionCard(c: Suggestion): HTMLElement {
     outlier ? h("p", { class: "warn-text", role: "alert" }, outlier) : null,
     supplierNote ? h("p", { class: "meta" }, supplierNote) : null,
     again ? h("p", { class: "meta" }, again) : null,
+    proposal ? h("p", {}, h("span", { class: "finding-label" }, "Propuesta de la IA: "), modelLimitText(proposal, c)) : null,
+    extra.hiddenReason ? h("p", { class: "meta" }, hiddenReasonText(extra.hiddenReason)) : null,
     activationFindings(c.overlaps),
     h("p", { class: "rule-risk" }, "Aviso: ", risk),
     h("p", { class: "meta" }, SUGGESTION_INACTIVE_NOTICE),
-    h("div", { class: "buttons finding-actions" }, create, helpTip(SUGGESTION_HELP.create, "Ayuda sobre crear la regla"), discard, helpTip(SUGGESTION_HELP.discard, "Ayuda sobre descartar")),
+    h("div", { class: "buttons finding-actions" }, create, createWithModelLimit, helpTip(SUGGESTION_HELP.create, "Ayuda sobre crear la regla"), discard, helpTip(SUGGESTION_HELP.discard, "Ayuda sobre descartar"), restore),
   );
+}
+
+/** Pide el afinado una sola vez: un doble clic no repite la llamada (el backend tampoco la repetiría). */
+function runRefinement() {
+  const seen = state.refinePreview;
+  if (state.refineBusy || !seen) return;
+  state.refineBusy = true;
+  state.refineConfirming = false;
+  render();
+  void api
+    .refineSuggestions(seen)
+    .then(
+      (view) => {
+        state.refinement = view;
+        state.restoredFromAi.clear();
+      },
+      (error) => {
+        state.notice = { kind: "error", text: String(error) };
+      },
+    )
+    .finally(() => {
+      state.refineBusy = false;
+      void refresh();
+    });
+}
+
+/** Lanza una acción del consentimiento una sola vez y refresca. */
+function runConsent(work: () => Promise<unknown>) {
+  if (state.refineBusy) return;
+  state.refineBusy = true;
+  state.refineConsentConfirming = false;
+  render();
+  void work()
+    .then(
+      () => undefined,
+      (error) => {
+        state.notice = { kind: "error", text: String(error) };
+      },
+    )
+    .finally(() => {
+      state.refineBusy = false;
+      void refresh();
+    });
+}
+
+/** Estado del afinado con IA, el modo del canal, el consentimiento y el botón con el aviso previo. */
+function refinementBox(s: Suggestions): HTMLElement | null {
+  if (state.refineError) {
+    // Un fallo al leer el estado no se oculta: se dice y se puede reintentar o cerrar.
+    return h(
+      "section",
+      { class: "finding-card ai-box", "aria-label": "Afinado con IA", "data-focus-key": "sugg:refine" },
+      h("p", { role: "alert", class: "warn-text" }, refineLoadError(state.refineError)),
+      h(
+        "div",
+        { class: "buttons" },
+        h("button", { type: "button", "data-focus-key": "refine:retry-load", onclick: () => void refresh() }, "Reintentar"),
+        h(
+          "button",
+          {
+            type: "button",
+            "data-focus-key": "refine:dismiss-load",
+            onclick: () => {
+              state.refineError = null;
+              render();
+            },
+          },
+          "Cerrar",
+        ),
+      ),
+    );
+  }
+  const v = state.refinement;
+  if (!v) return null;
+  const status = refinementStatus(state.refineBusy ? { ...v, status: "running" } : v);
+  const button = refineButton(v, state.refinePreview);
+  const body: Child[] = [
+    h("div", { class: "finding-head" }, h("h4", { class: "finding-title" }, "Afinado con IA"), statusChip(status.title, status.tone === "ok" ? "ok" : status.tone === "warn" ? "warn" : "info")),
+    h("p", { class: "meta" }, refineModeText(v.mode, v.min_new_signals, v.max_attempts)),
+    ...status.lines.map((line) => h("p", {}, line)),
+  ];
+  const preview = state.refinePreview;
+  const consentText = consentStatusText(v.consent);
+  if (consentText) body.push(h("p", { class: "meta" }, consentText));
+  const buttons: Child[] = [];
+  if (button.shown)
+    buttons.push(
+      h(
+        "button",
+        {
+          type: "button",
+          class: v.consent.required ? "" : "primary",
+          "data-focus-key": "refine:open",
+          disabled: button.disabled || state.refineBusy || state.refineConfirming,
+          onclick: () => {
+            state.refineConfirming = true;
+            state.refineConsentConfirming = false;
+            render();
+          },
+        },
+        "Afinar con IA",
+      ),
+    );
+  if (v.consent.required && v.consent.state === "granted")
+    buttons.push(
+      h(
+        "button",
+        { type: "button", "data-focus-key": "refine:withdraw", disabled: state.refineBusy, onclick: () => runConsent(() => api.withdrawRefineConsent()) },
+        "Retirar consentimiento",
+      ),
+    );
+  if (v.consent.required && v.consent.state !== "granted")
+    buttons.push(
+      h(
+        "button",
+        {
+          type: "button",
+          class: "primary",
+          "data-focus-key": "refine:consent-open",
+          disabled: state.refineBusy || !preview || Boolean(preview.blocked),
+          onclick: () => {
+            state.refineConsentConfirming = true;
+            state.refineConfirming = false;
+            render();
+          },
+        },
+        "Activar afinado automático",
+      ),
+    );
+  if (buttons.length) body.push(h("div", { class: "buttons" }, ...buttons));
+  if (button.why) body.push(h("p", { class: "meta" }, button.why));
+  if (state.refineConfirming && preview) {
+    const lines = refinePreviewLines(preview);
+    body.push(
+      h(
+        "div",
+        { class: "confirm", role: "group", "aria-label": "Qué se enviará a la IA" },
+        h("p", {}, h("strong", {}, "Antes de enviar. "), lines.destination),
+        lines.fallback ? h("p", { class: "meta" }, lines.fallback) : null,
+        h("p", { class: "meta" }, "Datos que se envían:"),
+        h("ul", { class: "sim-list" }, ...lines.items.map((item) => h("li", {}, item))),
+        ...lines.notes.map((note) => h("p", { class: "meta" }, note)),
+        h("p", { class: "meta" }, lines.never),
+        h(
+          "div",
+          { class: "buttons" },
+          h("button", { type: "button", class: "primary", "data-focus-key": "refine:send", onclick: runRefinement }, "Enviar y afinar"),
+          h(
+            "button",
+            {
+              type: "button",
+              "data-focus-key": "refine:cancel",
+              onclick: () => {
+                state.refineConfirming = false;
+                render();
+              },
+            },
+            "Cancelar",
+          ),
+        ),
+      ),
+    );
+  }
+  if (state.refineConsentConfirming && preview) {
+    const c = consentLines(preview, v.min_new_signals, v.max_attempts);
+    body.push(
+      h(
+        "div",
+        { class: "confirm", role: "group", "aria-label": "Consentimiento del afinado automático" },
+        h("p", {}, h("strong", {}, `${c.heading}. `), c.destination),
+        ...c.lines.map((line) => h("p", { class: "meta" }, line)),
+        h("p", { class: "meta" }, "Datos que se enviarían ahora:"),
+        h("ul", { class: "sim-list" }, ...c.items.map((item) => h("li", {}, item))),
+        h(
+          "div",
+          { class: "buttons" },
+          h(
+            "button",
+            { type: "button", class: "primary", "data-focus-key": "refine:consent-accept", onclick: () => runConsent(() => api.grantRefineConsent(preview.provider.provider, preview.provider.model, preview.host)) },
+            "Aceptar y activar",
+          ),
+          h(
+            "button",
+            {
+              type: "button",
+              "data-focus-key": "refine:consent-cancel",
+              onclick: () => {
+                state.refineConsentConfirming = false;
+                render();
+              },
+            },
+            "Cancelar",
+          ),
+        ),
+      ),
+    );
+  }
+  if (v.status === "refined") {
+    const comment = v.comment ? aiCommentText(v.comment) : "";
+    if (comment)
+      body.push(
+        h("p", { class: "ai-comment" }, h("span", { class: "finding-label" }, `${AI_COMMENT_LABEL}: `), comment),
+        // Nota fija y siempre visible: ninguna validación del comentario la sustituye.
+        h("p", { class: "meta" }, AI_COMMENT_NOTE),
+      );
+    const subject = (fp: string) => s.candidates.find((c) => c.fingerprint === fp)?.subject;
+    for (const group of v.groups) {
+      const names = group.map(subject);
+      if (names.every((n): n is string => Boolean(n))) body.push(h("p", { class: "meta" }, h("span", { class: "finding-label" }, "Pregunta de la IA: "), groupQuestion(names)));
+    }
+    for (const dropped of v.dropped) body.push(h("p", { class: "meta" }, droppedText(dropped)));
+  }
+  return h("section", { class: "finding-card ai-box", "aria-label": "Afinado con IA", "data-focus-key": "sugg:refine" }, ...body);
 }
 
 /** Acepta o descarta una sugerencia una sola vez: un doble clic no repite nada. */
@@ -2377,8 +2663,21 @@ function suggestedPanel(): HTMLElement {
   if (!s) return h("p", { class: "meta" }, "Calculando sugerencias…");
   const hidden = suggestionsHidden(s.hidden);
   const body: Child[] = [];
+  // La IA solo ordena y propone ocultar candidatas que calculó el programa (D134).
+  const lists = applyRefinement(s.candidates, state.refinement, state.restoredFromAi);
+  const proposalOf = (fingerprint: string) => (state.refinement?.status === "refined" ? state.refinement.limits.find((l) => l.fingerprint === fingerprint) : undefined);
   if (s.candidates.length) {
-    body.push(h("div", { class: "finding-cards" }, ...s.candidates.map(suggestionCard)));
+    if (lists.main.length) body.push(h("div", { class: "finding-cards" }, ...lists.main.map((c) => suggestionCard(c, { proposal: proposalOf(c.fingerprint) }))));
+    if (lists.hidden.length)
+      body.push(
+        h(
+          "section",
+          { class: "ai-hidden", "aria-label": hiddenBlockTitle(lists.hidden.length), "data-focus-key": "sugg:ai-hidden" },
+          h("h4", { class: "finding-title" }, hiddenBlockTitle(lists.hidden.length)),
+          h("p", { class: "meta" }, HIDDEN_BLOCK_NOTE),
+          h("div", { class: "finding-cards" }, ...lists.hidden.map((x) => suggestionCard(x.candidate, { proposal: proposalOf(x.candidate.fingerprint), hiddenReason: x.reason }))),
+        ),
+      );
   } else {
     const empty = suggestionsEmpty(s);
     body.push(emptyState(empty.title, empty.hint), empty.lines.length ? h("ul", { class: "sim-list" }, ...empty.lines.map((line) => h("li", {}, line))) : null);
@@ -2387,6 +2686,7 @@ function suggestedPanel(): HTMLElement {
     "div",
     {},
     h("p", { class: "intro" }, SUGGESTION_INTRO),
+    refinementBox(s),
     ...body,
     hidden ? h("p", { class: "meta" }, hidden) : null,
     thresholdsBox(s.thresholds),

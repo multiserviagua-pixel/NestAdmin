@@ -6,6 +6,12 @@ edition.workspace = true
 license.workspace = true
 publish.workspace = true
 
+[features]
+# Canal de las versiones de prueba (D133, D134): el afinado de sugerencias con IA (y, en E5, la
+# primera lectura de la bandeja) solo se hace bajo demanda, tras mostrar a qué proveedor se envía
+# y qué datos. Sin esta feature (versión final) se hace por lotes.
+lectura-bajo-demanda = []
+
 [dependencies]
 nestadmin-ai = { path = "../ai" }
 nestadmin-core = { path = "../core" }

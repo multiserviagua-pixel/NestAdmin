@@ -44,8 +44,10 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/setup-ocr.ps1
 ```powershell
 npm ci --prefix ui
 cd crates/desktop
-..\..\ui\node_modules\.bin\tauri dev
+..\..\ui\node_modules\.bin\tauri dev --features lectura-bajo-demanda
 ```
+
+La feature `lectura-bajo-demanda` es el canal de prueba: la IA solo afina las sugerencias de reglas cuando usted lo pide (con un aviso previo del proveedor y los datos); sin ella (versión final) el afinado automático está desactivado hasta que se consienta en el panel. `scripts\dev-pruebas.ps1` y `scripts\build-clean.ps1 -Prueba` la activan.
 
 La ventana usa los datos de `%LOCALAPPDATA%\NestAdmin`; para probar sin tocarlos, defina antes `$env:NESTADMIN_DATA_DIR` con otra carpeta. Cerrar la ventana la oculta: para salir, use «Salir de NestAdmin por completo» en el icono del área de notificación. Se importan archivos `.txt`, `.pdf` y fotos `.jpg` o `.png`; las páginas escaneadas y las fotos pasan por OCR local, y la revisión indica en qué páginas se usó y si su calidad es baja.
 

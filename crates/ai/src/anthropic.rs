@@ -91,6 +91,10 @@ impl Provider for AnthropicProvider {
         &self.model
     }
 
+    fn destination(&self) -> Option<String> {
+        Some("api.anthropic.com".to_owned())
+    }
+
     fn generate(&self, request: &GenerateRequest) -> Result<GenerateResult, AiError> {
         let started = Instant::now();
         let response = http::post_json_with_headers(

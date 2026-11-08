@@ -439,6 +439,116 @@ export interface Suggestions {
   watermark: number;
 }
 
+// ---- Capa con modelo de las sugerencias (D134) ----
+
+export type RefineMode = "on_demand" | "automatic";
+
+/** Consentimiento del afinado automático (solo la versión final con un proveedor externo). */
+export interface ConsentView {
+  required: boolean;
+  /** `not_needed`, `missing`, `granted` o `stale` (el proveedor o el modelo cambiaron). */
+  state: "not_needed" | "missing" | "granted" | "stale";
+  provider: string | null;
+  model: string | null;
+  /** Servidor (host) al que se consintió: el consentimiento está ligado a proveedor, modelo y servidor. */
+  host: string | null;
+  at: number | null;
+}
+
+/** Candidata que la IA propone ocultar: no se borra, sigue visible y recuperable. */
+export interface HiddenByModel {
+  fingerprint: string;
+  /** `low_value`, `likely_one_off` o `unclear_name`. */
+  reason: string;
+}
+
+/** Límite propuesto por la IA que pasó `check_rule` y la simulación. */
+export interface LimitProposal {
+  fingerprint: string;
+  max_total: string;
+  /** Huella de las condiciones con este límite: es la que exige aceptar la propuesta. */
+  shown: string;
+  considered: number;
+  would_automate: number;
+}
+
+export interface DroppedProposal {
+  kind: string;
+  fingerprint: string;
+  code: string;
+}
+
+/** Estado del afinado frente a las sugerencias de ahora. Las cifras las pone el backend. */
+export interface RefinementView {
+  mode: RefineMode;
+  status: "refined" | "stale" | "running" | "not_refined";
+  reason: string | null;
+  detail: string | null;
+  ran_at: number | null;
+  /** Cuándo se obtuvo el último resultado válido, aunque ya no esté vigente. */
+  last_ok_at: number | null;
+  provider: string | null;
+  model: string | null;
+  fallback: { from: string; reason: string } | null;
+  /** Huellas en orden de utilidad. */
+  order: string[];
+  hide: HiddenByModel[];
+  /** Grupos de huellas cuyo proveedor quizá es el mismo: solo una pregunta. */
+  groups: string[][];
+  limits: LimitProposal[];
+  dropped: DroppedProposal[];
+  /** Texto plano de la IA. */
+  comment: string | null;
+  /** Solo se descartó el comentario (cifras en letra o afirmaciones); el resto del afinado se conserva. */
+  comment_dropped: string | null;
+  /** Candidatas actuales, cuántas se envían (tope de 30) y a cuántas se aplica el resultado. */
+  candidates: number;
+  sent: number;
+  covered: number;
+  new_signals: number;
+  min_new_signals: number;
+  retry_at: number | null;
+  gave_up: boolean;
+  failures: number;
+  max_attempts: number;
+  consent: ConsentView;
+}
+
+/** Lo que se enviaría al afinar, candidata a candidata. */
+export interface RefineSentCandidate {
+  id: string;
+  kind: "invoice" | "reply";
+  supplier: string | null;
+  category: string | null;
+  sender_domain: string | null;
+  count: number;
+  earlier_breaks: number;
+  amount_min: string | null;
+  amount_max: string | null;
+  discarded_before: boolean;
+  /** Por qué no se envía el nombre o el dominio: `email`, `id_number`, `iban`, `phone`, `address`, `public_mail_domain`. */
+  withheld: string | null;
+}
+
+export interface RefinePreview {
+  mode: RefineMode;
+  provider: { provider: string; model: string };
+  /** Servidor real al que saldrían los datos. */
+  host: string | null;
+  /** Huella de lo que se enviaría: `refine_suggestions` rechaza si ya no coincide. */
+  input_fp: string;
+  external: boolean;
+  via_local_first: boolean;
+  local_fallback: boolean;
+  blocked: string | null;
+  blocked_message: string | null;
+  consent: ConsentView;
+  candidates: RefineSentCandidate[];
+  candidates_total: number;
+  discarded_by_user: number;
+  never_sent: string[];
+}
+
 /** Datos para precargar una regla desde una revisión. */
 export interface RuleSeed {
   action_kind: string;

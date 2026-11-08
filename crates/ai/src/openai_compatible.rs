@@ -251,6 +251,8 @@ fn blocked_v6(ip: &Ipv6Addr) -> bool {
 /// la credencial de ese host; nunca se usa como respaldo de otro proveedor.
 pub struct OpenAiCompatibleProvider {
     client: ChatClient,
+    /// `host` o `host:puerto` (si no es el 443) de la URL base.
+    destination: String,
 }
 
 impl OpenAiCompatibleProvider {
@@ -262,8 +264,14 @@ impl OpenAiCompatibleProvider {
         timeout: Duration,
     ) -> Result<Self, AiError> {
         let base = parse_base_url(base_url)?;
+        let destination = if base.port == DEFAULT_PORT {
+            base.host.clone()
+        } else {
+            format!("{}:{}", base.host, base.port)
+        };
         Ok(Self {
             client: ChatClient::new(&base.url, model, api_key, http::agent_external(timeout)),
+            destination,
         })
     }
 
@@ -273,6 +281,7 @@ impl OpenAiCompatibleProvider {
     pub fn with_endpoint(endpoint: &str, model: &str, api_key: Secret, timeout: Duration) -> Self {
         Self {
             client: ChatClient::new(endpoint, model, api_key, http::agent_no_redirects(timeout)),
+            destination: endpoint.to_owned(),
         }
     }
 }
@@ -294,6 +303,10 @@ impl Provider for OpenAiCompatibleProvider {
 
     fn model(&self) -> &str {
         &self.client.model
+    }
+
+    fn destination(&self) -> Option<String> {
+        Some(self.destination.clone())
     }
 
     fn generate(&self, request: &GenerateRequest) -> Result<GenerateResult, AiError> {

@@ -19,6 +19,9 @@ use nestadmin_app::accounts::{
     AccountView, FetchReport, MailAccountsView, MailEnv, MailProviderKind,
 };
 use nestadmin_app::panel::{MergePreview, NewRule, RuleView, Simulation};
+use nestadmin_app::refine::{
+    ConsentView, RefineExpectation, RefineMode, RefinePreview, RefineTrigger, RefinementView,
+};
 use nestadmin_app::rules::RuleFinding;
 use nestadmin_app::suggest::{RuleSeed, Suggestions, ThresholdSettings};
 use nestadmin_app::{AiWait, App, AppPaths, LocalFallback, ProviderInfo};
@@ -610,6 +613,104 @@ fn rule_suggestions(shared: State<'_, SharedState>) -> CmdResult<Suggestions> {
     shared.app()?.rule_suggestions().map_err(text)
 }
 
+/// Estado del afinado de las sugerencias con IA (D134). Solo lectura: no llama al proveedor.
+#[tauri::command]
+fn suggestion_refinement(shared: State<'_, SharedState>) -> CmdResult<RefinementView> {
+    shared.app()?.refinement_view().map_err(text)
+}
+
+/// A qué proveedor y qué datos se enviarían al afinar (D134). Solo lectura.
+#[tauri::command]
+fn refinement_preview(shared: State<'_, SharedState>) -> CmdResult<RefinePreview> {
+    shared.app()?.refinement_preview().map_err(text)
+}
+
+/// Activa el afinado automático para el proveedor y modelo que la persona vio en el aviso
+/// (D134). Queda en el historial; si el proveedor o el modelo cambiaron, se rechaza.
+#[tauri::command]
+fn grant_refine_consent<R: Runtime>(
+    shared: State<'_, SharedState>,
+    handle: AppHandle<R>,
+    provider: String,
+    model: String,
+    host: String,
+) -> CmdResult<ConsentView> {
+    let consent = shared
+        .app()?
+        .grant_refine_consent(&provider, &model, &host)
+        .map_err(text)?;
+    changed(&handle);
+    Ok(consent)
+}
+
+/// Retira el consentimiento del afinado automático (D134).
+#[tauri::command]
+fn withdraw_refine_consent<R: Runtime>(
+    shared: State<'_, SharedState>,
+    handle: AppHandle<R>,
+) -> CmdResult<ConsentView> {
+    let consent = shared.app()?.withdraw_refine_consent().map_err(text)?;
+    changed(&handle);
+    Ok(consent)
+}
+
+/// Afina las sugerencias con la IA cuando la persona lo pide, tras ver la vista previa (D134). La llamada al
+/// modelo se hace sin el cerrojo de la aplicación y fuera del hilo de la ventana.
+#[tauri::command]
+async fn refine_suggestions<R: Runtime>(
+    shared: State<'_, SharedState>,
+    handle: AppHandle<R>,
+    expect: RefineExpectation,
+) -> CmdResult<RefinementView> {
+    let shared = Arc::clone(shared.inner());
+    tauri::async_runtime::spawn_blocking(move || {
+        // `expect` es lo que la persona vio en la vista previa: si algo cambió, no se envía.
+        let job = shared
+            .app()?
+            .begin_refinement_with(RefineTrigger::Demand, Some(&expect))
+            .map_err(text)?;
+        let Some(job) = job else {
+            return shared.app()?.refinement_view().map_err(text);
+        };
+        // La ventana ve «afinando» mientras dura la llamada.
+        changed(&handle);
+        let completed = job.run();
+        let view = shared.app()?.finish_refinement(completed).map_err(text);
+        changed(&handle);
+        view
+    })
+    .await
+    .map_err(text)?
+}
+
+/// Afinado por lotes de la versión final (D134): si se acumularon señales válidas nuevas,
+/// lanza una sola llamada en un hilo aparte, para no frenar la cola de tareas.
+fn auto_refine<R: Runtime>(shared: &SharedState, handle: &AppHandle<R>) {
+    let job = match shared.app() {
+        Ok(mut app) if app.refine_mode() == RefineMode::Automatic => {
+            app.begin_refinement(RefineTrigger::Auto)
+        }
+        _ => return,
+    };
+    let Ok(Some(job)) = job else { return };
+    changed(handle);
+    let (shared, handle) = (Arc::clone(shared), handle.clone());
+    let spawned = thread::Builder::new()
+        .name("nestadmin-afinado".into())
+        .spawn(move || {
+            let completed = job.run();
+            if let Ok(mut app) = shared.app() {
+                if let Err(error) = app.finish_refinement(completed) {
+                    eprintln!("no se pudo guardar el afinado: {error}");
+                }
+            }
+            changed(&handle);
+        });
+    if let Err(error) = spawned {
+        eprintln!("no se pudo iniciar el afinado: {error}");
+    }
+}
+
 /// Crea la regla de una sugerencia, siempre inactiva (D132). Repetirlo no duplica.
 #[tauri::command]
 fn accept_suggestion<R: Runtime>(
@@ -618,10 +719,16 @@ fn accept_suggestion<R: Runtime>(
     fingerprint: String,
     shown: String,
     name: Option<String>,
+    model_limit: Option<String>,
 ) -> CmdResult<RuleView> {
     let view = shared
         .app()?
-        .accept_suggestion(&fingerprint, &shown, name.as_deref())
+        .accept_suggestion_with_limit(
+            &fingerprint,
+            &shown,
+            name.as_deref(),
+            model_limit.as_deref(),
+        )
         .map_err(text)?;
     changed(&handle);
     Ok(view)
@@ -1191,6 +1298,7 @@ fn worker<R: Runtime>(shared: SharedState, handle: AppHandle<R>, wake: Receiver<
                 changed(&handle);
             }
             Ok(None) => {
+                auto_refine(&shared, &handle);
                 let _ = wake.recv_timeout(Duration::from_secs(5));
             }
             Err(error) => {
@@ -1498,6 +1606,11 @@ fn configure<R: Runtime>(builder: Builder<R>, prepare_only: bool) -> Builder<R> 
             simulate_rule,
             rule_findings,
             rule_suggestions,
+            suggestion_refinement,
+            refinement_preview,
+            refine_suggestions,
+            grant_refine_consent,
+            withdraw_refine_consent,
             accept_suggestion,
             discard_suggestion,
             suggestion_thresholds,

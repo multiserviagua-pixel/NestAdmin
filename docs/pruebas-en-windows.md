@@ -20,8 +20,10 @@ Desde la carpeta del repositorio, en la rama `main` (el desarrollo es solo local
 git switch main
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts\setup-dev.ps1 -Comprobar
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts\setup-ocr.ps1
-powershell -NoProfile -ExecutionPolicy Bypass -File scripts\build-clean.ps1 -ClienteOAuth C:\NestAdmin-config\correo-oauth.json
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\build-clean.ps1 -Prueba -ClienteOAuth C:\NestAdmin-config\correo-oauth.json
 ```
+
+`-Prueba` construye el **instalador de prueba** (feature `lectura-bajo-demanda`, versión con sufijo `-prueba`): la IA solo afina las sugerencias de reglas (y, más adelante, lee la bandeja) cuando usted lo pide, tras ver a qué proveedor se envía y qué datos, para que no gaste sola. **Sin `-Prueba` el instalador es el de la versión final**, donde el afinado automático existe pero está desactivado hasta que la persona lo consiente en el panel de reglas; úselo solo para probar esa versión. Para la versión de desarrollo, `scripts\dev-pruebas.ps1` ya activa la feature.
 
 `-ClienteOAuth` es opcional: sin él, Gmail y Microsoft figuran como no configurados (guía de Microsoft: [guia-microsoft-365.pdf](guia-microsoft-365.pdf)). La construcción tarda: hágala una sola vez para todas las pruebas de esta lista.
 

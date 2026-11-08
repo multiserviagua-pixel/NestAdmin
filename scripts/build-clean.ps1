@@ -14,6 +14,10 @@ param(
     # Carpeta nueva donde clonar. Por defecto, una carpeta temporal única.
     [string]$Destination = (Join-Path ([IO.Path]::GetTempPath()) "nestadmin-limpio-$([guid]::NewGuid().ToString('N').Substring(0, 8))"),
     [switch]$SkipInstaller,
+    # Instalador de prueba (D133, D134): compila con la feature `lectura-bajo-demanda`, de modo que la IA
+    # solo afina y lee bajo demanda, con el botón y el aviso previo. Sin este interruptor el instalador es
+    # el de la versión final, donde el afinado automático existe pero está desactivado hasta el consentimiento.
+    [switch]$Prueba,
     # correo-oauth.json del editor (D43, D51), fuera del repositorio. Si se indica, el instalador
     # lo lleva junto a nestadmin.exe; si no, se construye igual y el correo real queda «no
     # configurado». Por defecto, la variable de entorno NESTADMIN_OAUTH_INSTALADOR.
@@ -106,18 +110,38 @@ try {
     Invoke-Step 'Formato (cargo fmt)' { cargo fmt --all --check }
     Invoke-Step 'Análisis (cargo clippy)' { cargo clippy --workspace --all-targets --locked -- -D warnings }
     Invoke-Step 'Pruebas (cargo test)' { cargo test --workspace --locked }
+    # El canal de prueba (D133, D134) compila otro código: se comprueba también con la feature.
+    Invoke-Step 'Análisis con la feature lectura-bajo-demanda (cargo clippy)' { cargo clippy -p nestadmin-app -p nestadmin-desktop --all-targets --features nestadmin-app/lectura-bajo-demanda,nestadmin-desktop/lectura-bajo-demanda --locked -- -D warnings }
+    Invoke-Step 'Pruebas con la feature lectura-bajo-demanda (cargo test)' { cargo test -p nestadmin-app -p nestadmin-desktop --features nestadmin-app/lectura-bajo-demanda,nestadmin-desktop/lectura-bajo-demanda --locked }
     if (-not $SkipInstaller) {
         Invoke-Step 'Instalador (tauri build)' {
+            Write-Host $(if ($Prueba) { 'Canal: PRUEBA (feature lectura-bajo-demanda; versión con sufijo -prueba; la IA solo trabaja a petición).' } else { 'Canal: FINAL (sin la feature; el afinado automático existe pero está desactivado hasta el consentimiento).' })
+            $versionConfig = $null
             Push-Location crates/desktop
-            $configs = @('--config', 'tauri.installer.json')
-            if ($oauthConfig) {
-                # Se fusiona con tauri.installer.json: añade un recurso más a bundle.resources.
-                $resource = $ClienteOAuth.Replace('\', '/')
-                $json = @{ bundle = @{ resources = @{ $resource = 'correo-oauth.json' } } } | ConvertTo-Json -Depth 4
-                [IO.File]::WriteAllText($oauthConfig, $json)   # UTF-8 sin BOM: lo exige el lector de Tauri
-                $configs += @('--config', $oauthConfig)
+            # Todo lo que puede fallar va dentro del try: Pop-Location y el borrado del archivo temporal
+            # se hacen siempre.
+            try {
+                $configs = @('--config', 'tauri.installer.json')
+                if ($Prueba) {
+                    $configs += @('--features', 'lectura-bajo-demanda')
+                    # El instalador de prueba se distingue del final por su versión (y por el nombre del archivo).
+                    $baseVersion = (Get-Content -LiteralPath 'tauri.conf.json' -Raw -Encoding UTF8 | ConvertFrom-Json).version
+                    $versionConfig = Join-Path ([IO.Path]::GetTempPath()) "nestadmin-prueba-$([guid]::NewGuid().ToString('N').Substring(0, 8)).json"
+                    [IO.File]::WriteAllText($versionConfig, (@{ version = "$baseVersion-prueba" } | ConvertTo-Json))
+                    $configs += @('--config', $versionConfig)
+                }
+                if ($oauthConfig) {
+                    # Se fusiona con tauri.installer.json: añade un recurso más a bundle.resources.
+                    $resource = $ClienteOAuth.Replace('\', '/')
+                    $json = @{ bundle = @{ resources = @{ $resource = 'correo-oauth.json' } } } | ConvertTo-Json -Depth 4
+                    [IO.File]::WriteAllText($oauthConfig, $json)   # UTF-8 sin BOM: lo exige el lector de Tauri
+                    $configs += @('--config', $oauthConfig)
+                }
+                & ..\..\ui\node_modules\.bin\tauri.cmd build @configs
+            } finally {
+                Pop-Location
+                if ($versionConfig) { Remove-Item -LiteralPath $versionConfig -ErrorAction SilentlyContinue }
             }
-            try { & ..\..\ui\node_modules\.bin\tauri.cmd build @configs } finally { Pop-Location }
         }
         Invoke-Step 'Cliente OAuth del editor en el paquete' {
             # Tauri copia los recursos junto al ejecutable compilado: el mismo archivo entra en el

@@ -17,6 +17,7 @@ pub use error::{CoreError, Result};
 pub use queue::{Task, TaskError, TaskState};
 pub use rule_panel::{
     EvaluationRecord, EvaluationRow, RuleMeta, RuleStats, SignalRecord, SignalRow, SuggestionRow,
+    REFINEMENT_KEY,
 };
 pub use rules::Rule;
 pub use store::Store;

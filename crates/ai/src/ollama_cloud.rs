@@ -55,6 +55,10 @@ impl Provider for OllamaCloudProvider {
         &self.model
     }
 
+    fn destination(&self) -> Option<String> {
+        Some("ollama.com".to_owned())
+    }
+
     fn generate(&self, request: &GenerateRequest) -> Result<GenerateResult, AiError> {
         let body = chat_body(&self.model, request);
         let started = Instant::now();

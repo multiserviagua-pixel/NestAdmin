@@ -10,6 +10,10 @@ publish.workspace = true
 name = "nestadmin"
 path = "src/main.rs"
 
+[features]
+# Versiones de prueba: la IA solo trabaja bajo demanda en lo opcional (D133, D134).
+lectura-bajo-demanda = ["nestadmin-app/lectura-bajo-demanda"]
+
 [build-dependencies]
 tauri-build = { version = "=2.7.4", features = [] }
 

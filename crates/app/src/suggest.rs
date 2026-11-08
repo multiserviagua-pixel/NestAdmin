@@ -269,11 +269,11 @@ fn series<'a>(group: &[&'a Signal], invoice: bool) -> Series<'a> {
 }
 
 /// Un importe canónico («1200.00») es positivo: no es cero ni negativo (rectificativas).
-fn is_positive_amount(amount: &str) -> bool {
+pub(crate) fn is_positive_amount(amount: &str) -> bool {
     !amount.starts_with('-') && amount.chars().any(|c| c.is_ascii_digit() && c != '0')
 }
 
-fn sanitize_name(raw: &str) -> String {
+pub(crate) fn sanitize_name(raw: &str) -> String {
     raw.chars()
         .filter(|c| !c.is_control())
         .take(MAX_NAME_CHARS)
@@ -282,7 +282,7 @@ fn sanitize_name(raw: &str) -> String {
         .to_owned()
 }
 
-fn fingerprint_of(parts: &[&str]) -> String {
+pub(crate) fn fingerprint_of(parts: &[&str]) -> String {
     let digest = Sha256::digest(parts.join("\u{1f}").as_bytes());
     digest.iter().take(10).map(|b| format!("{b:02x}")).collect()
 }
@@ -838,6 +838,21 @@ impl App {
         shown: &str,
         name: Option<&str>,
     ) -> AppResult<crate::panel::RuleView> {
+        self.accept_suggestion_with_limit(fingerprint, shown, name, None)
+    }
+
+    /// Como [`App::accept_suggestion`], eligiendo el límite: `None` es el que calculó el código;
+    /// `Some(importe)` es el que propuso la IA (D134), que debe seguir vigente y pasar otra vez
+    /// `check_rule` y la simulación. `shown` es entonces la huella de la propuesta de la IA
+    /// (`LimitProposal.shown`), no la de la tarjeta, de modo que lo que se crea es lo que la
+    /// persona vio. La IA no decide nada: es la persona quien elige un límite u otro.
+    pub fn accept_suggestion_with_limit(
+        &mut self,
+        fingerprint: &str,
+        shown: &str,
+        name: Option<&str>,
+        model_limit: Option<&str>,
+    ) -> AppResult<crate::panel::RuleView> {
         // Ya aceptada: la misma regla, sin crear nada.
         if let Some(id) = self
             .store
@@ -856,13 +871,46 @@ impl App {
             .iter()
             .find(|c| c.fingerprint == fingerprint)
             .ok_or_else(|| AppError::Invalid(stale_message()))?;
-        if c.shown != shown {
-            return Err(AppError::Invalid(
+        let changed = || {
+            AppError::Invalid(
                 "La sugerencia ha cambiado desde que la vio (otro límite u otros datos): revise la tarjeta de nuevo antes de crear la regla."
                     .into(),
-            ));
+            )
+        };
+        let mut conditions = c.conditions.clone();
+        let mut limit_source = "code";
+        match model_limit {
+            None if c.shown != shown => return Err(changed()),
+            None => {}
+            Some(limit) => {
+                let proposal = self
+                    .refinement_view_for(&all)?
+                    .limits
+                    .into_iter()
+                    .find(|l| l.fingerprint == c.fingerprint && l.max_total == limit)
+                    .ok_or_else(|| {
+                        AppError::Invalid(
+                            "La propuesta de límite de la IA ya no está vigente: los datos cambiaron. Actualice la lista."
+                                .into(),
+                        )
+                    })?;
+                if proposal.shown != shown {
+                    return Err(changed());
+                }
+                // Se vuelve a comprobar con los datos de ahora, como cuando se propuso.
+                let checked = self.check_limit(c, &proposal.max_total).map_err(|code| {
+                    AppError::Invalid(format!(
+                        "La propuesta de límite de la IA ya no es válida ({code}). Actualice la lista."
+                    ))
+                })?;
+                if checked.shown != shown {
+                    return Err(changed());
+                }
+                conditions["max_total"] = json!(checked.max_total);
+                limit_source = "model";
+            }
         }
-        check_rule(&c.action_kind, &c.conditions, false)?;
+        check_rule(&c.action_kind, &conditions, false)?;
         let name = match name.map(sanitize_name).filter(|n| !n.is_empty()) {
             Some(n) => n,
             None => c.name.clone(),
@@ -877,7 +925,9 @@ impl App {
             "count": c.evidence.count,
             "threshold": c.evidence.threshold,
             "earlier_breaks": c.evidence.earlier_breaks,
-            "limit": c.evidence.limit,
+            "limit": conditions["max_total"].as_str().or(c.evidence.limit.as_deref()),
+            "limit_source": limit_source,
+            "code_limit": c.evidence.limit,
             "task_ids": task_ids,
             "reappeared": c.evidence.reappeared.is_some(),
         });
@@ -886,7 +936,7 @@ impl App {
             fingerprint,
             &id,
             &c.action_kind,
-            &c.conditions,
+            &conditions,
             Some(&name),
             &origin,
             &evidence,

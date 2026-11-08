@@ -24,6 +24,9 @@ import type {
   RuleView,
   SettingsView,
   Simulation,
+  ConsentView,
+  RefinePreview,
+  RefinementView,
   Suggestion,
   Suggestions,
   ThresholdSettings,
@@ -1247,6 +1250,85 @@ function mockSuggestions(): Suggestions {
   };
 }
 
+// Afinado con IA (D134). Escenarios de la vista previa, con `?refine=`: sin valor (versión de
+// prueba, bajo demanda), `auto` (versión final sin consentimiento), `auto-consent` (con él),
+// `blocked` (sin clave), `failed` (el proveedor falla y se programa un reintento), `invalid`
+// (respuesta descartada) y `broken` (la lectura del estado falla). El resultado simulado solo
+// ordena, propone ocultar una y propone un límite; las cifras salen de las mismas candidatas.
+const mockScenario = new URLSearchParams(location.search).get("refine") ?? "";
+const mockRefine = { fps: null as string | null, ranAt: 0, failed: null as null | { code: string; detail: string | null }, consent: mockScenario === "auto-consent" };
+const mockAuto = mockScenario === "auto" || mockScenario === "auto-consent";
+
+function mockConsent(): ConsentView {
+  if (!mockAuto) return { required: false, state: "not_needed", provider: null, model: null, host: null, at: null };
+  return mockRefine.consent
+    ? { required: true, state: "granted", provider: "ollama_cloud", model: "gemma4:31b", host: "ollama.com", at: now() - 3600 * 1000 }
+    : { required: true, state: "missing", provider: "ollama_cloud", model: "gemma4:31b", host: "ollama.com", at: null };
+}
+
+function mockRefinementView(): RefinementView {
+  if (mockScenario === "broken") throw "no se pudo abrir la base de datos de ejemplo";
+  const s = mockSuggestions();
+  const base: RefinementView = {
+    mode: mockAuto ? "automatic" : "on_demand",
+    status: "not_refined",
+    reason: mockAuto ? (mockRefine.consent ? "waiting_signals" : "auto_consent_missing") : "on_demand",
+    detail: null,
+    ran_at: null,
+    last_ok_at: mockRefine.fps === null ? null : mockRefine.ranAt,
+    provider: null,
+    model: null,
+    fallback: null,
+    order: [],
+    hide: [],
+    groups: [],
+    limits: [],
+    dropped: [],
+    comment: null,
+    comment_dropped: null,
+    candidates: s.candidates.length,
+    sent: s.candidates.length,
+    covered: 0,
+    new_signals: mockAuto && mockRefine.consent ? 3 : 6,
+    min_new_signals: 5,
+    retry_at: null,
+    gave_up: false,
+    failures: 0,
+    max_attempts: 3,
+    consent: mockConsent(),
+  };
+  if (mockScenario === "blocked") return { ...base, reason: "needs_key" };
+  if (!s.candidates.length) return { ...base, reason: "no_candidates" };
+  if (mockRefine.failed) {
+    const { code, detail } = mockRefine.failed;
+    const transient = ["unavailable", "timeout", "rate_limited"].includes(code);
+    return { ...base, reason: code, detail, ran_at: mockRefine.ranAt, failures: 1, retry_at: transient && mockAuto ? now() + 15 * 60 * 1000 : null };
+  }
+  if (mockRefine.fps === null) return base;
+  const fps = s.candidates.map((c) => c.fingerprint).join("|");
+  if (fps !== mockRefine.fps) return { ...base, status: "stale", ran_at: mockRefine.ranAt };
+  const known = new Set(s.candidates.map((c) => c.fingerprint));
+  const keep = (fp: string) => known.has(fp);
+  const alfa = s.candidates.find((c) => c.fingerprint === "mock-factura-alfa");
+  const conditions = alfa ? { supplier: alfa.conditions.supplier ?? "", max_total: "968.00" } : null;
+  return {
+    ...base,
+    status: "refined",
+    reason: null,
+    ran_at: mockRefine.ranAt,
+    covered: s.candidates.length,
+    provider: "ollama_cloud",
+    model: "gemma4:31b",
+    order: ["mock-respuesta-pedidos", "mock-factura-alfa", "mock-factura-delta", "mock-factura-omega"].filter(keep),
+    hide: [{ fingerprint: "mock-factura-omega", reason: "likely_one_off" }].filter((h) => keep(h.fingerprint)),
+    limits:
+      alfa && conditions
+        ? [{ fingerprint: alfa.fingerprint, max_total: "968.00", shown: `${alfa.fingerprint}|${JSON.stringify(conditions)}`, considered: 12, would_automate: 7 }]
+        : [],
+    comment: "Las respuestas a pedidos parecen lo más útil de automatizar.",
+  };
+}
+
 const handlers: Record<string, (a: any, options?: any) => unknown> = {
   tasks: () => structuredClone(tasks),
   import_file: (bytes: Uint8Array, options?: { headers: Record<string, string> }) => {
@@ -1555,17 +1637,85 @@ const handlers: Record<string, (a: any, options?: any) => unknown> = {
   },
   // Sugerencias (D132): datos sintéticos fijos; el cálculo real vive en la capa Rust.
   rule_suggestions: (): Suggestions => mockSuggestions(),
-  accept_suggestion: ({ fingerprint, shown, name }) => {
+  suggestion_refinement: (): RefinementView => mockRefinementView(),
+  refinement_preview: (): RefinePreview => {
+    if (mockScenario === "broken") throw "no se pudo abrir la base de datos de ejemplo";
+    return {
+      mode: mockAuto ? "automatic" : "on_demand",
+      provider: { provider: "ollama_cloud", model: "gemma4:31b" },
+      host: "ollama.com",
+      input_fp: "mock-" + mockSuggestions().candidates.map((c) => c.fingerprint).join("|"),
+      external: true,
+      via_local_first: false,
+      local_fallback: true,
+      blocked: mockScenario === "blocked" ? "needs_key" : null,
+      blocked_message: mockScenario === "blocked" ? "Falta configurar la IA: guarde la clave del proveedor en Configuración" : null,
+      consent: mockConsent(),
+      candidates: mockSuggestions().candidates.map((c, i) => ({
+        id: `c${i + 1}`,
+        kind: (c.action_kind === "register_invoice" ? "invoice" : "reply") as "invoice" | "reply",
+        supplier: c.action_kind === "register_invoice" ? c.subject : null,
+        category: c.category,
+        sender_domain: c.action_kind === "register_invoice" ? null : (c.subject.split("@")[1] ?? null),
+        count: c.evidence.count,
+        earlier_breaks: c.evidence.earlier_breaks,
+        amount_min: c.evidence.amount_min,
+        amount_max: c.evidence.limit,
+        discarded_before: c.evidence.reappeared !== null,
+        // Un ejemplo de nombre retenido: un autónomo con su NIF en el nombre.
+        withheld: c.fingerprint === "mock-factura-delta" ? "id_number" : null,
+      })).map((c) => (c.withheld ? { ...c, supplier: null } : c)),
+      candidates_total: mockSuggestions().candidates.length,
+      discarded_by_user: 0,
+      never_sent: ["cuerpos de correo", "adjuntos y documentos", "asuntos", "direcciones de correo completas", "identificadores de tarea y huellas"],
+    };
+  },
+  grant_refine_consent: ({ provider, model, host }): ConsentView => {
+    if (provider !== "ollama_cloud" || model !== "gemma4:31b" || host !== "ollama.com") throw "El proveedor, el modelo o el servidor han cambiado desde que lo vio: revise el aviso de nuevo antes de aceptar.";
+    mockRefine.consent = true;
+    audit.push({ task_id: null, action: "rule_setting", status: "changed", authorization: null, detail: `consentimiento del afinado automático de sugerencias concedido: proveedor ${provider}, modelo ${model}` });
+    return mockConsent();
+  },
+  withdraw_refine_consent: (): ConsentView => {
+    if (mockRefine.consent) audit.push({ task_id: null, action: "rule_setting", status: "removed", authorization: null, detail: "consentimiento del afinado automático de sugerencias retirado" });
+    mockRefine.consent = false;
+    return mockConsent();
+  },
+  refine_suggestions: ({ expect }): RefinementView => {
+    const s = mockSuggestions();
+    if (expect?.input_fp !== "mock-" + s.candidates.map((c) => c.fingerprint).join("|")) throw "Lo que se iba a enviar ha cambiado desde que vio el aviso: revíselo de nuevo antes de enviar.";
+    if (!s.candidates.length || mockScenario === "blocked") return mockRefinementView();
+    mockRefine.ranAt = now();
+    if (mockScenario === "failed" || mockScenario === "invalid") {
+      mockRefine.failed = mockScenario === "failed" ? { code: "unavailable", detail: null } : { code: "rejected", detail: "comment_makes_claims" };
+      audit.push({ task_id: null, action: "rule_refinement", status: "failed", authorization: null, detail: `afinado con IA fallido: ${mockRefine.failed.code}; proveedor ollama_cloud, modelo gemma4:31b` });
+      return mockRefinementView();
+    }
+    if (mockRefine.fps === null || mockRefinementView().status === "stale") {
+      mockRefine.fps = s.candidates.map((c) => c.fingerprint).join("|");
+      audit.push({ task_id: null, action: "rule_refinement", status: "ok", authorization: null, detail: `afinado con IA aplicado a ${s.candidates.length} candidatas; proveedor ollama_cloud, modelo gemma4:31b` });
+    }
+    return mockRefinementView();
+  },
+  accept_suggestion: ({ fingerprint, shown, name, modelLimit }) => {
     const known = mockAccepted.get(String(fingerprint));
     if (known) return ruleView(latest().find((r) => r.id === known)!);
     const c = mockSuggestions().candidates.find((x) => x.fingerprint === fingerprint);
     if (!c) throw "La sugerencia ya no está vigente: los datos cambiaron o ya se resolvió. Actualice la lista.";
-    if (c.shown !== shown) throw "La sugerencia ha cambiado desde que la vio (otro límite u otros datos): revise la tarjeta de nuevo antes de crear la regla.";
+    let conditions = c.conditions;
+    if (modelLimit) {
+      const proposal = mockRefinementView().limits.find((l) => l.fingerprint === fingerprint && l.max_total === modelLimit);
+      if (!proposal) throw "La propuesta de límite de la IA ya no está vigente: los datos cambiaron. Actualice la lista.";
+      if (proposal.shown !== shown) throw "La sugerencia ha cambiado desde que la vio (otro límite u otros datos): revise la tarjeta de nuevo antes de crear la regla.";
+      conditions = { ...c.conditions, max_total: proposal.max_total };
+    } else if (c.shown !== shown) {
+      throw "La sugerencia ha cambiado desde que la vio (otro límite u otros datos): revise la tarjeta de nuevo antes de crear la regla.";
+    }
     const view = handlers.create_rule!({
       id: null,
       name: String(name ?? "").trim() || c.name,
       actionKind: c.action_kind,
-      conditions: c.conditions,
+      conditions,
       acknowledgeAnySender: false,
     }) as RuleView;
     setMeta(view.id, { origin: { kind: "suggestion", count: c.evidence.count, threshold: c.evidence.threshold } });

@@ -9,6 +9,7 @@
 
 pub mod accounts;
 pub mod panel;
+pub mod refine;
 pub mod rules;
 pub mod suggest;
 
@@ -163,6 +164,16 @@ pub struct App {
     fallback: Option<LocalFallback>,
     /// Hasta cuándo las tareas van directas al local tras un `unavailable` del externo.
     fallback_until: Arc<Mutex<Option<Instant>>>,
+    /// Hay un afinado de sugerencias con IA en curso (D134): no se lanza otro.
+    refining: Arc<std::sync::atomic::AtomicBool>,
+    /// Mayor id de señal con el que el lote automático ya comprobó que no había nada que afinar.
+    auto_skip: Option<i64>,
+    /// Un reintento vencido de otros datos que ya no aplica, descartado con este id de señal.
+    retry_obsolete: Option<i64>,
+    /// En esta sesión se corrigió la clave de IA o cambió el proveedor tras un `unauthorized`.
+    key_fixed: bool,
+    /// Cómo se afinan las sugerencias según el canal (D134): bajo demanda o por lotes.
+    refine_mode: refine::RefineMode,
 }
 
 /// Si se puede instalar una actualización sin cortar trabajo (actualizaciones.md, paso 5).
@@ -469,6 +480,11 @@ impl App {
             ai_wait: None,
             fallback: None,
             fallback_until: Arc::new(Mutex::new(None)),
+            refining: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            auto_skip: None,
+            retry_obsolete: None,
+            key_fixed: false,
+            refine_mode: refine::RefineMode::of_build(),
         };
         app.store.recover()?;
         app.store.reconcile_actions(SEND_DRAFT, &app.mail)?;
@@ -674,12 +690,18 @@ impl App {
     /// Cambio explícito de proveedor; afecta a las tareas que empiecen después.
     pub fn select_provider(&mut self, provider: Arc<dyn Provider>) {
         self.provider = provider;
+        self.key_fixed = true;
+        // El consentimiento del afinado automático es de un destino concreto (D134).
+        self.drop_consent_if_destination_changed();
         self.expire_fallback_period();
     }
 
     /// Fija o quita la espera de IA (D101). Con una espera, las tareas que necesitan el
     /// proveedor se quedan en `queued` sin gastar intentos; al quitarla se retoman.
     pub fn set_ai_wait(&mut self, wait: Option<AiWait>) {
+        if wait.is_none() && self.ai_wait == Some(AiWait::InvalidKey) {
+            self.key_fixed = true;
+        }
         self.ai_wait = wait;
     }
 

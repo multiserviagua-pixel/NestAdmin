@@ -94,6 +94,10 @@ pub struct SuggestionRow {
     pub decided_at: Option<i64>,
 }
 
+/// Huella reservada de la fila que guarda el último afinado con IA (D134). No es una huella
+/// de condiciones (esas son hexadecimales), de modo que no puede coincidir con una sugerencia.
+pub const REFINEMENT_KEY: &str = "(afinado)";
+
 /// Contadores de una regla.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct RuleStats {
@@ -406,7 +410,8 @@ impl Store {
     /// Decisiones guardadas sobre sugerencias, por huella. Solo lectura.
     pub fn rule_suggestion_rows(&self) -> Result<Vec<SuggestionRow>> {
         let mut stmt = self.conn.prepare(
-            "SELECT fingerprint, status, evidence_json, decided_at FROM rule_suggestions ORDER BY fingerprint",
+            "SELECT fingerprint, status, evidence_json, decided_at FROM rule_suggestions
+             WHERE status IN ('discarded', 'accepted') ORDER BY fingerprint",
         )?;
         let rows = stmt.query_map([], |r| {
             let evidence: String = r.get(2)?;
@@ -418,6 +423,44 @@ impl Store {
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Último afinado con IA guardado (D134), o `None` si nunca hubo uno. Solo lectura. El
+    /// contenido lo valida quien lo escribió: aquí solo hay códigos, huellas y cifras.
+    pub fn rule_refinement(&self) -> Result<Option<Value>> {
+        let stored: Option<Option<String>> = self
+            .conn
+            .query_row(
+                "SELECT model_json FROM rule_suggestions WHERE fingerprint = ?1 AND status = 'refinement'",
+                [REFINEMENT_KEY],
+                |r| r.get(0),
+            )
+            .optional()?;
+        Ok(stored
+            .flatten()
+            .and_then(|json| serde_json::from_str(&json).ok()))
+    }
+
+    /// Guarda el resultado del último afinado con IA (D134) y lo audita, en una transacción.
+    /// Una sola fila reservada: un nuevo afinado sustituye al anterior, que ya no sería
+    /// vigente. No toca las decisiones sobre sugerencias. `outcome` (`ok` o `failed`) y
+    /// `detail` son códigos, nunca contenido.
+    pub fn save_refinement(&mut self, model: &Value, outcome: &str, detail: &str) -> Result<()> {
+        let tx = self.conn.transaction()?;
+        let now = now_ms();
+        tx.execute(
+            "INSERT INTO rule_suggestions (fingerprint, status, evidence_json, model_json, decided_at)
+             VALUES (?1, 'refinement', '{}', ?2, ?3)
+             ON CONFLICT(fingerprint) DO UPDATE SET model_json = excluded.model_json,
+                 decided_at = excluded.decided_at",
+            params![REFINEMENT_KEY, serde_json::to_string(model)?, now],
+        )?;
+        tx.execute(
+            "INSERT INTO audit_log (at, task_id, action, status, authorization, detail) VALUES (?1, NULL, 'rule_refinement', ?2, NULL, ?3)",
+            params![now, outcome, detail],
+        )?;
+        tx.commit()?;
+        Ok(())
     }
 
     /// Descarta una sugerencia (D132): guarda la huella con la evidencia que había y lo audita,
@@ -550,6 +593,21 @@ impl Store {
         )?;
         tx.commit()?;
         Ok(())
+    }
+
+    /// Borra un ajuste y lo deja en el historial, en una transacción. Devuelve si existía; si
+    /// no existía no escribe nada.
+    pub fn delete_rule_setting(&mut self, key: &str, detail: &str) -> Result<bool> {
+        let tx = self.conn.transaction()?;
+        let removed = tx.execute("DELETE FROM rule_settings WHERE key = ?1", [key])? > 0;
+        if removed {
+            tx.execute(
+                "INSERT INTO audit_log (at, task_id, action, status, authorization, detail) VALUES (?1, NULL, 'rule_setting', 'removed', NULL, ?2)",
+                params![now_ms(), detail],
+            )?;
+        }
+        tx.commit()?;
+        Ok(removed)
     }
 
     /// Autorización y estado de la última entrada del historial que confirmó o reconcilió la

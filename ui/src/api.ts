@@ -11,7 +11,10 @@ import type {
   LaunchView,
   ProviderChoice,
   ProviderInfo,
+  ConsentView,
   MergePreview,
+  RefinePreview,
+  RefinementView,
   Rule,
   RuleFinding,
   RuleSeed,
@@ -139,7 +142,19 @@ export const api = {
   ruleSuggestions: () => invoke<Suggestions>("rule_suggestions"),
   /** Crea la regla de una sugerencia, siempre inactiva. Repetirlo no duplica. `shown` es la huella
    * de lo que se mostró: si los datos cambiaron, el backend rechaza y hay que revisar de nuevo. */
-  acceptSuggestion: (fingerprint: string, shown: string, name: string | null) => invoke<RuleView>("accept_suggestion", { fingerprint, shown, name }),
+  acceptSuggestion: (fingerprint: string, shown: string, name: string | null, modelLimit: string | null = null) =>
+    invoke<RuleView>("accept_suggestion", { fingerprint, shown, name, modelLimit }),
+  /** Estado del afinado con IA (D134). Solo lectura: no llama al proveedor. */
+  suggestionRefinement: () => invoke<RefinementView>("suggestion_refinement"),
+  /** A qué proveedor y qué datos se enviarían al afinar. Solo lectura. */
+  refinementPreview: () => invoke<RefinePreview>("refinement_preview"),
+  /** Afina las sugerencias con la IA cuando la persona lo pide, tras ver la vista previa. Nunca crea ni activa reglas. */
+  refineSuggestions: (seen: RefinePreview) =>
+    invoke<RefinementView>("refine_suggestions", { expect: { provider: seen.provider.provider, model: seen.provider.model, host: seen.host ?? "", input_fp: seen.input_fp } }),
+  /** Activa el afinado automático para el proveedor y modelo que la persona vio (versión final). Queda en el historial. */
+  grantRefineConsent: (provider: string, model: string, host: string | null) => invoke<ConsentView>("grant_refine_consent", { provider, model, host: host ?? "" }),
+  /** Retira el consentimiento del afinado automático. */
+  withdrawRefineConsent: () => invoke<ConsentView>("withdraw_refine_consent"),
   /** Descarta una sugerencia: solo reaparece con el doble de evidencia nueva. */
   discardSuggestion: (fingerprint: string) => invoke<void>("discard_suggestion", { fingerprint }),
   suggestionThresholds: () => invoke<ThresholdSettings>("suggestion_thresholds"),

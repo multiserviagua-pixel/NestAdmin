@@ -58,3 +58,18 @@ python evaluation/evaluate.py /ruta/local.jsonl --compare /ruta/externo.jsonl --
 - `performance`: media aritmética de tiempos y máximo de memoria declarados, junto con el número de muestras disponibles. La cobertura puede ser parcial; no comparar proveedores como equivalentes si los métodos, casos o condiciones difieren.
 
 Las pruebas unitarias usan respuestas construidas a partir de la referencia para comprobar el evaluador; **no son una medición del modelo**. Las métricas no fijan un umbral prometido. Además, este harness no sustituye las pruebas de revisión, automatización, recuperación, aislamiento de red, instalador y mediciones en el equipo objetivo.
+
+## Afinado de sugerencias de reglas (`refine_suggestions`, D134)
+
+Corpus aparte, sintético y sin contenido de usuario: `data/inputs/refine_suggestions.json` (8 casos; cada uno es una lista de candidatas agregadas, la misma forma que viaja en la aplicación, sin cuerpos, asuntos ni direcciones completas; dos casos llevan instrucciones o JSON dentro del nombre del proveedor) y `data/expected/refine_suggestions.json` (qué debería ordenar, ocultar, agrupar y proponer; **no enviar al modelo**). Todos los nombres, dominios (`.test`) e importes son inventados. El evaluador `evaluate_refine.py` usa solo la biblioteca estándar, no tiene código de red y aplica un validador que espeja el esquema cerrado de `crates/ai/src/refine.rs`.
+
+```sh
+cargo run --release -p nestadmin-ai --bin nestadmin-predict -- --provider ollama --task afinado --out evaluation/predictions/afinado-ollama.jsonl
+python evaluation/evaluate_refine.py evaluation/predictions/afinado-ollama.jsonl
+```
+
+`--task afinado` solo lee `refine_suggestions.json` y escribe la salida del modelo tal como llegó (`result`) o `error`; el validador del evaluador decide si cumple el esquema. Los proveedores externos siguen las mismas reglas que arriba (elección expresa y clave en el almacén).
+
+Métricas (`refine_report.json` en `results/`, ignorado por Git): `validity` (respuestas que cumplen el esquema cerrado y, si no, el código del rechazo; lo que falta, falla o se rechaza cuenta como no cumplido), `order` (pares «más útil antes que menos útil» respetados), `hide` (precisión y cobertura de lo que debía ocultarse, más las ocultaciones de lo que debía quedarse), `groups` (igual, por parejas, más las agrupaciones prohibidas), `limits` (propuestas dentro del rango observado, propuestas no esperadas y esperadas que faltan) e `injection` (casos con instrucciones en el nombre en los que el comentario las repite o las sigue). Son comprobaciones literales sobre ocho casos: no fijan un umbral prometido ni sustituyen las pruebas con `FakeProvider` de `crates/app/tests/refine.rs`.
+
+**Estado:** el corpus, el evaluador y sus pruebas (`python -m unittest discover -s evaluation/tests`) existen y pasan, pero **no se ha ejecutado contra ningún modelo real**: no hay resultados medidos de calidad. Las pruebas del evaluador usan respuestas construidas a partir de la referencia.

@@ -1204,13 +1204,15 @@ export interface OriginLike {
   sources?: Array<{ id: string; version: number }>;
   count?: number;
   threshold?: number;
+  limit_source?: string;
 }
 
 /** De dónde sale una regla creada al unificar; `null` si no tiene origen. */
 export function originText(origin: OriginLike | null | undefined, nameOf: NameOf): string | null {
   if (origin?.kind === "suggestion" && typeof origin.count === "number") {
     const min = typeof origin.threshold === "number" ? ` (el mínimo era ${origin.threshold})` : "";
-    return `Creada desde una sugerencia, con ${origin.count} ${plural(origin.count, "observación", "observaciones")}${min}.`;
+    const proposedByAi = origin.limit_source === "model" ? " El límite lo propuso la IA y usted lo eligió." : "";
+    return `Creada desde una sugerencia, con ${origin.count} ${plural(origin.count, "observación", "observaciones")}${min}.${proposedByAi}`;
   }
   if (!origin || origin.kind !== "merge" || !origin.sources?.length) return null;
   const list = origin.sources.map((s) => `«${nameOf(s.id)}» (versión ${s.version})`);
@@ -1342,7 +1344,7 @@ export const SUGGESTION_HELP = {
 } as const;
 
 export const SUGGESTION_INTRO =
-  "Estas sugerencias salen de lo que usted aprueba en Pendientes. Se calculan en este equipo, sin IA, y ninguna se crea ni se activa sin su aceptación.";
+  "Estas sugerencias salen de lo que usted aprueba en Pendientes. Se calculan en este equipo, sin IA, y ninguna se crea ni se activa sin su aceptación. Una IA puede afinarlas (ordenarlas, proponer ocultar las poco útiles, preguntar por proveedores parecidos o proponer otro límite), pero nunca crea ni activa reglas ni pone las cifras.";
 
 export const SUGGESTION_INACTIVE_NOTICE = "Si la crea, nacerá inactiva: no actuará hasta que usted la pruebe y la active.";
 
@@ -1483,6 +1485,443 @@ export function suggestionAccepted(name: string): string {
 }
 
 export const SUGGESTION_DISCARDED = "Sugerencia descartada. Solo volverá a aparecer con el doble de observaciones nuevas.";
+
+// ---- Capa con modelo (D134): la IA afina, el código garantiza ----
+
+export type RefineModeLike = "on_demand" | "automatic";
+
+export interface ConsentLike {
+  required: boolean;
+  /** `not_needed`, `missing`, `granted` o `stale`. */
+  state: string;
+  provider: string | null;
+  model: string | null;
+  host: string | null;
+  at: number | null;
+}
+
+export interface RefinementLike {
+  mode: RefineModeLike;
+  status: "refined" | "stale" | "running" | "not_refined";
+  reason: string | null;
+  detail: string | null;
+  ran_at: number | null;
+  last_ok_at: number | null;
+  provider: string | null;
+  model: string | null;
+  fallback: { from: string; reason: string } | null;
+  order: string[];
+  hide: { fingerprint: string; reason: string }[];
+  groups: string[][];
+  limits: { fingerprint: string; max_total: string; shown: string; considered: number; would_automate: number }[];
+  dropped: { kind: string; fingerprint: string; code: string }[];
+  comment: string | null;
+  comment_dropped: string | null;
+  candidates: number;
+  sent: number;
+  covered: number;
+  new_signals: number;
+  min_new_signals: number;
+  retry_at: number | null;
+  gave_up: boolean;
+  failures: number;
+  max_attempts: number;
+  consent: ConsentLike;
+}
+
+export interface RefinePreviewLike {
+  provider: { provider: string; model: string };
+  host: string | null;
+  input_fp: string;
+  external: boolean;
+  via_local_first: boolean;
+  local_fallback: boolean;
+  blocked: string | null;
+  blocked_message: string | null;
+  consent: ConsentLike;
+  candidates: {
+    id: string;
+    kind: string;
+    supplier: string | null;
+    category: string | null;
+    sender_domain: string | null;
+    count: number;
+    earlier_breaks: number;
+    discarded_before: boolean;
+    amount_min: string | null;
+    amount_max: string | null;
+    withheld: string | null;
+  }[];
+  candidates_total: number;
+  discarded_by_user: number;
+  never_sent: string[];
+}
+
+/** Rótulo fijo del texto libre del modelo: se muestra siempre como texto plano. */
+export const AI_COMMENT_LABEL = "Comentario de la IA";
+
+/** Nota fija, siempre visible junto al comentario: ninguna validación del comentario la sustituye. */
+export const AI_COMMENT_NOTE = "Es una opinión del modelo, no un dato; no se ha verificado.";
+
+export const AI_REFINE_NEVER_ACTS =
+  "La IA no crea ni activa reglas, no decide qué se automatiza y no cambia las cifras. Si no está disponible, las sugerencias del programa siguen igual.";
+
+const PROVIDER_NAMES: Record<string, string> = {
+  ollama: "la IA local (Ollama, en este equipo)",
+  ollama_cloud: "Ollama cloud (ollama.com)",
+  openai_compatible: "un servicio compatible con OpenAI",
+  anthropic: "Claude (Anthropic)",
+};
+
+/** Nombre legible del proveedor, o el código si no se conoce. */
+export function providerName(code: string): string {
+  return PROVIDER_NAMES[code] ?? code;
+}
+
+/** Modo del canal, dicho en una frase: el panel siempre dice en cuál está. */
+export function refineModeText(mode: RefineModeLike, minNewSignals: number, maxAttempts = 3): string {
+  return mode === "on_demand"
+    ? "Versión de prueba: la IA solo afina cuando usted pulsa «Afinar con IA», para reducir gasto. Antes verá a qué proveedor se envía y qué datos."
+    : `Versión final: el afinado automático está desactivado hasta que usted lo active. Activado, afina solo, por lotes, cuando se acumulan al menos ${minNewSignals} decisiones válidas nuevas, una vez por conjunto de datos y, si falla por un motivo pasajero, hasta ${maxAttempts} intentos en total. También puede afinar a mano con el botón.`;
+}
+
+const REJECTION_TEXT: Record<string, string> = {
+  not_an_object: "no era un objeto",
+  unknown_field: "traía campos que no existen en el formato",
+  missing_field: "faltaban campos del formato",
+  wrong_type: "algún campo no tenía el tipo esperado",
+  unknown_id: "se refería a sugerencias que no se enviaron",
+  duplicate_id: "repetía una sugerencia donde no debía",
+  too_many_items: "traía más elementos de los permitidos",
+  unknown_reason: "daba un motivo fuera de la lista",
+  bad_group: "un grupo no era válido",
+  bad_amount: "un importe no era texto plano con dos decimales como mucho",
+  comment_too_long: "el comentario era demasiado largo",
+  comment_has_figures: "el comentario llevaba cifras, también escritas en letra, que solo pone el programa",
+  comment_has_markup: "el comentario llevaba marcado, enlaces, saltos de línea o caracteres invisibles",
+  comment_makes_claims: "el comentario afirmaba seguridad o verificación, o invitaba a activar algo",
+  group_not_invoice: "agrupaba algo que no es una factura",
+};
+
+const FAILURE_TEXT: Record<string, string> = {
+  unavailable: "el proveedor no estaba disponible (red o servicio)",
+  timeout: "el proveedor no respondió a tiempo",
+  rate_limited: "el proveedor limitó las peticiones",
+  unauthorized: "el proveedor rechazó la clave; corríjala en Configuración",
+  invalid_response: "la respuesta del proveedor no tenía el formato pedido",
+};
+
+/** Un motivo de respaldo, en palabras. */
+export function failureWords(code: string): string {
+  return FAILURE_TEXT[code] ?? "el proveedor falló";
+}
+
+const WAIT_TEXT: Record<string, string> = {
+  needs_choice: "falta elegir un proveedor de IA en Configuración",
+  needs_key: "falta guardar la clave del proveedor en Configuración",
+  needs_consent: "falta confirmar en Configuración el destino de los datos",
+  invalid_key: "la clave de IA no es válida o fue revocada",
+};
+
+export interface RefinementStatus {
+  /** `ok`, `warn` o `info`: el color nunca es la única señal, el título lo dice. */
+  tone: "ok" | "warn" | "info";
+  title: string;
+  /** Líneas explicativas, en orden. */
+  lines: string[];
+}
+
+function when(millis: number): string {
+  const d = new Date(millis);
+  const two = (n: number) => String(n).padStart(2, "0");
+  return `${two(d.getDate())}/${two(d.getMonth() + 1)} ${two(d.getHours())}:${two(d.getMinutes())}`;
+}
+
+/** Cuándo volverá a intentarlo sola la IA tras un fallo, o por qué ya no lo hará. */
+export function retryText(v: Pick<RefinementLike, "retry_at" | "gave_up" | "failures" | "max_attempts" | "mode" | "reason" | "consent">): string | null {
+  if (v.mode !== "automatic" || !v.reason || !["unavailable", "timeout", "rate_limited"].includes(v.reason)) return null;
+  if (v.gave_up) return `Tras ${v.failures} intentos no volverá a intentarlo sola con estos datos; pulse «Afinar con IA» cuando quiera.`;
+  if (v.consent.required && v.consent.state !== "granted") return "No lo intentará sola mientras el afinado automático no esté activado.";
+  return v.retry_at ? `Volverá a intentarlo sola hacia las ${when(v.retry_at)} (intento ${v.failures + 1} de ${v.max_attempts}).` : null;
+}
+
+/** Por qué no hay afinado ahora, según el código del backend. */
+function pendingReason(v: RefinementLike): string {
+  switch (v.reason) {
+    case "no_candidates":
+      return "No hay sugerencias que afinar.";
+    case "on_demand":
+      return "En esta versión de prueba la IA solo afina cuando usted lo pide.";
+    case "auto_consent_missing":
+      return "El afinado automático está desactivado: no se envía nada a la IA hasta que usted lo active (botón «Activar afinado automático»). Mientras tanto puede afinar a mano.";
+    case "auto_consent_stale":
+      return `El afinado automático se activó para ${v.consent.provider ? providerName(v.consent.provider) : "otro proveedor"}${v.consent.model ? ` (modelo ${v.consent.model})` : ""}${v.consent.host ? ` en ${v.consent.host}` : ""} y ya no vale: el proveedor, el modelo o el servidor han cambiado. Vuelva a activarlo si quiere seguir.`;
+    case "waiting_signals":
+      return v.last_ok_at !== null
+        ? `La IA afinará sola cuando haya ${v.min_new_signals} decisiones válidas nuevas; desde el último intento hay ${v.new_signals}.`
+        : `La IA afinará sola cuando haya ${v.min_new_signals} decisiones válidas; hay ${v.new_signals}.`;
+    case "pending_auto":
+      return "Hay decisiones nuevas suficientes: se afinará en breve.";
+    case "interrupted":
+      return "El envío anterior no llegó a terminar (por ejemplo, se cerró la aplicación). No se repite solo para no gastar de más; puede pedirlo con el botón.";
+    case "rejected":
+      return `La respuesta de la IA se descartó entera porque ${REJECTION_TEXT[v.detail ?? ""] ?? "no cumplía el formato"}. No se aplicó nada de ella.`;
+    default: {
+      const code = v.reason ?? "";
+      if (WAIT_TEXT[code]) return `No se envió nada: ${WAIT_TEXT[code]}.`;
+      if (FAILURE_TEXT[code]) return `El último intento falló: ${FAILURE_TEXT[code]}.`;
+      return "No se pudo afinar.";
+    }
+  }
+}
+
+/** Estado del afinado para la pestaña Sugeridas: afinado, no afinado y por qué, o afinando. */
+export function refinementStatus(v: RefinementLike): RefinementStatus {
+  const retry = retryText(v);
+  switch (v.status) {
+    case "running":
+      return { tone: "info", title: "Afinando con IA…", lines: ["Mientras tanto, las sugerencias que ve son las calculadas por el programa."] };
+    case "refined": {
+      const lines = [
+        `Afinado${v.ran_at ? ` el ${when(v.ran_at)}` : ""} con ${v.provider ? providerName(v.provider) : "la IA"}${v.model ? ` (modelo ${v.model})` : ""}.`,
+      ];
+      if (v.covered < v.candidates)
+        lines.push(`Se aplica a ${v.covered} de ${v.candidates} sugerencias: las demás cambiaron desde entonces y se muestran como las calculó el programa.`);
+      if (v.sent < v.candidates) lines.push(`Solo se envían las primeras ${v.sent} de ${v.candidates} sugerencias; el resto no se afina.`);
+      if (v.comment_dropped) lines.push(commentDroppedText(v.comment_dropped));
+      if (v.fallback) lines.push(`Respondió la IA local porque ${providerName(v.fallback.from)} no estaba disponible (${failureWords(v.fallback.reason)}).`);
+      if (v.reason) {
+        lines.push(`${pendingReason(v)} Se muestra el último afinado válido.`);
+        if (retry) lines.push(retry);
+      }
+      lines.push(AI_REFINE_NEVER_ACTS);
+      return { tone: "ok", title: "Afinado con IA", lines };
+    }
+    case "stale":
+      return {
+        tone: "warn",
+        title: "Afinado anterior no vigente",
+        lines: [
+          `Las sugerencias cambiaron desde el último afinado${v.last_ok_at ? ` (${when(v.last_ok_at)})` : ""}, así que no se aplica ese resultado a ninguna. Las sugerencias que ve son las calculadas por el programa.`,
+          pendingReason(v),
+          ...(retry ? [retry] : []),
+        ],
+      };
+    default: {
+      const calm = ["on_demand", "waiting_signals", "no_candidates", "pending_auto", "auto_consent_missing"].includes(v.reason ?? "");
+      return {
+        tone: calm ? "info" : "warn",
+        title: "No afinado",
+        lines: [pendingReason(v), ...(retry ? [retry] : []), ...(v.sent < v.candidates ? [`Solo se enviarían las primeras ${v.sent} de ${v.candidates} sugerencias.`] : []), "Las sugerencias que ve son las calculadas por el programa, sin IA."],
+      };
+    }
+  }
+}
+
+/** El botón «Afinar con IA»: existe en los dos modos (en la versión final también sirve para reintentar). */
+export function refineButton(
+  v: RefinementLike,
+  preview: Pick<RefinePreviewLike, "blocked" | "blocked_message"> | null,
+): { shown: boolean; disabled: boolean; why: string | null } {
+  if (v.status === "running") return { shown: true, disabled: true, why: "Ya se está afinando." };
+  if (v.candidates === 0) return { shown: true, disabled: true, why: "No hay sugerencias que afinar." };
+  if (preview?.blocked) return { shown: true, disabled: true, why: preview.blocked_message ?? "Falta configurar la IA." };
+  if (v.status === "refined" && v.covered === v.candidates && !v.reason) return { shown: true, disabled: true, why: "Estas sugerencias ya están afinadas. Si cambian, podrá volver a afinar." };
+  return { shown: true, disabled: false, why: null };
+}
+
+function sentSubject(c: RefinePreviewLike["candidates"][number]): string {
+  const cat = c.category ? ` (${categoryLabel(c.category)})` : "";
+  if (c.kind === "invoice") return c.supplier ? `facturas de «${c.supplier}»` : "facturas de un proveedor cuyo nombre no se envía";
+  return c.sender_domain ? `respuestas al dominio ${c.sender_domain}${cat}` : `respuestas a un remitente cuyo dominio no se envía${cat}`;
+}
+
+const WITHHELD_TEXT: Record<string, string> = {
+  email: "su nombre lleva una dirección de correo",
+  id_number: "su nombre lleva un número de identificación fiscal",
+  iban: "su nombre lleva una cuenta bancaria",
+  phone: "su nombre lleva un teléfono",
+  public_mail_domain: "es un dominio de correo público (gmail.com y similares)",
+  address: "su nombre lleva una dirección postal",
+};
+
+/** Aviso sobre datos personales, el mismo en la vista previa y en el consentimiento. */
+export const PERSONAL_DATA_NOTE =
+  "El nombre de un proveedor que es autónomo o un negocio pequeño identifica a una persona: se envía tal como figura en el documento, salvo si lleva un correo, un NIF o CIF, una cuenta bancaria o un teléfono (entonces no se envía), ni si lleva una dirección postal evidente (una vía con su número); otras formas de escribir una dirección pueden no detectarse. Un dominio propio de una persona o de un negocio pequeño también puede identificarla; los dominios de correo públicos no se envían.";
+
+/** Con pocas facturas, el menor y el mayor importe son totales exactos de facturas. */
+export const EXACT_AMOUNTS_NOTE = "Con pocas facturas, el menor y el mayor importe son los totales exactos de esas facturas.";
+
+/** Lo que se va a enviar y a quién, antes de pedir el afinado. */
+export function refinePreviewLines(p: RefinePreviewLike): { destination: string; fallback: string | null; items: string[]; never: string; notes: string[] } {
+  const name = providerName(p.provider.provider);
+  let destination: string;
+  const where = p.host ? `, servidor ${p.host}` : "";
+  if (!p.external) destination = `Se hará con ${name}, modelo ${p.provider.model}. Los datos no salen de este equipo.`;
+  else if (p.via_local_first)
+    destination = `Ahora mismo la IA local de este equipo atiende primero las peticiones (el proveedor no respondió hace poco). Si falla, se enviará a ${name}, modelo ${p.provider.model}${where}, y los datos de abajo saldrán de este equipo.`;
+  else destination = `Se enviará a ${name}, modelo ${p.provider.model}${where}. Los datos de abajo salen de este equipo hacia ese proveedor.`;
+  const fallback = p.external
+    ? p.local_fallback
+      ? "El respaldo con la IA local está activado: si ese proveedor falla y la IA local está preparada en este equipo, se repetirá con ella; si no, no se afinará. Nunca se usa otro proveedor externo."
+      : "El respaldo con la IA local está desactivado: si el proveedor falla, no se afinará."
+    : null;
+  const items = p.candidates.map((c) => {
+    const range = c.amount_min && c.amount_max ? `, importes de ${formatAmount(c.amount_min)} a ${formatAmount(c.amount_max)}` : "";
+    const why = c.withheld ? ` (no se envía: ${WITHHELD_TEXT[c.withheld] ?? "dato personal"})` : "";
+    const breaks = c.earlier_breaks === 0 ? "sin cortes anteriores de la serie" : `${c.earlier_breaks} ${plural(c.earlier_breaks, "corte anterior", "cortes anteriores")} de la serie (ediciones, rechazos o incidencias)`;
+    const back = c.discarded_before ? "la descartó antes y vuelve a aparecer" : "no descartada antes";
+    return `${c.id}: ${sentSubject(c)}${why}, ${c.count} ${plural(c.count, "observación", "observaciones")}${range}, ${breaks}, ${back}`;
+  });
+  if (p.discarded_by_user) items.push(`Sugerencias que usted descartó: ${p.discarded_by_user}`);
+  const notes = [PERSONAL_DATA_NOTE, EXACT_AMOUNTS_NOTE];
+  if (p.candidates_total > p.candidates.length) notes.push(`Se envían como mucho ${p.candidates.length} sugerencias de las ${p.candidates_total} calculadas; el resto no se afina.`);
+  return { destination, fallback, items, never: `No se envía nunca: ${p.never_sent.join(", ")}.`, notes };
+}
+
+/** Estado del consentimiento del afinado automático, en una frase. */
+export function consentStatusText(c: ConsentLike): string | null {
+  switch (c.state) {
+    case "granted":
+      return `Afinado automático activado para ${c.provider ? providerName(c.provider) : "este proveedor"}${c.model ? ` (modelo ${c.model})` : ""}${c.host ? `, servidor ${c.host}` : ""}${c.at ? `, desde el ${when(c.at)}` : ""}. Puede retirarlo cuando quiera.`;
+    case "stale":
+      return "Afinado automático desactivado: el proveedor, el modelo o el servidor han cambiado desde que lo activó.";
+    case "missing":
+      return "Afinado automático desactivado: no se envía nada hasta que lo active.";
+    default:
+      return null;
+  }
+}
+
+/** Texto que se muestra antes de aceptar el afinado automático: lo que se envía, a quién y cuándo. */
+export function consentLines(p: RefinePreviewLike, minNewSignals: number, maxAttempts = 3): { heading: string; lines: string[]; items: string[]; destination: string } {
+  const preview = refinePreviewLines(p);
+  const name = providerName(p.provider.provider);
+  return {
+    heading: `Activar el afinado automático con ${name}, modelo ${p.provider.model}${p.host ? `, servidor ${p.host}` : ""}`,
+    destination: preview.destination,
+    lines: [
+      `Cada vez que se acumulen ${minNewSignals} decisiones válidas nuevas, la aplicación enviará sola a ${name} el resumen de sus sugerencias que ve abajo, sin preguntarle antes. Como mucho una vez por conjunto de datos y, si falla por un motivo pasajero, hasta ${maxAttempts} intentos.`,
+      "El resumen sale de sus decisiones en este equipo, también de las que tomó antes de elegir este proveedor o mientras la IA era solo local: esas decisiones no se enviaron entonces, pero su resumen sí saldrá ahora.",
+      ...preview.notes,
+      preview.never,
+      `El consentimiento vale solo para este proveedor, este modelo y este servidor${p.host ? ` (${p.host})` : ""}: si cambia cualquiera de los tres, se retira y tendrá que aceptarlo otra vez; volver al anterior no lo recupera. Puede retirarlo en cualquier momento; las sugerencias del programa no cambian.`,
+    ],
+    items: preview.items,
+  };
+}
+
+export interface RefinedLists<T> {
+  /** Las que se muestran en la lista principal, en orden de utilidad. */
+  main: T[];
+  /** Las que la IA propone ocultar y la persona no ha recuperado: visibles en su bloque. */
+  hidden: { candidate: T; reason: string }[];
+}
+
+/**
+ * Orden y bloque de ocultas. Solo trabaja con las candidatas que calculó el programa: una huella
+ * del resultado que no esté entre ellas se ignora, y sin un afinado vigente no cambia nada.
+ */
+export function applyRefinement<T extends { fingerprint: string }>(candidates: T[], v: RefinementLike | null, restored: ReadonlySet<string>): RefinedLists<T> {
+  if (!v || v.status !== "refined") return { main: candidates, hidden: [] };
+  const rank = new Map(v.order.map((fp, i) => [fp, i] as const));
+  const hideReason = new Map(v.hide.map((h) => [h.fingerprint, h.reason] as const));
+  const sorted = candidates
+    .map((c, i) => ({ c, i }))
+    .sort((a, b) => (rank.get(a.c.fingerprint) ?? Infinity) - (rank.get(b.c.fingerprint) ?? Infinity) || a.i - b.i)
+    .map((x) => x.c);
+  const isHidden = (c: T) => hideReason.has(c.fingerprint) && !restored.has(c.fingerprint);
+  return {
+    main: sorted.filter((c) => !isHidden(c)),
+    hidden: sorted.filter(isHidden).map((candidate) => ({ candidate, reason: hideReason.get(candidate.fingerprint)! })),
+  };
+}
+
+const HIDE_TEXT: Record<string, string> = {
+  low_value: "le parece poco útil",
+  likely_one_off: "le parece un caso puntual",
+  unclear_name: "el nombre no es claro",
+};
+
+export function hiddenBlockTitle(n: number): string {
+  return `La IA propone ocultar ${n} ${plural(n, "sugerencia", "sugerencias")}`;
+}
+
+export const HIDDEN_BLOCK_NOTE =
+  "No se han borrado ni descartado: siguen aquí y puede crearlas, descartarlas o devolverlas a la lista principal. Es solo una opinión de la IA.";
+
+export function hiddenReasonText(reason: string): string {
+  return `La IA propone ocultarla porque ${HIDE_TEXT[reason] ?? "la considera poco útil"}.`;
+}
+
+/** Pregunta sobre proveedores que quizá son el mismo. Nunca une nada: solo pregunta. */
+export function groupQuestion(names: string[]): string {
+  const quoted = names.map((n) => `«${n}»`);
+  const list = quoted.length <= 2 ? quoted.join(" y ") : `${quoted.slice(0, -1).join(", ")} y ${quoted[quoted.length - 1]}`;
+  return `¿${list} son el mismo proveedor? La IA cree que podrían serlo porque los nombres se parecen. El programa no puede comprobarlo sin el NIF y no los une por su cuenta: compruébelo con sus facturas.`;
+}
+
+/** Límite propuesto por la IA junto al del programa; la persona elige. Las cifras son del backend. */
+export function modelLimitText(proposal: { max_total: string; considered: number; would_automate: number }, c: SuggestionLike): string {
+  const mine = c.evidence.limit ? `, frente a ${formatAmount(c.evidence.limit)} del programa` : "";
+  const range = c.evidence.amount_min && c.evidence.limit ? ` Está dentro del rango observado (de ${formatAmount(c.evidence.amount_min)} a ${formatAmount(c.evidence.limit)}).` : "";
+  const sim = `En la simulación de ahora, con ${proposal.considered} ${plural(proposal.considered, "factura guardada", "facturas guardadas")}, esta regla habría registrado ${proposal.would_automate}.`;
+  return `La IA propone un límite de ${formatAmount(proposal.max_total)}${mine}.${range} ${sim} Usted elige cuál usar; con cualquiera, la regla nace inactiva.`;
+}
+
+const DROPPED_TEXT: Record<string, string> = {
+  out_of_range: "estaba fuera del rango de importes observado",
+  same_as_code: "coincidía con el que ya propone el programa",
+  not_positive: "no era un importe positivo",
+  bad_amount: "no era un importe legible",
+  no_range: "no había un rango de importes con el que compararlo",
+  not_invoice: "se refería a algo que no es una factura",
+  invalid_rule: "no producía una regla válida",
+  simulation_failed: "no se pudo simular",
+  simulation_no_effect: "en la simulación no habría registrado ninguna factura",
+  simulation_blocks_other: "en la simulación dejaría sin actuar a otra regla activa",
+};
+
+/** Qué propuesta de la IA se descartó y por qué (sin contenido del modelo). */
+export function droppedText(d: { kind?: string; code: string }): string {
+  if (d.kind === "group") return "Se descartó una pregunta de agrupación de la IA porque incluía una sugerencia cuyo nombre no se envía.";
+  return `Se descartó un límite propuesto por la IA porque ${DROPPED_TEXT[d.code] ?? "no pasó las comprobaciones"}.`;
+}
+
+const COMMENT_DROPPED_TEXT: Record<string, string> = {
+  comment_number_words: "llevaba cifras escritas en letra, que solo pone el programa",
+  comment_makes_claims: "afirmaba seguridad o verificación, o invitaba a activar algo",
+};
+
+/** Solo se descartó el comentario: el resto del afinado se conserva. */
+export function commentDroppedText(code: string): string {
+  return `El comentario de la IA se descartó porque ${COMMENT_DROPPED_TEXT[code] ?? "no cumplía las reglas"}; el resto del afinado se conserva.`;
+}
+
+/** Texto plano del comentario: sin caracteres de control ni de formato, ni marcado, y con longitud acotada. */
+export function aiCommentText(raw: string): string {
+  const flat = raw
+    .replace(/[\u0000-\u001f\u007f-\u009f­؜᠎​-‏‪-‮⁠-⁯﻿<>`]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  return flat.length > 240 ? `${flat.slice(0, 237)}…` : flat;
+}
+
+export function modelLimitButtonLabel(limit: string): string {
+  return `Crear regla con el límite de la IA (${formatAmount(limit)}, inactiva)`;
+}
+
+/** Aviso al crear la regla: dice «límite de la IA» solo si la regla creada lo lleva de verdad. */
+export function acceptedWithModelLimit(name: string, created: string | undefined, proposed: string): string {
+  if (created !== undefined && Number(created) === Number(proposed))
+    return `Regla «${name}» creada, inactiva, con el límite de ${formatAmount(proposed)} que propuso la IA y que usted eligió. ${MERGE_NEXT_STEP}.`;
+  return `Ya existía la regla «${name}», creada antes desde esta sugerencia${created ? ` con otro límite (${formatAmount(created)})` : ""}; no se ha creado otra. ${MERGE_NEXT_STEP}.`;
+}
+
+/** Fallo al leer el estado del afinado o la vista previa: se dice, no se oculta. */
+export function refineLoadError(error: string): string {
+  return `No se pudo leer el estado del afinado con IA: ${error}. Las sugerencias del programa no cambian.`;
+}
 
 // ---- «Crear regla» desde una revisión ----
 

@@ -9,6 +9,8 @@ pub enum Task {
     Extraction,
     Classification,
     Draft,
+    /// Afinado de sugerencias de reglas con datos agregados (D134).
+    RefineSuggestions,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -98,6 +100,11 @@ impl AiError {
 pub trait Provider: Send + Sync {
     fn kind(&self) -> ProviderKind;
     fn model(&self) -> &str;
+    /// Destino real al que salen los datos (host y puerto si no es el 443): `None` con la IA local.
+    /// El consentimiento del afinado automático (D134) se liga a él.
+    fn destination(&self) -> Option<String> {
+        None
+    }
     fn generate(&self, request: &GenerateRequest) -> Result<GenerateResult, AiError>;
 }
 

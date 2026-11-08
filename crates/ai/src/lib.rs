@@ -13,6 +13,7 @@ pub mod ollama_cloud;
 mod openai_chat;
 pub mod openai_compatible;
 pub mod provider;
+pub mod refine;
 pub mod selection;
 pub mod tasks;
 

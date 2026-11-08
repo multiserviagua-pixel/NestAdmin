@@ -1782,3 +1782,22 @@ h2 + .section {
   gap: var(--s2);
   margin: var(--s2) 0;
 }
+
+/* Afinado con IA (D134): el comentario de la IA y sus ocultas se distinguen de los datos del programa. */
+.ai-box {
+  margin: var(--s3) 0;
+}
+
+.ai-comment {
+  margin: var(--s2) 0;
+  padding-left: var(--s3);
+  border-left: 3px solid var(--line-strong);
+  max-width: 75ch;
+  overflow-wrap: anywhere;
+}
+
+.ai-hidden {
+  margin-top: var(--s4);
+  padding-top: var(--s3);
+  border-top: 1px dashed var(--line-strong);
+}
