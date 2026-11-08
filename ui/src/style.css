@@ -1283,3 +1283,114 @@ h2 + .section {
     scroll-behavior: auto !important;
   }
 }
+
+/* ---- Panel de reglas (R21, R22) ---- */
+
+.filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s3);
+  margin: var(--s4) 0 var(--s2);
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s1);
+  min-width: 170px;
+}
+
+.field.grow {
+  flex: 1;
+  min-width: 220px;
+}
+
+.field-head {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  font-size: var(--fs-small);
+  color: var(--muted);
+}
+
+.field-head label {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s1);
+}
+
+.field-group {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s3);
+  margin-bottom: var(--s3);
+}
+
+/* El atributo hidden debe ganar a display:flex en los campos del formulario de reglas. */
+.rule-form .field-group[hidden] {
+  display: none;
+}
+
+.tag {
+  font-size: var(--fs-label);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 0 var(--s2);
+}
+
+.hint {
+  color: var(--muted);
+  font-size: var(--fs-small);
+  margin: var(--s1) 0 var(--s2);
+}
+
+.rule-sentence {
+  margin: 0 0 var(--s1);
+  font-weight: 600;
+}
+
+.rule-risk {
+  margin: 0 0 var(--s1);
+  color: var(--warn);
+  font-size: var(--fs-small);
+}
+
+.rule-problem {
+  margin: 0 0 var(--s1);
+  color: var(--error);
+  font-size: var(--fs-small);
+}
+
+.rule-problem[hidden] {
+  display: none;
+}
+
+.rule-preview {
+  border: 1px dashed var(--line-strong);
+  border-radius: var(--radius);
+  padding: var(--s3) var(--s4);
+  margin: var(--s2) 0;
+  background: var(--surface-2);
+}
+
+.rule-preview p {
+  margin: var(--s1) 0;
+}
+
+.row-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s2);
+}
+
+.rules-grid code {
+  font-size: var(--fs-small);
+}
+
+.rules-grid {
+  min-width: 620px;
+}
+
+.tabpanel {
+  padding-top: var(--s4);
+}

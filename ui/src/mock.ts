@@ -584,6 +584,28 @@ function addRule(rule: Rule) {
   return rule;
 }
 
+// Condiciones cerradas por acción (D123), como en el backend.
+function checkConditions(kind: string, conditions: Record<string, unknown>) {
+  const allowed = kind === "register_invoice" ? ["supplier", "max_total"] : kind === "send_draft" ? ["category"] : null;
+  if (!allowed) throw `tipo de regla no admitido: ${kind}`;
+  const unknown = Object.keys(conditions).find((k) => !allowed.includes(k));
+  if (unknown) throw `condición no admitida: ${unknown}`;
+  if (kind === "register_invoice" && !String(conditions.supplier ?? "").trim()) throw "la regla de registro necesita un proveedor";
+  if (kind === "send_draft" && !String(conditions.category ?? "").trim()) throw "la regla de envío necesita una categoría";
+  if ("max_total" in conditions && (typeof conditions.max_total !== "string" || !/^\d+([.,]\d{1,2})?$/.test(conditions.max_total)))
+    throw "el total máximo debe ser un importe, por ejemplo 500.00";
+}
+
+// Reglas sintéticas de cada tipo para la vista previa (más un tipo que la aplicación no reconoce).
+const seedRules: Array<Omit<Rule, "version" | "created_at">> = [
+  { id: "alfa-hasta-500", action_kind: "register_invoice", conditions: { supplier: "Suministros Alfa SL", max_total: "500.00" }, active: true },
+  { id: "beta-sin-limite", action_kind: "register_invoice", conditions: { supplier: "Beta Servicios SL" }, active: false },
+  { id: "consulta-pago-auto", action_kind: "send_draft", conditions: { category: "consulta_pago" }, active: true },
+  { id: "documentacion-auto", action_kind: "send_draft", conditions: { category: "documentacion" }, active: false },
+  { id: "emitir-recurrente", action_kind: "issue_recurring", conditions: {}, active: false },
+];
+for (const rule of seedRules) addRule({ ...rule, version: 1, created_at: now() });
+
 const handlers: Record<string, (a: any, options?: any) => unknown> = {
   tasks: () => structuredClone(tasks),
   import_file: (bytes: Uint8Array, options?: { headers: Record<string, string> }) => {
@@ -689,11 +711,14 @@ const handlers: Record<string, (a: any, options?: any) => unknown> = {
   rules: () => latest(),
   create_rule: ({ id, actionKind, conditions }) => {
     if (latest().some((r) => r.id === id)) throw `la regla ${id} ya existe`;
+    if (!/^[a-z0-9-]+$/.test(id)) throw "el identificador solo admite minúsculas, números y guiones";
+    checkConditions(actionKind, conditions);
     return addRule({ id, version: 1, action_kind: actionKind, conditions, active: false, created_at: now() });
   },
   update_rule: ({ id, conditions }) => {
     const r = latest().find((r) => r.id === id);
     if (!r) throw `regla ${id} inexistente`;
+    checkConditions(r.action_kind, conditions);
     return addRule({ ...r, version: r.version + 1, conditions, created_at: now() });
   },
   set_rule_active: ({ id, active }) => {
