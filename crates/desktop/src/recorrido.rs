@@ -445,9 +445,6 @@ fn la_interfaz_solo_llama_a_comandos_registrados() {
         .filter(|n| !n.is_empty())
         .collect();
     assert!(called.len() >= 25, "no se leyeron las llamadas: {called:?}");
-    // Comandos nuevos del asistente de IA (D100–D102, D122) que la interfaz aún no usa: se
-    // quitan de esta lista cuando `ui/src/api.ts` los llame (paso 5 de tareas.md).
-    const PENDING_FOR_THE_WINDOW: &[&str] = &["list_models", "test_provider", "set_local_fallback"];
     assert!(
         called.is_subset(&registered),
         "la interfaz llama a comandos no registrados: {:?}",
@@ -455,10 +452,9 @@ fn la_interfaz_solo_llama_a_comandos_registrados() {
     );
     let unused: std::collections::BTreeSet<&str> =
         registered.difference(&called).copied().collect();
-    assert_eq!(
-        unused,
-        PENDING_FOR_THE_WINDOW.iter().copied().collect(),
-        "comandos registrados que la interfaz no llama"
+    assert!(
+        unused.is_empty(),
+        "comandos registrados que la interfaz no llama: {unused:?}"
     );
 }
 
@@ -477,7 +473,10 @@ fn documento_importado_se_revisa_y_se_registra_una_sola_vez() {
     let settings = s.ok("settings", json!({}));
     assert_eq!(settings["choice"]["provider"], "ollama");
     assert_eq!(settings["active"]["provider"], "ollama");
-    assert_eq!(settings["groq_key_saved"], false);
+    // Quien tenía la IA local recibe una sola vez la oferta de pasar al externo (D100).
+    assert_eq!(settings["offer_external"], true);
+    s.ok("dismiss_external_offer", json!({}));
+    assert_eq!(s.ok("settings", json!({}))["offer_external"], false);
 
     let clean = s.import(
         "Factura Alfa F-1.txt",
@@ -1139,18 +1138,26 @@ fn clave_y_respaldo_cambian_la_espera_y_la_configuracion() {
     )
     .unwrap();
     let ai = FakeOllama::start(Mode::Answer);
-    let s = Session::open(test_deps(&data, &ai.url));
+    // Las claves nuevas solo se guardan al listar los modelos (red); aquí se siembra una.
+    let credentials = Arc::new(MemoryCredentialStore::default());
+    credentials
+        .set(
+            nestadmin_ai::credentials::ANTHROPIC_API_KEY,
+            &nestadmin_ai::Secret::new("clave-sintetica-recorrido"),
+        )
+        .unwrap();
+    let mut deps = test_deps(&data, &ai.url);
+    deps.credentials = credentials;
+    let s = Session::open(deps);
     let view = s.ok("settings", json!({}));
     assert_eq!(view["consented"], true, "migrada de la versión anterior");
-    assert_eq!(view["ai_wait"], "needs_key");
+    assert!(view["ai_wait"].is_null());
+    let choice = json!({ "choice": { "provider": "anthropic", "model": "claude-opus-5-5" } });
+    assert_eq!(s.ok("provider_key_saved", choice.clone()), true);
+    assert_eq!(view["offer_external"], false);
 
-    // Sin tareas en cola no sale nada al guardar la clave sintética.
-    s.ok(
-        "save_anthropic_key",
-        json!({ "key": "clave-sintetica-recorrido" }),
-    );
-    assert!(s.ok("settings", json!({}))["ai_wait"].is_null());
-    s.ok("delete_anthropic_key", json!({}));
+    s.ok("delete_provider_key", choice.clone());
+    assert_eq!(s.ok("provider_key_saved", choice), false);
     assert_eq!(s.ok("settings", json!({}))["ai_wait"], "needs_key");
 
     s.ok("set_local_fallback", json!({ "enabled": false }));

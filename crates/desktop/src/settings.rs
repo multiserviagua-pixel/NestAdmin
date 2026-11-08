@@ -53,6 +53,9 @@ pub struct Settings {
     /// Respaldo automático del proveedor externo elegido a la IA local (D101).
     #[serde(default = "default_true")]
     pub local_fallback: bool,
+    /// La oferta única de pasar al proveedor externo ya se mostró (D100).
+    #[serde(default)]
+    pub external_offer_shown: bool,
 }
 
 fn default_mail_limit() -> usize {
@@ -70,6 +73,7 @@ impl Default for Settings {
             mail_limit: default_mail_limit(),
             external_consent: Vec::new(),
             local_fallback: true,
+            external_offer_shown: false,
         }
     }
 }
@@ -114,11 +118,16 @@ impl Settings {
                 .collect(),
             None => Vec::new(),
         };
+        let external_offer_shown = value
+            .get("external_offer_shown")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
         Self {
             provider,
             mail_limit,
             external_consent,
             local_fallback,
+            external_offer_shown,
         }
     }
 

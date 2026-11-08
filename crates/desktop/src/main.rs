@@ -14,8 +14,6 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread;
 use std::time::Duration;
 
-use nestadmin_ai::credentials::{ANTHROPIC_API_KEY, GROQ_API_KEY, OLLAMA_CLOUD_API_KEY};
-use nestadmin_ai::openai_compatible::credential_name_for;
 use nestadmin_ai::{CredentialStore, ProviderChoice, Secret};
 use nestadmin_app::accounts::{
     AccountView, FetchReport, MailAccountsView, MailEnv, MailProviderKind,
@@ -543,12 +541,8 @@ struct SettingsView {
     fallback_period_active: bool,
     /// Destino de la elección actual ya confirmado (siempre `true` con la IA local).
     consented: bool,
-    groq_key_saved: bool,
-    ollama_cloud_key_saved: bool,
-    anthropic_key_saved: bool,
-    /// Clave del host de la URL compatible con OpenAI configurada (D109); `false` si la
-    /// selección actual no es ese proveedor o su URL no es válida.
-    openai_compatible_key_saved: bool,
+    /// Oferta única de pasar al proveedor externo a quien tenía la IA local (D100).
+    offer_external: bool,
     /// Modelo prefijado para Ollama cloud (D108): la interfaz lo toma de aquí.
     default_cloud_model: &'static str,
     data_dir: PathBuf,
@@ -556,38 +550,23 @@ struct SettingsView {
 
 #[tauri::command]
 fn settings(shared: State<'_, SharedState>) -> CmdResult<SettingsView> {
-    let (choice, local_fallback, consented) = {
+    let (choice, local_fallback, consented, offer_external) = {
         let settings = shared.settings.lock().map_err(text)?;
         let consented = settings
             .provider
             .as_ref()
             .is_some_and(|c| c.is_local() || settings.has_consent(c));
+        let offer_external = !settings.external_offer_shown
+            && settings
+                .provider
+                .as_ref()
+                .is_some_and(ProviderChoice::is_local);
         (
             settings.provider.clone(),
             settings.local_fallback,
             consented,
+            offer_external,
         )
-    };
-    let ollama_cloud_key_saved = shared
-        .credentials
-        .get(OLLAMA_CLOUD_API_KEY)
-        .map_err(text)?
-        .is_some();
-    let groq_key_saved = shared
-        .credentials
-        .get(GROQ_API_KEY)
-        .map_err(text)?
-        .is_some();
-    let anthropic_key_saved = shared
-        .credentials
-        .get(ANTHROPIC_API_KEY)
-        .map_err(text)?
-        .is_some();
-    let openai_compatible_key_saved = match &choice {
-        Some(ProviderChoice::OpenAiCompatible { base_url, .. }) => {
-            openai_compatible_key_present(&shared, base_url)?
-        }
-        _ => false,
     };
     let (active, ai_wait, fallback_period_active) = {
         let app = shared.app()?;
@@ -601,10 +580,7 @@ fn settings(shared: State<'_, SharedState>) -> CmdResult<SettingsView> {
         local_fallback,
         fallback_period_active,
         consented,
-        groq_key_saved,
-        ollama_cloud_key_saved,
-        anthropic_key_saved,
-        openai_compatible_key_saved,
+        offer_external,
         default_cloud_model: nestadmin_ai::ollama::DEFAULT_CLOUD_MODEL,
         data_dir: shared.data_dir.clone(),
     })
@@ -704,119 +680,46 @@ fn select_provider(
     Ok(shared.app()?.provider())
 }
 
-/// La clave va directa al Administrador de credenciales de Windows; nunca se devuelve.
+/// Elimina la clave del proveedor `choice` (la del host en el compatible con OpenAI) y vuelve
+/// a calcular el proveedor activo. Las claves nuevas solo se guardan al listar los modelos.
 #[tauri::command]
-fn save_groq_key(shared: State<'_, SharedState>, key: String) -> CmdResult<()> {
-    let key = key.trim();
-    if key.is_empty() {
-        return Err("la clave está vacía".into());
+fn delete_provider_key(shared: State<'_, SharedState>, choice: ProviderChoice) -> CmdResult<()> {
+    if let Some(name) = choice.credential_name() {
+        shared.credentials.delete(&name).map_err(text)?;
     }
-    shared
-        .credentials
-        .set(GROQ_API_KEY, &Secret::new(key))
-        .map_err(text)?;
     refresh_provider(&shared)
 }
 
+/// Si hay clave guardada para `choice`; una URL compatible no válida no tiene ninguna.
 #[tauri::command]
-fn delete_groq_key(shared: State<'_, SharedState>) -> CmdResult<()> {
-    shared.credentials.delete(GROQ_API_KEY).map_err(text)?;
-    refresh_provider(&shared)
-}
-
-/// Igual que la de Groq (D106): va directa al almacén del sistema y nunca se devuelve.
-#[tauri::command]
-fn save_ollama_cloud_key(shared: State<'_, SharedState>, key: String) -> CmdResult<()> {
-    let key = key.trim();
-    if key.is_empty() {
-        return Err("la clave está vacía".into());
-    }
-    shared
-        .credentials
-        .set(OLLAMA_CLOUD_API_KEY, &Secret::new(key))
-        .map_err(text)?;
-    refresh_provider(&shared)
-}
-
-#[tauri::command]
-fn delete_ollama_cloud_key(shared: State<'_, SharedState>) -> CmdResult<()> {
-    shared
-        .credentials
-        .delete(OLLAMA_CLOUD_API_KEY)
-        .map_err(text)?;
-    refresh_provider(&shared)
-}
-
-/// Claves de los proveedores externos nuevos (D109, D110): como las demás, van directas al
-/// almacén del sistema y nunca se devuelven ni se guardan en `configuracion.json`.
-#[tauri::command]
-fn save_anthropic_key(shared: State<'_, SharedState>, key: String) -> CmdResult<()> {
-    let key = key.trim();
-    if key.is_empty() {
-        return Err("la clave está vacía".into());
-    }
-    shared
-        .credentials
-        .set(ANTHROPIC_API_KEY, &Secret::new(key))
-        .map_err(text)?;
-    refresh_provider(&shared)
-}
-
-#[tauri::command]
-fn delete_anthropic_key(shared: State<'_, SharedState>) -> CmdResult<()> {
-    shared.credentials.delete(ANTHROPIC_API_KEY).map_err(text)?;
-    refresh_provider(&shared)
-}
-
-/// La clave queda ligada al host de `base_url` (acepta la URL base o solo el host): al cambiar
-/// de host la anterior no se envía.
-#[tauri::command]
-fn save_openai_compatible_key(
-    shared: State<'_, SharedState>,
-    base_url: String,
-    key: String,
-) -> CmdResult<()> {
-    let key = key.trim();
-    if key.is_empty() {
-        return Err("la clave está vacía".into());
-    }
-    let name = credential_name_for(&base_url).map_err(text)?;
-    shared
-        .credentials
-        .set(&name, &Secret::new(key))
-        .map_err(text)?;
-    refresh_provider(&shared)
-}
-
-#[tauri::command]
-fn delete_openai_compatible_key(shared: State<'_, SharedState>, base_url: String) -> CmdResult<()> {
-    let name = credential_name_for(&base_url).map_err(text)?;
-    shared.credentials.delete(&name).map_err(text)?;
-    refresh_provider(&shared)
-}
-
-/// Si hay clave para el host de `base_url` (para una URL aún sin seleccionar).
-#[tauri::command]
-fn openai_compatible_key_saved(
-    shared: State<'_, SharedState>,
-    base_url: String,
-) -> CmdResult<bool> {
-    openai_compatible_key_present(&shared, &base_url)
-}
-
-fn openai_compatible_key_present(shared: &SharedState, base_url: &str) -> CmdResult<bool> {
-    // Una URL no válida no tiene clave asociada.
-    let Ok(name) = credential_name_for(base_url) else {
+fn provider_key_saved(shared: State<'_, SharedState>, choice: ProviderChoice) -> CmdResult<bool> {
+    let Some(name) = choice.credential_name() else {
         return Ok(false);
     };
     Ok(shared.credentials.get(&name).map_err(text)?.is_some())
 }
 
+/// Marca la oferta única de D100 como mostrada.
+#[tauri::command]
+fn dismiss_external_offer(shared: State<'_, SharedState>) -> CmdResult<()> {
+    let mut current = shared.settings.lock().map_err(text)?;
+    let updated = Settings {
+        external_offer_shown: true,
+        ..current.clone()
+    };
+    updated.save(&shared.data_dir).map_err(text)?;
+    *current = updated;
+    Ok(())
+}
+
 /// Plazo de la lista de modelos y de la prueba sintética.
 const PROVIDER_CALL_TIMEOUT: Duration = Duration::from_secs(60);
 
-/// Texto fijo y sintético de la prueba del proveedor (D122): no contiene datos del usuario.
-const SYNTHETIC_TEST_PROMPT: &str = "Prueba sintética de NestAdmin: responde con la palabra OK.";
+/// Correo fijo y sintético de la prueba del proveedor (D122): no contiene datos del usuario.
+const SYNTHETIC_TEST_MAIL: &str = "Asunto: Solicitud de copia de factura
+De: cliente@ejemplo.invalid
+
+Buenos días. Les agradecería que me enviaran una copia de la factura F-2026-001 del mes pasado. Gracias.";
 
 /// Modelos que ofrece el proveedor (D122), tal cual los devuelve, con el recomendado primero.
 /// Con `key` vacía o ausente se usa la guardada del proveedor (la del host en el compatible);
@@ -886,14 +789,15 @@ fn test_provider_for(shared: &SharedState, choice: &ProviderChoice) -> CmdResult
     let provider =
         nestadmin_ai::build_provider(choice, shared.credentials.as_ref(), PROVIDER_CALL_TIMEOUT)
             .map_err(text)?;
-    provider
-        .generate(&nestadmin_ai::GenerateRequest {
-            request_id: "prueba-sintetica".into(),
-            task: nestadmin_ai::Task::Classification,
-            instructions: SYNTHETIC_TEST_PROMPT.into(),
-            content: "Texto sintético sin datos de usuario.".into(),
-            schema: None,
-        })
+    // La misma solicitud que el correo real: un modelo que no devuelve el JSON estricto falla
+    // aquí y no más tarde en una tarea (D105).
+    let result = provider
+        .generate(&nestadmin_ai::tasks::email_request(
+            "prueba-sintetica",
+            SYNTHETIC_TEST_MAIL,
+        ))
+        .map_err(text)?;
+    nestadmin_ai::tasks::parse_email(&result.output)
         .map(|_| ())
         .map_err(text)
 }
@@ -1357,15 +1261,9 @@ fn configure<R: Runtime>(builder: Builder<R>, prepare_only: bool) -> Builder<R> 
             audit_log,
             settings,
             select_provider,
-            save_groq_key,
-            delete_groq_key,
-            save_ollama_cloud_key,
-            delete_ollama_cloud_key,
-            save_anthropic_key,
-            delete_anthropic_key,
-            save_openai_compatible_key,
-            delete_openai_compatible_key,
-            openai_compatible_key_saved,
+            delete_provider_key,
+            provider_key_saved,
+            dismiss_external_offer,
             list_models,
             test_provider,
             set_local_fallback,
