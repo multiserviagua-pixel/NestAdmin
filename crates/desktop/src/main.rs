@@ -20,6 +20,7 @@ use nestadmin_app::accounts::{
 };
 use nestadmin_app::panel::{MergePreview, NewRule, RuleView, Simulation};
 use nestadmin_app::rules::RuleFinding;
+use nestadmin_app::suggest::{RuleSeed, Suggestions, ThresholdSettings};
 use nestadmin_app::{AiWait, App, AppPaths, LocalFallback, ProviderInfo};
 use nestadmin_core::{AuditEntry, Rule, RuleStats, Task};
 use nestadmin_extract::{Extractor, Tesseract};
@@ -601,6 +602,73 @@ fn simulate_rule(
 #[tauri::command]
 fn rule_findings(shared: State<'_, SharedState>) -> CmdResult<Vec<RuleFinding>> {
     shared.app()?.rule_findings().map_err(text)
+}
+
+/// Sugerencias de reglas calculadas por código (D132). Solo lectura: no llama a la IA.
+#[tauri::command]
+fn rule_suggestions(shared: State<'_, SharedState>) -> CmdResult<Suggestions> {
+    shared.app()?.rule_suggestions().map_err(text)
+}
+
+/// Crea la regla de una sugerencia, siempre inactiva (D132). Repetirlo no duplica.
+#[tauri::command]
+fn accept_suggestion<R: Runtime>(
+    shared: State<'_, SharedState>,
+    handle: AppHandle<R>,
+    fingerprint: String,
+    shown: String,
+    name: Option<String>,
+) -> CmdResult<RuleView> {
+    let view = shared
+        .app()?
+        .accept_suggestion(&fingerprint, &shown, name.as_deref())
+        .map_err(text)?;
+    changed(&handle);
+    Ok(view)
+}
+
+/// Descarta una sugerencia; solo reaparece con el doble de evidencia nueva (D132).
+#[tauri::command]
+fn discard_suggestion<R: Runtime>(
+    shared: State<'_, SharedState>,
+    handle: AppHandle<R>,
+    fingerprint: String,
+) -> CmdResult<()> {
+    shared
+        .app()?
+        .discard_suggestion(&fingerprint)
+        .map_err(text)?;
+    changed(&handle);
+    Ok(())
+}
+
+/// Umbrales de evidencia para sugerir y sus límites.
+#[tauri::command]
+fn suggestion_thresholds(shared: State<'_, SharedState>) -> CmdResult<ThresholdSettings> {
+    shared.app()?.suggestion_thresholds().map_err(text)
+}
+
+/// Cambia un umbral («invoice» o «reply»); el backend rechaza lo que no esté entre el mínimo
+/// y el máximo y deja el cambio en el historial.
+#[tauri::command]
+fn set_suggestion_threshold<R: Runtime>(
+    shared: State<'_, SharedState>,
+    handle: AppHandle<R>,
+    which: String,
+    value: i64,
+) -> CmdResult<ThresholdSettings> {
+    let settings = shared
+        .app()?
+        .set_suggestion_threshold(&which, value)
+        .map_err(text)?;
+    changed(&handle);
+    Ok(settings)
+}
+
+/// Datos para precargar una regla desde una revisión. Solo lectura.
+#[tauri::command]
+fn rule_seed_for_task(shared: State<'_, SharedState>, task_id: i64) -> CmdResult<RuleSeed> {
+    shared.app()?.rule_seed_for_task(task_id).map_err(text)
 }
 
 /// Contradicciones que tendría una regla archivada al restaurarla (D128, D130). Solo lectura.
@@ -1429,6 +1497,12 @@ fn configure<R: Runtime>(builder: Builder<R>, prepare_only: bool) -> Builder<R> 
             rule_stats,
             simulate_rule,
             rule_findings,
+            rule_suggestions,
+            accept_suggestion,
+            discard_suggestion,
+            suggestion_thresholds,
+            set_suggestion_threshold,
+            rule_seed_for_task,
             preview_merge,
             preview_restore,
             merge_rules,

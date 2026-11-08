@@ -19,10 +19,14 @@ import type {
   ProviderChoice,
   Rule,
   RuleFinding,
+  RuleSeed,
   RuleStats,
   RuleView,
   SettingsView,
   Simulation,
+  Suggestion,
+  Suggestions,
+  ThresholdSettings,
   SimulationItem,
   SetupDone,
   SetupEvent,
@@ -1123,6 +1127,126 @@ function mockPlan(members: Rule[], chosen: string): MergePlan {
   };
 }
 
+// ---- Sugerencias (D132): datos sintéticos fijos ----
+
+const mockThresholds = { invoice: 3, reply: 5 };
+const mockDiscarded = new Set<string>();
+const mockAccepted = new Map<string, string>();
+const mockThresholdSettings = (): ThresholdSettings => ({
+  invoice: mockThresholds.invoice,
+  reply: mockThresholds.reply,
+  min: 2,
+  max: 50,
+  default_invoice: 3,
+  default_reply: 5,
+});
+
+const mockEvidence = (count: number, threshold: number, daysAgo: number, amounts: string[] = []): Suggestion["evidence"] => {
+  const sorted = amounts.map(Number).sort((x, y) => y - x);
+  return {
+    count,
+    threshold,
+    earlier_breaks: 0,
+    last_at: now() - daysAgo * 24 * 3600 * 1000,
+    task_ids: [],
+    amounts,
+    limit: amounts.length ? sorted[0]!.toFixed(2) : null,
+    amount_min: amounts.length ? sorted[sorted.length - 1]!.toFixed(2) : null,
+    amount_second: amounts.length > 1 ? sorted[1]!.toFixed(2) : null,
+    limit_outlier: amounts.length > 1 && sorted[0]! >= 3 * sorted[1]!,
+    reappeared: null,
+  };
+};
+
+function mockSuggestions(): Suggestions {
+  const base: Array<Omit<Suggestion, "shown" | "overlaps">> = [
+    {
+      fingerprint: "mock-factura-alfa",
+      action_kind: "register_invoice",
+      name: "Facturas de Alfa SL",
+      conditions: { supplier: "Alfa SL", max_total: "1210.00" },
+      subject: "Alfa SL",
+      category: null,
+      evidence: mockEvidence(3, mockThresholds.invoice, 5, ["968.00", "1210.00", "605.00"]),
+    },
+    {
+      // Un importe muy por encima del resto: el aviso de límite alto.
+      fingerprint: "mock-factura-omega",
+      action_kind: "register_invoice",
+      name: "Facturas de Omega SL",
+      conditions: { supplier: "Omega SL", max_total: "9680.00" },
+      subject: "Omega SL",
+      category: null,
+      evidence: mockEvidence(3, mockThresholds.invoice, 9, ["121.00", "242.00", "9680.00"]),
+    },
+    {
+      // Nombre casi igual al de una regla existente («DELTA, S.A.»): lleva su aviso real.
+      fingerprint: "mock-factura-delta",
+      action_kind: "register_invoice",
+      name: "Facturas de Delta SA",
+      conditions: { supplier: "Delta SA", max_total: "605.00" },
+      subject: "Delta SA",
+      category: null,
+      evidence: mockEvidence(4, mockThresholds.invoice, 3, ["121.00", "242.00", "363.00", "605.00"]),
+    },
+    {
+      fingerprint: "mock-respuesta-pedidos",
+      action_kind: "send_draft",
+      name: "Respuestas a pedidos@ejemplo.test (solicitud_factura)",
+      conditions: { category: "solicitud_factura", sender: "pedidos@ejemplo.test" },
+      subject: "pedidos@ejemplo.test",
+      category: "solicitud_factura",
+      evidence: mockEvidence(6, mockThresholds.reply, 2),
+    },
+    {
+      // Dentro de una regla inactiva del dominio: se muestra con su aviso.
+      fingerprint: "mock-respuesta-documentacion",
+      action_kind: "send_draft",
+      name: "Respuestas a ana@ejemplo.test (documentacion)",
+      conditions: { category: "documentacion", sender: "ana@ejemplo.test" },
+      subject: "ana@ejemplo.test",
+      category: "documentacion",
+      evidence: mockEvidence(5, mockThresholds.reply, 6),
+    },
+  ];
+  const hidden = { covered: 0, discarded: 0, accepted: 0, invalid: 0, not_suggested: 0 };
+  const candidates: Suggestion[] = [];
+  for (const c of base) {
+    if (c.evidence.count < c.evidence.threshold) continue;
+    if (mockAccepted.has(c.fingerprint)) {
+      hidden.accepted++;
+      continue;
+    }
+    // Hallazgos de la candidata como si estuviera activa, con las reglas no archivadas.
+    const hypothetical: Rule = { id: "(sugerida)", version: 1, action_kind: c.action_kind, conditions: c.conditions, active: true, created_at: 0 };
+    const findings = mockFindings([...latest(), hypothetical]).filter((f) => f.kind !== "defective" && f.rules.some((r) => r.id === "(sugerida)"));
+    // Igual, o más amplia y activa: ya está cubierta (lo mismo que hace el backend).
+    const covered = findings.some(
+      (f) =>
+        f.kind === "duplicate" ||
+        (f.kind === "overlap" && f.effect.data.wider?.id !== "(sugerida)" && f.rules.some((r) => r.id === f.effect.data.wider?.id && r.active)),
+    );
+    if (covered) {
+      hidden.covered++;
+      continue;
+    }
+    if (mockDiscarded.has(c.fingerprint)) {
+      hidden.discarded++;
+      continue;
+    }
+    candidates.push({ ...c, shown: `${c.fingerprint}|${JSON.stringify(c.conditions)}`, overlaps: findings });
+  }
+  return {
+    candidates,
+    progress: [{ action_kind: "register_invoice", subject: "Beta SA", category: null, count: 2, needed: mockThresholds.invoice, missing: Math.max(0, mockThresholds.invoice - 2) }].filter((p) => p.missing > 0),
+    observed: 24,
+    counted: 24,
+    hidden,
+    thresholds: mockThresholdSettings(),
+    watermark: 24,
+  };
+}
+
 const handlers: Record<string, (a: any, options?: any) => unknown> = {
   tasks: () => structuredClone(tasks),
   import_file: (bytes: Uint8Array, options?: { headers: Record<string, string> }) => {
@@ -1428,6 +1552,74 @@ const handlers: Record<string, (a: any, options?: any) => unknown> = {
       else ruleMeta.delete(hypothetical.id);
     }
     return sim;
+  },
+  // Sugerencias (D132): datos sintéticos fijos; el cálculo real vive en la capa Rust.
+  rule_suggestions: (): Suggestions => mockSuggestions(),
+  accept_suggestion: ({ fingerprint, shown, name }) => {
+    const known = mockAccepted.get(String(fingerprint));
+    if (known) return ruleView(latest().find((r) => r.id === known)!);
+    const c = mockSuggestions().candidates.find((x) => x.fingerprint === fingerprint);
+    if (!c) throw "La sugerencia ya no está vigente: los datos cambiaron o ya se resolvió. Actualice la lista.";
+    if (c.shown !== shown) throw "La sugerencia ha cambiado desde que la vio (otro límite u otros datos): revise la tarjeta de nuevo antes de crear la regla.";
+    const view = handlers.create_rule!({
+      id: null,
+      name: String(name ?? "").trim() || c.name,
+      actionKind: c.action_kind,
+      conditions: c.conditions,
+      acknowledgeAnySender: false,
+    }) as RuleView;
+    setMeta(view.id, { origin: { kind: "suggestion", count: c.evidence.count, threshold: c.evidence.threshold } });
+    mockAccepted.set(String(fingerprint), view.id);
+    audit.push({ task_id: null, action: "rule_suggestion", status: "accepted", authorization: null, detail: `${view.id} v1 (inactiva) creada desde la sugerencia ${fingerprint}` });
+    return ruleView(latest().find((r) => r.id === view.id)!);
+  },
+  discard_suggestion: ({ fingerprint }) => {
+    if (!mockSuggestions().candidates.some((x) => x.fingerprint === fingerprint) && !mockDiscarded.has(String(fingerprint)))
+      throw "La sugerencia ya no está vigente: los datos cambiaron o ya se resolvió. Actualice la lista.";
+    if (!mockDiscarded.has(String(fingerprint))) {
+      mockDiscarded.add(String(fingerprint));
+      audit.push({ task_id: null, action: "rule_suggestion", status: "discarded", authorization: null, detail: `sugerencia ${fingerprint} descartada` });
+    }
+  },
+  suggestion_thresholds: (): ThresholdSettings => mockThresholdSettings(),
+  set_suggestion_threshold: ({ which, value }): ThresholdSettings => {
+    if (which !== "invoice" && which !== "reply") throw `umbral desconocido: ${which}; use «invoice» o «reply»`;
+    if (!Number.isInteger(value) || value < 2 || value > 50)
+      throw "el umbral debe estar entre 2 y 50: con una sola observación no se sugiere nada";
+    if (mockThresholds[which as "invoice" | "reply"] !== value) {
+      audit.push({ task_id: null, action: "rule_setting", status: "changed", authorization: null, detail: `umbral para sugerir reglas (${which}): ${mockThresholds[which as "invoice" | "reply"]} -> ${value}` });
+      mockThresholds[which as "invoice" | "reply"] = value;
+    }
+    return mockThresholdSettings();
+  },
+  rule_seed_for_task: ({ taskId }): RuleSeed => {
+    const task = tasks.find((t) => t.id === taskId);
+    const r = task?.result;
+    if (!task || !r) throw "la tarea no tiene resultado";
+    if (task.kind === "invoice") {
+      const supplier = String(r.fields?.supplier ?? "").trim();
+      if (!supplier || /[\u0000-\u001f\u007f]/.test(supplier)) throw "la factura no indica proveedor: no hay qué precargar";
+      const total = /^\d+\.\d{2}$/.test(String(r.fields?.total ?? "")) ? String(r.fields.total) : null;
+      // Mismo orden que el backend: el límite solo con el euro comprobado y sin importe dudoso.
+      const foreign = foreignOf(r);
+      let skipped: RuleSeed["limit_skipped"] = null;
+      if (foreign === null) skipped = { code: "currency_not_checked", currencies: [] };
+      else if (foreign.length) skipped = { code: "foreign_currency", currencies: foreign };
+      else if (r.currency_evidence?.euro !== true) skipped = { code: "currency_not_shown", currencies: [] };
+      else if (typeof r.amount_review === "string") skipped = { code: "amount_review", currencies: [] };
+      else if (!total) skipped = { code: "no_total", currencies: [] };
+      return {
+        action_kind: "register_invoice",
+        conditions: skipped ? { supplier } : { supplier, max_total: total! },
+        name: `Facturas de ${supplier}`.slice(0, 80),
+        limit_from_this_invoice: !skipped,
+        limit_skipped: skipped,
+      };
+    }
+    const sender = String(r.message?.from ?? "").trim().toLowerCase();
+    if (!/^[^@\s,<>;:"]+@[a-z0-9-]+(\.[a-z0-9-]+)+$/.test(sender)) throw "el correo no indica un remitente que se pueda usar en una regla";
+    if (!["solicitud_factura", "consulta_pago", "incidencia_factura", "documentacion", "otros"].includes(String(r.category ?? ""))) throw "la regla de envío necesita una categoría válida";
+    return { action_kind: "send_draft", conditions: { category: String(r.category), sender }, name: `Respuestas a ${sender} (${r.category})`.slice(0, 80), limit_from_this_invoice: false, limit_skipped: null };
   },
   rule_findings: (): RuleFinding[] => mockFindings(latest()),
   preview_restore: ({ id }): RuleFinding[] => {

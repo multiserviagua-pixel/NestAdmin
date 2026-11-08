@@ -47,7 +47,7 @@ export interface RuleView extends Rule {
   /** Marca de la opción avanzada: la regla de envío contesta a cualquier remitente. */
   any_sender_ack_at: number | null;
   /** De dónde sale la regla: al unificar, las reglas de origen y la opción elegida (D131). */
-  origin: { kind: string; sources?: Array<{ id: string; version: number }>; option?: string } | null;
+  origin: { kind: string; sources?: Array<{ id: string; version: number }>; option?: string; count?: number; threshold?: number } | null;
   stats: RuleStats;
 }
 
@@ -370,4 +370,82 @@ export interface FieldSource {
   pages: number[];
   text: string;
   line: string;
+}
+
+// ---- Sugerencias de reglas (D132, R24) ----
+
+/** Datos de la serie que sostiene una sugerencia. Todas las cifras las calcula el backend. */
+export interface SuggestionEvidence {
+  count: number;
+  threshold: number;
+  /** Veces que la serie se cortó antes (edición, rechazo, sin clasificar o factura con incidencias). */
+  earlier_breaks: number;
+  /** Cuándo se guardó la última observación (ms). */
+  last_at: number;
+  task_ids: number[];
+  /** Facturas: los importes observados, en orden. */
+  amounts: string[];
+  /** Facturas: límite propuesto, el mayor de los importes observados. */
+  limit: string | null;
+  /** Facturas: el menor y el segundo mayor de los importes observados. */
+  amount_min: string | null;
+  amount_second: string | null;
+  /** Facturas: el mayor es al menos el triple del segundo mayor. */
+  limit_outlier: boolean;
+  reappeared: { at_discard: number; new_since: number; needed_new: number } | null;
+}
+
+export interface Suggestion {
+  fingerprint: string;
+  /** Huella de las condiciones mostradas: aceptar exige la misma. */
+  shown: string;
+  action_kind: string;
+  name: string;
+  conditions: Record<string, string>;
+  subject: string;
+  category: string | null;
+  evidence: SuggestionEvidence;
+  /** Contradicciones que crearía la regla si se activara (la candidata va como `(sugerida)`). */
+  overlaps: RuleFinding[];
+}
+
+export interface SuggestionProgress {
+  action_kind: string;
+  subject: string;
+  category: string | null;
+  count: number;
+  needed: number;
+  missing: number;
+}
+
+export interface ThresholdSettings {
+  invoice: number;
+  reply: number;
+  min: number;
+  max: number;
+  default_invoice: number;
+  default_reply: number;
+}
+
+export interface Suggestions {
+  candidates: Suggestion[];
+  progress: SuggestionProgress[];
+  /** Señales válidas que se miraron. Cero: aún no hay datos. */
+  observed: number;
+  /** Observaciones que cuentan como evidencia en las series actuales, se muestren o no. */
+  counted: number;
+  hidden: { covered: number; discarded: number; accepted: number; invalid: number; not_suggested: number };
+  thresholds: ThresholdSettings;
+  watermark: number;
+}
+
+/** Datos para precargar una regla desde una revisión. */
+export interface RuleSeed {
+  action_kind: string;
+  conditions: Record<string, string>;
+  name: string;
+  /** Facturas: el límite es el total de esa factura, no una estadística. */
+  limit_from_this_invoice: boolean;
+  /** Facturas: por qué no se precargó el límite (solo el proveedor). */
+  limit_skipped: { code: string; currencies: string[] } | null;
 }

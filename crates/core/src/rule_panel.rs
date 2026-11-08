@@ -69,6 +69,9 @@ pub struct SignalRecord<'a> {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct SignalRow {
+    /// Orden de llegada: creciente y sin reutilizar (las filas no se borran).
+    pub id: i64,
+    pub at: i64,
     pub kind: String,
     pub action_kind: String,
     pub subject_key: String,
@@ -78,6 +81,17 @@ pub struct SignalRow {
     pub source_key: Option<String>,
     /// `valid`, `pending` o `void`. Las sugerencias solo usan las `valid`.
     pub state: String,
+}
+
+/// Una decisión sobre una sugerencia (D132): descartada o aceptada, con la evidencia que
+/// había entonces. Solo cifras, ids y claves; nunca contenido de correos.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct SuggestionRow {
+    pub fingerprint: String,
+    /// `discarded` o `accepted`.
+    pub status: String,
+    pub evidence: Value,
+    pub decided_at: Option<i64>,
 }
 
 /// Contadores de una regla.
@@ -369,22 +383,173 @@ impl Store {
 
     pub fn rule_signals(&self) -> Result<Vec<SignalRow>> {
         let mut stmt = self.conn.prepare(
-            "SELECT kind, action_kind, subject_key, edit_state, task_id, content_version, source_key, state
+            "SELECT id, at, kind, action_kind, subject_key, edit_state, task_id, content_version, source_key, state
              FROM rule_signals ORDER BY id",
         )?;
         let rows = stmt.query_map([], |r| {
             Ok(SignalRow {
-                kind: r.get(0)?,
-                action_kind: r.get(1)?,
-                subject_key: r.get(2)?,
-                edit_state: r.get(3)?,
-                task_id: r.get(4)?,
-                content_version: r.get(5)?,
-                source_key: r.get(6)?,
-                state: r.get(7)?,
+                id: r.get(0)?,
+                at: r.get(1)?,
+                kind: r.get(2)?,
+                action_kind: r.get(3)?,
+                subject_key: r.get(4)?,
+                edit_state: r.get(5)?,
+                task_id: r.get(6)?,
+                content_version: r.get(7)?,
+                source_key: r.get(8)?,
+                state: r.get(9)?,
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Decisiones guardadas sobre sugerencias, por huella. Solo lectura.
+    pub fn rule_suggestion_rows(&self) -> Result<Vec<SuggestionRow>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT fingerprint, status, evidence_json, decided_at FROM rule_suggestions ORDER BY fingerprint",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            let evidence: String = r.get(2)?;
+            Ok(SuggestionRow {
+                fingerprint: r.get(0)?,
+                status: r.get(1)?,
+                evidence: serde_json::from_str(&evidence).unwrap_or(Value::Null),
+                decided_at: r.get(3)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Descarta una sugerencia (D132): guarda la huella con la evidencia que había y lo audita,
+    /// en una transacción. Descartar otra vez actualiza la referencia con la que se mide la
+    /// evidencia nueva. Una sugerencia ya aceptada no se descarta.
+    pub fn discard_suggestion(
+        &mut self,
+        fingerprint: &str,
+        evidence: &Value,
+        detail: &str,
+    ) -> Result<()> {
+        let tx = self.conn.transaction()?;
+        let status: Option<String> = tx
+            .query_row(
+                "SELECT status FROM rule_suggestions WHERE fingerprint = ?1",
+                [fingerprint],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if status.as_deref() == Some("accepted") {
+            return Err(CoreError::IdempotencyConflict(format!(
+                "sugerencia {fingerprint} ya aceptada"
+            )));
+        }
+        let now = now_ms();
+        tx.execute(
+            "INSERT INTO rule_suggestions (fingerprint, status, evidence_json, decided_at)
+             VALUES (?1, 'discarded', ?2, ?3)
+             ON CONFLICT(fingerprint) DO UPDATE SET status = 'discarded',
+                 evidence_json = excluded.evidence_json, decided_at = excluded.decided_at",
+            params![fingerprint, serde_json::to_string(evidence)?, now],
+        )?;
+        tx.execute(
+            "INSERT INTO audit_log (at, task_id, action, status, authorization, detail) VALUES (?1, NULL, 'rule_suggestion', 'discarded', NULL, ?2)",
+            params![now, detail],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Acepta una sugerencia (D132) en una sola transacción: crea la regla **inactiva** con su
+    /// origen, marca la sugerencia como aceptada y lo audita. Es idempotente por huella: si ya
+    /// estaba aceptada devuelve la regla que se creó entonces (`false`: no se creó nada).
+    /// Nunca activa nada. Quien llama comprueba las condiciones con `check_rule`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn accept_suggestion(
+        &mut self,
+        fingerprint: &str,
+        new_id: &str,
+        action_kind: &str,
+        conditions: &Value,
+        name: Option<&str>,
+        origin: &Value,
+        evidence: &Value,
+    ) -> Result<(Rule, bool)> {
+        let tx = self.conn.transaction()?;
+        let prior: Option<(String, String)> = tx
+            .query_row(
+                "SELECT status, evidence_json FROM rule_suggestions WHERE fingerprint = ?1",
+                [fingerprint],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?;
+        if let Some((status, stored)) = prior {
+            if status == "accepted" {
+                let stored: Value = serde_json::from_str(&stored).unwrap_or(Value::Null);
+                if let Some(rule) = stored["rule_id"]
+                    .as_str()
+                    .map(|id| current_rule(&tx, id))
+                    .transpose()?
+                    .flatten()
+                {
+                    return Ok((rule, false));
+                }
+            }
+        }
+        if current_rule(&tx, new_id)?.is_some() {
+            return Err(CoreError::IdempotencyConflict(format!("regla {new_id}")));
+        }
+        let rule = insert_rule_version(&tx, new_id, 1, action_kind, conditions, false)?;
+        tx.execute(
+            "INSERT INTO rule_meta (rule_id, name, origin_json) VALUES (?1, ?2, ?3)",
+            params![new_id, name, serde_json::to_string(origin)?],
+        )?;
+        let mut stored = evidence.clone();
+        stored["rule_id"] = Value::String(new_id.to_owned());
+        let now = now_ms();
+        tx.execute(
+            "INSERT INTO rule_suggestions (fingerprint, status, evidence_json, decided_at)
+             VALUES (?1, 'accepted', ?2, ?3)
+             ON CONFLICT(fingerprint) DO UPDATE SET status = 'accepted',
+                 evidence_json = excluded.evidence_json, decided_at = excluded.decided_at",
+            params![fingerprint, serde_json::to_string(&stored)?, now],
+        )?;
+        tx.execute(
+            "INSERT INTO audit_log (at, task_id, action, status, authorization, detail) VALUES (?1, NULL, 'rule_suggestion', 'accepted', NULL, ?2)",
+            params![
+                now,
+                format!("{new_id} v1 (inactiva) creada desde la sugerencia {fingerprint}")
+            ],
+        )?;
+        tx.commit()?;
+        Ok((rule, true))
+    }
+
+    /// Valor guardado de un ajuste del panel (`rule_settings`), si existe.
+    pub fn rule_setting(&self, key: &str) -> Result<Option<String>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT value FROM rule_settings WHERE key = ?1",
+                [key],
+                |r| r.get(0),
+            )
+            .optional()?)
+    }
+
+    /// Guarda un ajuste y lo deja en el historial, en una transacción. Quien llama valida el
+    /// valor. `detail` describe el cambio (valor anterior y nuevo).
+    pub fn set_rule_setting(&mut self, key: &str, value: &str, detail: &str) -> Result<()> {
+        let tx = self.conn.transaction()?;
+        tx.execute(
+            "INSERT INTO rule_settings (key, value) VALUES (?1, ?2)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params![key, value],
+        )?;
+        tx.execute(
+            "INSERT INTO audit_log (at, task_id, action, status, authorization, detail) VALUES (?1, NULL, 'rule_setting', 'changed', NULL, ?2)",
+            params![now_ms(), detail],
+        )?;
+        tx.commit()?;
+        Ok(())
     }
 
     /// Autorización y estado de la última entrada del historial que confirmó o reconcilió la

@@ -17,6 +17,8 @@ import type {
   RuleView,
   SettingsView,
   Simulation,
+  Suggestion,
+  Suggestions,
   SetupCheck,
   SetupDone,
   SetupErrorCode,
@@ -24,6 +26,7 @@ import type {
   SetupStep,
   Startup,
   Task,
+  ThresholdSettings,
 } from "./types";
 import {
   ANY_SENDER_CONFIRMATION,
@@ -36,6 +39,11 @@ import {
   NO_EVALUATION,
   NO_FINDINGS,
   SIMULATION_DISCLAIMER,
+  SUGGESTION_DISCARDED,
+  SUGGESTION_HELP,
+  SUGGESTION_INACTIVE_NOTICE,
+  SUGGESTION_INTRO,
+  THRESHOLD_LABEL,
   actsOnNothing,
   anyAckReady,
   anySenderConsequences,
@@ -46,6 +54,7 @@ import {
   categoryLabel,
   conditionsSummary,
   draftConditions,
+  draftFromSeed,
   draftOf,
   draftProblems,
   explainEvaluation,
@@ -64,10 +73,23 @@ import {
   ruleSentence,
   ruleStatus,
   searchText,
+  seedNotice,
   similarClarification,
   simulationSummary,
   sortFindings,
   statsText,
+  suggestionAccepted,
+  suggestionLimitText,
+  suggestionOutlierWarning,
+  suggestionSupplierNote,
+  suggestionsTabCount,
+  suggestionReappeared,
+  suggestionSentence,
+  suggestionWhy,
+  suggestionsEmpty,
+  suggestionsHidden,
+  thresholdProblem,
+  thresholdSaved,
   type CandidateOutcome,
   type RuleDraft,
 } from "./rules-text";
@@ -183,7 +205,13 @@ const state = {
   // Incluye los formularios de reglas en curso, con clave «rule:new» o «rule:edit:<id>».
   drafts: {} as Record<string, string>,
   // Panel de reglas: pestaña, filtros de «Mis reglas» y formulario abierto.
-  rulesTab: "mine" as "mine" | "categories",
+  rulesTab: "mine" as "mine" | "categories" | "suggested",
+  // Sugerencias calculadas por código (D132), su error si no se pudieron calcular, las que se
+  // están resolviendo (contra el doble clic) y los umbrales escritos y aún sin guardar.
+  suggestions: null as Suggestions | null,
+  suggestionsError: null as string | null,
+  suggestionBusy: {} as Record<string, boolean>,
+  thresholdText: {} as Partial<Record<"invoice" | "reply", string>>,
   ruleFilter: { text: "", action: "", status: "", category: "" },
   ruleEditor: null as null | { mode: "new" } | { mode: "edit"; id: string },
   // Panel dentro de una fila (activar con evidencia, probar, opción avanzada, archivar) y su
@@ -324,18 +352,23 @@ function afterConfirm(task: Task) {
 async function refresh(background = false) {
   try {
     let findingsError: string | null = null;
-    const [tasks, rules, findings, audit, settings, mail] = await Promise.all([
+    let suggestionsError: string | null = null;
+    const [tasks, rules, findings, suggestions, audit, settings, mail] = await Promise.all([
       api.tasks(),
       api.ruleViews(),
       api.ruleFindings().catch((error) => {
         findingsError = String(error);
         return [] as RuleFinding[];
       }),
+      api.ruleSuggestions().catch((error) => {
+        suggestionsError = String(error);
+        return null;
+      }),
       api.auditLog(),
       api.settings(),
       api.mailAccounts(),
     ]);
-    Object.assign(state, { tasks, rules, findings, findingsError, audit, settings, mail });
+    Object.assign(state, { tasks, rules, findings, findingsError, suggestions, suggestionsError, audit, settings, mail });
     announceDoubtfulAmounts();
   } catch (error) {
     state.notice = { kind: "error", text: String(error) };
@@ -887,6 +920,7 @@ function invoiceDetail(task: Task) {
         "Aprobar y registrar",
       ),
       openOriginal(task),
+      createRuleButton(task),
       h("button", { class: "danger", onclick: () => resolveTask(task, () => api.reject(task.id), "Tarea descartada") }, "Descartar"),
     ),
   );
@@ -966,6 +1000,7 @@ function emailDetail(task: Task) {
         "Aprobar y enviar",
       ),
       h("button", { onclick: () => void act(() => api.editDraft(task.id, body.value), "Borrador guardado como versión nueva") }, "Guardar borrador"),
+      createRuleButton(task),
       h("button", { class: "danger", onclick: () => resolveTask(task, () => api.reject(task.id), "Tarea descartada") }, "Descartar"),
     ),
   );
@@ -1057,7 +1092,7 @@ const editDraftKey = (id: string) => `rule:edit:${id}`;
 
 const noRuleFilter = () => ({ text: "", action: "", status: "", category: "" });
 
-function setRulesTab(tab: "mine" | "categories") {
+function setRulesTab(tab: "mine" | "categories" | "suggested") {
   state.rulesTab = tab;
   render();
 }
@@ -2207,6 +2242,179 @@ function mergePanel(f: RuleFinding): HTMLElement | null {
   );
 }
 
+// -- Sugeridas (D132, R24): calculadas por código; crear una regla la deja inactiva --
+
+function suggestionCard(c: Suggestion): HTMLElement {
+  const busy = Boolean(state.suggestionBusy[c.fingerprint]);
+  const limit = suggestionLimitText(c);
+  const outlier = suggestionOutlierWarning(c);
+  const supplierNote = suggestionSupplierNote(c);
+  const risk = ruleRisk({ id: "", version: 0, action_kind: c.action_kind, conditions: c.conditions, active: false });
+  const again = suggestionReappeared(c);
+  const create = h(
+    "button",
+    {
+      class: "primary",
+      type: "button",
+      "data-focus-key": `sugg:${c.fingerprint}:create`,
+      disabled: busy,
+      onclick: () => resolveSuggestion(c.fingerprint, async () => suggestionAccepted((await api.acceptSuggestion(c.fingerprint, c.shown, null)).name)),
+    },
+    "Crear regla (inactiva)",
+  );
+  const discard = h(
+    "button",
+    {
+      type: "button",
+      "data-focus-key": `sugg:${c.fingerprint}:discard`,
+      disabled: busy,
+      onclick: () =>
+        resolveSuggestion(c.fingerprint, async () => {
+          await api.discardSuggestion(c.fingerprint);
+          return SUGGESTION_DISCARDED;
+        }),
+    },
+    "Descartar",
+  );
+  return h(
+    "article",
+    { class: "finding-card", "aria-label": suggestionSentence(c), "data-focus-key": `sugg:${c.fingerprint}` },
+    h("header", { class: "finding-head" }, h("h4", { class: "finding-title" }, suggestionSentence(c)), statusChip(c.evidence.reappeared ? "Vuelve a aparecer" : "Sugerida", c.evidence.reappeared ? "warn" : "info")),
+    h("p", {}, h("span", { class: "finding-label" }, "Por qué: "), suggestionWhy(c), " ", helpTip(SUGGESTION_HELP.evidence, "Ayuda sobre qué cuenta como evidencia")),
+    limit ? h("p", {}, limit, " ", helpTip(SUGGESTION_HELP.limit, "Ayuda sobre el límite propuesto")) : null,
+    outlier ? h("p", { class: "warn-text", role: "alert" }, outlier) : null,
+    supplierNote ? h("p", { class: "meta" }, supplierNote) : null,
+    again ? h("p", { class: "meta" }, again) : null,
+    activationFindings(c.overlaps),
+    h("p", { class: "rule-risk" }, "Aviso: ", risk),
+    h("p", { class: "meta" }, SUGGESTION_INACTIVE_NOTICE),
+    h("div", { class: "buttons finding-actions" }, create, helpTip(SUGGESTION_HELP.create, "Ayuda sobre crear la regla"), discard, helpTip(SUGGESTION_HELP.discard, "Ayuda sobre descartar")),
+  );
+}
+
+/** Acepta o descarta una sugerencia una sola vez: un doble clic no repite nada. */
+function resolveSuggestion(fingerprint: string, work: () => Promise<string>) {
+  if (state.suggestionBusy[fingerprint]) return;
+  state.suggestionBusy[fingerprint] = true;
+  render();
+  void work()
+    .then(
+      (text) => {
+        state.notice = { kind: "ok", text };
+      },
+      (error) => {
+        state.notice = { kind: "error", text: String(error) };
+      },
+    )
+    .finally(() => {
+      delete state.suggestionBusy[fingerprint];
+      void refresh();
+    });
+}
+
+function thresholdsBox(t: ThresholdSettings): HTMLElement {
+  const row = (which: "invoice" | "reply") => {
+    const current = which === "invoice" ? t.invoice : t.reply;
+    const id = `threshold-${which}`;
+    const input = h("input", {
+      id,
+      type: "number",
+      min: String(t.min),
+      max: String(t.max),
+      step: "1",
+      inputmode: "numeric",
+      "data-focus-key": `threshold:${which}`,
+      oninput: () => {
+        state.thresholdText[which] = input.value;
+      },
+    }) as HTMLInputElement;
+    input.value = state.thresholdText[which] ?? String(current);
+    const problem = h("p", { class: "warn-text", role: "alert" });
+    const save = h(
+      "button",
+      {
+        type: "button",
+        "data-focus-key": `threshold:${which}:save`,
+        onclick: async () => {
+          const bad = thresholdProblem(input.value, t);
+          problem.textContent = bad ?? "";
+          if (bad || save.disabled) return;
+          save.disabled = true;
+          try {
+            const saved = await api.setSuggestionThreshold(which, Number(input.value.trim()));
+            delete state.thresholdText[which];
+            state.notice = { kind: "ok", text: thresholdSaved(which, which === "invoice" ? saved.invoice : saved.reply) };
+          } catch (error) {
+            state.notice = { kind: "error", text: String(error) };
+          }
+          await refresh();
+        },
+      },
+      "Guardar",
+    ) as HTMLButtonElement;
+    return h(
+      "div",
+      { class: "field" },
+      h("div", { class: "field-head" }, h("label", { for: id }, THRESHOLD_LABEL[which]), helpTip(SUGGESTION_HELP.thresholds, `Ayuda sobre el umbral: ${THRESHOLD_LABEL[which].toLowerCase()}`)),
+      h("div", { class: "buttons" }, input, save),
+      h("p", { class: "meta" }, `Ahora: ${current}. Mínimo ${t.min}, máximo ${t.max}.`),
+      problem,
+    );
+  };
+  return h(
+    "details",
+    { class: "sim-examples", "data-focus-key": "sugg:thresholds" },
+    h("summary", {}, "Umbrales para sugerir"),
+    row("invoice"),
+    row("reply"),
+  );
+}
+
+function suggestedPanel(): HTMLElement {
+  if (state.suggestionsError)
+    return h("p", { class: "meta findings-none", role: "alert" }, `No se han podido calcular las sugerencias: ${state.suggestionsError}`);
+  const s = state.suggestions;
+  if (!s) return h("p", { class: "meta" }, "Calculando sugerencias…");
+  const hidden = suggestionsHidden(s.hidden);
+  const body: Child[] = [];
+  if (s.candidates.length) {
+    body.push(h("div", { class: "finding-cards" }, ...s.candidates.map(suggestionCard)));
+  } else {
+    const empty = suggestionsEmpty(s);
+    body.push(emptyState(empty.title, empty.hint), empty.lines.length ? h("ul", { class: "sim-list" }, ...empty.lines.map((line) => h("li", {}, line))) : null);
+  }
+  return h(
+    "div",
+    {},
+    h("p", { class: "intro" }, SUGGESTION_INTRO),
+    ...body,
+    hidden ? h("p", { class: "meta" }, hidden) : null,
+    thresholdsBox(s.thresholds),
+  );
+}
+
+/** «Crear regla» desde una revisión: abre el formulario precargado; la regla sigue naciendo inactiva. */
+function createRuleButton(task: Task): HTMLElement {
+  return h(
+    "button",
+    {
+      type: "button",
+      "data-focus-key": `task:${task.id}:create-rule`,
+      onclick: async () => {
+        try {
+          const seed = await api.ruleSeedForTask(task.id);
+          state.view = "rules";
+          state.notice = { kind: "ok", text: seedNotice(seed) };
+          openRuleEditor({ mode: "new" }, draftFromSeed(seed));
+        } catch (error) {
+          notify("error", error);
+        }
+      },
+    },
+    "Crear regla",
+  );
+}
+
 function findingCard(f: RuleFinding): HTMLElement {
   const t = explainFinding(f, ruleName);
   const rules = f.rules.map((r) => state.rules.find((v) => v.id === r.id)).filter((r): r is RuleView => Boolean(r));
@@ -2318,7 +2526,9 @@ function rulesView() {
           findingsBlock(),
           rulesList(),
         )
-      : categoriesPanel();
+      : state.rulesTab === "suggested"
+        ? suggestedPanel()
+        : categoriesPanel();
   return h(
     "section",
     { class: "page" },
@@ -2327,13 +2537,14 @@ function rulesView() {
       label: "Secciones de reglas",
       items: [
         { key: "mine", label: "Mis reglas" },
+        { key: "suggested", label: "Sugeridas", count: suggestionsTabCount(state.suggestions, Boolean(state.suggestionsError)) },
         { key: "categories", label: "Categorías" },
       ],
       active: state.rulesTab,
       panelId: "rules-panel",
       onSelect: setRulesTab,
     }),
-    h("div", { role: "tabpanel", id: "rules-panel", class: "tabpanel", "aria-label": state.rulesTab === "mine" ? "Mis reglas" : "Categorías" }, panel),
+    h("div", { role: "tabpanel", id: "rules-panel", class: "tabpanel", "aria-label": state.rulesTab === "mine" ? "Mis reglas" : state.rulesTab === "suggested" ? "Sugeridas" : "Categorías" }, panel),
   );
 }
 

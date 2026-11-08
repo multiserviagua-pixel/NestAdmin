@@ -10,6 +10,7 @@
 pub mod accounts;
 pub mod panel;
 pub mod rules;
+pub mod suggest;
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -1541,7 +1542,7 @@ impl App {
         // La aprobación es la decisión de la persona: se anota antes de ejecutar para que un
         // fallo al anotarla conste en el resultado sin impedir ni repetir la acción.
         let mut result = result;
-        let signal = panel::signal_for(&task, &result);
+        let signal = panel::signal_for(&task, &result, "approved");
         if let Err(error) = self.record_signal("approved", signal) {
             result["evidence_error"] = json!(format!("no se guardó la señal: {error}"));
         }
@@ -1578,7 +1579,7 @@ impl App {
         // cambios» y no sirve de evidencia para sugerir una regla (D129).
         result["edited"] = json!(true);
         result["version"] = json!(result["version"].as_i64().unwrap_or(1) + 1);
-        let signal = panel::signal_for(&task, &result);
+        let signal = panel::signal_for(&task, &result, "edited");
         if let Err(error) = self.record_signal("edited", signal) {
             result["evidence_error"] = json!(format!("no se guardó la señal: {error}"));
         }
@@ -1648,7 +1649,7 @@ impl App {
         // guarda, el fallo queda en el resultado antes de cancelar.
         if before.state == TaskState::AwaitingReview {
             let mut result = before.result.clone().unwrap_or(Value::Null);
-            let signal = panel::signal_for(&before, &result);
+            let signal = panel::signal_for(&before, &result, "rejected");
             if let Err(error) = self.record_signal("rejected", signal) {
                 result["evidence_error"] = json!(format!("no se guardó la señal: {error}"));
                 self.store.revise(task_id, &result)?;

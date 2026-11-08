@@ -253,7 +253,7 @@ impl App {
         self.rule_view(&rule.id)
     }
 
-    fn unique_rule_id(&self, name: &str) -> AppResult<String> {
+    pub(crate) fn unique_rule_id(&self, name: &str) -> AppResult<String> {
         let base = slugify(name);
         let mut candidate = base.clone();
         let mut n = 1;
@@ -405,7 +405,7 @@ impl App {
             .collect())
     }
 
-    fn rule_view(&self, id: &str) -> AppResult<RuleView> {
+    pub(crate) fn rule_view(&self, id: &str) -> AppResult<RuleView> {
         self.rule_views()?
             .into_iter()
             .find(|v| v.rule.id == id)
@@ -601,7 +601,7 @@ impl App {
 
     /// Reglas y las marcas que necesita el análisis (D130): archivadas y con la validación
     /// avanzada.
-    fn analysis_inputs(&self) -> AppResult<(Vec<Rule>, Marks)> {
+    pub(crate) fn analysis_inputs(&self) -> AppResult<(Vec<Rule>, Marks)> {
         let metas = self.store.rule_metas()?;
         let marks = Marks {
             any_sender: metas
@@ -849,13 +849,19 @@ fn replace_id(value: &mut Value, to: &str) {
 
 /// Lo que identifica una señal de aprendizaje de esta tarea, o `None` si no es señal:
 /// las partes de una factura separada de un documento con varias (D68) no lo son.
-pub(crate) fn signal_for(task: &Task, result: &Value) -> Option<SignalDraft> {
-    // Tampoco lo es una tarea cuya decisión tomó una regla (aunque una persona apruebe
-    // después un reintento): la señal es lo que las personas deciden por su cuenta.
-    if result["part"]["of"].as_u64().is_some_and(|n| n > 1)
-        || result["authorization"]["type"] == "rule"
-        || result["rule_attempt"]["type"] == "rule"
-    {
+///
+/// `signal` es la clase de señal (`approved`, `edited` o `rejected`). Tampoco es señal una
+/// tarea cuya decisión tomó una regla, ni la aprobación de un reintento de una regla (la
+/// señal es lo que las personas deciden por su cuenta). Pero un **rechazo** humano sí lo es
+/// aunque la tarea lleve `authorization` de regla (una regla lo intentó, el conector falló y
+/// `retry` la devolvió a revisión) o `rule_attempt` (si antes aprobó un reintento): `reject`
+/// solo crea la señal desde `AwaitingReview`, así que es una decisión de la persona sobre lo
+/// que la regla no llegó a hacer, y corta la serie (D132). Una ejecución por regla (tarea
+/// completada) sigue sin ser evidencia ni aprobación.
+pub(crate) fn signal_for(task: &Task, result: &Value, signal: &str) -> Option<SignalDraft> {
+    let by_rule = signal != "rejected"
+        && (result["authorization"]["type"] == "rule" || result["rule_attempt"]["type"] == "rule");
+    if result["part"]["of"].as_u64().is_some_and(|n| n > 1) || by_rule {
         return None;
     }
     let kind = action_kind(task);
@@ -1020,7 +1026,7 @@ mod tests {
             "fields": { "supplier": "  Alfa SL " },
             "origin": { "sha256": "abc" },
         });
-        let s = signal_for(&task(INVOICE), &invoice).unwrap();
+        let s = signal_for(&task(INVOICE), &invoice, "approved").unwrap();
         assert_eq!(
             (s.action_kind, s.subject_key.as_str(), s.edit_state),
             (REGISTER_INVOICE, "alfa sl", "unedited")
@@ -1032,30 +1038,38 @@ mod tests {
             "category": "solicitud_factura",
             "message": { "from": "Pedidos@Alfa.TEST" },
         });
-        let s = signal_for(&task(EMAIL), &mail).unwrap();
+        let s = signal_for(&task(EMAIL), &mail, "approved").unwrap();
         assert_eq!(s.subject_key, "solicitud_factura|pedidos@alfa.test");
         assert_eq!((s.edit_state, s.source_key), ("unedited", None));
         // Una versión mayor sin la marca (`confirm_not_sent` también la sube): no se sabe.
         mail["version"] = json!(2);
         assert_eq!(
-            signal_for(&task(EMAIL), &mail).unwrap().edit_state,
+            signal_for(&task(EMAIL), &mail, "approved")
+                .unwrap()
+                .edit_state,
             "unknown"
         );
         mail["edited"] = json!(true);
         assert_eq!(
-            signal_for(&task(EMAIL), &mail).unwrap().edit_state,
+            signal_for(&task(EMAIL), &mail, "approved")
+                .unwrap()
+                .edit_state,
             "edited"
         );
         mail["edited"] = json!(false);
         assert_eq!(
-            signal_for(&task(EMAIL), &mail).unwrap().edit_state,
+            signal_for(&task(EMAIL), &mail, "approved")
+                .unwrap()
+                .edit_state,
             "unedited"
         );
         // Sin remitente ni proveedor la clave queda vacía, nunca inventada.
-        let empty = signal_for(&task(EMAIL), &json!({})).unwrap();
+        let empty = signal_for(&task(EMAIL), &json!({}), "approved").unwrap();
         assert_eq!(empty.subject_key, "|");
         assert_eq!(
-            signal_for(&task(INVOICE), &json!({})).unwrap().subject_key,
+            signal_for(&task(INVOICE), &json!({}), "approved")
+                .unwrap()
+                .subject_key,
             ""
         );
     }
@@ -1064,17 +1078,30 @@ mod tests {
     fn split_invoices_and_rule_executions_are_not_signals() {
         let mut result = json!({ "version": 1, "fields": { "supplier": "Alfa SL" } });
         result["part"] = json!({ "k": 2, "of": 3 });
-        assert!(signal_for(&task(INVOICE), &result).is_none());
+        assert!(signal_for(&task(INVOICE), &result, "approved").is_none());
         result["part"] = json!({ "k": 1, "of": 1 });
-        assert!(signal_for(&task(INVOICE), &result).is_some());
+        assert!(signal_for(&task(INVOICE), &result, "approved").is_some());
         result["authorization"] = json!({ "type": "rule", "rule_id": "a", "rule_version": 1 });
-        assert!(signal_for(&task(INVOICE), &result).is_none());
+        assert!(signal_for(&task(INVOICE), &result, "approved").is_none());
         // Tras aprobar un intento de regla que no se ejecutó, `authorization` es la
         // aprobación y el intento consta en `rule_attempt`: sigue sin ser señal.
         let attempt = result["authorization"].take();
         result["authorization"] = json!({ "type": "approval" });
         result["rule_attempt"] = attempt;
-        assert!(signal_for(&task(INVOICE), &result).is_none());
+        assert!(signal_for(&task(INVOICE), &result, "approved").is_none());
+        // Pero rechazarla sí es una decisión de la persona y deja señal.
+        assert!(signal_for(&task(INVOICE), &result, "rejected").is_some());
+        // También con la autorización de regla aún en el resultado (la regla lo intentó, el
+        // conector falló y `retry` la devolvió a revisión sin `rule_attempt`).
+        result["authorization"] = json!({ "type": "rule", "rule_id": "a", "rule_version": 1 });
+        result["rule_attempt"] = Value::Null;
+        assert!(signal_for(&task(INVOICE), &result, "rejected").is_some());
+        assert!(signal_for(&task(INVOICE), &result, "approved").is_none());
+        result["authorization"] = json!({ "type": "approval" });
+        result["rule_attempt"] = json!({ "type": "rule", "rule_id": "a", "rule_version": 1 });
+        // Una parte de factura separada no lo es ni al rechazarla.
+        result["part"] = json!({ "index": 2, "of": 3 });
+        assert!(signal_for(&task(INVOICE), &result, "rejected").is_none());
     }
 
     #[test]

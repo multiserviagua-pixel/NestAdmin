@@ -358,6 +358,27 @@ impl Store {
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
+    /// Una tarea por id, solo lectura. `None` si no existe.
+    pub fn task_by_id(&self, id: i64) -> Result<Option<Task>> {
+        Ok(self
+            .conn
+            .query_row(
+                &format!("SELECT {TASK_COLUMNS} FROM tasks WHERE id = ?1"),
+                [id],
+                task_from_row,
+            )
+            .optional()?)
+    }
+
+    /// Las tareas con esos ids, solo lectura; los ids que no existen se omiten.
+    pub fn tasks_by_ids(&self, ids: &[i64]) -> Result<Vec<Task>> {
+        let mut out = Vec::new();
+        for id in ids {
+            out.extend(self.task_by_id(*id)?);
+        }
+        Ok(out)
+    }
+
     /// Tras una interrupción, devuelve a la cola las tareas que estaban en curso.
     /// Las acciones con efectos se reconcilian aparte (`reconcile_actions`).
     pub fn recover(&mut self) -> Result<Vec<i64>> {

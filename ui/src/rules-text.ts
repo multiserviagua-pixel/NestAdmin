@@ -817,7 +817,7 @@ export const MERGE_NEXT_STEP = "Pruébela y actívela cuando quiera";
 export type NameOf = (id: string) => string;
 
 function ref(id: string, nameOf: NameOf): string {
-  return id === SIMULATED_RULE ? "esta regla" : `«${nameOf(id)}»`;
+  return id === SIMULATED_RULE || id === SUGGESTED_RULE ? "esta regla" : `«${nameOf(id)}»`;
 }
 
 function plural(n: number, one: string, many: string): string {
@@ -1202,10 +1202,16 @@ export function mergedDone(name: string): string {
 export interface OriginLike {
   kind?: string;
   sources?: Array<{ id: string; version: number }>;
+  count?: number;
+  threshold?: number;
 }
 
 /** De dónde sale una regla creada al unificar; `null` si no tiene origen. */
 export function originText(origin: OriginLike | null | undefined, nameOf: NameOf): string | null {
+  if (origin?.kind === "suggestion" && typeof origin.count === "number") {
+    const min = typeof origin.threshold === "number" ? ` (el mínimo era ${origin.threshold})` : "";
+    return `Creada desde una sugerencia, con ${origin.count} ${plural(origin.count, "observación", "observaciones")}${min}.`;
+  }
   if (!origin || origin.kind !== "merge" || !origin.sources?.length) return null;
   const list = origin.sources.map((s) => `«${nameOf(s.id)}» (versión ${s.version})`);
   return `Creada al unificar ${list.length === 1 ? list[0] : `${list.slice(0, -1).join(", ")} y ${list[list.length - 1]}`}.`;
@@ -1256,9 +1262,272 @@ const RULE_AUDIT_STATUS: Record<string, string> = {
   unarchived: "Restaurada",
   renamed: "Renombrada",
   merged: "Unificada",
+  accepted: "Sugerencia aceptada",
+  discarded: "Sugerencia descartada",
+  changed: "Ajuste cambiado",
 };
 
 /** Estado en palabras de una entrada del historial que viene de una regla; el resto se deja tal cual. */
 export function auditStatusLabel(action: string, status: string): string {
   return action.startsWith("rule") ? (RULE_AUDIT_STATUS[status] ?? status) : status;
+}
+
+// ---- Sugerencias de reglas (D132, R24) ----
+//
+// Las candidatas, su evidencia y las cifras las calcula el backend (`suggest`). Aquí solo se
+// redactan, y un texto solo afirma lo que esos datos sostienen: la candidata describe lo que
+// cubriría por sí sola; otra regla activa o una incidencia pueden cambiar el resultado, y los
+// avisos de solapamiento (D130) lo dicen aparte.
+
+/** Id de la regla hipotética de una candidata en los hallazgos del backend. */
+export const SUGGESTED_RULE = "(sugerida)";
+
+export interface SuggestionEvidenceLike {
+  count: number;
+  threshold: number;
+  earlier_breaks: number;
+  last_at: number;
+  amounts: string[];
+  limit: string | null;
+  amount_min?: string | null;
+  amount_second?: string | null;
+  limit_outlier?: boolean;
+  reappeared: { at_discard: number; new_since: number; needed_new: number } | null;
+}
+
+export interface SuggestionLike {
+  fingerprint: string;
+  action_kind: string;
+  name: string;
+  conditions: Record<string, unknown>;
+  subject: string;
+  category: string | null;
+  evidence: SuggestionEvidenceLike;
+}
+
+export interface ProgressLike {
+  action_kind: string;
+  subject: string;
+  category: string | null;
+  count: number;
+  needed: number;
+  missing: number;
+}
+
+export interface ThresholdsLike {
+  invoice: number;
+  reply: number;
+  min: number;
+  max: number;
+}
+
+export interface SuggestionsLike {
+  candidates: SuggestionLike[];
+  progress: ProgressLike[];
+  observed: number;
+  counted: number;
+  hidden: { covered: number; discarded: number; accepted: number; invalid: number; not_suggested?: number };
+  thresholds: ThresholdsLike;
+}
+
+export const SUGGESTION_HELP = {
+  evidence:
+    "Solo cuentan aprobaciones suyas ya ejecutadas. Reinician el recuento: una edición del borrador, un rechazo, una aprobación sin clasificar (por ejemplo, tras confirmar que un envío no se hizo) y, en facturas, una aprobación con incidencias. No cuentan ni reinician: las partes de una factura separada, lo que ya hizo una regla, los documentos repetidos (mismo contenido), los reintentos de una misma tarea y las facturas marcadas solo como posible duplicada. Lo que no conste en este equipo (por ejemplo, lo que hizo fuera de la aplicación) no se puede contar.",
+  limit:
+    "El límite sale de los importes de las facturas aprobadas: es el mayor de ellos. Es una propuesta, no una garantía: puede cambiarlo al revisar la regla. Por sí sola, la regla no cubriría las facturas de más importe. La regla reconoce al proveedor solo por su nombre tal como aparece en la factura.",
+  create: "Crea la regla inactiva: no actúa hasta que usted la pruebe y la active. La encontrará en Mis reglas.",
+  discard: "Oculta la sugerencia. Solo vuelve a aparecer si, tras descartarla, se acumula el doble de observaciones nuevas que las que había.",
+  thresholds:
+    "Observaciones mínimas para sugerir una regla. El mínimo posible es 2: con una sola observación no se sugiere nada. Bajar un umbral solo hace que aparezcan más sugerencias; ninguna se crea ni se activa sin su aceptación.",
+} as const;
+
+export const SUGGESTION_INTRO =
+  "Estas sugerencias salen de lo que usted aprueba en Pendientes. Se calculan en este equipo, sin IA, y ninguna se crea ni se activa sin su aceptación.";
+
+export const SUGGESTION_INACTIVE_NOTICE = "Si la crea, nacerá inactiva: no actuará hasta que usted la pruebe y la active.";
+
+/** Cuando el cálculo falló no hay recuento que mostrar: se dice, no se enseña un 0. */
+export const SUGGESTIONS_UNAVAILABLE = "No se han podido calcular las sugerencias";
+
+/** Etiqueta de la pestaña: sin recuento si no hay cálculo. */
+export function suggestionsTabCount(s: { candidates: unknown[] } | null | undefined, failed: boolean): number | undefined {
+  return failed || !s ? undefined : s.candidates.length;
+}
+
+function shortDate(millis: number): string {
+  const d = new Date(millis);
+  const two = (n: number) => String(n).padStart(2, "0");
+  return `${two(d.getDate())}/${two(d.getMonth() + 1)}`;
+}
+
+/** Frase de la regla que se crearía: lo que cubriría por sí sola. */
+export function suggestionSentence(c: SuggestionLike): string {
+  return ruleSentence({ id: "", version: 0, action_kind: c.action_kind, conditions: c.conditions, active: false });
+}
+
+/**
+ * Qué observaciones constan, con cifras del backend. No dice «seguidas» ni «las últimas»: lo no
+ * registrado (lo que se hizo fuera de la aplicación) podría desmentirlo; solo dice lo que consta.
+ */
+export function suggestionWhy(c: SuggestionLike): string {
+  const e = c.evidence;
+  const n = e.count;
+  const last = shortDate(e.last_at);
+  const cuts = e.earlier_breaks;
+  const before = (what: string) => (cuts === 1 ? ` Antes consta 1 corte (${what}) que reinició el recuento.` : cuts > 1 ? ` Antes constan ${cuts} cortes (${what}) que reiniciaron el recuento.` : "");
+  if (c.action_kind === "register_invoice") {
+    return `Constan ${n} ${plural(n, "factura aprobada", "facturas aprobadas")} de ${c.subject} sin incidencias; la última, el ${last}.${before("una factura con incidencias, rechazada o sin clasificar")}`;
+  }
+  const cat = c.category ? categoryLabel(c.category) : "sin categoría";
+  return `Constan ${n} ${plural(n, "respuesta aprobada", "respuestas aprobadas")} sin cambios a ${c.subject} clasificadas como ${cat}; la última, el ${last}.${before("con cambios, rechazo o sin clasificar")}`;
+}
+
+/** De dónde sale el límite propuesto (solo facturas): el mayor, el rango y el segundo mayor. */
+export function suggestionLimitText(c: SuggestionLike): string | null {
+  const e = c.evidence;
+  if (c.action_kind !== "register_invoice" || !e.limit) return null;
+  const parts = [`el mayor de los ${e.amounts.length} importes aprobados`];
+  if (e.amount_min && e.amount_second) parts.push(`de ${formatAmount(e.amount_min)} a ${formatAmount(e.limit)}; el segundo mayor es ${formatAmount(e.amount_second)}`);
+  const list = e.amounts.length <= 5 ? ` Importes: ${e.amounts.map(formatAmount).join(", ")}.` : "";
+  return `Límite propuesto: ${formatAmount(e.limit)}, ${parts[0]}${parts[1] ? ` (${parts[1]})` : ""}.${list}`;
+}
+
+/** Aviso visible si el mayor importe se aleja mucho del resto, o `null`. */
+export function suggestionOutlierWarning(c: SuggestionLike): string | null {
+  const e = c.evidence;
+  if (c.action_kind !== "register_invoice" || !e.limit_outlier || !e.amount_second || !(Number(e.amount_second) > 0)) return null;
+  return `Revise el límite: el mayor importe (${formatAmount(e.limit ?? "")}) es al menos el triple del segundo mayor (${formatAmount(e.amount_second)}) y podría ser demasiado alto.`;
+}
+
+/** La coincidencia es solo por el nombre del proveedor; no se sabe si son el mismo proveedor. */
+export function suggestionSupplierNote(c: SuggestionLike): string | null {
+  return c.action_kind === "register_invoice"
+    ? `La regla reconoce al proveedor solo por su nombre, «${c.subject}», tal como aparece en la factura; no comprueba que sea la misma empresa.`
+    : null;
+}
+
+/** Por qué vuelve a aparecer una sugerencia descartada, o `null`. */
+export function suggestionReappeared(c: SuggestionLike): string | null {
+  const r = c.evidence.reappeared;
+  if (!r) return null;
+  return `La descartó cuando había ${r.at_discard} observaciones. Vuelve a aparecer porque desde entonces hay ${r.new_since} nuevas (hacían falta ${r.needed_new}).`;
+}
+
+function progressLine(p: ProgressLike): string {
+  const missing = p.missing === 1 ? "falta 1" : `faltan ${p.missing}`;
+  if (p.action_kind === "register_invoice") return `${p.subject}: ${p.count} de ${p.needed} facturas sin incidencias (${missing})`;
+  const cat = p.category ? ` (${categoryLabel(p.category)})` : "";
+  return `${p.subject}${cat}: ${p.count} de ${p.needed} respuestas aprobadas sin cambios (${missing})`;
+}
+
+export interface SuggestionsEmpty {
+  title: string;
+  hint: string;
+  /** Lo más cerca de sugerirse, con cuánto falta. */
+  lines: string[];
+}
+
+/** Lo que no se muestra y por qué, o `null` si no se ocultó nada. */
+export function suggestionsHidden(h: SuggestionsLike["hidden"]): string | null {
+  const parts: string[] = [];
+  if (h.covered) parts.push(`${h.covered} ya ${plural(h.covered, "cubierta", "cubiertas")} por una regla existente (la misma o una activa más amplia)`);
+  if (h.discarded) parts.push(`${h.discarded} ${plural(h.discarded, "descartada", "descartadas")}`);
+  if (h.accepted) parts.push(`${h.accepted} ya ${plural(h.accepted, "aceptada", "aceptadas")}`);
+  if (h.invalid) parts.push(`${h.invalid} sin datos válidos para una regla`);
+  if (h.not_suggested) parts.push(`${h.not_suggested} de la categoría «Otros», que no se sugiere (puede crear la regla a mano)`);
+  return parts.length ? `No se muestran: ${parts.join("; ")}.` : null;
+}
+
+/** Estado vacío explícito, contando con lo que se oculta: nunca afirma que no hay nada si hay algo oculto. */
+export function suggestionsEmpty(s: SuggestionsLike): SuggestionsEmpty {
+  const t = s.thresholds;
+  const needs = `Se necesitan ${t.invoice} facturas sin incidencias del mismo proveedor, o ${t.reply} respuestas aprobadas sin cambios al mismo remitente.`;
+  if (s.counted === 0) {
+    return s.observed === 0
+      ? { title: "Aún no hay datos para sugerir reglas", hint: `No hay observaciones que cuenten. ${needs}`, lines: [] }
+      : {
+          title: "Aún no hay observaciones que cuenten",
+          hint: `Constan ${s.observed} ${plural(s.observed, "decisión", "decisiones")}, pero ninguna cuenta como evidencia ahora (por ejemplo, una edición, un rechazo o una aprobación sin clasificar reinician el recuento). ${needs}`,
+          lines: [],
+        };
+  }
+  const lines = s.progress.map(progressLine);
+  if (lines.length) return { title: "Aún no hay sugerencias, pero hay datos", hint: "Lo más cerca de sugerirse:", lines };
+  const counted = `${s.counted} ${plural(s.counted, "observación cuenta", "observaciones cuentan")}`;
+  if (suggestionsHidden(s.hidden))
+    return { title: "No hay sugerencias que mostrar", hint: `${capitalize(counted)}, pero lo que podría sugerirse está oculto; abajo se dice qué y por qué.`, lines: [] };
+  return { title: "No hay sugerencias que mostrar", hint: `${capitalize(counted)}, pero no hay ninguna sugerencia que mostrar. ${needs}`, lines: [] };
+}
+
+export const THRESHOLD_LABEL = {
+  invoice: "Facturas sin incidencias del mismo proveedor",
+  reply: "Respuestas aprobadas sin cambios al mismo remitente",
+} as const;
+
+/** Problema de un umbral escrito, o `null`. El backend lo valida de nuevo. */
+export function thresholdProblem(raw: string, t: Pick<ThresholdsLike, "min" | "max">): string | null {
+  const text = raw.trim();
+  if (!/^\d{1,6}$/.test(text)) return "Escriba un número entero.";
+  const n = Number(text);
+  if (n < t.min) return `El mínimo es ${t.min}: con una sola observación no se sugiere nada.`;
+  if (n > t.max) return `El máximo es ${t.max}.`;
+  return null;
+}
+
+export function thresholdSaved(which: "invoice" | "reply", value: number): string {
+  return `Umbral de ${which === "invoice" ? "facturas" : "respuestas"} guardado: ${value}. Queda en el historial. No crea ni activa ninguna regla.`;
+}
+
+export function suggestionAccepted(name: string): string {
+  return `Regla «${name}» creada, inactiva. ${MERGE_NEXT_STEP}.`;
+}
+
+export const SUGGESTION_DISCARDED = "Sugerencia descartada. Solo volverá a aparecer con el doble de observaciones nuevas.";
+
+// ---- «Crear regla» desde una revisión ----
+
+export interface RuleSeedLike {
+  action_kind: string;
+  conditions: Record<string, unknown>;
+  name: string;
+  limit_from_this_invoice: boolean;
+  limit_skipped?: { code: string; currencies: string[] } | null;
+}
+
+/** Borrador del formulario precargado con lo que calculó el backend. */
+export function draftFromSeed(seed: RuleSeedLike): RuleDraft {
+  return draftOf({ id: "", version: 0, action_kind: seed.action_kind, conditions: seed.conditions, active: false, name: seed.name });
+}
+
+/** Por qué no se precargó el límite de una factura, según el código del backend. */
+function limitSkippedText(skipped: { code: string; currencies: string[] }): string {
+  switch (skipped.code) {
+    case "foreign_currency":
+      return `el documento menciona ${skipped.currencies.join(", ")} y el límite de una regla está en euros`;
+    case "currency_not_shown":
+      return "el documento no muestra la moneda y no se puede comprobar que el total esté en euros";
+    case "currency_not_checked":
+      return "no consta la comprobación de moneda de esta factura";
+    case "amount_review":
+      return "el importe de esta factura está pendiente de comprobar";
+    case "no_total":
+      return "no consta un total legible";
+    default:
+      return "no se pudo comprobar el total";
+  }
+}
+
+/** Qué se precargó y de dónde sale, sin prometer más de lo que hay. */
+export function seedNotice(seed: RuleSeedLike): string {
+  let base: string;
+  if (seed.action_kind !== "register_invoice") {
+    base = "Precargado desde este correo: la categoría y la dirección del remitente.";
+  } else if (seed.limit_skipped) {
+    base = `Precargado desde esta factura: solo el proveedor, porque ${limitSkippedText(seed.limit_skipped)}, así que no se precarga ningún límite.`;
+  } else if (seed.limit_from_this_invoice) {
+    base = "Precargado desde esta factura: el proveedor y, como límite, el total de esta factura. Es un solo dato, no una estadística; ajústelo.";
+  } else {
+    base = "Precargado desde esta factura: solo el proveedor.";
+  }
+  return `${base} La regla nacerá inactiva.`;
 }

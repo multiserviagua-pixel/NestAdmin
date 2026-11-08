@@ -14,10 +14,13 @@ import type {
   MergePreview,
   Rule,
   RuleFinding,
+  RuleSeed,
   RuleStats,
   RuleView,
   SettingsView,
   Simulation,
+  Suggestions,
+  ThresholdSettings,
   SetupDone,
   SetupEvent,
   SetupStatus,
@@ -132,6 +135,18 @@ export const api = {
   ) => invoke<Simulation>("simulate_rule", { actionKind, conditions, limit, assumeAnySenderAck, excludeRuleId }),
   /** Contradicciones entre las reglas, de más a menos graves (D130). Solo lectura. */
   ruleFindings: () => invoke<RuleFinding[]>("rule_findings"),
+  /** Sugerencias de reglas calculadas por código (D132). Solo lectura: no llama a la IA. */
+  ruleSuggestions: () => invoke<Suggestions>("rule_suggestions"),
+  /** Crea la regla de una sugerencia, siempre inactiva. Repetirlo no duplica. `shown` es la huella
+   * de lo que se mostró: si los datos cambiaron, el backend rechaza y hay que revisar de nuevo. */
+  acceptSuggestion: (fingerprint: string, shown: string, name: string | null) => invoke<RuleView>("accept_suggestion", { fingerprint, shown, name }),
+  /** Descarta una sugerencia: solo reaparece con el doble de evidencia nueva. */
+  discardSuggestion: (fingerprint: string) => invoke<void>("discard_suggestion", { fingerprint }),
+  suggestionThresholds: () => invoke<ThresholdSettings>("suggestion_thresholds"),
+  /** `which`: `invoice` o `reply`. El backend rechaza lo que no esté entre el mínimo y el máximo. */
+  setSuggestionThreshold: (which: "invoice" | "reply", value: number) => invoke<ThresholdSettings>("set_suggestion_threshold", { which, value }),
+  /** Datos para precargar una regla desde una revisión (solo lectura). */
+  ruleSeedForTask: (taskId: number) => invoke<RuleSeed>("rule_seed_for_task", { taskId }),
   /** Revisa una unificación sin cambiar nada: antes, opciones y, con la elección hecha, el plan. */
   previewMerge: (ids: string[], chosen: string | null) => invoke<MergePreview>("preview_merge", { ids, chosen }),
   /** Contradicciones que tendría una regla archivada al restaurarla (solo lectura). */

@@ -2790,3 +2790,675 @@ fn findings_do_not_count_tasks_evaluated_while_one_of_the_rules_was_inactive() {
     );
     assert_eq!(app.rule_findings().unwrap()[0].affected_tasks, Some(1));
 }
+
+// ---- Sugerencias de reglas (D132, R24) ----
+
+const SUGGESTION_TABLES: [&str; 9] = [
+    "audit_log",
+    "tasks",
+    "actions",
+    "rules",
+    "rule_meta",
+    "rule_signals",
+    "rule_suggestions",
+    "rule_settings",
+    "rule_evaluations",
+];
+
+/// Factura sintética con IVA del 21 % calculado a partir de una base en euros enteros, de
+/// modo que subtotal, IVA y total cuadran y la factura no tiene incidencias.
+fn invoice_net(supplier: &str, number: &str, net: u64) -> String {
+    let day: u32 = number
+        .trim_start_matches(|c: char| !c.is_ascii_digit())
+        .parse()
+        .unwrap();
+    let cents = |c: u64| format!("{}.{:02}", c / 100, c % 100);
+    let sub = net * 100;
+    let tax = sub * 21 / 100;
+    json!({
+        "supplier": supplier,
+        "invoice_number": number,
+        "date": format!("2026-10-{day:02}"),
+        "subtotal": cents(sub),
+        "tax": cents(tax),
+        "total": cents(sub + tax),
+        "moneda": "EUR",
+    })
+    .to_string()
+}
+
+/// Importa una factura sintética, la aprueba y devuelve su tarea. Deja una señal válida.
+fn approve_invoice(app: &mut App, n: u32, supplier: &str, net: u64) -> i64 {
+    app.import_document(
+        &format!("{n}.txt"),
+        &invoice_net(supplier, &format!("F-{n}"), net),
+    )
+    .unwrap();
+    let task = app.process_next().unwrap().unwrap();
+    assert_eq!(task.state, TaskState::AwaitingReview);
+    assert_eq!(app.approve(task.id, 1).unwrap().state, TaskState::Completed);
+    task.id
+}
+
+/// Señal escrita directamente, como la dejaría el flujo de correo (que se prueba aparte).
+fn seed_reply_signal(
+    dir: &tempfile::TempDir,
+    kind: &str,
+    sender: &str,
+    edit_state: &str,
+    task_id: i64,
+    state: &str,
+) {
+    let conn = rusqlite::Connection::open(dir.path().join("nestadmin.db")).unwrap();
+    // Sin tarea real detrás: solo importa la señal.
+    conn.execute_batch("PRAGMA foreign_keys = OFF;").unwrap();
+    conn.execute(
+        "INSERT INTO rule_signals (kind, action_kind, subject_key, edit_state, task_id, content_version, source_key, at, state)
+         VALUES (?1, 'send_draft', ?2, ?3, ?4, 1, NULL, ?4, ?5)",
+        rusqlite::params![
+            kind,
+            format!("solicitud_factura|{sender}"),
+            edit_state,
+            task_id,
+            state
+        ],
+    )
+    .unwrap();
+}
+
+fn audit_rows(dir: &tempfile::TempDir, needle: &str) -> usize {
+    dump(dir, &["audit_log"])[0]
+        .1
+        .iter()
+        .filter(|row| row.contains(needle))
+        .count()
+}
+
+#[test]
+fn clean_invoices_suggest_a_limit_and_accepting_creates_one_inactive_audited_rule() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = open(&dir, FakeProvider::new());
+    // Sin datos: la ausencia es explícita.
+    let none = app.rule_suggestions().unwrap();
+    assert_eq!(
+        (none.observed, none.candidates.len(), none.progress.len()),
+        (0, 0, 0)
+    );
+
+    approve_invoice(&mut app, 1, "Alfa SL", 800);
+    approve_invoice(&mut app, 2, "Alfa SL", 1000);
+    let two = app.rule_suggestions().unwrap();
+    assert!(two.candidates.is_empty());
+    assert_eq!(
+        (
+            two.progress[0].count,
+            two.progress[0].needed,
+            two.progress[0].missing
+        ),
+        (2, 3, 1)
+    );
+    approve_invoice(&mut app, 3, "Alfa SL", 500);
+
+    // `suggest` no escribe: ni historial, ni tareas, ni reglas, ni decisiones.
+    let before = dump(&dir, &SUGGESTION_TABLES);
+    let s = app.rule_suggestions().unwrap();
+    assert_eq!(
+        app.rule_suggestions().unwrap(),
+        s,
+        "mismos datos, misma salida"
+    );
+    assert_eq!(dump(&dir, &SUGGESTION_TABLES), before);
+
+    assert_eq!(s.candidates.len(), 1);
+    let c = &s.candidates[0];
+    assert_eq!(c.evidence.limit.as_deref(), Some("1210.00"));
+    assert_eq!(c.evidence.amounts, ["968.00", "1210.00", "605.00"]);
+    assert_eq!(
+        c.conditions,
+        json!({ "supplier": "Alfa SL", "max_total": "1210.00" })
+    );
+    assert_eq!(app.rules().unwrap().len(), 0, "sugerir no crea reglas");
+
+    // Aceptar: regla inactiva, con origen y auditada; reintentar no duplica.
+    let view = app
+        .accept_suggestion(&c.fingerprint, &c.shown, None)
+        .unwrap();
+    assert!(!view.rule.active);
+    assert_eq!(view.rule.conditions, c.conditions);
+    assert_eq!(view.origin.as_ref().unwrap()["kind"], "suggestion");
+    assert_eq!(view.origin.as_ref().unwrap()["count"], 3);
+    assert_eq!(audit_rows(&dir, "creada desde la sugerencia"), 1);
+    let again = app
+        .accept_suggestion(&c.fingerprint, &c.shown, None)
+        .unwrap();
+    assert_eq!(again.rule.id, view.rule.id);
+    assert_eq!(app.rules().unwrap().len(), 1);
+    assert_eq!(audit_rows(&dir, "creada desde la sugerencia"), 1);
+    assert_eq!(count(&dir, "rule_suggestions"), 1);
+    assert!(app.rule_suggestions().unwrap().candidates.is_empty());
+
+    // Nunca se activa sola: la factura siguiente sigue yendo a revisión.
+    app.import_document("4.txt", &invoice_net("Alfa SL", "F-4", 100))
+        .unwrap();
+    assert_eq!(
+        app.process_next().unwrap().unwrap().state,
+        TaskState::AwaitingReview
+    );
+    assert!(app.rules().unwrap().iter().all(|r| !r.active));
+}
+
+#[test]
+fn a_stale_or_unknown_suggestion_cannot_be_accepted_or_discarded() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = open(&dir, FakeProvider::new());
+    assert!(matches!(
+        app.accept_suggestion("no-existe", "x", None),
+        Err(AppError::Invalid(_))
+    ));
+    assert!(matches!(
+        app.discard_suggestion("no-existe"),
+        Err(AppError::Invalid(_))
+    ));
+    assert_eq!(count(&dir, "rules"), 0);
+    assert_eq!(count(&dir, "rule_suggestions"), 0);
+}
+
+#[test]
+fn a_discard_survives_reopening_and_returns_only_with_double_the_new_evidence() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = open(&dir, FakeProvider::new());
+    for n in 1..=3 {
+        approve_invoice(&mut app, n, "Alfa SL", 100);
+    }
+    let fingerprint = app.rule_suggestions().unwrap().candidates[0]
+        .fingerprint
+        .clone();
+    app.discard_suggestion(&fingerprint).unwrap();
+    app.discard_suggestion(&fingerprint).unwrap(); // doble clic: sin efecto
+    assert_eq!(audit_rows(&dir, "descartada"), 1);
+    drop(app);
+
+    // Tras reiniciar sigue descartada.
+    let mut app = open(&dir, FakeProvider::new());
+    let hidden = app.rule_suggestions().unwrap();
+    assert!(hidden.candidates.is_empty());
+    assert_eq!(hidden.hidden.discarded, 1);
+    // Cinco facturas nuevas (menos del doble de 3): sigue oculta.
+    for n in 4..=8 {
+        approve_invoice(&mut app, n, "Alfa SL", 100);
+    }
+    assert!(app.rule_suggestions().unwrap().candidates.is_empty());
+    // La sexta alcanza el doble y reaparece, diciendo por qué.
+    approve_invoice(&mut app, 9, "Alfa SL", 100);
+    let back = app.rule_suggestions().unwrap();
+    assert_eq!(back.candidates.len(), 1);
+    let again = back.candidates[0].evidence.reappeared.as_ref().unwrap();
+    assert_eq!((again.at_discard, again.new_since), (3, 6));
+    assert_eq!(back.candidates[0].fingerprint, fingerprint);
+    // Reaparecida, se puede aceptar y entonces queda resuelta.
+    app.accept_suggestion(
+        &fingerprint,
+        &back.candidates[0].shown,
+        Some("Alfa: registro"),
+    )
+    .unwrap();
+    assert!(app.rule_suggestions().unwrap().candidates.is_empty());
+    assert!(matches!(
+        app.discard_suggestion(&fingerprint),
+        Err(AppError::Invalid(_))
+    ));
+}
+
+#[test]
+fn rule_decisions_split_invoices_and_pending_signals_are_not_evidence() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = open(&dir, FakeProvider::new());
+    // Con una regla activa, las facturas las registra la regla: no son decisiones del usuario.
+    app.create_rule(
+        "alfa",
+        "register_invoice",
+        &json!({ "supplier": "Alfa SL" }),
+    )
+    .unwrap();
+    app.set_rule_active("alfa", true).unwrap();
+    for n in 1..=3 {
+        app.import_document(
+            &format!("{n}.txt"),
+            &invoice("Alfa SL", &format!("F-{n}"), "121.00"),
+        )
+        .unwrap();
+        assert_eq!(
+            app.process_next().unwrap().unwrap().state,
+            TaskState::Completed
+        );
+    }
+    app.set_rule_active("alfa", false).unwrap();
+    let s = app.rule_suggestions().unwrap();
+    assert_eq!(
+        (s.observed, s.candidates.len(), s.progress.len()),
+        (0, 0, 0)
+    );
+
+    // Las partes de una factura separada tampoco: se aprueban las dos partes de tres
+    // documentos, y no queda señal.
+    for doc in 0..3u32 {
+        let mut both: Value =
+            serde_json::from_str(&invoice("Beta SL", &format!("B-{}", doc * 2 + 1), "121.00"))
+                .unwrap();
+        both["other_invoices"] = json!([serde_json::from_str::<Value>(&invoice(
+            "Beta SL",
+            &format!("B-{}", doc * 2 + 2),
+            "121.00"
+        ))
+        .unwrap()]);
+        app.import_document(&format!("dos-{doc}.txt"), &both.to_string())
+            .unwrap();
+        for _ in 0..2 {
+            let part = app.process_next().unwrap().unwrap();
+            assert_eq!(part.state, TaskState::AwaitingReview);
+            app.approve(part.id, 1).unwrap();
+        }
+    }
+    let s = app.rule_suggestions().unwrap();
+    assert_eq!(
+        (s.observed, s.candidates.len(), s.progress.len()),
+        (0, 0, 0)
+    );
+
+    // Una aprobación pendiente o anulada no cuenta aunque exista la fila.
+    for (i, state) in ["valid", "valid", "pending", "void", "valid"]
+        .iter()
+        .enumerate()
+    {
+        seed_reply_signal(
+            &dir,
+            "approved",
+            "pedidos@ejemplo.test",
+            "unedited",
+            100 + i as i64,
+            state,
+        );
+    }
+    let s = app.rule_suggestions().unwrap();
+    assert!(s.candidates.is_empty(), "solo 3 válidas de 5");
+    assert_eq!(s.observed, 3);
+    assert_eq!(s.progress[0].missing, 2);
+}
+
+#[test]
+fn replies_are_suggested_only_after_unedited_approvals_from_an_exact_address() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = open(&dir, FakeProvider::new());
+    let sender = "pedidos@ejemplo.test";
+    for i in 0..4 {
+        seed_reply_signal(&dir, "approved", sender, "unedited", 200 + i, "valid");
+    }
+    assert!(app.rule_suggestions().unwrap().candidates.is_empty());
+    // «Sin clasificar» no cuenta como sin edición.
+    seed_reply_signal(&dir, "approved", sender, "unknown", 210, "valid");
+    assert!(app.rule_suggestions().unwrap().candidates.is_empty());
+    // Con una edición en la serie no se sugiere, aunque luego haya otras cuatro.
+    seed_reply_signal(&dir, "edited", sender, "edited", 211, "valid");
+    for i in 0..4 {
+        seed_reply_signal(&dir, "approved", sender, "unedited", 220 + i, "valid");
+    }
+    assert!(app.rule_suggestions().unwrap().candidates.is_empty());
+    // La quinta tras la edición reinicia la serie y la sostiene.
+    seed_reply_signal(&dir, "approved", sender, "unedited", 230, "valid");
+    let s = app.rule_suggestions().unwrap();
+    assert_eq!(s.candidates.len(), 1);
+    let c = &s.candidates[0];
+    assert_eq!(
+        c.conditions,
+        json!({ "category": "solicitud_factura", "sender": sender })
+    );
+    assert_eq!((c.evidence.count, c.evidence.earlier_breaks), (5, 2));
+
+    let view = app
+        .accept_suggestion(&c.fingerprint, &c.shown, None)
+        .unwrap();
+    assert!(!view.rule.active);
+    assert_eq!(view.rule.action_kind, "send_draft");
+    assert!(app.rules().unwrap().iter().all(|r| !r.active));
+}
+
+#[test]
+fn a_mail_asking_to_create_a_rule_changes_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = open(&dir, FakeProvider::new());
+    // La bandeja de ejemplo se lee y se procesa entera: ninguna regla ni sugerencia sale de ahí.
+    mail_states(&mut app);
+    let s = app.rule_suggestions().unwrap();
+    assert!(s.candidates.is_empty());
+    assert_eq!(count(&dir, "rules"), 0);
+    assert_eq!(count(&dir, "rule_suggestions"), 0);
+    assert_eq!(audit_rows(&dir, "sugerencia"), 0);
+}
+
+#[test]
+fn thresholds_are_validated_in_the_backend_and_every_change_is_audited() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = open(&dir, FakeProvider::new());
+    let t = app.suggestion_thresholds().unwrap();
+    assert_eq!((t.invoice, t.reply, t.min), (3, 5, 2));
+    for bad in [-1, 0, 1, 51, 1_000_000, i64::MAX] {
+        assert!(
+            matches!(
+                app.set_suggestion_threshold("invoice", bad),
+                Err(AppError::Invalid(_))
+            ),
+            "{bad}"
+        );
+        assert!(app.set_suggestion_threshold("reply", bad).is_err(), "{bad}");
+    }
+    assert!(app.set_suggestion_threshold("otro", 3).is_err());
+    assert_eq!(count(&dir, "rule_settings"), 0);
+    assert_eq!(audit_rows(&dir, "umbral"), 0);
+
+    // Un cambio válido se guarda y queda en el historial; repetirlo no añade nada.
+    let t = app.set_suggestion_threshold("invoice", 2).unwrap();
+    assert_eq!(t.invoice, 2);
+    assert_eq!(
+        audit_rows(&dir, "umbral de facturas para sugerir reglas: 3 -> 2"),
+        1
+    );
+    app.set_suggestion_threshold("invoice", 2).unwrap();
+    assert_eq!(audit_rows(&dir, "umbral"), 1);
+
+    // Bajar el umbral hace aparecer la sugerencia, pero no crea ni activa nada.
+    approve_invoice(&mut app, 1, "Alfa SL", 100);
+    approve_invoice(&mut app, 2, "Alfa SL", 100);
+    assert_eq!(app.rule_suggestions().unwrap().candidates.len(), 1);
+    assert_eq!(app.rules().unwrap().len(), 0);
+
+    // Un valor por debajo del mínimo escrito a mano en la base se ignora.
+    let conn = rusqlite::Connection::open(dir.path().join("nestadmin.db")).unwrap();
+    conn.execute(
+        "UPDATE rule_settings SET value = '1' WHERE key = 'suggest_invoice_min'",
+        [],
+    )
+    .unwrap();
+    drop(conn);
+    assert_eq!(app.suggestion_thresholds().unwrap().invoice, 3);
+    assert!(app.rule_suggestions().unwrap().candidates.is_empty());
+    drop(app);
+    // Y los cambios persisten al reabrir.
+    let mut app = open(&dir, FakeProvider::new());
+    app.set_suggestion_threshold("reply", 4).unwrap();
+    assert_eq!(app.suggestion_thresholds().unwrap().reply, 4);
+}
+
+#[test]
+fn a_rule_seed_from_a_review_is_computed_by_code_and_creates_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = open(&dir, FakeProvider::new());
+    app.import_document("1.txt", &invoice_net("Alfa SL", "F-1", 1000))
+        .unwrap();
+    let task = app.process_next().unwrap().unwrap();
+    let before = dump(&dir, &SUGGESTION_TABLES);
+    let seed = app.rule_seed_for_task(task.id).unwrap();
+    assert_eq!(seed.action_kind, "register_invoice");
+    assert_eq!(
+        seed.conditions,
+        json!({ "supplier": "Alfa SL", "max_total": "1210.00" })
+    );
+    assert!(seed.limit_from_this_invoice);
+    assert_eq!(dump(&dir, &SUGGESTION_TABLES), before);
+    assert!(app.rule_seed_for_task(9999).is_err());
+}
+
+/// Señal de respuesta con la clave de sujeto indicada tal cual.
+fn seed_subject_signal(dir: &tempfile::TempDir, subject_key: &str, task_id: i64) {
+    let conn = rusqlite::Connection::open(dir.path().join("nestadmin.db")).unwrap();
+    conn.execute_batch("PRAGMA foreign_keys = OFF;").unwrap();
+    conn.execute(
+        "INSERT INTO rule_signals (kind, action_kind, subject_key, edit_state, task_id, content_version, source_key, at, state)
+         VALUES ('approved', 'send_draft', ?1, 'unedited', ?2, 1, NULL, ?2, 'valid')",
+        rusqlite::params![subject_key, task_id],
+    )
+    .unwrap();
+}
+
+#[test]
+fn accepting_needs_the_fingerprint_of_what_was_shown() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = open(&dir, FakeProvider::new());
+    for (n, net) in [(1, 100), (2, 200), (3, 300)] {
+        approve_invoice(&mut app, n, "Alfa SL", net);
+    }
+    let seen = app.rule_suggestions().unwrap().candidates[0].clone();
+    // Llega una factura mayor: el límite mostrado ya no es el de ahora.
+    approve_invoice(&mut app, 4, "Alfa SL", 900);
+    let before = dump(&dir, &SUGGESTION_TABLES);
+    let error = app
+        .accept_suggestion(&seen.fingerprint, &seen.shown, None)
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("revise la tarjeta de nuevo"), "{error}");
+    assert!(app
+        .accept_suggestion(&seen.fingerprint, "otra", None)
+        .is_err());
+    assert_eq!(dump(&dir, &SUGGESTION_TABLES), before, "nada se creó");
+    let now = app.rule_suggestions().unwrap().candidates[0].clone();
+    assert_ne!(now.shown, seen.shown);
+    assert_eq!(now.evidence.limit.as_deref(), Some("1089.00"));
+    app.accept_suggestion(&now.fingerprint, &now.shown, None)
+        .unwrap();
+}
+
+#[test]
+fn a_possible_duplicate_neither_counts_nor_cuts_in_the_real_flow() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = open(&dir, FakeProvider::new());
+    approve_invoice(&mut app, 1, "Alfa SL", 100);
+    approve_invoice(&mut app, 2, "Alfa SL", 200);
+    // Mismo proveedor y número que la F-1, con otro texto (otro hash): posible duplicado.
+    let mut dup: Value = serde_json::from_str(&invoice_net("Alfa SL", "F-1", 100)).unwrap();
+    dup["nota"] = json!("copia");
+    app.import_document("dup.txt", &dup.to_string()).unwrap();
+    let dup_task = app.process_next().unwrap().unwrap();
+    assert_eq!(
+        dup_task.result.as_ref().unwrap()["issues"],
+        json!(["possible_duplicate"])
+    );
+    app.approve(dup_task.id, 1).unwrap();
+    let s = app.rule_suggestions().unwrap();
+    assert!(s.candidates.is_empty(), "el duplicado no suma: {s:?}");
+    assert_eq!(s.progress[0].count, 2, "ni corta");
+    approve_invoice(&mut app, 3, "Alfa SL", 300);
+    assert_eq!(
+        app.rule_suggestions().unwrap().candidates[0].evidence.count,
+        3
+    );
+
+    // Rechazar otro posible duplicado tampoco corta.
+    let mut dup2: Value = serde_json::from_str(&invoice_net("Alfa SL", "F-2", 200)).unwrap();
+    dup2["nota"] = json!("otra copia");
+    app.import_document("dup2.txt", &dup2.to_string()).unwrap();
+    let dup2_task = app.process_next().unwrap().unwrap();
+    assert_eq!(
+        dup2_task.result.as_ref().unwrap()["issues"],
+        json!(["possible_duplicate"])
+    );
+    app.reject(dup2_task.id).unwrap();
+    assert_eq!(
+        app.rule_suggestions().unwrap().candidates[0].evidence.count,
+        3
+    );
+
+    // Rechazar una factura que no es duplicado sí corta.
+    app.import_document("4.txt", &invoice_net("Alfa SL", "F-4", 400))
+        .unwrap();
+    let t = app.process_next().unwrap().unwrap();
+    app.reject(t.id).unwrap();
+    let s = app.rule_suggestions().unwrap();
+    assert!(s.candidates.is_empty());
+    assert_eq!(s.counted, 0);
+}
+
+#[test]
+fn the_other_category_is_not_suggested_and_a_pipe_in_the_address_is_kept() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = open(&dir, FakeProvider::new());
+    for i in 0..5 {
+        seed_subject_signal(&dir, "otros|pedidos@ejemplo.test", 300 + i);
+        seed_subject_signal(&dir, "solicitud_factura|x|jefe@empresa.test", 400 + i);
+    }
+    let s = app.rule_suggestions().unwrap();
+    assert_eq!(s.candidates.len(), 1);
+    assert_eq!(s.hidden.not_suggested, 1);
+    let c = &s.candidates[0];
+    assert_eq!(
+        c.conditions,
+        json!({ "category": "solicitud_factura", "sender": "x|jefe@empresa.test" })
+    );
+    let view = app
+        .accept_suggestion(&c.fingerprint, &c.shown, None)
+        .unwrap();
+    assert!(!view.rule.active);
+    assert_eq!(view.rule.conditions, c.conditions);
+}
+
+#[test]
+fn an_active_wider_rule_hides_the_suggestion_and_an_archived_or_accepted_rule_stays_counted() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = open(&dir, FakeProvider::new());
+    app.create_rule(
+        "alfa-libre",
+        "register_invoice",
+        &json!({ "supplier": "Alfa SL" }),
+    )
+    .unwrap();
+    app.set_rule_active("alfa-libre", true).unwrap();
+    // Con la regla activa las facturas las registra ella; se desactiva para aprobarlas a mano.
+    app.set_rule_active("alfa-libre", false).unwrap();
+    for n in 1..=3 {
+        approve_invoice(&mut app, n, "Alfa SL", 100);
+    }
+    // Inactiva: se muestra con su aviso.
+    let s = app.rule_suggestions().unwrap();
+    assert_eq!(s.candidates.len(), 1);
+    assert_eq!(s.candidates[0].overlaps.len(), 1);
+    // Activa y más amplia: se oculta y se cuenta.
+    app.set_rule_active("alfa-libre", true).unwrap();
+    let s = app.rule_suggestions().unwrap();
+    assert!(s.candidates.is_empty());
+    assert_eq!(s.hidden.covered, 1);
+    // Archivada: vuelve a mostrarse.
+    app.archive_rule("alfa-libre").unwrap();
+    let c = app.rule_suggestions().unwrap().candidates[0].clone();
+    // Aceptada y luego archivada: no reaparece y cuenta como ya aceptada.
+    let view = app
+        .accept_suggestion(&c.fingerprint, &c.shown, None)
+        .unwrap();
+    app.archive_rule(&view.rule.id).unwrap();
+    let s = app.rule_suggestions().unwrap();
+    assert!(s.candidates.is_empty());
+    assert_eq!(s.hidden.accepted, 1);
+}
+
+#[test]
+fn a_seed_only_carries_a_limit_when_the_euro_is_checked_and_the_amount_is_not_doubtful() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = open(&dir, FakeProvider::new());
+    let seed_of = |app: &mut App, name: &str, text: String| {
+        app.import_document(name, &text).unwrap();
+        let task = app.process_next().unwrap().unwrap();
+        app.rule_seed_for_task(task.id).unwrap()
+    };
+    let mut usd: Value = serde_json::from_str(&invoice_plain("Alfa SL", "F-1", "121.00")).unwrap();
+    usd["moneda"] = json!("USD");
+    usd["total"] = json!("50000.00");
+    usd["subtotal"] = json!("41322.31");
+    usd["tax"] = json!("8677.69");
+    let seed = seed_of(&mut app, "usd.txt", usd.to_string());
+    assert_eq!(seed.conditions, json!({ "supplier": "Alfa SL" }));
+    assert!(!seed.limit_from_this_invoice);
+    let skipped = seed.limit_skipped.unwrap();
+    assert_eq!(skipped.code, "foreign_currency");
+    assert_eq!(skipped.currencies, ["USD"]);
+
+    let plain = seed_of(
+        &mut app,
+        "sin.txt",
+        invoice_plain("Beta SL", "B-2", "121.00"),
+    );
+    assert_eq!(plain.conditions, json!({ "supplier": "Beta SL" }));
+    assert_eq!(plain.limit_skipped.unwrap().code, "currency_not_shown");
+
+    let doubtful = seed_of(&mut app, "dudosa.txt", invoice("Gamma SL", "G-3", "999.00"));
+    assert_eq!(doubtful.conditions, json!({ "supplier": "Gamma SL" }));
+    assert_eq!(doubtful.limit_skipped.unwrap().code, "amount_review");
+
+    let ok = seed_of(&mut app, "ok.txt", invoice("Delta SL", "D-4", "121.00"));
+    assert_eq!(
+        ok.conditions,
+        json!({ "supplier": "Delta SL", "max_total": "121.00" })
+    );
+    assert!(ok.limit_from_this_invoice && ok.limit_skipped.is_none());
+}
+
+#[test]
+fn rejecting_a_task_a_failed_rule_returned_to_review_leaves_a_signal_and_cuts_the_series() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = open(&dir, FakeProvider::new());
+    approve_invoice(&mut app, 1, "Alfa SL", 100);
+    approve_invoice(&mut app, 2, "Alfa SL", 200);
+    assert_eq!(app.rule_suggestions().unwrap().progress[0].count, 2);
+
+    // Una regla intenta registrar la factura, el conector falla y `retry` la devuelve a
+    // revisión con la autorización de la regla todavía en el resultado (sin `rule_attempt`).
+    app.create_rule(
+        "alfa",
+        "register_invoice",
+        &json!({ "supplier": "Alfa SL" }),
+    )
+    .unwrap();
+    app.set_rule_active("alfa", true).unwrap();
+    app.simulators()
+        .1
+        .set_failure(Some(FailureMode::Unavailable));
+    app.import_document("3.txt", &invoice_net("Alfa SL", "F-3", 300))
+        .unwrap();
+    let failed = app.process_next().unwrap().unwrap();
+    assert_eq!(failed.state, TaskState::Failed);
+    app.retry(failed.id).unwrap();
+    let review = app.process_next().unwrap().unwrap();
+    assert_eq!(review.state, TaskState::AwaitingReview);
+    let result = review.result.as_ref().unwrap();
+    assert_eq!(result["authorization"]["type"], "rule");
+    assert!(result["rule_attempt"].is_null());
+    app.simulators().1.set_failure(None);
+    app.set_rule_active("alfa", false).unwrap();
+
+    // Rechazarla es una decisión de la persona: deja una señal y corta la serie.
+    let before = count(&dir, "rule_signals");
+    app.reject(review.id).unwrap();
+    assert_eq!(count(&dir, "rule_signals"), before + 1);
+    let s = app.rule_suggestions().unwrap();
+    assert_eq!(
+        (s.counted, s.observed),
+        (0, 3),
+        "las dos anteriores ya no cuentan"
+    );
+    assert!(s.progress.is_empty());
+    // Hacen falta tres nuevas tras el corte.
+    approve_invoice(&mut app, 4, "Alfa SL", 100);
+    approve_invoice(&mut app, 5, "Alfa SL", 100);
+    assert!(app.rule_suggestions().unwrap().candidates.is_empty());
+    approve_invoice(&mut app, 6, "Alfa SL", 100);
+    let s = app.rule_suggestions().unwrap();
+    assert_eq!(s.candidates[0].evidence.count, 3);
+    assert_eq!(s.candidates[0].evidence.earlier_breaks, 1);
+
+    // Una ejecución por regla (tarea completada) sigue sin ser evidencia ni aprobación.
+    app.set_rule_active("alfa", true).unwrap();
+    let signals = count(&dir, "rule_signals");
+    app.import_document("7.txt", &invoice_net("Alfa SL", "F-7", 100))
+        .unwrap();
+    assert_eq!(
+        app.process_next().unwrap().unwrap().state,
+        TaskState::Completed
+    );
+    assert_eq!(count(&dir, "rule_signals"), signals);
+}
