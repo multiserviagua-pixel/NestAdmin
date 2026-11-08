@@ -21,5 +21,6 @@ Cada decisión (`D<n>`) tiene un número definitivo desde que se escribe, para q
 | D119–D120 | `fase-9b-importes-es`: importes en formato español D119 e importes dudosos D120 (antes `D48`–`D49`), integrados el 2026-11-07 | Asignado |
 | D121–D121 | Credenciales largas repartidas en trozos del Administrador de credenciales (tokens de Microsoft), 2026-11-07 | Asignado |
 | D122–D122 | Lista de modelos de cada proveedor y prueba sintética, 2026-11-08 | Asignado |
+| D123–D135 | `claude/panel-reglas`: panel de reglas, sugerencias y primera lectura | Reservado |
 
-Siguiente número libre: **D123**.
+Siguiente número libre: **D136**.
