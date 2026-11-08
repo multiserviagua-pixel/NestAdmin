@@ -725,6 +725,26 @@ fn regla_expresa_se_activa_y_desactiva_desde_la_ventana() {
     );
     assert!(invalid.is_err());
 
+    // Mismos argumentos que `api.updateRule`: cambia las condiciones, sube la versión y la
+    // regla sigue inactiva; una condición inválida se rechaza y no cambia nada.
+    let edited = s.ok(
+        "update_rule",
+        json!({
+            "id": "alfa-hasta-500",
+            "conditions": { "supplier": "Alfa SL", "max_total": "400.00" },
+        }),
+    );
+    assert_eq!(edited["active"], false);
+    assert_eq!(edited["conditions"]["max_total"], "400.00");
+    assert!(edited["version"].as_i64().unwrap() > rule["version"].as_i64().unwrap());
+    let rejected = s.call(
+        "update_rule",
+        json!({ "id": "alfa-hasta-500", "conditions": { "supplier": "Alfa SL", "max_total": 400 } }),
+    );
+    assert!(rejected.is_err());
+    let rule = s.ok("rules", json!({}))[0].clone();
+    assert_eq!(rule["conditions"]["max_total"], "400.00");
+
     let inactive = s.import("f1.txt", &invoice("Alfa SL", "F-1", 1, "121.00"));
     let inactive = s.wait_state(id(&inactive), "awaiting_review");
     assert_eq!(s.registered(), 0);

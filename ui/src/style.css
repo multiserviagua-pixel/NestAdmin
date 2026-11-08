@@ -743,3 +743,190 @@ button.pill.provider.waiting {
 .provider-block select:disabled {
   opacity: 0.7;
 }
+
+/* Panel de reglas (R21): pestañas, lista, formulario, ayuda. */
+.tabs {
+  display: flex;
+  gap: 4px;
+  border-bottom: 1px solid var(--line);
+  margin-bottom: 16px;
+}
+
+button.tab {
+  border: none;
+  border-bottom: 3px solid transparent;
+  border-radius: 8px 8px 0 0;
+  background: none;
+  padding: 8px 16px;
+}
+
+button.tab[aria-selected="true"] {
+  border-bottom-color: var(--brand);
+  color: var(--brand);
+  font-weight: 600;
+}
+
+.filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin: 16px 0 8px;
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 170px;
+}
+
+.field.grow {
+  flex: 1;
+  min-width: 220px;
+}
+
+.field-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.86rem;
+  color: var(--muted);
+}
+
+.field-head label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.field-group {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.tag {
+  font-size: 0.74rem;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 0 7px;
+}
+
+.hint {
+  color: var(--muted);
+  font-size: 0.86rem;
+  margin: 4px 0 8px;
+}
+
+.warn-text {
+  color: var(--warn);
+}
+
+.rule-sentence {
+  margin: 0 0 4px;
+  font-weight: 600;
+}
+
+.rule-risk {
+  margin: 0 0 4px;
+  color: var(--warn);
+  font-size: 0.86rem;
+}
+
+.rule-problem {
+  margin: 0 0 4px;
+  color: var(--error);
+  font-size: 0.86rem;
+}
+
+.rule-problem[hidden] {
+  display: none;
+}
+
+.rule-preview {
+  border: 1px dashed var(--line);
+  border-radius: 8px;
+  padding: 10px 14px;
+  margin: 8px 0;
+  background: var(--surface-2);
+}
+
+.rule-preview p {
+  margin: 4px 0;
+}
+
+.row-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.rules-grid code {
+  font-size: 0.82rem;
+}
+
+.help {
+  position: relative;
+  display: inline-block;
+}
+
+button.help-btn {
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border-radius: 50%;
+  font-size: 0.75rem;
+  font-weight: 700;
+  line-height: 1;
+  color: var(--brand);
+  border-color: var(--brand);
+}
+
+.help-tip {
+  position: fixed;
+  z-index: 50;
+  width: max-content;
+  max-width: min(320px, calc(100vw - 16px));
+  padding: 8px 12px;
+  border-radius: 8px;
+  border: 1px solid var(--line);
+  background: var(--surface);
+  color: var(--text);
+  box-shadow: 0 4px 16px color-mix(in srgb, var(--text) 25%, transparent);
+  font-size: 0.86rem;
+  font-weight: 400;
+  line-height: 1.4;
+  text-align: left;
+}
+
+/* Puente invisible entre el botón y la ayuda: el ratón puede pasar a ella sin cerrarla. */
+.help-tip::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: 8px;
+}
+
+.help-tip[data-placement="below"]::before {
+  top: -8px;
+}
+
+.help-tip[data-placement="above"]::before {
+  bottom: -8px;
+}
+
+/* El atributo hidden debe ganar a display:flex en los campos del formulario de reglas. */
+.rule-form .field-group[hidden] {
+  display: none;
+}
+
+/* Tablas del panel de reglas: desplazamiento propio en ventanas estrechas. */
+.table-scroll {
+  overflow-x: auto;
+}
+
+.table-scroll > .grid {
+  min-width: 620px;
+}

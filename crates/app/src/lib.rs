@@ -38,7 +38,7 @@ use crate::accounts::{
     split_id, AccountFetch, AccountView, Accounts, AttachmentFetch, AttachmentIssue, FetchReport,
     MailAccountsView, MailEnv, MailIssue, MailProviderKind,
 };
-use crate::rules::{decide, RuleDecision, REGISTER_INVOICE, SEND_DRAFT};
+use crate::rules::{evaluate, Evaluation, Explanation, RuleDecision, REGISTER_INVOICE, SEND_DRAFT};
 
 pub const INVOICE: &str = "invoice";
 pub const EMAIL: &str = "email";
@@ -204,10 +204,6 @@ enum Previous {
     /// Un intento no se pudo comprobar: el conector falló o el borrador ya no existe.
     Unknown { version: i64, error: ConnectorError },
 }
-
-/// Motivo de revisión de las facturas de un documento con varias (D68).
-const SPLIT_REASON: &str =
-    "el documento contiene varias facturas; la IA las separó y cada una se revisa por separado";
 
 /// Campos ya extraídos de una factura separada de un documento con varias (D68).
 fn split_preset(input: &Value) -> Option<GenerateResult> {
@@ -1121,17 +1117,26 @@ impl App {
         let kind = action_kind(&task);
         // Un importe dudoso nunca se registra por regla: lo confirma una persona (D120).
         if let Some(message) = result["amount_review"].as_str() {
-            result["review_reason"] = json!(message);
+            let explanation = Explanation::amount_review(message);
+            result["review_reason"] = json!(explanation.summary());
+            result["evaluation"] = json!(explanation);
             return Ok(self.store.await_review(task.id, &result)?);
         }
         let several = result["part"]["of"].as_u64().is_some_and(|n| n > 1);
-        let decision = if several {
+        let evaluation = if several {
             // Una regla nunca registra sola una factura separada de un documento con varias:
             // la separación la hizo el modelo y la revisa una persona.
-            RuleDecision::Review(SPLIT_REASON.into())
+            let explanation = Explanation::split_invoice();
+            Evaluation {
+                decision: RuleDecision::Review(explanation.summary()),
+                explanation,
+            }
         } else {
-            decide(&self.store.rules()?, kind, &result)
+            evaluate(&self.store.rules()?, kind, &result)
         };
+        // Solo ids, códigos e importes o nombres que ya están en el resultado (D125).
+        result["evaluation"] = json!(evaluation.explanation);
+        let decision = evaluation.decision;
         match decision {
             RuleDecision::Automate {
                 rule_id,

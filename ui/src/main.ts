@@ -22,6 +22,18 @@ import type {
   Startup,
   Task,
 } from "./types";
+import {
+  CATEGORY_HELP,
+  CATEGORY_LABEL,
+  FIELD_HELP,
+  conditionsSummary,
+  isKnownAction,
+  normalizeSearch,
+  ruleProblem,
+  ruleRisk,
+  ruleSentence,
+  searchText,
+} from "./rules-text";
 
 // ---- Utilidades de DOM: todo el texto se inserta como texto, nunca como HTML. ----
 
@@ -70,14 +82,6 @@ const AMOUNT_LABEL: Record<string, string> = { subtotal: "Base imponible", tax: 
 
 /** Facturas con importes dudosos ya avisadas en esta sesión, para no repetir el aviso. */
 const announced = new Set<number>();
-
-const CATEGORY_LABEL: Record<string, string> = {
-  solicitud_factura: "Solicitud de factura",
-  consulta_pago: "Consulta de pago",
-  incidencia_factura: "Incidencia de factura",
-  documentacion: "Documentación",
-  otros: "Otros",
-};
 
 const FIELD_LABEL: Record<string, string> = {
   supplier: "Proveedor",
@@ -140,7 +144,12 @@ const state = {
   /** Tareas cuyos importes dudosos ha confirmado la persona antes de aprobar. */
   amountsChecked: {} as Record<number, boolean>,
   // Borradores editados y aún no guardados, para no perderlos al refrescar.
-  drafts: {} as Record<number, string>,
+  // Incluye los formularios de reglas en curso, con clave «rule:new» o «rule:edit:<id>».
+  drafts: {} as Record<string, string>,
+  // Panel de reglas: pestaña, filtros de «Mis reglas» y formulario abierto.
+  rulesTab: "mine" as "mine" | "categories",
+  ruleFilter: { text: "", action: "", status: "", category: "" },
+  ruleEditor: null as null | { mode: "new" } | { mode: "edit"; id: string },
   // Preparación (R08): modo instalador, última comprobación y la ejecución en curso.
   prepareOnly: false,
   check: null as SetupCheck | null,
@@ -747,94 +756,539 @@ function tasksView() {
   );
 }
 
-function conditionsText(rule: Rule) {
-  const c = rule.conditions;
-  if (rule.action_kind === "register_invoice")
-    return `Proveedor «${c.supplier}»${c.max_total ? `, total ≤ ${c.max_total}` : ""}, sin incidencias`;
-  return `Categoría «${CATEGORY_LABEL[c.category] ?? c.category}», con destinatario`;
+// ---- Ayuda accesible (WCAG 1.4.13): aparece al pasar el ratón y al recibir foco, se cierra con Esc
+// sin mover foco ni ratón y sigue abierta si el ratón pasa a la propia ayuda. ----
+
+let helpSeq = 0;
+const openHelps = new Map<HTMLElement, { close: () => void; place: () => void }>();
+
+document.addEventListener("keydown", (event) => {
+  if (event.key !== "Escape") return;
+  for (const { close } of [...openHelps.values()]) close();
+});
+document.addEventListener("click", (event) => {
+  for (const [wrap, { close }] of [...openHelps]) if (!wrap.contains(event.target as Node)) close();
+});
+const placeAllHelps = () => openHelps.forEach(({ place }) => place());
+window.addEventListener("resize", placeAllHelps);
+window.addEventListener("scroll", placeAllHelps, true);
+
+function helpTip(text: string, label = "Ayuda"): HTMLElement {
+  const id = `help-${++helpSeq}`;
+  const tip = h("span", { id, role: "tooltip", class: "help-tip", hidden: true }, text);
+  const button = h("button", { type: "button", class: "help-btn", "aria-describedby": id, "aria-label": label }, "?");
+  const wrap = h("span", { class: "help" }, button, tip);
+  let hover = false;
+  let focus = false;
+  let pinned = false;
+  // La ayuda usa posición fija: ningún contenedor con desbordamiento oculto la recorta.
+  const place = () => {
+    tip.style.left = "0px";
+    tip.style.top = "0px";
+    const b = button.getBoundingClientRect();
+    const t = tip.getBoundingClientRect();
+    const vw = document.documentElement.clientWidth;
+    const vh = window.innerHeight;
+    const left = Math.max(8, Math.min(b.left + b.width / 2 - t.width / 2, vw - t.width - 8));
+    const below = b.bottom + 6 + t.height <= vh - 8 || b.top - 6 - t.height < 8;
+    const top = below ? b.bottom + 6 : b.top - 6 - t.height;
+    tip.dataset.placement = below ? "below" : "above";
+    tip.style.left = `${left}px`;
+    tip.style.top = `${Math.max(8, top)}px`;
+  };
+  const close = () => {
+    hover = focus = pinned = false;
+    sync();
+  };
+  function sync() {
+    const open = hover || focus || pinned;
+    if (open === !tip.hidden) return;
+    tip.hidden = !open;
+    if (open) {
+      openHelps.set(wrap, { close, place });
+      place();
+    } else {
+      openHelps.delete(wrap);
+    }
+  }
+  wrap.addEventListener("mouseenter", () => ((hover = true), sync()));
+  wrap.addEventListener("mouseleave", () => ((hover = false), sync()));
+  button.addEventListener("focus", () => ((focus = true), sync()));
+  button.addEventListener("blur", () => ((focus = false), (pinned = false), sync()));
+  // Clic o Intro: para quien no usa el ratón. Otro clic la cierra.
+  button.addEventListener("click", () => (pinned ? close() : ((pinned = true), sync())));
+  return wrap;
 }
 
-function rulesView() {
+/** Etiqueta con su ayuda al lado: la ayuda va fuera de `<label>` para no activar el campo. */
+function field(labelText: string, control: HTMLElement, helpText: string, tag?: string): HTMLElement {
+  const controlId = control.id || `field-${++helpSeq}`;
+  control.id = controlId;
+  return h(
+    "div",
+    { class: "field" },
+    h(
+      "div",
+      { class: "field-head" },
+      h("label", { for: controlId }, labelText),
+      tag ? h("span", { class: "tag" }, tag) : null,
+      helpTip(helpText, `Ayuda sobre ${labelText.toLowerCase()}`),
+    ),
+    control,
+  );
+}
+
+// ---- Panel de reglas (R21, R22) ----
+
+interface RuleDraft {
+  id: string;
+  kind: string;
+  supplier: string;
+  max_total: string;
+  category: string;
+}
+
+const newDraftKey = "rule:new";
+const editDraftKey = (id: string) => `rule:edit:${id}`;
+
+function draftOf(rule: Rule | null): RuleDraft {
+  return {
+    id: rule?.id ?? "",
+    kind: rule?.action_kind ?? "register_invoice",
+    supplier: rule?.conditions.supplier ?? "",
+    max_total: rule?.conditions.max_total ?? "",
+    category: rule?.conditions.category ?? Object.keys(CATEGORY_LABEL)[0],
+  };
+}
+
+function draftConditions(d: RuleDraft): Record<string, string> {
+  if (d.kind === "register_invoice") {
+    return Object.fromEntries(Object.entries({ supplier: d.supplier.trim(), max_total: d.max_total.trim() }).filter(([, v]) => v));
+  }
+  return { category: d.category };
+}
+
+function setRulesTab(tab: "mine" | "categories") {
+  state.rulesTab = tab;
+  render();
+}
+
+/** Lleva a «Mis reglas» filtradas por una categoría. */
+function showRulesOf(category: string) {
+  state.ruleFilter = { text: "", action: "", status: "", category };
+  state.rulesTab = "mine";
+  render();
+}
+
+function openRuleEditor(editor: NonNullable<typeof state.ruleEditor>, draft?: RuleDraft) {
+  state.ruleEditor = editor;
+  if (draft) state.drafts[editor.mode === "new" ? newDraftKey : editDraftKey(editor.id)] = JSON.stringify(draft);
+  state.rulesTab = "mine";
+  render();
+}
+
+function closeRuleEditor() {
+  const editor = state.ruleEditor;
+  if (editor) delete state.drafts[editor.mode === "new" ? newDraftKey : editDraftKey(editor.id)];
+  state.ruleEditor = null;
+}
+
+function ruleForm(): HTMLElement {
+  const editor = state.ruleEditor!;
+  const editing = editor.mode === "edit" ? (state.rules.find((r) => r.id === editor.id) ?? null) : null;
+  const key = editor.mode === "new" ? newDraftKey : editDraftKey(editor.id);
+  let draft: RuleDraft;
+  try {
+    draft = state.drafts[key] ? (JSON.parse(state.drafts[key]) as RuleDraft) : draftOf(editing);
+  } catch {
+    draft = draftOf(editing);
+  }
+  const id = h("input", { name: "id", required: true, placeholder: "p. ej. alfa-mensual", pattern: "[a-z0-9-]+", autocomplete: "off" }) as HTMLInputElement;
   const kind = h(
     "select",
-    { name: "kind", onchange: () => toggleFields() },
+    { name: "kind" },
     h("option", { value: "register_invoice" }, "Registrar factura"),
     h("option", { value: "send_draft" }, "Enviar respuesta"),
   ) as HTMLSelectElement;
-  const id = h("input", { name: "id", required: true, placeholder: "p. ej. alfa-mensual", pattern: "[a-z0-9-]+" }) as HTMLInputElement;
-  const supplier = h("input", { name: "supplier", placeholder: "Nombre exacto del proveedor" }) as HTMLInputElement;
-  const maxTotal = h("input", { name: "max_total", placeholder: "500.00", inputmode: "decimal" }) as HTMLInputElement;
+  const supplier = h("input", { name: "supplier", required: true, placeholder: "Nombre exacto del proveedor", autocomplete: "off" }) as HTMLInputElement;
+  const maxTotal = h("input", { name: "max_total", placeholder: "p. ej. 500.00", inputmode: "decimal", autocomplete: "off" }) as HTMLInputElement;
   const category = h(
     "select",
     { name: "category" },
     ...Object.entries(CATEGORY_LABEL).map(([value, label]) => h("option", { value }, label)),
   ) as HTMLSelectElement;
-  const invoiceFields = h("div", { class: "row" }, h("label", {}, "Proveedor", supplier), h("label", {}, "Total máximo (opcional)", maxTotal));
-  const emailFields = h("div", { class: "row", hidden: true }, h("label", {}, "Categoría", category));
-  function toggleFields() {
-    invoiceFields.hidden = kind.value !== "register_invoice";
-    emailFields.hidden = kind.value === "register_invoice";
-  }
+  id.value = draft.id;
+  kind.value = draft.kind;
+  supplier.value = draft.supplier;
+  maxTotal.value = draft.max_total;
+  category.value = draft.category;
+
+  const invoiceFields = h(
+    "div",
+    { class: "field-group" },
+    field("Proveedor", supplier, FIELD_HELP.supplier, "obligatorio"),
+    h(
+      "p",
+      { class: "hint" },
+      "Escríbalo tal como lo lee la aplicación en la factura: «Alfa SL» no coincide con «Alfa, S.L.». No distingue mayúsculas de minúsculas.",
+    ),
+    field("Total máximo", maxTotal, FIELD_HELP.max_total, "opcional"),
+  );
+  const emailFields = h("div", { class: "field-group" }, field("Categoría del correo", category, FIELD_HELP.category, "obligatorio"));
+  const previewSentence = h("p", { class: "rule-sentence" });
+  const previewRisk = h("p", { class: "rule-risk" });
+  const previewProblem = h("p", { class: "rule-problem" });
+  const preview = h("div", { class: "rule-preview", "aria-live": "polite" }, h("p", { class: "meta" }, "Vista previa de la regla"), previewSentence, previewRisk, previewProblem);
+
+  const read = (): RuleDraft => ({
+    id: editing ? editing.id : id.value.trim(),
+    kind: editing ? editing.action_kind : kind.value,
+    supplier: supplier.value,
+    max_total: maxTotal.value,
+    category: category.value,
+  });
+  const sync = () => {
+    const d = read();
+    state.drafts[key] = JSON.stringify(d);
+    invoiceFields.hidden = d.kind !== "register_invoice";
+    emailFields.hidden = d.kind === "register_invoice";
+    supplier.required = d.kind === "register_invoice";
+    const rule = { id: d.id, version: 0, action_kind: d.kind, conditions: draftConditions(d), active: false };
+    previewSentence.textContent = ruleSentence(rule);
+    previewRisk.textContent = `Aviso: ${ruleRisk(rule)}`;
+    const problem = ruleProblem(rule);
+    previewProblem.textContent = problem ?? "";
+    previewProblem.hidden = !problem;
+  };
+
+  const wasActive = editing?.active ?? false;
   const form = h(
     "form",
     {
-      class: "card",
+      class: "card rule-form",
+      "aria-label": editing ? `Editar la regla ${editing.id}` : "Nueva regla",
+      oninput: sync,
+      onchange: sync,
       onsubmit: (event) => {
         event.preventDefault();
-        const conditions: Record<string, string> =
-          kind.value === "register_invoice"
-            ? Object.fromEntries(Object.entries({ supplier: supplier.value.trim(), max_total: maxTotal.value.trim() }).filter(([, v]) => v))
-            : { category: category.value };
-        void act(() => api.createRule(id.value.trim(), kind.value, conditions), "Regla creada inactiva; actívela cuando la haya comprobado");
+        const d = read();
+        const conditions = draftConditions(d);
+        if (editing) {
+          void act(async () => {
+            await api.updateRule(editing.id, conditions);
+            closeRuleEditor();
+          }, wasActive ? "Regla guardada; sigue activa y se aplicará a las tareas que se procesen desde ahora" : "Regla guardada; sigue inactiva");
+        } else {
+          void act(async () => {
+            await api.createRule(d.id, d.kind, conditions);
+            closeRuleEditor();
+          }, "Regla creada inactiva; actívela cuando la haya comprobado");
+        }
       },
     },
-    h("h3", {}, "Nueva regla"),
-    h("div", { class: "row" }, h("label", {}, "Identificador", id), h("label", {}, "Acción", kind)),
+    h("h3", {}, editing ? `Editar la regla ${editing.id}` : "Nueva regla"),
+    editing
+      ? h(
+          "p",
+          { class: "meta" },
+          `Identificador: ${editing.id} · Acción: ${ACTION_LABEL[editing.action_kind] ?? editing.action_kind}. Ninguno de los dos se puede cambiar; para otro tipo de regla, cree una nueva.`,
+        )
+      : h("div", { class: "field-group" }, field("Identificador", id, FIELD_HELP.id, "obligatorio"), field("Acción", kind, FIELD_HELP.action)),
     invoiceFields,
     emailFields,
-    h("button", { class: "primary", type: "submit" }, "Crear regla"),
+    preview,
+    editing
+      ? h(
+          "p",
+          { class: wasActive ? "hint warn-text" : "hint" },
+          wasActive
+            ? "Esta regla está activa y seguirá activa al guardar. Se aplicará a las tareas que se procesen desde ahora, no a las que ya están en Pendientes."
+            : "Esta regla está inactiva y seguirá inactiva al guardar; actívela desde la lista cuando la haya comprobado.",
+        )
+      : h("p", { class: "hint" }, "La regla se crea inactiva: no hará nada hasta que usted la active desde la lista."),
+    h(
+      "div",
+      { class: "buttons" },
+      h("button", { class: "primary", type: "submit" }, editing ? "Guardar cambios" : "Crear regla"),
+      h("button", { type: "button", onclick: () => (closeRuleEditor(), render()) }, "Cancelar"),
+    ),
   );
+  if (editing) {
+    // Los datos fijos no se editan.
+    id.disabled = true;
+    kind.disabled = true;
+  }
+  sync();
+  return form;
+}
+
+function filteredRules(): Rule[] {
+  const f = state.ruleFilter;
+  const query = normalizeSearch(f.text.trim());
+  return state.rules.filter(
+    (r) =>
+      (!f.action || r.action_kind === f.action) &&
+      (!f.status || (f.status === "active") === r.active) &&
+      (!f.category || r.conditions.category === f.category) &&
+      (!query || searchText(r).includes(query)),
+  );
+}
+
+function ruleRow(r: Rule): HTMLElement {
+  const problem = ruleProblem(r);
+  return h(
+    "tr",
+    {},
+    h(
+      "td",
+      {},
+      h("p", { class: "rule-sentence" }, ruleSentence(r)),
+      h("p", { class: "rule-risk" }, "Aviso: ", ruleRisk(r)),
+      problem ? h("p", { class: "rule-problem" }, problem) : null,
+      h("p", { class: "meta" }, "Identificador: ", h("code", {}, r.id), ` · Versión ${r.version}`, helpTip(FIELD_HELP.column_version, "Ayuda sobre la versión")),
+    ),
+    h("td", {}, ACTION_LABEL[r.action_kind] ?? r.action_kind),
+    h("td", {}, conditionsSummary(r)),
+    h("td", {}, h("span", { class: r.active ? "badge state-completed" : "badge state-cancelled" }, r.active ? "Activa" : "Inactiva")),
+    h(
+      "td",
+      {},
+      h(
+        "div",
+        { class: "row-actions" },
+        h(
+          "button",
+          { onclick: () => void act(() => api.setRuleActive(r.id, !r.active), r.active ? "Regla desactivada" : "Regla activada") },
+          r.active ? "Desactivar" : "Activar",
+        ),
+        isKnownAction(r.action_kind) ? h("button", { onclick: () => openRuleEditor({ mode: "edit", id: r.id }, undefined) }, "Editar") : null,
+        isKnownAction(r.action_kind)
+          ? h("button", { onclick: () => openRuleEditor({ mode: "new" }, { ...draftOf(r), id: "" }) }, "Duplicar")
+          : null,
+      ),
+    ),
+  );
+}
+
+/** Lista con buscador y filtros; al escribir solo se rehace la lista, para conservar el foco. */
+function rulesList(): HTMLElement {
+  const box = h("div", { class: "rules-list" });
+  const results = h("div", { "aria-live": "polite" });
+  const fill = () => {
+    const rows = filteredRules();
+    const f = state.ruleFilter;
+    const filtered = Boolean(f.text.trim() || f.action || f.status || f.category);
+    results.replaceChildren(
+      !state.rules.length
+        ? h("p", { class: "empty" }, "Todavía no hay reglas: todas las acciones requieren su aprobación en Pendientes. Cree una con «Nueva regla».")
+        : !rows.length
+          ? h(
+              "p",
+              { class: "empty" },
+              "Ninguna regla coincide con la búsqueda y los filtros elegidos. ",
+              filtered ? h("button", { class: "link", onclick: clearRuleFilter }, "Quitar filtros") : null,
+            )
+          : h("p", { class: "meta" }, `${rows.length} de ${state.rules.length} reglas`),
+      ...(rows.length
+        ? [h("div", { class: "table-scroll" }, h(
+            "table",
+            { class: "grid rules-grid" },
+            h(
+              "thead",
+              {},
+              h(
+                "tr",
+                {},
+                h("th", {}, "Regla ", helpTip(FIELD_HELP.column_rule, "Ayuda sobre la columna Regla")),
+                h("th", {}, "Acción ", helpTip(FIELD_HELP.column_action, "Ayuda sobre la columna Acción")),
+                h("th", {}, "Condiciones ", helpTip(FIELD_HELP.column_conditions, "Ayuda sobre la columna Condiciones")),
+                h("th", {}, "Estado ", helpTip(FIELD_HELP.column_status, "Ayuda sobre la columna Estado")),
+                h("th", {}, "Acciones ", helpTip(FIELD_HELP.column_actions, "Ayuda sobre la columna Acciones")),
+              ),
+            ),
+            h("tbody", {}, ...rows.map(ruleRow)),
+          ))]
+        : []),
+    );
+  };
+  const search = h("input", {
+    type: "search",
+    id: "rule-search",
+    placeholder: "Proveedor, categoría o identificador",
+    autocomplete: "off",
+    oninput: () => ((state.ruleFilter.text = search.value), fill()),
+  }) as HTMLInputElement;
+  search.value = state.ruleFilter.text;
+  const select = (name: keyof typeof state.ruleFilter, options: Array<[string, string]>) => {
+    const el = h(
+      "select",
+      { onchange: () => ((state.ruleFilter[name] = el.value), fill()) },
+      ...options.map(([value, label]) => h("option", { value }, label)),
+    ) as HTMLSelectElement;
+    el.value = state.ruleFilter[name];
+    return el;
+  };
+  const action = select("action", [["", "Todas las acciones"], ["register_invoice", "Registrar factura"], ["send_draft", "Enviar respuesta"]]);
+  const status = select("status", [["", "Activas e inactivas"], ["active", "Solo activas"], ["inactive", "Solo inactivas"]]);
+  const category = select("category", [["", "Todas las categorías"], ...Object.entries(CATEGORY_LABEL)]);
+  function clearRuleFilter() {
+    state.ruleFilter = { text: "", action: "", status: "", category: "" };
+    render();
+  }
+  box.append(
+    h(
+      "div",
+      { class: "filters", role: "search" },
+      h("div", { class: "field grow" }, h("div", { class: "field-head" }, h("label", { for: "rule-search" }, "Buscar"), helpTip(FIELD_HELP.search, "Ayuda sobre el buscador")), search),
+      h("div", { class: "field" }, h("div", { class: "field-head" }, h("label", {}, "Acción", action), helpTip(FIELD_HELP.filter_action, "Ayuda sobre el filtro de acción"))),
+      h("div", { class: "field" }, h("div", { class: "field-head" }, h("label", {}, "Estado", status), helpTip(FIELD_HELP.filter_status, "Ayuda sobre el filtro de estado"))),
+      h("div", { class: "field" }, h("div", { class: "field-head" }, h("label", {}, "Categoría", category), helpTip(FIELD_HELP.filter_category, "Ayuda sobre el filtro de categoría"))),
+    ),
+    results,
+  );
+  fill();
+  return box;
+}
+
+function categoriesPanel(): HTMLElement {
+  const emails = state.tasks.filter((t) => t.kind === "email");
+  const counts: Record<string, number> = {};
+  let unclassified = 0;
+  for (const t of emails) {
+    const c = t.result?.category;
+    if (typeof c === "string" && c) counts[c] = (counts[c] ?? 0) + 1;
+    else unclassified += 1;
+  }
+  return h(
+    "div",
+    {},
+    h(
+      "p",
+      { class: "intro" },
+      "La IA clasifica cada correo recibido en una de estas cinco categorías; no se pueden añadir ni cambiar. Una regla de envío se aplica a los correos de la categoría que elija.",
+    ),
+    h("div", { class: "table-scroll" }, h(
+      "table",
+      { class: "grid" },
+      h(
+        "thead",
+        {},
+        h(
+          "tr",
+          {},
+          h("th", {}, "Categoría ", helpTip(FIELD_HELP.category_name, "Ayuda sobre las categorías")),
+          h("th", {}, "Qué significa"),
+          h("th", {}, "Ejemplo inventado"),
+          h("th", {}, "Correos ", helpTip(FIELD_HELP.category_count, "Ayuda sobre el recuento")),
+          h("th", {}, "Reglas que la usan ", helpTip(FIELD_HELP.category_rules, "Ayuda sobre las reglas que la usan")),
+        ),
+      ),
+      h(
+        "tbody",
+        {},
+        ...Object.entries(CATEGORY_LABEL).map(([key, label]) => {
+          const using = state.rules.filter((r) => r.action_kind === "send_draft" && r.conditions.category === key);
+          const info = CATEGORY_HELP[key];
+          return h(
+            "tr",
+            {},
+            h("td", {}, h("strong", {}, label)),
+            h("td", {}, info.description),
+            h("td", {}, h("em", {}, info.example)),
+            h("td", {}, String(counts[key] ?? 0)),
+            h(
+              "td",
+              {},
+              using.length
+                ? h(
+                    "span",
+                    {},
+                    `${using.length} ${using.length === 1 ? "regla" : "reglas"}: ${using.map((r) => r.id).join(", ")} `,
+                    h("button", { class: "link", onclick: () => showRulesOf(key) }, "Ver reglas"),
+                  )
+                : "Ninguna",
+            ),
+          );
+        }),
+      ),
+    )),
+    h(
+      "p",
+      { class: "meta" },
+      state.tasks.length
+        ? `Recuento sobre los ${emails.length} correos que constan en este equipo, incluidos los ya tratados${unclassified ? `; ${unclassified} sin categoría (aún sin clasificar o con error)` : ""}.`
+        : "Todavía no consta ningún correo en este equipo: el recuento es cero.",
+    ),
+  );
+}
+
+/** Pestañas accesibles (tablist, roving tabindex, flechas, Inicio y Fin). Aislada: se puede
+ *  sustituir por otra implementación con la misma firma sin tocar `rulesView`. */
+function tabs<T extends string>(items: Array<[T, string]>, selected: T, onSelect: (tab: T) => void, panel: HTMLElement, label: string): HTMLElement[] {
+  const tabId = (tab: string) => `tab-${tab}`;
+  const onKey = (event: Event) => {
+    const key = (event as KeyboardEvent).key;
+    const index = items.findIndex(([tab]) => tab === selected);
+    const next = key === "ArrowRight" ? index + 1 : key === "ArrowLeft" ? index - 1 : key === "Home" ? 0 : key === "End" ? items.length - 1 : null;
+    if (next === null) return;
+    event.preventDefault();
+    const target = items[(next + items.length) % items.length][0];
+    onSelect(target);
+    document.getElementById(tabId(target))?.focus();
+  };
+  return [
+    h(
+      "div",
+      { class: "tabs", role: "tablist", "aria-label": label, onkeydown: onKey },
+      ...items.map(([tab, text]) =>
+        h(
+          "button",
+          {
+            role: "tab",
+            id: tabId(tab),
+            class: "tab",
+            "aria-selected": String(selected === tab),
+            "aria-controls": "tab-panel",
+            tabindex: selected === tab ? "0" : "-1",
+            onclick: () => (onSelect(tab), document.getElementById(tabId(tab))?.focus()),
+          },
+          text,
+        ),
+      ),
+    ),
+    h("div", { role: "tabpanel", id: "tab-panel", "aria-labelledby": tabId(selected), class: "tabpanel" }, panel),
+  ];
+}
+
+function rulesView() {
+  const panel =
+    state.rulesTab === "mine"
+      ? h(
+          "div",
+          {},
+          h(
+            "p",
+            { class: "intro" },
+            "Por defecto todo se revisa. Una regla activa permite enviar o registrar sin revisión solo cuando es la única que coincide y los datos no tienen incidencias. Cada cambio crea una versión nueva y queda en el historial.",
+          ),
+          state.ruleEditor ? ruleForm() : h("div", { class: "buttons" }, h("button", { class: "primary", onclick: () => openRuleEditor({ mode: "new" }, undefined) }, "Nueva regla")),
+          rulesList(),
+        )
+      : categoriesPanel();
   return h(
     "section",
     { class: "page" },
     h("h2", {}, "Reglas"),
-    h(
-      "p",
-      { class: "intro" },
-      "Por defecto todo se revisa. Una regla activa permite enviar o registrar sin revisión solo cuando es la única que coincide y los datos no tienen incidencias. Cada cambio crea una versión nueva y queda en el historial.",
+    ...tabs(
+      [
+        ["mine", "Mis reglas"],
+        ["categories", "Categorías"],
+      ],
+      state.rulesTab,
+      setRulesTab,
+      panel,
+      "Secciones de reglas",
     ),
-    state.rules.length
-      ? h(
-          "table",
-          { class: "grid" },
-          h("thead", {}, h("tr", {}, ...["Regla", "Acción", "Condiciones", "Versión", "Estado", ""].map((c) => h("th", {}, c)))),
-          h(
-            "tbody",
-            {},
-            ...state.rules.map((r) =>
-              h(
-                "tr",
-                {},
-                h("td", {}, r.id),
-                h("td", {}, ACTION_LABEL[r.action_kind] ?? r.action_kind),
-                h("td", {}, conditionsText(r)),
-                h("td", {}, `v${r.version}`),
-                h("td", {}, h("span", { class: r.active ? "badge state-completed" : "badge state-cancelled" }, r.active ? "Activa" : "Inactiva")),
-                h(
-                  "td",
-                  {},
-                  h(
-                    "button",
-                    { onclick: () => void act(() => api.setRuleActive(r.id, !r.active), r.active ? "Regla desactivada" : "Regla activada") },
-                    r.active ? "Desactivar" : "Activar",
-                  ),
-                ),
-              ),
-            ),
-          ),
-        )
-      : h("p", { class: "empty" }, "No hay reglas: todas las acciones requieren su aprobación."),
-    form,
   );
 }
 
