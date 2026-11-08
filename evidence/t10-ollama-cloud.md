@@ -46,3 +46,21 @@ Consecuencia: con este proveedor no se puede dar por hecho que la salida respeta
 
 - Corregir las instrucciones del proveedor en la nube y repetir T12 para los correos.
 - La latencia en la nube depende de la red y de la carga del servicio. Es una sola ejecución.
+
+## 2026-11-08: repetición con las instrucciones corregidas (D105)
+
+Mismo equipo objetivo y mismo corpus sintético (`synthetic-v1`), `scripts/t12-medir.ps1 -Proveedor ollama-cloud -Modelo gemma4:31b`, código de `59c936e`. Una sola ejecución; solo salieron datos sintéticos.
+
+| Métrica | Resultado |
+| --- | --- |
+| Casos recibidos / errores | 30 / 0 |
+| Campos de factura correctos | 60 de 60 |
+| Campos ausentes inventados | 0 de 2 |
+| Incidencias (VP / FP / FN) | 4 / 0 / 0 |
+| Clasificación de correos | 20 de 20 |
+| Heurística de borradores | 17 de 20 |
+| Latencia media por caso | 0,75 s |
+| Duración total | 23 s |
+| Memoria en el equipo | 0,01 GB (cliente) |
+
+Las instrucciones explícitas resuelven el fallo de los 20 correos. El corpus es sintético y pequeño: no mide la calidad con correo real, donde ya se observó que el modelo local propone responder a remitentes automáticos (T13). La latencia depende de la red y de la carga del servicio. Las predicciones y el informe quedan fuera de Git.
