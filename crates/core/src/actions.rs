@@ -321,6 +321,22 @@ impl Store {
             .optional()?)
     }
 
+    /// Evento del historial sin acción de conector ni autorización, por ejemplo el uso del
+    /// respaldo local de la IA (D101). `detail` no debe llevar contenido ni secretos.
+    pub fn record_event(
+        &mut self,
+        task_id: i64,
+        action: &str,
+        status: &str,
+        detail: &Value,
+    ) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO audit_log (at, task_id, action, status, authorization, detail) VALUES (?1, ?2, ?3, ?4, NULL, ?5)",
+            params![now_ms(), task_id, action, status, detail.to_string()],
+        )?;
+        Ok(())
+    }
+
     pub fn audit_log(&self) -> Result<Vec<AuditEntry>> {
         let mut stmt = self.conn.prepare(
             "SELECT task_id, action, status, authorization, detail FROM audit_log ORDER BY id",

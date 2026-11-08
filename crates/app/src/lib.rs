@@ -13,8 +13,8 @@ pub mod rules;
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use nestadmin_ai::tasks::{
     email_request, extraction_request, parse_email, parse_extraction, parse_other_invoices,
@@ -137,6 +137,14 @@ impl AiWait {
     }
 }
 
+/// Proveedor local de respaldo (D101): `None` si no está preparado. Nunca descarga ni instala
+/// nada; quien lo construye decide si la IA local está lista y si el respaldo está permitido.
+pub type LocalFallback = Arc<dyn Fn() -> Option<Arc<dyn Provider>> + Send + Sync>;
+
+/// Tras un `unavailable` del externo, las tareas siguientes van directas al local este tiempo
+/// (D101). `timeout` y `rate_limited` no abren periodo.
+const FALLBACK_PERIOD: Duration = Duration::from_secs(10 * 60);
+
 pub struct App {
     store: Store,
     mail: Accounts,
@@ -149,6 +157,10 @@ pub struct App {
     paused: bool,
     /// Si es `Some`, las tareas que necesitan la IA esperan en la cola (D101).
     ai_wait: Option<AiWait>,
+    /// Respaldo del proveedor externo elegido al local (D101); `None` desactiva el respaldo.
+    fallback: Option<LocalFallback>,
+    /// Hasta cuándo las tareas van directas al local tras un `unavailable` del externo.
+    fallback_until: Arc<Mutex<Option<Instant>>>,
 }
 
 /// Si se puede instalar una actualización sin cortar trabajo (actualizaciones.md, paso 5).
@@ -220,6 +232,8 @@ const MISSING_REASON: &str = "el borrador del intento anterior ya no existe y no
 pub struct Job {
     pub task: Task,
     provider: Arc<dyn Provider>,
+    fallback: Option<LocalFallback>,
+    fallback_until: Arc<Mutex<Option<Instant>>>,
     extractor: Arc<Extractor>,
     prepared: Result<Prepared, TaskError>,
 }
@@ -233,6 +247,128 @@ pub struct Completed {
     /// El proveedor devolvió `unauthorized`. Se marca aquí y no por el código del error, porque
     /// los conectores de correo también usan `unauthorized` y esos fallos siguen siendo fallos.
     ai_unauthorized: bool,
+    /// `{from, reason}` si la respuesta la dio el respaldo local (D101).
+    fallback: Option<Value>,
+}
+
+/// Resultado de pedir la generación, con el respaldo local si procede.
+struct Attempt {
+    result: Result<GenerateResult, TaskError>,
+    /// `{from, reason}` si respondió el respaldo local.
+    fallback: Option<Value>,
+    /// El proveedor elegido devolvió `unauthorized` (y no hubo respaldo).
+    unauthorized: bool,
+}
+
+/// Errores del externo que activan el respaldo local (D101). `unauthorized` e
+/// `invalid_response` no: el primero pide corregir la clave y el segundo no es un fallo de
+/// disponibilidad.
+fn triggers_fallback(error: &AiError) -> bool {
+    matches!(error.code(), "unavailable" | "timeout" | "rate_limited")
+}
+
+fn failure(error: &AiError) -> TaskError {
+    TaskError {
+        code: error.code().to_owned(),
+        message: error.to_string(),
+        recoverable: true,
+    }
+}
+
+fn fallback_note(from: ProviderKind, reason: &str) -> Value {
+    json!({ "from": from, "reason": reason })
+}
+
+/// Genera con el proveedor elegido. Solo si es externo y hay respaldo: ante `unavailable`,
+/// `timeout` o `rate_limited` repite UNA vez con el local; durante el periodo abierto por un
+/// `unavailable` va directo al local. El único camino de respaldo es externo a local: con la
+/// IA local elegida no hay ninguno, ni existe código que llame a otro proveedor externo.
+fn generate_with_fallback(
+    provider: &dyn Provider,
+    fallback: Option<&LocalFallback>,
+    until: &Mutex<Option<Instant>>,
+    request: &GenerateRequest,
+) -> Attempt {
+    let from = provider.kind();
+    let fallback = fallback.filter(|_| from != ProviderKind::Ollama);
+    // El respaldo es siempre la IA local: lo que no sea Ollama se descarta, de modo que ningún
+    // camino lleva de un externo a otro.
+    let local_provider =
+        |local: &LocalFallback| local().filter(|p| p.kind() == ProviderKind::Ollama);
+    let mut local_failure: Option<AiError> = None;
+    if let Some(local) = fallback {
+        let active = until
+            .lock()
+            .map(|u| u.is_some_and(|end| Instant::now() < end))
+            .unwrap_or(false);
+        if active {
+            if let Some(local) = local_provider(local) {
+                match local.generate(request) {
+                    Ok(result) => {
+                        return Attempt {
+                            result: Ok(result),
+                            fallback: Some(fallback_note(from, "unavailable")),
+                            unauthorized: false,
+                        }
+                    }
+                    Err(error) => local_failure = Some(error),
+                }
+            }
+        }
+    }
+    match provider.generate(request) {
+        Ok(result) => Attempt {
+            result: Ok(result),
+            fallback: None,
+            unauthorized: false,
+        },
+        Err(error) => {
+            let Some(local) = fallback.filter(|_| triggers_fallback(&error)) else {
+                return Attempt {
+                    result: Err(failure(&error)),
+                    fallback: None,
+                    unauthorized: error == AiError::Unauthorized,
+                };
+            };
+            let outcome = match local_failure {
+                Some(previous) => Err(previous),
+                None => match local_provider(local) {
+                    Some(local) => local.generate(request),
+                    // Sin IA local preparada: el error del externo, como sin respaldo.
+                    None => {
+                        return Attempt {
+                            result: Err(failure(&error)),
+                            fallback: None,
+                            unauthorized: false,
+                        }
+                    }
+                },
+            };
+            match outcome {
+                Ok(result) => {
+                    if error.code() == "unavailable" {
+                        if let Ok(mut until) = until.lock() {
+                            *until = Some(Instant::now() + FALLBACK_PERIOD);
+                        }
+                    }
+                    Attempt {
+                        result: Ok(result),
+                        fallback: Some(fallback_note(from, error.code())),
+                        unauthorized: false,
+                    }
+                }
+                Err(local_error) => Attempt {
+                    result: Err(TaskError {
+                        code: error.code().to_owned(),
+                        message: format!("{error}; respaldo local: {local_error}"),
+                        recoverable: true,
+                    }),
+                    fallback: None,
+                    unauthorized: false,
+                },
+            }
+        }
+    }
 }
 
 impl Job {
@@ -242,11 +378,14 @@ impl Job {
         let Job {
             task,
             provider,
+            fallback,
+            fallback_until,
             extractor,
             prepared,
         } = self;
         let mut extracted = None;
         let mut ai_unauthorized = false;
+        let mut used_fallback = None;
         let outcome = prepared.and_then(|prepared| {
             let request = match prepared {
                 Prepared::Resume(result) => return Ok(Outcome::Resumed(result)),
@@ -264,23 +403,18 @@ impl Job {
                     request
                 }
             };
-            provider
-                .generate(&request)
-                .map(Outcome::Generated)
-                .map_err(|e| {
-                    ai_unauthorized = e == AiError::Unauthorized;
-                    TaskError {
-                        code: e.code().to_owned(),
-                        message: e.to_string(),
-                        recoverable: true,
-                    }
-                })
+            let attempt =
+                generate_with_fallback(&*provider, fallback.as_ref(), &fallback_until, &request);
+            ai_unauthorized = attempt.unauthorized;
+            used_fallback = attempt.fallback;
+            attempt.result.map(Outcome::Generated)
         });
         Completed {
             task,
             outcome,
             extraction: extracted,
             ai_unauthorized,
+            fallback: used_fallback,
         }
     }
 }
@@ -324,6 +458,8 @@ impl App {
             extractor,
             paused: false,
             ai_wait: None,
+            fallback: None,
+            fallback_until: Arc::new(Mutex::new(None)),
         };
         app.store.recover()?;
         app.store.reconcile_actions(SEND_DRAFT, &app.mail)?;
@@ -519,6 +655,7 @@ impl App {
     /// Cambio explícito de proveedor; afecta a las tareas que empiecen después.
     pub fn select_provider(&mut self, provider: Arc<dyn Provider>) {
         self.provider = provider;
+        self.expire_fallback_period();
     }
 
     /// Fija o quita la espera de IA (D101). Con una espera, las tareas que necesitan el
@@ -529,6 +666,30 @@ impl App {
 
     pub fn ai_wait(&self) -> Option<AiWait> {
         self.ai_wait
+    }
+
+    /// Activa o desactiva el respaldo del proveedor externo al local (D101). El respaldo solo
+    /// se usa si el proveedor activo es externo; con `None` no hay ninguno.
+    pub fn set_local_fallback(&mut self, fallback: Option<LocalFallback>) {
+        self.fallback = fallback;
+        self.expire_fallback_period();
+    }
+
+    /// Si las tareas van directas al local por un `unavailable` reciente del externo.
+    pub fn fallback_period_active(&self) -> bool {
+        self.fallback_until
+            .lock()
+            .map(|u| u.is_some_and(|end| Instant::now() < end))
+            .unwrap_or(false)
+    }
+
+    /// Cierra el periodo de respaldo (también al cambiar de proveedor). Las pruebas lo usan
+    /// para simular que pasaron los 10 minutos.
+    #[doc(hidden)]
+    pub fn expire_fallback_period(&self) {
+        if let Ok(mut until) = self.fallback_until.lock() {
+            *until = None;
+        }
     }
 
     /// Encola un documento de texto.
@@ -865,6 +1026,8 @@ impl App {
             return Ok(Some(Job {
                 task,
                 provider: Arc::clone(&self.provider),
+                fallback: self.fallback.clone(),
+                fallback_until: Arc::clone(&self.fallback_until),
                 extractor: Arc::clone(&self.extractor),
                 prepared: Ok(Prepared::Resume(result)),
             }));
@@ -912,6 +1075,8 @@ impl App {
         Ok(Some(Job {
             task,
             provider: Arc::clone(&self.provider),
+            fallback: self.fallback.clone(),
+            fallback_until: Arc::clone(&self.fallback_until),
             extractor: Arc::clone(&self.extractor),
             prepared,
         }))
@@ -920,6 +1085,7 @@ impl App {
     /// Valida la respuesta, aplica reglas y deja la tarea en su estado siguiente.
     pub fn finish(&mut self, completed: Completed) -> AppResult<Task> {
         let task = completed.task;
+        let fallback = completed.fallback;
         if completed.ai_unauthorized {
             // La clave no sirve: la tarea vuelve a la cola sin gastar intento ni fallar y la
             // ventana pide corregir la clave (D101).
@@ -931,6 +1097,11 @@ impl App {
             Ok(Outcome::Resumed(result)) => return self.resume(task, result),
             Err(error) => return Ok(self.store.fail(task.id, &error)?),
         };
+        if let Some(note) = &fallback {
+            // Solo el proveedor de origen y el motivo: ni contenido ni secretos (D101).
+            self.store
+                .record_event(task.id, "ai_fallback", "used", note)?;
+        }
         let built = match task.kind.as_str() {
             INVOICE => self.invoice_result(&task, &generated, completed.extraction.as_ref()),
             _ => self.email_result(&task, &generated),
@@ -939,6 +1110,9 @@ impl App {
             Ok(result) => result,
             Err(error) => return Ok(self.store.fail(task.id, &error)?),
         };
+        if let Some(note) = fallback {
+            result["fallback"] = note;
+        }
         if task.kind == INVOICE {
             if let Err(error) = self.enqueue_other_invoices(&task, &generated, &mut result) {
                 return Ok(self.store.fail(task.id, &error)?);
@@ -1767,6 +1941,7 @@ mod tests {
                 outcome: Err(error),
                 extraction: None,
                 ai_unauthorized: false,
+                fallback: None,
             })
             .unwrap();
         assert_eq!(failed.state, TaskState::Failed);

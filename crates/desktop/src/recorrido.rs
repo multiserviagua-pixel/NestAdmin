@@ -447,7 +447,7 @@ fn la_interfaz_solo_llama_a_comandos_registrados() {
     assert!(called.len() >= 25, "no se leyeron las llamadas: {called:?}");
     // Comandos nuevos del asistente de IA (D100–D102, D122) que la interfaz aún no usa: se
     // quitan de esta lista cuando `ui/src/api.ts` los llame (paso 5 de tareas.md).
-    const PENDING_FOR_THE_WINDOW: &[&str] = &["list_models", "test_provider"];
+    const PENDING_FOR_THE_WINDOW: &[&str] = &["list_models", "test_provider", "set_local_fallback"];
     assert!(
         called.is_subset(&registered),
         "la interfaz llama a comandos no registrados: {:?}",
@@ -1034,5 +1034,133 @@ fn interrumpir_el_proceso_no_repite_efectos() {
         .count();
     assert_eq!(confirmed, 1);
     assert_eq!(ai.chats(), 2, "reabrir no vuelve a llamar al modelo");
+    s.close();
+}
+
+// ---- Primer uso: elección, destino y espera de la IA (D100, D101) ----
+
+/// T03g: sin `configuracion.json` la selección es Ollama cloud sin destino confirmado; las
+/// tareas esperan en la cola sin gastar intentos ni llamar a ningún proveedor, y al elegir la
+/// IA local (que no necesita confirmación) se retoman. Elegir un externo exige confirmarlo.
+#[test]
+fn sin_configuracion_las_tareas_con_ia_esperan_hasta_elegir_proveedor() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = data_dir_for(&dir);
+    let ai = FakeOllama::start(Mode::Answer);
+    let s = Session::open(test_deps(&data, &ai.url));
+
+    let view = s.ok("settings", json!({}));
+    assert_eq!(view["choice"]["provider"], "ollama_cloud");
+    assert_eq!(view["choice"]["model"], "gemma4:31b");
+    assert_eq!(view["ai_wait"], "needs_consent");
+    assert!(view["ai_wait_message"]
+        .as_str()
+        .unwrap()
+        .starts_with("Falta configurar la IA"));
+    assert_eq!(view["consented"], false);
+    assert_eq!(view["local_fallback"], true);
+    assert_eq!(view["fallback_period_active"], false);
+
+    let task = s.import("f1.txt", &invoice("Alfa SL", "F-1", 1, "121.00"));
+    thread::sleep(Duration::from_millis(400));
+    let waiting = s.task(id(&task));
+    assert_eq!(waiting["state"], "queued");
+    assert_eq!(waiting["attempts"], 0, "sin gastar intentos");
+    assert_eq!(ai.chats(), 0);
+
+    // Un externo exige confirmar el destino; sin ello no se guarda ni se construye nada.
+    let cloud = json!({ "provider": "ollama_cloud", "model": "gemma4:31b" });
+    let refused = s.call(
+        "select_provider",
+        json!({ "choice": cloud, "consent": false }),
+    );
+    assert!(
+        refused
+            .unwrap_err()
+            .as_str()
+            .unwrap()
+            .contains("Confirme antes el destino"),
+        "sin confirmación"
+    );
+    assert!(!data.join("configuracion.json").exists());
+
+    // La IA local no necesita confirmación: las tareas que esperaban se retoman.
+    let local = json!({ "provider": "ollama", "base_url": ai.url, "model": "qwen3:8b" });
+    s.ok(
+        "select_provider",
+        json!({ "choice": local, "consent": false }),
+    );
+    let review = s.wait_state(id(&task), "awaiting_review");
+    assert_eq!(review["attempts"], 1);
+    assert_eq!(ai.chats(), 1);
+    let view = s.ok("settings", json!({}));
+    assert!(view["ai_wait"].is_null() && view["ai_wait_message"].is_null());
+    assert_eq!(
+        view["consented"], true,
+        "la IA local no necesita confirmación"
+    );
+    s.close();
+}
+
+/// Una configuración con Groq (retirado) no se sustituye por otro externo: hay que elegir
+/// proveedor y, mientras tanto, nada se envía.
+#[test]
+fn una_configuracion_con_groq_pide_elegir_proveedor_y_no_envia_nada() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = data_dir_for(&dir);
+    std::fs::create_dir_all(&data).unwrap();
+    std::fs::write(
+        data.join("configuracion.json"),
+        r#"{"provider":{"provider":"groq","model":"llama-3.3-70b-versatile"},"mail_limit":12}"#,
+    )
+    .unwrap();
+    let ai = FakeOllama::start(Mode::Answer);
+    let s = Session::open(test_deps(&data, &ai.url));
+    let view = s.ok("settings", json!({}));
+    assert!(view["choice"].is_null());
+    assert_eq!(view["ai_wait"], "needs_choice");
+    let task = s.import("f1.txt", &invoice("Alfa SL", "F-1", 1, "121.00"));
+    thread::sleep(Duration::from_millis(400));
+    assert_eq!(s.task(id(&task))["state"], "queued");
+    assert_eq!(ai.chats(), 0);
+    s.close();
+}
+
+/// Una configuración anterior con proveedor externo conserva su confirmación; la clave se pide
+/// y al guardarla (o borrarla) la espera se recalcula. El respaldo local se puede apagar.
+#[test]
+fn clave_y_respaldo_cambian_la_espera_y_la_configuracion() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = data_dir_for(&dir);
+    std::fs::create_dir_all(&data).unwrap();
+    std::fs::write(
+        data.join("configuracion.json"),
+        r#"{"provider":{"provider":"anthropic","model":"claude-opus-5-5"}}"#,
+    )
+    .unwrap();
+    let ai = FakeOllama::start(Mode::Answer);
+    let s = Session::open(test_deps(&data, &ai.url));
+    let view = s.ok("settings", json!({}));
+    assert_eq!(view["consented"], true, "migrada de la versión anterior");
+    assert_eq!(view["ai_wait"], "needs_key");
+
+    // Sin tareas en cola no sale nada al guardar la clave sintética.
+    s.ok(
+        "save_anthropic_key",
+        json!({ "key": "clave-sintetica-recorrido" }),
+    );
+    assert!(s.ok("settings", json!({}))["ai_wait"].is_null());
+    s.ok("delete_anthropic_key", json!({}));
+    assert_eq!(s.ok("settings", json!({}))["ai_wait"], "needs_key");
+
+    s.ok("set_local_fallback", json!({ "enabled": false }));
+    assert_eq!(s.ok("settings", json!({}))["local_fallback"], false);
+    let saved = std::fs::read_to_string(data.join("configuracion.json")).unwrap();
+    assert!(saved.contains("\"local_fallback\": false"), "{saved}");
+    assert!(saved.contains("api.anthropic.com"), "{saved}");
+    assert!(
+        !saved.contains("clave-sintetica"),
+        "la clave nunca va al archivo"
+    );
     s.close();
 }

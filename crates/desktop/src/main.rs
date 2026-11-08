@@ -20,7 +20,7 @@ use nestadmin_ai::{CredentialStore, ProviderChoice, Secret};
 use nestadmin_app::accounts::{
     AccountView, FetchReport, MailAccountsView, MailEnv, MailProviderKind,
 };
-use nestadmin_app::{AiWait, App, AppPaths, ProviderInfo};
+use nestadmin_app::{AiWait, App, AppPaths, LocalFallback, ProviderInfo};
 use nestadmin_core::{AuditEntry, Rule, Task};
 use nestadmin_extract::{Extractor, Tesseract};
 use nestadmin_mail::PendingAuthorization;
@@ -54,6 +54,9 @@ struct Shared {
     settings: Mutex<Settings>,
     credentials: Arc<dyn CredentialStore>,
     data_dir: PathBuf,
+    /// Comprobación de la IA local para el respaldo (D101): comprueba, arranca si estaba
+    /// detenida, y nunca descarga ni instala nada.
+    local_setup: Arc<Setup>,
     /// Inicio de sesión de correo en curso; solo uno a la vez.
     sign_in: Mutex<Option<SignIn>>,
     /// Motivo por el que no se pudo leer `correo-oauth.json`, si lo hay.
@@ -536,6 +539,8 @@ struct SettingsView {
     ai_wait_message: Option<String>,
     /// Respaldo automático del externo elegido a la IA local (D101).
     local_fallback: bool,
+    /// Las tareas van directas a la IA local por un `unavailable` reciente del externo (D101).
+    fallback_period_active: bool,
     /// Destino de la elección actual ya confirmado (siempre `true` con la IA local).
     consented: bool,
     groq_key_saved: bool,
@@ -584,9 +589,9 @@ fn settings(shared: State<'_, SharedState>) -> CmdResult<SettingsView> {
         }
         _ => false,
     };
-    let (active, ai_wait) = {
+    let (active, ai_wait, fallback_period_active) = {
         let app = shared.app()?;
-        (app.provider(), app.ai_wait())
+        (app.provider(), app.ai_wait(), app.fallback_period_active())
     };
     Ok(SettingsView {
         choice,
@@ -594,6 +599,7 @@ fn settings(shared: State<'_, SharedState>) -> CmdResult<SettingsView> {
         ai_wait,
         ai_wait_message: ai_wait.map(|w| w.message().to_owned()),
         local_fallback,
+        fallback_period_active,
         consented,
         groq_key_saved,
         ollama_cloud_key_saved,
@@ -609,17 +615,59 @@ fn settings(shared: State<'_, SharedState>) -> CmdResult<SettingsView> {
 /// proveedor que no puede enviar y las tareas con IA esperan en la cola; si no, se construye
 /// el elegido y se retoman. Se llama al arrancar y tras cada cambio de proveedor o de clave.
 fn refresh_provider(shared: &Shared) -> CmdResult<()> {
-    let (provider, wait) = {
+    let (provider, wait, fallback) = {
         let settings = shared.settings.lock().map_err(text)?;
-        settings::resolve(&settings, shared.credentials.as_ref())
+        let (provider, wait) = settings::resolve(&settings, shared.credentials.as_ref());
+        // Respaldo solo del externo elegido (y utilizable) a la IA local, y solo si está
+        // activado (D101). Con la IA local elegida o en espera no hay ninguno.
+        let external = settings.provider.as_ref().is_some_and(|c| !c.is_local());
+        let fallback =
+            (external && wait.is_none() && settings.local_fallback).then(|| local_fallback(shared));
+        (provider, wait, fallback)
     };
     {
         let mut app = shared.app()?;
         app.select_provider(provider);
         app.set_ai_wait(wait);
+        app.set_local_fallback(fallback);
     }
     shared.wake();
     Ok(())
+}
+
+/// Respaldo local (D101): si Ollama está preparado (arrancándolo si estaba detenido) devuelve el
+/// proveedor local con su selección inicial; si falta algo, `None`, y no se descarga nada.
+fn local_fallback(shared: &Shared) -> LocalFallback {
+    let setup = Arc::clone(&shared.local_setup);
+    let credentials = Arc::clone(&shared.credentials);
+    Arc::new(move || match setup.startup(true) {
+        Startup::Ready | Startup::Started => {
+            settings::build(&local_choice(), credentials.as_ref()).ok()
+        }
+        _ => None,
+    })
+}
+
+fn local_choice() -> ProviderChoice {
+    ProviderChoice::Ollama {
+        base_url: nestadmin_ai::ollama::DEFAULT_URL.to_owned(),
+        model: nestadmin_ai::ollama::DEFAULT_MODEL.to_owned(),
+    }
+}
+
+/// Activa o desactiva el respaldo automático del proveedor externo a la IA local (D101).
+#[tauri::command]
+fn set_local_fallback(shared: State<'_, SharedState>, enabled: bool) -> CmdResult<()> {
+    {
+        let mut current = shared.settings.lock().map_err(text)?;
+        let updated = Settings {
+            local_fallback: enabled,
+            ..current.clone()
+        };
+        updated.save(&shared.data_dir).map_err(text)?;
+        *current = updated;
+    }
+    refresh_provider(&shared)
 }
 
 /// Cambio explícito de proveedor. Con uno externo hace falta la confirmación del destino
@@ -1195,18 +1243,23 @@ fn start<R: Runtime>(
     let (sender, receiver) = mpsc::channel();
     let preparation = preparation(setup, false);
     handle.manage(Arc::clone(&preparation));
+    let local_setup = Arc::clone(&preparation.setup);
     startup_check(preparation, handle.clone(), local_provider);
     let shared = Arc::new(Shared {
         app: Mutex::new(app),
         settings: Mutex::new(settings),
         credentials,
         data_dir,
+        local_setup,
         sign_in: Mutex::new(None),
         mail_clients_error,
         wake: Mutex::new(sender),
         stopping: AtomicBool::new(false),
     });
     handle.manage(Arc::clone(&shared));
+    if let Err(error) = refresh_provider(&shared) {
+        eprintln!("no se pudo preparar el proveedor de IA: {error}");
+    }
     let worker_handle = handle.clone();
     let worker = thread::Builder::new()
         .name("nestadmin-cola".into())
@@ -1315,6 +1368,7 @@ fn configure<R: Runtime>(builder: Builder<R>, prepare_only: bool) -> Builder<R> 
             openai_compatible_key_saved,
             list_models,
             test_provider,
+            set_local_fallback,
             launch_mode,
             setup_check,
             setup_prepare,
