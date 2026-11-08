@@ -46,3 +46,5 @@ Con `?` sin parámetros en `http://localhost:5297`:
 - La dirección con cuentas reales de Gmail y Microsoft 365, y el permiso nuevo `User.Read` en la pantalla de consentimiento de Microsoft.
 - Los conectores no descargan adjuntos: el origen «adjunto de correo» no aparece todavía en la aplicación.
 - La localización por página con OCR de facturas reales.
+
+> Nota (2026-11-08): la disposición y algunos textos de Pendientes descritos aquí cambiaron con D137. El selector de origen sigue existiendo, ahora dentro de cada pestaña. Esta evidencia se conserva tal como se obtuvo.

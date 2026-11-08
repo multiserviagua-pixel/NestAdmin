@@ -163,7 +163,7 @@ export function sectionHeader(title: string, ...actions: Child[]): HTMLElement {
 }
 
 /** Tabla densa con cabecera. Las columnas `numeric` se alinean a la derecha. */
-export function dataTable(columns: Array<{ label: string; numeric?: boolean }>, rows: Child[][]): HTMLElement {
+export function dataTable(columns: Array<{ label: Child; numeric?: boolean }>, rows: Child[][]): HTMLElement {
   const cls = (numeric?: boolean) => (numeric ? "numeric" : undefined);
   return h(
     "div",

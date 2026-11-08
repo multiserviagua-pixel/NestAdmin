@@ -521,23 +521,19 @@ h3 {
 }
 
 .tone-ok,
-.state-completed,
-.step-done,
-.step-skipped {
+.state-completed {
   background: var(--ok-soft);
   color: var(--ok);
 }
 
 .tone-warn,
-.state-awaiting_review,
-.step-running {
+.state-awaiting_review {
   background: var(--warn-soft);
   color: var(--warn);
 }
 
 .tone-error,
-.state-failed,
-.step-failed {
+.state-failed {
   background: var(--error-soft);
   color: var(--error);
 }
@@ -1079,6 +1075,9 @@ h3 {
   display: flex;
   flex-direction: column;
   max-width: 760px;
+  margin: var(--s3) 0;
+  padding: 0;
+  list-style: none;
   background: var(--surface);
   border: 1px solid var(--line);
   border-radius: var(--radius);
@@ -1099,9 +1098,11 @@ h3 {
 
 .component .name {
   font-weight: 600;
-  display: flex;
-  gap: var(--s2);
-  align-items: center;
+}
+
+.component .detail-line,
+.component .error-text {
+  grid-column: 1 / -1;
 }
 
 .component .detail-line {
@@ -1110,18 +1111,10 @@ h3 {
   line-height: 18px;
 }
 
-.component .side {
-  grid-row: span 2;
-}
-
 .component progress {
   grid-column: 1 / -1;
   width: 100%;
   accent-color: var(--brand);
-}
-
-.component .error-text {
-  grid-column: 1 / -1;
 }
 
 /* Modo instalador y asistente: el contenido ocupa la ventana. */
@@ -1129,6 +1122,76 @@ h3 {
   padding: var(--s5);
   max-width: 720px;
   margin: 0 auto;
+}
+
+/* ---- Secciones, filas y cuentas ---- */
+
+.section {
+  max-width: 760px;
+  padding-top: var(--s2);
+  margin-top: var(--s5);
+  border-top: 1px solid var(--line);
+}
+
+.section > .section-header {
+  margin-top: var(--s3);
+}
+
+h2 + .section {
+  margin-top: 0;
+  padding-top: 0;
+  border-top: none;
+}
+
+.row-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: var(--s2);
+}
+
+.cell-title {
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.accounts {
+  list-style: none;
+  margin: var(--s3) 0;
+  padding: 0;
+  max-width: 920px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+}
+
+.account {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--s4);
+  padding: var(--s3) var(--s4);
+  border-bottom: 1px solid var(--line);
+}
+
+.account:last-child {
+  border-bottom: none;
+}
+
+.account-main {
+  min-width: 0;
+}
+
+.account-name {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s2);
+}
+
+.account .row-actions {
+  flex-shrink: 0;
+  max-width: 50%;
 }
 
 /* ---- Proveedor de IA (D100–D102, D122) ---- */
