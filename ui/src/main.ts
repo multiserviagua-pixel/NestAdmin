@@ -131,6 +131,8 @@ const state = {
   // Proveedor desplegado en Configuración (null: el elegido) y asistente de primer uso.
   pick: null as ProviderChoice["provider"] | null,
   wizard: false,
+  wizardStep: "choose" as "choose" | "cloud" | "other",
+  wizardOther: "openai_compatible" as "openai_compatible" | "anthropic",
   mail: null as MailView | null,
   // Dirección del inicio de sesión en curso, por si el navegador no se abrió solo.
   signInUrl: null as string | null,
@@ -1518,6 +1520,16 @@ function providerBlock(kind: Kind, opts: BlockOptions = {}): HTMLElement {
             `La clave queda ligada al host ${hostOf(b.url)}: con otro host no se envía. ${b.saved ? "Hay una clave guardada para este host." : "No hay clave guardada para este host."}`,
         )
       : null;
+  const checkDisabled = () => b.loading || b.busy || !!problem || (!b.key.trim() && !b.saved);
+  const check = h(
+    "button",
+    {
+      disabled: checkDisabled(),
+      "aria-busy": b.loading ? "true" : undefined,
+      onclick: () => void loadModels(kind, b.key.trim() || null),
+    },
+    b.loading ? "Comprobando…" : "Comprobar y ver modelos",
+  ) as HTMLButtonElement;
   const keyField = external
     ? h(
         "div",
@@ -1531,18 +1543,14 @@ function providerBlock(kind: Kind, opts: BlockOptions = {}): HTMLElement {
             autocomplete: "off",
             value: b.key,
             placeholder: b.saved ? "Clave guardada" : "Pegue aquí la clave",
-            oninput: (event) => (b.key = (event.target as HTMLInputElement).value),
+            // Sin repintar: el botón se habilita al teclear, sin perder el foco.
+            oninput: (event) => {
+              b.key = (event.target as HTMLInputElement).value;
+              check.disabled = checkDisabled();
+            },
           }),
         ),
-        h(
-          "button",
-          {
-            disabled: b.loading || b.busy || !!problem || (!b.key.trim() && !b.saved),
-            "aria-busy": b.loading ? "true" : undefined,
-            onclick: () => void loadModels(kind, b.key.trim() || null),
-          },
-          b.loading ? "Comprobando…" : "Comprobar y ver modelos",
-        ),
+        check,
       )
     : null;
   const keyNote = external
@@ -1671,6 +1679,7 @@ function settingsView() {
         "Si el proveedor externo elegido no responde, agota el tiempo o alcanza su límite, la tarea se repite una sola vez con la IA local, siempre que esté preparada. Nunca se pasa a otro servicio externo ni se descarga nada para ello.",
       ),
     ),
+    s.offer_external ? externalOffer() : null,
     h(
       "div",
       { class: "card" },
@@ -1700,6 +1709,130 @@ function settingsView() {
       ),
     ),
     h("div", { class: "card" }, h("h3", {}, "Datos locales"), h("p", { class: "mono" }, s.data_dir)),
+  );
+}
+
+/// Oferta única (D100) a quien tenía la IA local: pasar a Ollama cloud. No cambia nada hasta que
+/// la persona termina el bloque (clave, modelo, destino y prueba).
+function externalOffer() {
+  return h(
+    "div",
+    { class: "banner", role: "status" },
+    h(
+      "span",
+      {},
+      "NestAdmin ahora puede trabajar con Ollama cloud, un proveedor externo que no necesita preparar nada en este equipo. Seguirá usando la IA local y no cambiará nada hasta que usted termine de configurarlo y confirme el destino de los datos.",
+    ),
+    h(
+      "div",
+      { class: "buttons" },
+      h(
+        "button",
+        {
+          class: "primary",
+          onclick: () => {
+            state.pick = "ollama_cloud";
+            void act(() => api.dismissExternalOffer());
+          },
+        },
+        "Pasar a Ollama cloud",
+      ),
+      h("button", { onclick: () => void act(() => api.dismissExternalOffer()) }, "No, gracias"),
+    ),
+  );
+}
+
+// ---- Asistente de primer uso (D100, D101, D103) ----
+
+function closeWizard(notice?: string) {
+  state.wizard = false;
+  state.wizardStep = "choose";
+  state.view = "review";
+  state.notice = notice ? { kind: "ok", text: notice } : null;
+  resetBlocks();
+  void refresh();
+}
+
+function wizardView() {
+  const later = h("button", { onclick: () => closeWizard() }, "Ahora no");
+  const done = () => closeWizard("Proveedor listo: la IA responde y las tareas en espera se reanudan");
+  const head = h(
+    "div",
+    {},
+    h("h2", {}, "Configure la IA de NestAdmin"),
+    h(
+      "p",
+      { class: "intro" },
+      "NestAdmin necesita un proveedor de IA para leer facturas y preparar borradores de correo. Hasta que lo configure, las tareas esperan en la cola con el motivo a la vista; puede importar documentos y consultar el correo con normalidad. El OCR y la extracción de texto se hacen siempre en este equipo.",
+    ),
+  );
+  if (state.wizardStep === "cloud") {
+    return h(
+      "section",
+      { class: "page wizard" },
+      head,
+      h("h3", {}, "Ollama cloud"),
+      providerBlock("ollama_cloud", { auto: true, onDone: done }),
+      h("div", { class: "buttons" }, h("button", { onclick: () => ((state.wizardStep = "choose"), render()) }, "Volver"), later),
+    );
+  }
+  if (state.wizardStep === "other") {
+    const kinds: Array<"openai_compatible" | "anthropic"> = ["openai_compatible", "anthropic"];
+    return h(
+      "section",
+      { class: "page wizard" },
+      head,
+      h("h3", {}, "Otro proveedor externo"),
+      ...kinds.map((kind) =>
+        h(
+          "div",
+          { class: "provider-choice" },
+          h(
+            "label",
+            { class: "choice" },
+            h("input", {
+              type: "radio",
+              name: "wizard-other",
+              checked: state.wizardOther === kind,
+              onchange: () => {
+                state.wizardOther = kind;
+                render();
+              },
+            }),
+            h("span", {}, h("strong", {}, KIND_NAME[kind]), ` (${KIND_NOTE[kind]})`),
+          ),
+          state.wizardOther === kind ? h("div", { class: "indent" }, providerBlock(kind, { auto: true, onDone: done })) : null,
+        ),
+      ),
+      h("div", { class: "buttons" }, h("button", { onclick: () => ((state.wizardStep = "choose"), render()) }, "Volver"), later),
+    );
+  }
+  return h(
+    "section",
+    { class: "page wizard" },
+    head,
+    h(
+      "div",
+      { class: "card" },
+      h("h3", {}, "Ollama cloud (recomendado)"),
+      h("p", { class: "intro" }, "Proveedor externo por defecto: no hay que instalar nada. Necesita su clave de Ollama y que usted confirme qué contenido sale del equipo."),
+      h("button", { class: "primary", onclick: () => ((state.wizardStep = "cloud"), render()) }, "Configurar Ollama cloud"),
+    ),
+    h(
+      "div",
+      { class: "card" },
+      h("h3", {}, "Otro proveedor externo"),
+      h("p", { class: "intro" }, "Un servicio compatible con OpenAI o Claude de Anthropic, con su propia clave."),
+      h("button", { onclick: () => ((state.wizardStep = "other"), render()) }, "Elegir otro proveedor externo"),
+    ),
+    h(
+      "div",
+      { class: "card" },
+      h("h3", {}, "Usar la IA local"),
+      h("p", { class: "intro" }, "Ollama en este equipo: el contenido no sale de él. Hay que instalar Ollama y descargar un modelo de varios GB (Preparación)."),
+      h("button", { onclick: goInstallLocal }, "Usar la IA local"),
+    ),
+    h("div", { class: "buttons" }, later),
   );
 }
 
@@ -1943,6 +2076,10 @@ function render(background = false) {
     wait && (state.view === "review" || state.view === "tasks")
       ? h("div", { class: "banner", role: "status" }, h("span", {}, `${wait}. Las tareas esperan en la cola.`), h("button", { onclick: goToSettings }, "Ir a Configuración"))
       : null;
+  if (state.wizard) {
+    root.replaceChildren(h("main", { class: "wizard-only" }, wizardView()));
+    return;
+  }
   root.replaceChildren(header(), h("div", { class: "body" }, nav(), h("main", {}, notice, waitBanner, views[state.view]())));
 }
 
@@ -1970,6 +2107,13 @@ void (async () => {
     render(true);
   });
   await refresh();
+  // Primer uso (D101): una vez por arranque, y solo si falta elegir, la clave o el destino;
+  // con una clave rechazada basta el aviso.
+  const wait = state.settings?.ai_wait;
+  if (wait === "needs_choice" || wait === "needs_key" || wait === "needs_consent") {
+    state.wizard = true;
+    render();
+  }
   applyStartup();
   void refreshCheck();
 })();
