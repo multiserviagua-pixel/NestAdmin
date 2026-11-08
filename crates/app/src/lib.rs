@@ -200,8 +200,12 @@ enum Outcome {
 enum Previous {
     /// No queda ningún intento sin cerrar: se puede ejecutar.
     Clear,
-    /// Una versión consta realizada.
-    Done { version: i64, receipt: Value },
+    /// Una versión consta realizada, con la autorización que figura en su acción (D129).
+    Done {
+        version: i64,
+        receipt: Value,
+        authorization: String,
+    },
     /// Un intento no se pudo comprobar: el conector falló o el borrador ya no existe.
     Unknown { version: i64, error: ConnectorError },
 }
@@ -526,6 +530,7 @@ impl App {
             return Ok(Previous::Done {
                 version: done.version,
                 receipt: done.receipt.clone().unwrap_or(Value::Null),
+                authorization: done.authorization.clone(),
             });
         }
         let mut unsent = Vec::new();
@@ -544,6 +549,7 @@ impl App {
                     return Ok(Previous::Done {
                         version: action.version,
                         receipt,
+                        authorization: action.authorization.clone(),
                     });
                 }
                 Ok(None) => unsent.push(action),
@@ -614,9 +620,9 @@ impl App {
             .or_else(|| result["version"].as_i64())
             .unwrap_or(1);
         let (error, missing) = match self.check_previous(&task, None, None)? {
-            Previous::Done { version, receipt } => {
-                return self.complete_with(task.id, result, version, receipt)
-            }
+            Previous::Done {
+                version, receipt, ..
+            } => return self.complete_with(task.id, result, version, receipt),
             Previous::Unknown { error, .. } => {
                 let missing = error.code == nestadmin_simulators::codes::NOT_FOUND;
                 (Some(error.code), missing)
@@ -1388,8 +1394,17 @@ impl App {
         // realizados: si alguno salió, la tarea se completa con él y no se ejecuta otro.
         match self.check_previous(&task, Some(version), Some(&authorization))? {
             Previous::Clear => {}
-            Previous::Done { version, receipt } => {
-                return self.complete_with(task.id, result, version, receipt)
+            Previous::Done {
+                version,
+                receipt,
+                authorization: done_by,
+            } => {
+                // Si el envío lo había hecho la regla y aquí solo se reconcilia, la
+                // autorización que consta es la de la regla, no la aprobación (D129).
+                if done_by.starts_with("regla ") && result["rule_attempt"]["type"] == "rule" {
+                    result["authorization"] = result["rule_attempt"].clone();
+                }
+                return self.complete_with(task.id, result, version, receipt);
             }
             Previous::Unknown { version, error }
                 if error.code == nestadmin_simulators::codes::NOT_FOUND =>
@@ -1438,6 +1453,21 @@ impl App {
         };
         match outcome {
             Ok(done) => {
+                // Si lo ejecutó la regla y aquí solo se reconcilia, la autorización que consta
+                // en la acción es la de la regla; el resultado debe decir lo mismo (D129).
+                if matches!(done, nestadmin_core::ActionOutcome::Reconciled(_))
+                    && result["rule_attempt"]["type"] == "rule"
+                {
+                    let kind = action_kind(&task);
+                    let by_rule = self.store.task_actions(task.id)?.iter().any(|a| {
+                        a.kind == kind
+                            && a.version == version
+                            && a.authorization.starts_with("regla ")
+                    });
+                    if by_rule {
+                        result["authorization"] = result["rule_attempt"].clone();
+                    }
+                }
                 result["receipt"] = done.receipt().clone();
                 Ok(self.store.complete(task.id, &result)?)
             }

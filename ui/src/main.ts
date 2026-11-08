@@ -166,9 +166,12 @@ const state = {
   // Panel dentro de una fila (activar con evidencia, probar, opción avanzada, archivar) y su
   // simulación; la confirmación escrita de la opción avanzada; menú «Más» abierto.
   rulePanel: null as null | { id: string; kind: "test" | "activate" | "advanced" | "archive" },
-  ruleSim: null as null | { key: string; status: "loading" | "done" | "error"; kind: string; sim?: Simulation; error?: string },
-  ruleAdv: { ack: false, text: "" },
+  ruleSim: null as null | { key: string; status: "loading" | "done" | "error"; kind: string; sig?: string; sim?: Simulation; error?: string },
+  // `skip`: activar sin la comprobación cuando la prueba falló (confirmación expresa).
+  ruleAdv: { ack: false, text: "", skip: false },
   ruleMore: null as string | null,
+  // «Detalles» abiertos por regla.
+  ruleDetails: {} as Record<string, boolean>,
   advancedOpen: false,
   // «Por qué está aquí» desplegado, por tarea; filtro del Historial (regla, aprobadas o todo).
   whyOpen: {} as Record<number, boolean>,
@@ -1079,22 +1082,27 @@ function closeRuleEditor() {
 let simToken = 0;
 
 /** Lanza la simulación y repinta al empezar y al terminar. Solo cuenta la última petición. */
-function runSimulation(key: string, kind: string, conditions: Record<string, string>, assumeAnySender: boolean) {
+function runSimulation(key: string, kind: string, conditions: Record<string, string>, assumeAnySender: boolean, excludeRuleId: string | null, sig?: string) {
   const token = ++simToken;
-  state.ruleSim = { key, status: "loading", kind };
+  state.ruleSim = { key, status: "loading", kind, sig };
   render();
-  api.simulateRule(kind, conditions, null, assumeAnySender).then(
+  api.simulateRule(kind, conditions, null, assumeAnySender, excludeRuleId).then(
     (sim) => {
       if (token !== simToken) return;
-      state.ruleSim = { key, status: "done", kind, sim };
+      state.ruleSim = { key, status: "done", kind, sig, sim };
       render();
     },
     (error) => {
       if (token !== simToken) return;
-      state.ruleSim = { key, status: "error", kind, error: String(error) };
+      state.ruleSim = { key, status: "error", kind, sig, error: String(error) };
       render();
     },
   );
+}
+
+/** Estado de la simulación de una clave: `missing` si no hay ninguna (no hay evidencia). */
+function simStatus(key: string): "loading" | "done" | "error" | "missing" {
+  return state.ruleSim?.key === key ? state.ruleSim.status : "missing";
 }
 
 function exampleList(examples: Array<{ task_id: number; label: string }>): HTMLElement | null {
@@ -1114,13 +1122,18 @@ function exampleList(examples: Array<{ task_id: number; label: string }>): HTMLE
 }
 
 /** Resultado de la simulación de la clave dada, o `null` si no hay ninguna en curso. */
-function simulationBox(key: string, kind: string, selfId?: string): HTMLElement | null {
+function simulationBox(key: string, kind: string): HTMLElement | null {
   const s = state.ruleSim;
   if (!s || s.key !== key || s.kind !== kind) return null;
   if (s.status === "loading") return h("div", { class: "sim-box", role: "status" }, h("p", { class: "meta" }, "Comprobando la regla con sus tareas…"));
   if (s.status === "error" || !s.sim)
-    return h("div", { class: "sim-box", role: "status" }, h("p", { class: "error-text" }, `No se ha podido hacer la prueba: ${s.error ?? "error desconocido"}. No hay datos para decir qué haría la regla.`));
-  const summary = simulationSummary(s.sim, kind, selfId);
+    return h(
+      "div",
+      { class: "sim-box", role: "alert" },
+      h("p", { class: "error-text" }, `No se ha podido hacer la prueba: ${s.error ?? "error desconocido"}.`),
+      h("p", {}, "No hay datos para decir qué haría esta regla con sus tareas."),
+    );
+  const summary = simulationSummary(s.sim, kind);
   return h(
     "div",
     { class: "sim-box", role: "status" },
@@ -1147,12 +1160,12 @@ function simulationBox(key: string, kind: string, selfId?: string): HTMLElement 
 // -- Confirmación de la opción avanzada (D126): casilla y texto escrito --
 
 function ackControls(
-  category: string,
+  category: () => string,
   value: () => { ack: boolean; text: string },
   set: (ack: boolean, text: string) => void,
   onChange: () => void,
   keyPrefix: string,
-): HTMLElement {
+): HTMLElement & { refreshText: () => void } {
   const check = h("input", {
     type: "checkbox",
     "data-focus-key": `${keyPrefix}:ack`,
@@ -1175,10 +1188,11 @@ function ackControls(
   }) as HTMLInputElement;
   check.checked = value().ack;
   typed.value = value().text;
-  return h(
+  const warning = h("p", { class: "ack-warning", role: "note" }, anySenderConsequences(category()));
+  const box = h(
     "div",
     { class: "ack-box" },
-    h("p", { class: "ack-warning", role: "note" }, anySenderConsequences(category)),
+    warning,
     h("label", { class: "choice" }, check, " Entiendo las consecuencias"),
     h(
       "div",
@@ -1188,6 +1202,7 @@ function ackControls(
       h("p", { class: "hint", id: `${keyPrefix}-ack-hint` }, "Escríbalo tal cual, en mayúsculas."),
     ),
   );
+  return Object.assign(box, { refreshText: () => (warning.textContent = anySenderConsequences(category())) });
 }
 
 // -- Formulario --
@@ -1304,6 +1319,9 @@ function ruleForm(): HTMLElement {
     ack_text: ack.text,
   });
 
+  // Se asignan más abajo: `sync` los usa y se llama al final.
+  let ackBox: (HTMLElement & { refreshText: () => void }) | null = null;
+  let signature: (d: RuleDraft) => string = () => "";
   const submit = h("button", { class: "primary", type: "submit", "aria-describedby": "rule-form-problems" }, editing ? "Guardar cambios" : "Crear regla") as HTMLButtonElement;
   const testButton = h("button", { type: "button", "data-focus-key": "rule-form:test" }, "Probar con mis datos") as HTMLButtonElement;
 
@@ -1337,20 +1355,28 @@ function ruleForm(): HTMLElement {
     problems.hidden = issues.length === 0;
     submit.disabled = issues.length > 0;
     testButton.disabled = draftProblems(d, false, { ignoreAck: true }).filter((p) => !p.startsWith("Escriba un nombre")).length > 0;
+    ackBox?.refreshText();
+    // Si las condiciones cambian, el resultado de la prueba ya no es de lo que hay en pantalla.
+    if (state.ruleSim?.key === "form" && state.ruleSim.sig !== signature(d)) {
+      state.ruleSim = null;
+      simToken++;
+      simSlot.replaceChildren();
+    }
     simSlot.hidden = state.ruleSim?.kind !== d.kind;
   };
-  anyBox.append(
-    ackControls(
-      draft.category,
-      () => ack,
-      (a, t) => (ack = { ack: a, text: t }),
-      sync,
-      "rule-form",
-    ),
+  ackBox = ackControls(
+    () => category.value,
+    () => ack,
+    (a, t) => (ack = { ack: a, text: t }),
+    sync,
+    "rule-form",
   );
+  anyBox.append(ackBox);
+  signature = (d: RuleDraft) => JSON.stringify([d.kind, draftConditions(d), d.scope === "any"]);
   testButton.addEventListener("click", () => {
     const d = read();
-    runSimulation("form", d.kind, draftConditions(d), d.scope === "any");
+    // Al probar una regla guardada, se excluye a sí misma de la comparación.
+    runSimulation("form", d.kind, draftConditions(d), d.scope === "any", editing?.id ?? null, signature(d));
   });
   const formSim = simulationBox("form", draft.kind);
   if (formSim) simSlot.append(formSim);
@@ -1371,11 +1397,9 @@ function ruleForm(): HTMLElement {
         const conditions = draftConditions(d);
         if (editing) {
           void act(async () => {
-            const clean = d.name.trim();
-            if (clean !== (editing.name === editing.id ? "" : editing.name)) await api.renameRule(editing.id, clean || null);
-            await api.updateRule(editing.id, conditions);
-            // Guardar borra la validación avanzada: si se mantiene la opción, se confirma de nuevo.
-            if (d.scope === "any" && editing.action_kind === "send_draft") await api.setRuleAnySender(editing.id, true);
+            // Una sola llamada atómica: nombre, condiciones y validación avanzada, o nada. Guardar
+            // borra la validación anterior; si se mantiene «cualquier remitente», va confirmada.
+            await api.updateRuleWithAck(editing.id, d.name.trim(), conditions, editing.action_kind === "send_draft" && d.scope === "any");
             closeRuleEditor();
           }, wasActive ? "Regla guardada; sigue activa y se aplicará a las tareas que se procesen desde ahora" : "Regla guardada; sigue inactiva");
         } else {
@@ -1457,21 +1481,23 @@ function closeRulePanel() {
 
 function openRulePanel(r: RuleView, kind: NonNullable<typeof state.rulePanel>["kind"]) {
   state.rulePanel = { id: r.id, kind };
-  state.ruleAdv = { ack: false, text: "" };
+  state.ruleAdv = { ack: false, text: "", skip: false };
   state.ruleMore = null;
   state.ruleSim = null;
   state.focusAfterRender = `rule:${r.id}:panel`;
   const simulate = kind !== "archive" && isKnownAction(r.action_kind) && !(kind === "activate" && actsOnNothing(r));
   // La hipótesis de «cualquier remitente» vale si la regla ya lo tiene validado o se va a validar.
-  if (simulate) runSimulation(`${kind}:${r.id}`, r.action_kind, r.conditions, kind === "advanced" || r.any_sender_ack_at != null);
+  // La regla se excluye de la comparación: no debe coincidir consigo misma.
+  if (simulate) runSimulation(`${kind}:${r.id}`, r.action_kind, r.conditions, kind === "advanced" || r.any_sender_ack_at != null, r.id);
   else render();
 }
 
-/** Panel dentro de la fila: activar con evidencia, probar, validar la opción avanzada o archivar. */
+/** Panel dentro de la tarjeta: activar con evidencia, probar, validar la opción avanzada o archivar. */
 function rulePanel(r: RuleView): HTMLElement | null {
   const panel = state.rulePanel;
   if (!panel || panel.id !== r.id) return null;
   const key = `${panel.kind}:${r.id}`;
+  const status = simStatus(key);
   const box = (label: string, ...children: Child[]) =>
     h(
       "div",
@@ -1497,14 +1523,40 @@ function rulePanel(r: RuleView): HTMLElement | null {
       `Prueba de la regla ${r.name}`,
       h("h4", {}, "Probar con sus tareas"),
       h("p", { class: "rule-sentence" }, ruleSentence(r)),
-      r.active ? h("p", { class: "hint" }, "Esta regla ya está activa: la prueba cuenta sus coincidencias con las tareas que hay en este equipo.") : null,
-      simulationBox(key, r.action_kind, r.active ? r.id : undefined),
+      simulationBox(key, r.action_kind),
       h("div", { class: "buttons" }, cancel("Cerrar")),
     );
   }
 
   if (panel.kind === "activate") {
     const blocked = actsOnNothing(r) ? "Esta regla no indica remitente y no podría actuar. Añada un remitente o valide la opción avanzada antes de activarla." : ruleProblem(r);
+    const failed = status === "error" || status === "missing";
+    const go = h(
+      "button",
+      {
+        class: "primary",
+        type: "button",
+        "data-focus-key": `rule:${r.id}:panel-go`,
+        onclick: () =>
+          void act(async () => {
+            await api.setRuleActive(r.id, true);
+            state.rulePanel = null;
+            state.ruleSim = null;
+          }, "Regla activada: actuará sin revisión en las tareas que se procesen desde ahora"),
+      },
+      "Activar regla",
+    ) as HTMLButtonElement;
+    const sync = () => (go.disabled = status === "loading" || (failed && !state.ruleAdv.skip));
+    sync();
+    const skip = h("input", {
+      type: "checkbox",
+      "data-focus-key": `rule:${r.id}:skip`,
+      onchange: () => {
+        state.ruleAdv = { ...state.ruleAdv, skip: skip.checked };
+        sync();
+      },
+    }) as HTMLInputElement;
+    skip.checked = state.ruleAdv.skip;
     return box(
       `Activar la regla ${r.name}`,
       h("h4", {}, "¿Activar esta regla?"),
@@ -1512,6 +1564,9 @@ function rulePanel(r: RuleView): HTMLElement | null {
       h("p", { class: "rule-risk" }, "Aviso: ", ruleRisk(r)),
       blocked ? h("p", { class: "rule-problem" }, blocked) : h("p", { class: "meta" }, "Esto es lo que habría hecho con sus tareas anteriores:"),
       blocked ? null : simulationBox(key, r.action_kind),
+      !blocked && failed
+        ? h("label", { class: "choice" }, skip, " Quiero activarla sin esta comprobación")
+        : null,
       blocked ? null : h("p", { class: "hint" }, "Desactivarla después es siempre un solo clic."),
       h(
         "div",
@@ -1520,21 +1575,7 @@ function rulePanel(r: RuleView): HTMLElement | null {
           ? actsOnNothing(r)
             ? h("button", { class: "primary", type: "button", "data-focus-key": `rule:${r.id}:panel-go`, onclick: () => addSender(r) }, "Añadir remitente")
             : null
-          : h(
-              "button",
-              {
-                class: "primary",
-                type: "button",
-                "data-focus-key": `rule:${r.id}:panel-go`,
-                onclick: () =>
-                  void act(async () => {
-                    await api.setRuleActive(r.id, true);
-                    state.rulePanel = null;
-                    state.ruleSim = null;
-                  }, "Regla activada: actuará sin revisión en las tareas que se procesen desde ahora"),
-              },
-              "Activar regla",
-            ),
+          : go,
         cancel(),
       ),
     );
@@ -1548,21 +1589,35 @@ function rulePanel(r: RuleView): HTMLElement | null {
         type: "button",
         "data-focus-key": `rule:${r.id}:panel-go`,
         onclick: () =>
-          void act(async () => {
-            await api.setRuleAnySender(r.id, true);
-            state.rulePanel = null;
-            state.ruleSim = null;
-          }, "Opción avanzada validada: la regla contesta a cualquier remitente cuando esté activa. Queda en el historial y puede retirarla cuando quiera"),
+          void act(
+            async () => {
+              await api.setRuleAnySender(r.id, true);
+              state.rulePanel = null;
+              state.ruleSim = null;
+            },
+            r.active
+              ? "Opción avanzada validada. La regla está activa: ya contesta a cualquier remitente sin revisión. Queda en el historial y puede retirarla cuando quiera"
+              : "Opción avanzada validada. Cuando active la regla, contestará a cualquier remitente sin revisión. Queda en el historial y puede retirarla cuando quiera",
+          ),
       },
       "Validar la opción avanzada",
     ) as HTMLButtonElement;
-    const sync = () => (go.disabled = !anyAckReady({ ack: state.ruleAdv.ack, ack_text: state.ruleAdv.text }));
+    const sync = () => (go.disabled = status === "loading" || !anyAckReady({ ack: state.ruleAdv.ack, ack_text: state.ruleAdv.text }));
     sync();
     return box(
       `Opción avanzada de la regla ${r.name}`,
       h("h4", {}, "Contestar a cualquier remitente"),
       h("p", { class: "rule-sentence" }, `Enviar sin revisión la respuesta redactada por la IA a cualquier remitente cuando se clasifique como ${categoryLabel(r.conditions.category ?? "")}`),
-      ackControls(r.conditions.category ?? "", () => ({ ack: state.ruleAdv.ack, text: state.ruleAdv.text }), (a, t) => (state.ruleAdv = { ack: a, text: t }), sync, `rule:${r.id}`),
+      r.active
+        ? h("p", { class: "rule-problem", role: "alert" }, "Esta regla está activa: empezará a contestar en cuanto la valide.")
+        : null,
+      ackControls(
+        () => r.conditions.category ?? "",
+        () => ({ ack: state.ruleAdv.ack, text: state.ruleAdv.text }),
+        (a, t) => (state.ruleAdv = { ...state.ruleAdv, ack: a, text: t }),
+        sync,
+        `rule:${r.id}`,
+      ),
       h("p", { class: "meta" }, "Esto es lo que habría hecho con sus tareas anteriores:"),
       simulationBox(key, r.action_kind),
       h("div", { class: "buttons" }, go, cancel()),
@@ -1607,13 +1662,7 @@ function addSender(r: RuleView) {
 
 function statsLine(r: RuleView): HTMLElement {
   const t = statsText(r.stats);
-  return h(
-    "p",
-    { class: "meta rule-stats" },
-    t.main,
-    t.unclassified ? ` · ${t.unclassified}` : "",
-    helpTip(FIELD_HELP.stats, "Ayuda sobre los contadores de la regla"),
-  );
+  return h("p", { class: "meta rule-stats" }, t.main, t.unclassified ? ` · ${t.unclassified}` : "");
 }
 
 function moreMenu(r: RuleView, items: Array<[string, string, () => void]>): HTMLElement {
@@ -1644,7 +1693,9 @@ function moreMenu(r: RuleView, items: Array<[string, string, () => void]>): HTML
   return menu;
 }
 
-function ruleRow(r: RuleView): Child[] {
+/** Tarjeta de una regla: cabecera con nombre y estado, cuerpo con lo que hace y su riesgo, y pie
+ * con las acciones siempre a la vista. Lo técnico va en «Detalles». */
+function ruleCard(r: RuleView): HTMLElement {
   const problem = ruleProblem(r);
   const known = isKnownAction(r.action_kind);
   const status = ruleStatus(r);
@@ -1660,42 +1711,66 @@ function ruleRow(r: RuleView): Child[] {
   more.push(["history", "Ver historial", () => showHistoryOf(r.id)]);
   if (!archived) more.push(["archive", "Archivar", () => openRulePanel(r, "archive")]);
 
-  const info = h(
-    "div",
-    { class: "rule-info" },
-    h("p", { class: "cell-title" }, r.name),
-    h("p", { class: "meta" }, "Identificador: ", h("code", {}, r.id), ` · Versión ${r.version}`, helpTip(FIELD_HELP.column_version, "Ayuda sobre la versión")),
-    h("p", { class: "rule-sentence" }, ruleSentence(r)),
-    h("p", { class: missingSender || r.any_sender_ack_at ? "rule-problem" : "rule-risk" }, "Aviso: ", ruleRisk(r)),
-    problem ? h("p", { class: "rule-problem" }, problem) : null,
-    statsLine(r),
-    missingSender
-      ? h("p", { class: "meta" }, h("button", { class: "link", type: "button", "data-focus-key": `rule:${r.id}:advanced`, onclick: () => openRulePanel(r, "advanced") }, "Contestar a cualquier remitente (opción avanzada)"))
-      : null,
-    r.any_sender_ack_at && !archived
-      ? h(
-          "p",
-          { class: "meta" },
-          h("button", { class: "link", type: "button", "data-focus-key": `rule:${r.id}:retract`, onclick: () => void act(() => api.setRuleAnySender(r.id, false), "Opción avanzada retirada: la regla vuelve a exigir remitente y no actuará hasta que lo añada") }, "Retirar la opción avanzada"),
-        )
-      : null,
-    rulePanel(r),
-  );
-
-  return [
-    info,
-    ACTION_LABEL[r.action_kind] ?? r.action_kind,
-    conditionsSummary(r),
+  const details = h(
+    "details",
+    {
+      class: "rule-details",
+      ontoggle: () => (state.ruleDetails[r.id] = details.open),
+    },
+    h("summary", { "data-focus-key": `rule:${r.id}:details` }, "Detalles"),
     h(
-      "div",
-      { class: "status-cell" },
-      statusChip(status.primary.text, status.primary.tone),
-      status.extra ? statusChip(status.extra.text, status.extra.tone) : null,
-      r.any_sender_ack_at && !archived ? statusChip("Contesta a cualquier remitente", "warn") : null,
+      "dl",
+      { class: "rule-facts" },
+      h("dt", {}, "Identificador"),
+      h("dd", {}, h("code", {}, r.id)),
+      h("dt", {}, "Versión"),
+      h("dd", {}, String(r.version)),
+      h("dt", {}, "Acción"),
+      h("dd", {}, ACTION_LABEL[r.action_kind] ?? r.action_kind),
+      h("dt", {}, "Condiciones"),
+      h("dd", {}, conditionsSummary(r)),
+    ),
+  ) as HTMLDetailsElement;
+  details.open = Boolean(state.ruleDetails[r.id]);
+
+  return h(
+    "article",
+    { class: `card rule-card${archived ? " is-archived" : ""}`, "aria-label": `Regla ${r.name}` },
+    h(
+      "header",
+      { class: "rule-head" },
+      h("h3", { class: "rule-title" }, r.name),
+      h(
+        "div",
+        { class: "status-cell" },
+        statusChip(status.primary.text, status.primary.tone),
+        status.extra ? statusChip(status.extra.text, status.extra.tone) : null,
+        r.any_sender_ack_at && !archived ? statusChip("Contesta a cualquier remitente", "warn") : null,
+      ),
     ),
     h(
       "div",
-      { class: "row-actions" },
+      { class: "rule-info" },
+      h("p", { class: "rule-sentence" }, ruleSentence(r)),
+      h("p", { class: missingSender || r.any_sender_ack_at ? "rule-problem" : "rule-risk" }, "Aviso: ", ruleRisk(r)),
+      problem ? h("p", { class: "rule-problem" }, problem) : null,
+      statsLine(r),
+      missingSender
+        ? h("p", { class: "meta" }, h("button", { class: "link", type: "button", "data-focus-key": `rule:${r.id}:advanced`, onclick: () => openRulePanel(r, "advanced") }, "Contestar a cualquier remitente (opción avanzada)"))
+        : null,
+      r.any_sender_ack_at && !archived
+        ? h(
+            "p",
+            { class: "meta" },
+            h("button", { class: "link", type: "button", "data-focus-key": `rule:${r.id}:retract`, onclick: () => void act(() => api.setRuleAnySender(r.id, false), "Opción avanzada retirada: la regla vuelve a exigir remitente y no actuará hasta que lo añada") }, "Retirar la opción avanzada"),
+          )
+        : null,
+      rulePanel(r),
+      details,
+    ),
+    h(
+      "footer",
+      { class: "rule-actions" },
       ...(archived
         ? [
             h("button", { "data-focus-key": `rule:${r.id}:restore`, onclick: () => void act(() => api.unarchiveRule(r.id), "Regla restaurada. Queda inactiva: actívela cuando quiera") }, "Restaurar"),
@@ -1709,7 +1784,7 @@ function ruleRow(r: RuleView): Child[] {
             moreMenu(r, more),
           ]),
     ),
-  ];
+  );
 }
 
 /** Lista con buscador y filtros; al escribir solo se rehace la lista, para conservar el foco. */
@@ -1722,7 +1797,6 @@ function rulesList(): HTMLElement {
     const filtered = Boolean(f.text.trim() || f.action || f.status || f.category);
     const hiddenArchived = state.rules.filter((r) => r.archived_at).length;
     const live = state.rules.filter((r) => !r.archived_at).length;
-    const col = (label: string, helpKey: string) => ({ label: h("span", {}, `${label} `, helpTip(FIELD_HELP[helpKey]!, `Ayuda sobre la columna ${label}`)) });
     results.replaceChildren(
       !state.rules.length
         ? emptyState("Todavía no hay reglas", "Todas las acciones requieren su aprobación en Pendientes. Cree una con «Nueva regla».")
@@ -1734,7 +1808,7 @@ function rulesList(): HTMLElement {
             )
           : h(
               "p",
-              { class: "meta" },
+              { class: "meta list-count" },
               f.status === "archived" ? `${rows.length} de ${hiddenArchived} reglas archivadas` : `${rows.length} de ${live} reglas`,
               ...(f.status !== "archived" && hiddenArchived
                 ? [
@@ -1742,19 +1816,9 @@ function rulesList(): HTMLElement {
                     h("button", { class: "link", type: "button", "data-focus-key": "rules:show-archived", onclick: () => ((state.ruleFilter = { ...noRuleFilter(), status: "archived" }), render()) }, "Ver archivadas"),
                   ]
                 : []),
+              helpTip(FIELD_HELP.rules_list!, "Ayuda sobre las tarjetas de reglas"),
             ),
-      ...(rows.length
-        ? [
-            (() => {
-              const table = dataTable(
-                [col("Regla", "column_rule"), col("Acción", "column_action"), col("Condiciones", "column_conditions"), col("Estado", "column_status"), col("Acciones", "column_actions")],
-                rows.map(ruleRow),
-              );
-              table.querySelector("table")?.classList.add("rules-grid");
-              return table;
-            })(),
-          ]
-        : []),
+      ...(rows.length ? [h("div", { class: "rule-cards" }, ...rows.map(ruleCard))] : []),
     );
   };
   const search = h("input", {
@@ -1900,7 +1964,7 @@ const OUTCOME_CHIP: Record<CandidateOutcome, [string, Tone]> = {
 
 /** Bloque desplegable con las reglas que se comprobaron para esta tarea y por qué no se automatizó. */
 function whyHere(task: Task): HTMLElement {
-  const info = explainEvaluation(task.result?.evaluation);
+  const info = explainEvaluation(task.result?.evaluation, true);
   const details = h(
     "details",
     {

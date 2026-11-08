@@ -125,17 +125,54 @@ impl Store {
     pub fn set_rule_name(&mut self, id: &str, name: Option<&str>) -> Result<()> {
         let tx = self.conn.transaction()?;
         current_rule(&tx, id)?.ok_or_else(|| CoreError::RuleNotFound(id.to_owned()))?;
-        tx.execute(
-            "INSERT INTO rule_meta (rule_id, name) VALUES (?1, ?2)
-             ON CONFLICT(rule_id) DO UPDATE SET name = excluded.name",
-            params![id, name],
-        )?;
-        tx.execute(
-            "INSERT INTO audit_log (at, task_id, action, status, authorization, detail) VALUES (?1, NULL, 'rule_rename', 'renamed', NULL, ?2)",
-            params![now_ms(), format!("{id}: {}", name.unwrap_or("(sin nombre)"))],
-        )?;
+        write_name(&tx, id, name)?;
         tx.commit()?;
         Ok(())
+    }
+
+    /// Guarda en una sola transacción las condiciones nuevas, el nombre (si `name` es
+    /// `Some`; `Some(None)` lo borra) y la validación avanzada sin remitente (D126). Cambiar
+    /// las condiciones borra la validación anterior; con `any_sender_ack` se da de nuevo a las
+    /// condiciones nuevas. Todo consta en el historial y, si algo falla, no se guarda nada.
+    /// Quien llama comprueba las condiciones con `check_rule`.
+    pub fn update_rule_full(
+        &mut self,
+        id: &str,
+        conditions: &Value,
+        name: Option<Option<&str>>,
+        any_sender_ack: bool,
+    ) -> Result<Rule> {
+        let tx = self.conn.transaction()?;
+        let current = live_rule(&tx, id)?;
+        let rule = insert_rule_version(
+            &tx,
+            id,
+            current.version + 1,
+            &current.action_kind,
+            conditions,
+            current.active,
+        )?;
+        let had_ack = tx.execute(
+            "UPDATE rule_meta SET allow_any_sender_ack_at = NULL
+             WHERE rule_id = ?1 AND allow_any_sender_ack_at IS NOT NULL",
+            [id],
+        )?;
+        if had_ack > 0 {
+            audit_any_sender(&tx, &rule, false, "retirada: las condiciones cambiaron")?;
+        }
+        if let Some(name) = name {
+            write_name(&tx, id, name)?;
+        }
+        if any_sender_ack {
+            tx.execute(
+                "INSERT INTO rule_meta (rule_id, allow_any_sender_ack_at) VALUES (?1, ?2)
+                 ON CONFLICT(rule_id) DO UPDATE SET allow_any_sender_ack_at = excluded.allow_any_sender_ack_at",
+                params![id, now_ms()],
+            )?;
+            audit_any_sender(&tx, &rule, true, "validada al guardar la regla")?;
+        }
+        tx.commit()?;
+        Ok(rule)
     }
 
     /// Archiva una regla: la deja inactiva (versión nueva si estaba activa) y la marca. No
@@ -500,6 +537,20 @@ impl Store {
         out.sort_by(|a, b| a.rule_id.cmp(&b.rule_id));
         Ok(out)
     }
+}
+
+/// Escribe el nombre visible de una regla y lo deja en el historial.
+fn write_name(tx: &rusqlite::Transaction<'_>, id: &str, name: Option<&str>) -> Result<()> {
+    tx.execute(
+        "INSERT INTO rule_meta (rule_id, name) VALUES (?1, ?2)
+         ON CONFLICT(rule_id) DO UPDATE SET name = excluded.name",
+        params![id, name],
+    )?;
+    tx.execute(
+        "INSERT INTO audit_log (at, task_id, action, status, authorization, detail) VALUES (?1, NULL, 'rule_rename', 'renamed', NULL, ?2)",
+        params![now_ms(), format!("{id}: {}", name.unwrap_or("(sin nombre)"))],
+    )?;
+    Ok(())
 }
 
 /// Análisis estricto de la autorización «regla X vN» de las filas anteriores a `rule_id`.

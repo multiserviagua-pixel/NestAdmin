@@ -80,15 +80,8 @@ export const FIELD_HELP: Record<string, string> = {
   filter_category: "Muestra solo las reglas de envío que se aplican a los correos de esta categoría.",
   filter_archived:
     "Las reglas archivadas no actúan ni se pueden editar, pero su historial se conserva. Por defecto no se muestran.",
-  column_rule:
-    "El nombre y la frase describen lo que hará la regla. El aviso de debajo recuerda su riesgo y el identificador sirve para encontrarla en el historial.",
-  column_action: "Lo que la regla hace sin preguntarle cuando coincide.",
-  column_conditions: "Datos que deben coincidir para que la regla actúe. Si alguno no coincide, la tarea queda en Pendientes.",
-  column_status:
-    "Activa: puede actuar sin revisión. Inactiva: no hace nada. Una regla nueva nace inactiva hasta que usted la active. «No actúa» indica que la regla está incompleta.",
-  column_version:
-    "Número interno para el historial: sube también al activar o desactivar la regla, aunque no cambie lo que hace.",
-  column_actions: "Activar o desactivar, editar, duplicar, probar con sus datos o archivar. «Más» reúne las acciones menos habituales.",
+  rules_list:
+    "Cada tarjeta es una regla. El nombre y la frase dicen lo que hará; el aviso recuerda su riesgo. «Activa» puede actuar sin revisión, «Inactiva» no hace nada y «No actúa» indica que la regla está incompleta. «Detalles» muestra el identificador y la versión (un número interno que también sube al activar o desactivar). «Más» reúne las acciones menos habituales. Una regla nueva nace inactiva hasta que usted la active.",
   stats:
     "«Aplicada» cuenta las veces que la regla ha registrado o enviado algo sin revisión. «Pasó a revisión» cuenta las tareas que la regla habría automatizado pero que se quedaron en Pendientes por otro motivo, por ejemplo una incidencia. «Sin clasificar» son acciones de versiones anteriores de la aplicación que citan la regla de una forma que no se puede leer.",
   category_name: "Clasificación que la IA asigna a cada correo recibido. Son cinco y no se pueden cambiar.",
@@ -182,6 +175,37 @@ export function publicDomainWarning(domain: string): string | null {
   return `${d} abarca a ${who}, no solo a una empresa. Si quiere acotar más, indique una dirección exacta.`;
 }
 
+export type AmountResult = { ok: true; value: string } | { ok: false; message: string };
+
+/** Importe como lo guarda la regla: `500` -> `500.00`, `500,5` -> `500.50`, `1.234,50` ->
+ * `1234.50`. Lo ambiguo (`1.234`: ¿mil doscientos treinta y cuatro o 1,234?) se rechaza. */
+export function normalizeAmount(raw: string): AmountResult {
+  const t = raw.trim().replace(/\s*(€|EUR)$/i, "");
+  const bad = (message: string): AmountResult => ({ ok: false, message });
+  if (/^\d{1,12}$/.test(t)) return { ok: true, value: `${t}.00` };
+  let m = /^(\d{1,12})[.,](\d{1,2})$/.exec(t);
+  if (m) return { ok: true, value: `${m[1]}.${m[2].padEnd(2, "0")}` };
+  m = /^(\d{1,3}(?:\.\d{3})+),(\d{1,2})$/.exec(t);
+  if (m) return { ok: true, value: `${m[1].replace(/\./g, "")}.${m[2].padEnd(2, "0")}` };
+  m = /^(\d{1,3}(?:,\d{3})+)\.(\d{1,2})$/.exec(t);
+  if (m) return { ok: true, value: `${m[1].replace(/,/g, "")}.${m[2].padEnd(2, "0")}` };
+  if (/^\d{1,3}([.,]\d{3})+$/.test(t) || /^\d+[.,]\d{3,}$/.test(t))
+    return bad(`«${t}» es ambiguo: no queda claro si son miles o decimales. Escriba, por ejemplo, 1234.00 o 1.234,00.`);
+  return bad("El total máximo debe ser un importe en euros, por ejemplo 500.00.");
+}
+
+/** Importe tal como lo exige el backend (`parse_amount`): dos decimales y, si hay miles, un solo
+ * separador distinto del decimal. Una regla guardada con otra forma no coincide nunca. */
+export function isStoredAmount(value: string): boolean {
+  const t = value.trim().replace(/\s*(€|EUR)$/, "");
+  return (
+    /^\d+[.,]\d{2}$/.test(t) ||
+    /^\d{1,3}(\.\d{3})+,\d{2}$/.test(t) ||
+    /^\d{1,3}(,\d{3})+\.\d{2}$/.test(t) ||
+    /^\d{1,3}([\s\u00a0]\d{3})+[.,]\d{2}$/.test(t)
+  );
+}
+
 export function isEmailAddress(value: string): boolean {
   return /^[^\s@,<>;()"]{1,64}@[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)+$/.test(value.trim());
 }
@@ -272,6 +296,12 @@ export function ruleStatus(rule: RuleLike): { primary: StatusChip; extra: Status
       extra: { text: rule.active ? "Activa" : "Inactiva", tone: "neutral" },
     };
   }
+  if (isKnownAction(rule.action_kind) && ruleProblem(rule)) {
+    return {
+      primary: { text: "No actúa: la regla tiene un problema", tone: "warn" },
+      extra: { text: rule.active ? "Activa" : "Inactiva", tone: "neutral" },
+    };
+  }
   return { primary: { text: rule.active ? "Activa" : "Inactiva", tone: rule.active ? "ok" : "neutral" }, extra: null };
 }
 
@@ -284,8 +314,8 @@ export function ruleProblem(rule: RuleLike): string | null {
   const unknown = Object.keys(c).find((k) => !allowed.includes(k));
   if (unknown) return `La regla tiene una condición desconocida («${unknown}»): no actuará.`;
   if (rule.action_kind === "register_invoice" && !text(c.supplier)) return "La regla no indica proveedor: no actuará.";
-  if (rule.action_kind === "register_invoice" && "max_total" in c && typeof c.max_total !== "string")
-    return "El máximo de la regla no es un importe válido: no actuará.";
+  if (rule.action_kind === "register_invoice" && "max_total" in c && (typeof c.max_total !== "string" || !isStoredAmount(c.max_total)))
+    return `El máximo de la regla${typeof c.max_total === "string" ? ` («${c.max_total}»)` : ""} no es un importe válido: no actuará.`;
   if (rule.action_kind === "register_invoice" && "currency" in c && c.currency !== "EUR")
     return "Hoy la aplicación solo registra facturas en euros: la regla no actuará.";
   if (rule.action_kind === "send_draft" && !text(c.category)) return "La regla no indica categoría: no actuará.";
@@ -391,8 +421,13 @@ export function draftOf(rule: RuleLike | null): RuleDraft {
 /** Condiciones que se envían al guardar. Solo las de su tipo de regla. */
 export function draftConditions(d: RuleDraft): Record<string, string> {
   if (d.kind === "register_invoice") {
+    const amount = normalizeAmount(d.max_total);
     return Object.fromEntries(
-      Object.entries({ supplier: d.supplier.trim(), max_total: d.max_total.trim(), currency: d.currency.trim() }).filter(([, v]) => v),
+      Object.entries({
+        supplier: d.supplier.trim(),
+        max_total: d.max_total.trim() ? (amount.ok ? amount.value : d.max_total.trim()) : "",
+        currency: d.currency.trim(),
+      }).filter(([, v]) => v),
     );
   }
   const out: Record<string, string> = { category: d.category };
@@ -408,7 +443,10 @@ export function draftProblems(d: RuleDraft, creating: boolean, options: { ignore
   if (d.name.trim().length > 80) out.push("El nombre admite hasta 80 caracteres.");
   if (d.kind === "register_invoice") {
     if (!d.supplier.trim()) out.push("Indique el proveedor.");
-    if (d.max_total.trim() && !/^\d{1,12}([.,]\d{1,2})?$/.test(d.max_total.trim())) out.push("El total máximo debe ser un importe, por ejemplo 500.00.");
+    if (d.max_total.trim()) {
+      const amount = normalizeAmount(d.max_total);
+      if (!amount.ok) out.push(amount.message);
+    }
   } else {
     if (d.scope === "sender" && !isEmailAddress(d.sender)) out.push("Indique la dirección completa del remitente, por ejemplo compras@cliente.test.");
     if (d.scope === "domain" && !isDomainName(d.sender_domain)) out.push("Indique el dominio, por ejemplo cliente.test (sin comodines ni @ en medio).");
@@ -417,12 +455,20 @@ export function draftProblems(d: RuleDraft, creating: boolean, options: { ignore
   return out;
 }
 
-/** Aviso al editar una regla con la opción avanzada: guardar borra la validación (D126). */
+/** Aviso al editar una regla de envío con la opción avanzada o que pasa a tenerla: guardar borra
+ * la validación (D126) y, si la regla está activa, empieza a contestar a cualquiera. */
 export function anySenderEditNotice(rule: RuleLike | null, d: RuleDraft): string | null {
-  if (!rule || !rule.any_sender_ack_at || rule.action_kind !== "send_draft") return null;
-  if (d.scope === "any")
-    return "Esta regla tiene validada la opción avanzada. Guardar cualquier cambio borra esa validación: dejará de enviar hasta que vuelva a confirmarla (más abajo, en «Opciones avanzadas»).";
-  return "Esta regla tenía validada la opción avanzada. Al indicar un remitente ya no la necesita y la validación se borra al guardar.";
+  if (!rule || rule.action_kind !== "send_draft") return null;
+  const parts: string[] = [];
+  if (rule.any_sender_ack_at) {
+    parts.push(
+      d.scope === "any"
+        ? "Esta regla tiene validada la opción avanzada. Guardar cualquier cambio borra esa validación: dejará de enviar hasta que vuelva a confirmarla (más abajo, en «Opciones avanzadas»)."
+        : "Esta regla tenía validada la opción avanzada. Al indicar un remitente ya no la necesita y la validación se borra al guardar.",
+    );
+  }
+  if (d.scope === "any" && rule.active) parts.push("Esta regla está activa: empezará a contestar a cualquier remitente en cuanto la guarde.");
+  return parts.length ? parts.join(" ") : null;
 }
 
 // ---- Contadores (D129) ----
@@ -438,9 +484,9 @@ function times(n: number): string {
   return n === 1 ? "1 vez" : `${n} veces`;
 }
 
-/** «03/11/2026» a partir de segundos desde 1970, en hora local. */
-export function formatDate(seconds: number): string {
-  const d = new Date(seconds * 1000);
+/** «03/11/2026» a partir de milisegundos desde 1970 (como los guarda el backend), en hora local. */
+export function formatDate(millis: number): string {
+  const d = new Date(millis);
   const two = (n: number) => String(n).padStart(2, "0");
   return `${two(d.getDate())}/${two(d.getMonth() + 1)}/${d.getFullYear()}`;
 }
@@ -475,7 +521,7 @@ export const REASON_CODES = [
   "sender_required",
   "foreign_currency",
   "currency_not_checked",
-  "scanned_currency",
+  "currency_not_shown",
 ] as const;
 
 export type ReasonCode = (typeof REASON_CODES)[number];
@@ -517,8 +563,8 @@ export function reasonText(code: string, facts?: Record<string, unknown> | null)
     }
     case "currency_not_checked":
       return "no consta la comprobación de moneda; reprocese o revise";
-    case "scanned_currency":
-      return "el documento está escaneado y no se lee la moneda";
+    case "currency_not_shown":
+      return "el documento no muestra la moneda; no se puede comprobar que sea en euros";
     default:
       return `motivo no reconocido (${code})`;
   }
@@ -580,11 +626,8 @@ function exampleLabel(item: SimulationLike["items"][number]): { task_id: number;
 }
 
 /** Resumen en lenguaje normal de una simulación, agrupado por motivo. */
-export function simulationSummary(sim: SimulationLike, actionKind: string, selfId?: string): SimulationSummary {
+export function simulationSummary(sim: SimulationLike, actionKind: string): SimulationSummary {
   const word = (n: number) => taskWord(actionKind, n);
-  // Una regla ya activa coincide consigo misma en la prueba: esas tareas no son un solapamiento real.
-  const own = selfId ? sim.items.filter((i) => i.outcome === "overlap" && i.overlapping_rules.length > 0 && i.overlapping_rules.every((r) => r === selfId)) : [];
-  const realOverlaps = sim.overlaps - own.length;
   const notes: string[] = [];
   const groups: ReviewGroup[] = [];
   const reviewCodes = Object.keys(sim.would_review).sort((a, b) => sim.would_review[b] - sim.would_review[a]);
@@ -594,19 +637,15 @@ export function simulationSummary(sim: SimulationLike, actionKind: string, selfI
     const items = sim.items.filter((i) => i.outcome === "review" && i.reason_code === code);
     groups.push({ code, count, text: reasonText(code), examples: items.map(exampleLabel) });
   }
-  if (realOverlaps > 0) {
+  if (sim.overlaps > 0) {
     groups.push({
       code: "several_rules_match",
-      count: realOverlaps,
+      count: sim.overlaps,
       text: reasonText("several_rules_match"),
-      examples: sim.items.filter((i) => i.outcome === "overlap" && !own.includes(i)).map(exampleLabel),
+      examples: sim.items.filter((i) => i.outcome === "overlap").map(exampleLabel),
     });
   }
-  const blocked = sim.would_block_other.filter((b) => b.rule_id !== selfId).map((b) => ({ rule_id: b.rule_id, count: b.task_ids.length }));
-  if (own.length > 0)
-    notes.push(
-      `${own.length} ${word(own.length)} ${own.length === 1 ? "coincide" : "coinciden"} solo con esta misma regla, que ya está activa: se tratarían como hasta ahora y no se pueden contar aquí como automatizadas ni como revisadas.`,
-    );
+  const blocked = sim.would_block_other.map((b) => ({ rule_id: b.rule_id, count: b.task_ids.length }));
   if (sim.without_currency_check > 0)
     notes.push(
       sim.without_currency_check === 1
@@ -675,7 +714,13 @@ export function sentenceEnd(value: string): string {
 }
 
 /** Cada regla comprobada, con si coincidía y el motivo concreto. Solo usa lo que guardó la evaluación. */
-export function explainEvaluation(evaluation: unknown): { headline: string; candidates: CandidateExplanation[] } | null {
+export const AUTOMATED_NOT_CONFIRMED =
+  "una regla activa coincidía y se intentó la acción, pero no consta que se completara; por eso queda en revisión. Compruebe el aviso de recuperación de esta tarea antes de aprobarla";
+
+export function explainEvaluation(
+  evaluation: unknown,
+  awaitingReview = false,
+): { headline: string; candidates: CandidateExplanation[] } | null {
   if (!isEvaluation(evaluation)) return null;
   const several = evaluation.code === "several_rules_match";
   const rank: Record<CandidateOutcome, number> = { matched: 0, would_apply: 1, needs_sender: 2, no_match: 3 };
@@ -699,7 +744,9 @@ export function explainEvaluation(evaluation: unknown): { headline: string; cand
       return { id: c.id, version: c.version, outcome, text: detail };
     })
     .sort((a, b) => rank[a.outcome] - rank[b.outcome]);
-  return { headline: sentenceEnd(reasonText(evaluation.code, evaluation.facts)), candidates };
+  // Una tarea en revisión cuya evaluación dice «automatizada» es un intento sin confirmar.
+  const reason = awaitingReview && evaluation.code === "automated" ? AUTOMATED_NOT_CONFIRMED : reasonText(evaluation.code, evaluation.facts);
+  return { headline: sentenceEnd(reason), candidates };
 }
 
 export const NO_EVALUATION = "Esta tarea es anterior a este registro: no consta qué reglas se comprobaron.";

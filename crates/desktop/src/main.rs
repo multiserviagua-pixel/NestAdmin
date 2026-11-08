@@ -573,7 +573,8 @@ fn rule_stats(shared: State<'_, SharedState>) -> CmdResult<Vec<RuleStats>> {
 }
 
 /// Solo lectura: no escribe nada ni llama a la IA. `assume_any_sender_ack` es solo una
-/// hipótesis (D126): nunca guarda la marca.
+/// hipótesis (D126): nunca guarda la marca. `exclude_rule_id` quita esa regla de la
+/// comparación (probar una regla guardada sin que coincida consigo misma).
 #[tauri::command]
 fn simulate_rule(
     shared: State<'_, SharedState>,
@@ -581,6 +582,7 @@ fn simulate_rule(
     conditions: Value,
     limit: Option<usize>,
     assume_any_sender_ack: Option<bool>,
+    exclude_rule_id: Option<String>,
 ) -> CmdResult<Simulation> {
     shared
         .app()?
@@ -589,8 +591,27 @@ fn simulate_rule(
             &conditions,
             limit,
             assume_any_sender_ack.unwrap_or(false),
+            exclude_rule_id.as_deref(),
         )
         .map_err(text)
+}
+
+/// Guarda de una vez condiciones, nombre y validación avanzada (D126): sin guardados parciales.
+#[tauri::command]
+fn update_rule_with_ack<R: Runtime>(
+    shared: State<'_, SharedState>,
+    handle: AppHandle<R>,
+    id: String,
+    name: Option<String>,
+    conditions: Value,
+    acknowledge_any_sender: bool,
+) -> CmdResult<RuleView> {
+    let view = shared
+        .app()?
+        .update_rule_with_ack(&id, name.as_deref(), &conditions, acknowledge_any_sender)
+        .map_err(text)?;
+    changed(&handle);
+    Ok(view)
 }
 
 #[tauri::command]
@@ -1354,6 +1375,7 @@ fn configure<R: Runtime>(builder: Builder<R>, prepare_only: bool) -> Builder<R> 
             create_rule,
             rename_rule,
             update_rule,
+            update_rule_with_ack,
             set_rule_active,
             set_rule_any_sender,
             archive_rule,

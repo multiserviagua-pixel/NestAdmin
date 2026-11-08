@@ -745,6 +745,10 @@ fn a_rule_send_reconciled_after_a_person_approves_stays_attributed_to_the_rule()
     let done = app.approve(task.id, 1).unwrap();
     assert_eq!(done.state, TaskState::Completed);
     assert_eq!(fixture.world().sends, [proposal(1)], "un solo envío");
+    // El resultado también dice que lo envió la regla, como `actions` y el historial.
+    let result = done.result.clone().unwrap();
+    assert_eq!(result["authorization"]["type"], "rule", "{result}");
+    assert_eq!(result["authorization"]["rule_id"], "facturas");
 
     let label = "regla facturas v2";
     let conn = rusqlite::Connection::open(fixture.dir.path().join("nestadmin.db")).unwrap();

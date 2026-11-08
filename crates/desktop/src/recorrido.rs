@@ -407,6 +407,8 @@ fn invoice(supplier: &str, number: &str, day: u32, total: &str) -> Vec<u8> {
             "subtotal": "100.00",
             "tax": "21.00",
             "total": total,
+            // Una factura que debe poder automatizarse muestra el euro (D127).
+            "moneda": "EUR",
         })
     )
     .into_bytes()
@@ -897,6 +899,36 @@ fn panel_de_reglas_nombre_remitente_archivo_y_simulacion_desde_la_ventana() {
         json!({ "id": "envio", "name": "Pagos de Alfa" }),
     );
 
+    // Guardado atómico: nombre, condiciones y validación avanzada en una sola llamada. Si
+    // falla, no se guarda nada, tampoco el nombre.
+    let before_views = s.ok("rule_views", json!({}));
+    assert!(s
+        .call(
+            "update_rule_with_ack",
+            json!({
+                "id": "envio", "name": "Nombre nuevo",
+                "conditions": { "category": "solicitud_factura" },
+                "acknowledgeAnySender": false,
+            }),
+        )
+        .is_err());
+    assert_eq!(
+        s.ok("rule_views", json!({})),
+        before_views,
+        "un fallo no guarda ni el nombre"
+    );
+    let saved = s.ok(
+        "update_rule_with_ack",
+        json!({
+            "id": "envio", "name": "Contesta a cualquiera",
+            "conditions": { "category": "consulta_pago" },
+            "acknowledgeAnySender": true,
+        }),
+    );
+    assert_eq!(saved["name"], "Contesta a cualquiera");
+    assert!(saved["any_sender_ack_at"].is_number());
+    assert!(saved["conditions"].get("sender_domain").is_none());
+
     // Archivar: inactiva, no se activa ni se edita; desarchivar la deja inactiva.
     s.ok(
         "set_rule_active",
@@ -953,6 +985,33 @@ fn panel_de_reglas_nombre_remitente_archivo_y_simulacion_desde_la_ventana() {
     );
     assert_eq!(hypothetical["action_kind"], "send_draft");
     assert_eq!((s.tasks(), s.audit()), before);
+
+    // Una regla activa coincide consigo misma: con `excludeRuleId` se prueba sin ella.
+    s.ok(
+        "set_rule_active",
+        json!({ "id": "facturas-de-alfa", "active": true }),
+    );
+    let conditions = json!({ "supplier": "Alfa SL", "max_total": "500.00" });
+    let with_self = s.ok(
+        "simulate_rule",
+        json!({ "actionKind": "register_invoice", "conditions": conditions, "limit": null }),
+    );
+    assert_eq!(with_self["overlaps"], 1, "{with_self}");
+    let without_self = s.ok(
+        "simulate_rule",
+        json!({
+            "actionKind": "register_invoice", "conditions": conditions, "limit": null,
+            "excludeRuleId": "facturas-de-alfa",
+        }),
+    );
+    assert_eq!(
+        (
+            without_self["would_automate"].clone(),
+            without_self["overlaps"].clone()
+        ),
+        (json!(1), json!(0)),
+        "{without_self}"
+    );
 
     let stats = s.ok("rule_stats", json!({}));
     assert_eq!(stats.as_array().unwrap().len(), 2);

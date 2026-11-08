@@ -1383,14 +1383,6 @@ h2 + .section {
   gap: var(--s2);
 }
 
-.rules-grid code {
-  font-size: var(--fs-small);
-}
-
-.rules-grid {
-  min-width: 620px;
-}
-
 .tabpanel {
   padding-top: var(--s4);
 }
@@ -1611,6 +1603,77 @@ h2 + .section {
   gap: var(--s2);
 }
 
-.rules-grid th:first-child {
-  width: 46%;
+/* Lista de reglas en tarjetas: sin tabla ni desplazamiento horizontal. */
+.rule-cards {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s4);
+  margin-top: var(--s3);
+}
+
+.rule-card {
+  max-width: 920px;
+  margin-top: 0;
+}
+
+.rule-card.is-archived {
+  border-style: dashed;
+}
+
+.rule-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--s2) var(--s3);
+}
+
+.rule-title {
+  margin: 0;
+  font-size: var(--fs-title);
+  overflow-wrap: anywhere;
+}
+
+.rule-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s2);
+  margin-top: var(--s3);
+  padding-top: var(--s3);
+  border-top: 1px solid var(--line);
+}
+
+.rule-details {
+  margin-top: var(--s2);
+}
+
+.rule-details > summary {
+  cursor: pointer;
+  color: var(--muted);
+  font-size: var(--fs-small);
+}
+
+.rule-facts {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: var(--s1) var(--s3);
+  margin: var(--s2) 0 0;
+  font-size: var(--fs-small);
+}
+
+.rule-facts dt {
+  color: var(--muted);
+}
+
+.rule-facts dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.list-count {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s1);
 }

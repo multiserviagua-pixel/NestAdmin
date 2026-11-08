@@ -249,6 +249,54 @@ impl App {
         self.rule_view(id)
     }
 
+    /// Guarda de una vez las condiciones, el nombre y la validación avanzada de una regla
+    /// (D126): una sola transacción, sin guardados parciales. `name`: `None` lo deja como está;
+    /// `Some("")` lo borra. `acknowledge_any_sender` da la validación a las condiciones
+    /// nuevas y solo vale para una regla de envío sin remitente; sin ella, una regla de envío
+    /// sin remitente se rechaza.
+    pub fn update_rule_with_ack(
+        &mut self,
+        id: &str,
+        name: Option<&str>,
+        conditions: &Value,
+        acknowledge_any_sender: bool,
+    ) -> AppResult<RuleView> {
+        let current = self
+            .store
+            .rule(id)?
+            .ok_or_else(|| AppError::Invalid(format!("regla {id} inexistente")))?;
+        let meta = self.store.rule_meta(id)?;
+        if meta.as_ref().is_some_and(|m| m.archived_at.is_some()) {
+            return Err(CoreError::RuleArchived(id.to_owned()).into());
+        }
+        if acknowledge_any_sender
+            && (current.action_kind != SEND_DRAFT
+                || ["sender", "sender_domain"]
+                    .iter()
+                    .any(|k| conditions.get(k).is_some()))
+        {
+            return Err(AppError::Invalid(
+                "la validación avanzada solo se aplica a reglas de envío sin remitente".into(),
+            ));
+        }
+        check_rule(&current.action_kind, conditions, acknowledge_any_sender)?;
+        let name_change = match name {
+            None => None,
+            Some(raw) => {
+                let cleaned = clean_name(Some(raw))?;
+                let stored = meta.and_then(|m| m.name);
+                (cleaned != stored).then_some(cleaned)
+            }
+        };
+        self.store.update_rule_full(
+            id,
+            conditions,
+            name_change.as_ref().map(|n| n.as_deref()),
+            acknowledge_any_sender,
+        )?;
+        self.rule_view(id)
+    }
+
     /// Valida o retira la opción avanzada de una regla de envío sin remitente (D126). Queda
     /// en el historial con su motivo. Sin la marca, la regla no automatiza.
     pub fn set_rule_any_sender(&mut self, id: &str, acknowledge: bool) -> AppResult<RuleView> {
@@ -350,12 +398,16 @@ impl App {
     /// `assume_any_sender_ack` es solo una hipótesis para una regla de envío sin remitente:
     /// simula qué haría si tuviera la validación avanzada (D126). Nunca escribe la marca; sin
     /// ella la regla sin remitente no automatiza y la simulación lo dice.
+    ///
+    /// `exclude_rule_id` quita esa regla de las existentes para la prueba: sirve para probar
+    /// una regla ya guardada (o editada) sin que coincida consigo misma.
     pub fn simulate_rule(
         &self,
         action_kind: &str,
         conditions: &Value,
         limit: Option<usize>,
         assume_any_sender_ack: bool,
+        exclude_rule_id: Option<&str>,
     ) -> AppResult<Simulation> {
         let limit = limit.unwrap_or(DEFAULT_SIMULATION_LIMIT);
         if limit == 0 || limit > MAX_SIMULATION_LIMIT {
@@ -370,7 +422,11 @@ impl App {
             REGISTER_INVOICE => INVOICE,
             _ => EMAIL,
         };
-        let (rules, mut any_sender) = self.rules_for_evaluation()?;
+        let (mut rules, mut any_sender) = self.rules_for_evaluation()?;
+        if let Some(excluded) = exclude_rule_id {
+            rules.retain(|r| r.id != excluded);
+            any_sender.remove(excluded);
+        }
         if assume_any_sender_ack {
             any_sender.insert(SIMULATED.to_owned());
         }

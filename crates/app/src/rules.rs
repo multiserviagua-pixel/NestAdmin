@@ -44,9 +44,9 @@ pub enum ReasonCode {
     ForeignCurrency,
     /// La tarea no lleva la comprobación local de moneda (tarea anterior a D127).
     CurrencyNotChecked,
-    /// El documento se leyó con OCR y no consta el euro: la moneda no se puede comprobar
-    /// (D127).
-    ScannedCurrency,
+    /// El documento no muestra el euro (`€`, `EUR`, «euro»): no se puede comprobar que sea en
+    /// euros, sea texto digital o escaneado (D127).
+    CurrencyNotShown,
 }
 
 /// Resultado de comprobar una regla contra los datos de una tarea. El motivo de no
@@ -92,7 +92,7 @@ impl Explanation {
                 join_ids(&self.facts["currencies"])
             ),
             ReasonCode::CurrencyNotChecked => CURRENCY_UNCHECKED.into(),
-            ReasonCode::ScannedCurrency => SCANNED_CURRENCY.into(),
+            ReasonCode::CurrencyNotShown => CURRENCY_NOT_SHOWN.into(),
             ReasonCode::SenderRequired => format!(
                 "la regla no indica remitente; añádalo o valide la opción avanzada (regla: {})",
                 self.facts["rule_ids"]
@@ -137,8 +137,9 @@ impl Explanation {
 /// Motivo cuando falta la comprobación local de moneda (D127).
 pub const CURRENCY_UNCHECKED: &str = "no consta la comprobación de moneda; reprocese o revise";
 
-/// Motivo cuando el documento está escaneado y no se lee la moneda (D127).
-pub const SCANNED_CURRENCY: &str = "el documento está escaneado y no se lee la moneda";
+/// Motivo cuando el documento no muestra el euro (D127).
+pub const CURRENCY_NOT_SHOWN: &str =
+    "el documento no muestra la moneda; no se puede comprobar que sea en euros";
 
 fn join_ids(value: &Value) -> String {
     value
@@ -258,16 +259,16 @@ pub fn decide(rules: &[Rule], action_kind: &str, result: &Value) -> RuleDecision
 
 /// Monedas distintas del euro que consta que menciona una factura (D127): las del texto
 /// local (`currency_evidence`) y la moneda explícita de los campos si no es EUR. `None` si la
-/// tarea no lleva la comprobación (tareas anteriores): fallo cerrado.
+/// tarea no lleva la comprobación o es defectuosa (tareas anteriores, `foreign` que no es una
+/// lista de textos): fallo cerrado.
 pub fn foreign_currencies(result: &Value) -> Option<Vec<String>> {
     let evidence = result.get("currency_evidence").filter(|e| e.is_object())?;
-    let mut foreign: Vec<String> = evidence["foreign"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter_map(Value::as_str)
-        .map(str::to_owned)
-        .collect();
+    let mut foreign: Vec<String> = evidence
+        .get("foreign")?
+        .as_array()?
+        .iter()
+        .map(|c| c.as_str().map(str::to_owned))
+        .collect::<Option<_>>()?;
     if let Some(explicit) = result["fields"]["currency"]
         .as_str()
         .map(str::trim)
@@ -280,18 +281,10 @@ pub fn foreign_currencies(result: &Value) -> Option<Vec<String>> {
     Some(foreign)
 }
 
-/// El documento tiene alguna página leída con OCR y no consta el euro: no se puede afirmar
-/// que sea una factura en euros (D127). Una factura con texto digital sin ninguna marca sigue
-/// contando como euro.
-pub fn scanned_without_euro(result: &Value) -> bool {
-    let evidence = &result["currency_evidence"];
-    let scanned = evidence["ocr"].as_bool() == Some(true)
-        || result["pages"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .any(|p| p["method"].as_str() == Some("ocr"));
-    scanned && evidence["euro"].as_bool() != Some(true)
+/// El documento muestra el euro (`currency_evidence.euro`): evidencia positiva de que una
+/// factura está en euros (D127). Sin ella no se puede comprobar, sea texto digital o OCR.
+pub fn shows_euro(result: &Value) -> bool {
+    result["currency_evidence"]["euro"].as_bool() == Some(true)
 }
 
 /// Motivos que impiden automatizar aunque haya una regla.
@@ -307,9 +300,7 @@ fn blockers(action_kind: &str, result: &Value) -> Option<(ReasonCode, Value)> {
             Some(list) if !list.is_empty() => {
                 Some((ReasonCode::ForeignCurrency, json!({ "currencies": list })))
             }
-            Some(_) if scanned_without_euro(result) => {
-                Some((ReasonCode::ScannedCurrency, json!({})))
-            }
+            Some(_) if !shows_euro(result) => Some((ReasonCode::CurrencyNotShown, json!({}))),
             Some(_) => None,
         },
         SEND_DRAFT
@@ -627,7 +618,7 @@ mod tests {
     fn invoice() -> Value {
         json!({
             "fields": { "supplier": "Alfa SL", "total": "121.00", "currency": null },
-            "currency_evidence": { "foreign": [], "euro": false },
+            "currency_evidence": { "foreign": [], "euro": true },
             "issues": [],
             "unreadable": [],
         })
@@ -1019,7 +1010,7 @@ mod tests {
                 json!({ "supplier": "Alfa SL", "max_total": "200.00" }),
             )
         };
-        // Sin marca de moneda ni mención extranjera cuenta como euro.
+        // Con el euro a la vista y sin otra moneda, coincide y automatiza.
         assert!(automates(limited(), &invoice(), REGISTER_INVOICE));
         assert_eq!(
             why(limited(), &with_foreign(&["USD"])).as_deref(),
@@ -1143,31 +1134,40 @@ mod tests {
         assert!(!automates(r, &blank, REGISTER_INVOICE));
     }
 
+    /// Evidencia de moneda con el euro o sin él, y con la página leída por OCR o no.
+    fn evidence(euro: bool, ocr: bool) -> Value {
+        let mut r = invoice();
+        r["currency_evidence"] = json!({ "foreign": [], "euro": euro, "ocr": ocr });
+        r
+    }
+
     #[test]
-    fn a_scanned_document_needs_a_legible_euro() {
-        let scanned = |euro: bool| {
-            let mut r = invoice();
-            r["currency_evidence"] = json!({ "foreign": [], "euro": euro, "ocr": true });
-            r
-        };
+    fn a_document_that_does_not_show_the_euro_goes_to_review() {
         for conditions in [
             json!({ "supplier": "Alfa SL" }),
             json!({ "supplier": "Alfa SL", "max_total": "500.00" }),
         ] {
             let r = || rule(REGISTER_INVOICE, conditions.clone());
-            let e = evaluate(&[r()], REGISTER_INVOICE, &scanned(false));
-            assert_eq!(e.explanation.code, ReasonCode::ScannedCurrency);
-            assert_eq!(
-                e.explanation.summary(),
-                "el documento está escaneado y no se lee la moneda"
-            );
-            assert!(matches!(e.decision, RuleDecision::Review(_)));
-            assert!(automates(r(), &scanned(true), REGISTER_INVOICE));
-            // Con texto digital y sin ninguna marca sigue contando como euro.
-            assert!(automates(r(), &invoice(), REGISTER_INVOICE));
+            // Sin marca de euro, en texto digital o en OCR, no se puede comprobar la moneda.
+            for ocr in [false, true] {
+                let e = evaluate(&[r()], REGISTER_INVOICE, &evidence(false, ocr));
+                assert_eq!(
+                    e.explanation.code,
+                    ReasonCode::CurrencyNotShown,
+                    "ocr={ocr}"
+                );
+                assert_eq!(
+                    e.explanation.summary(),
+                    "el documento no muestra la moneda; no se puede comprobar que sea en euros"
+                );
+                assert!(matches!(e.decision, RuleDecision::Review(_)));
+                // La regla sí coincide: el bloqueo es de la factura.
+                assert!(e.explanation.candidates[0].matches);
+                assert!(automates(r(), &evidence(true, ocr), REGISTER_INVOICE));
+            }
         }
-        // Otra moneda mencionada manda sobre el escaneo.
-        let mut both = scanned(false);
+        // Otra moneda mencionada manda sobre la falta del euro.
+        let mut both = evidence(false, true);
         both["currency_evidence"]["foreign"] = json!(["USD"]);
         let e = evaluate(
             &[rule(REGISTER_INVOICE, json!({ "supplier": "Alfa SL" }))],
@@ -1175,14 +1175,36 @@ mod tests {
             &both,
         );
         assert_eq!(e.explanation.code, ReasonCode::ForeignCurrency);
-        // Una tarea guardada sin `ocr` en la evidencia pero con una página OCR también cuenta.
-        let mut paged = invoice();
-        paged["pages"] = json!([{ "number": 1, "method": "ocr" }]);
+        // El euro junto a otra moneda no automatiza: queda la extranjera.
+        let mut mixed = evidence(true, false);
+        mixed["currency_evidence"]["foreign"] = json!(["USD"]);
         assert!(!automates(
             rule(REGISTER_INVOICE, json!({ "supplier": "Alfa SL" })),
-            &paged,
+            &mixed,
             REGISTER_INVOICE
         ));
+    }
+
+    #[test]
+    fn malformed_currency_evidence_is_not_checked() {
+        let free = || rule(REGISTER_INVOICE, json!({ "supplier": "Alfa SL" }));
+        for bad in [
+            json!({}),
+            json!({ "euro": true }),
+            json!({ "foreign": "USD", "euro": true }),
+            json!({ "foreign": null, "euro": true }),
+            json!({ "foreign": [1, "USD"], "euro": true }),
+            json!([]),
+            json!("EUR"),
+        ] {
+            let mut r = invoice();
+            r["currency_evidence"] = bad.clone();
+            assert!(foreign_currencies(&r).is_none(), "{bad}");
+            let e = evaluate(&[free()], REGISTER_INVOICE, &r);
+            assert_eq!(e.explanation.code, ReasonCode::CurrencyNotChecked, "{bad}");
+        }
+        // Una lista vacía y válida sí está comprobada.
+        assert_eq!(foreign_currencies(&invoice()), Some(vec![]));
     }
 
     #[test]

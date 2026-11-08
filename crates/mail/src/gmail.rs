@@ -15,7 +15,7 @@ use crate::mailbox::{CreatedDraft, DraftStatus, MailProvider};
 use crate::oauth::TokenSource;
 use crate::text::{
     decode_text, encode_header, format_utc_millis, header_addresses, header_value, html_to_text,
-    mime_base64,
+    mime_base64, single_address,
 };
 use crate::{error, MailResult};
 
@@ -186,7 +186,7 @@ fn message(value: &Value) -> Option<Message> {
         subject: header(value, "Subject")
             .filter(|s| !s.trim().is_empty())
             .map(str::to_owned),
-        from: header(value, "From").and_then(|h| header_addresses(h).into_iter().next()),
+        from: header(value, "From").and_then(single_address),
         to: header(value, "To").map(header_addresses),
         body: body(value),
         attachments: {
@@ -518,6 +518,31 @@ mod tests {
         assert_eq!(m.to, Some(vec!["compras@empresa.test".to_owned()]));
         assert_eq!(m.subject, None, "un asunto ausente no se inventa");
         assert_eq!(m.date.as_deref(), Some("2026-11-03T00:00:00Z"));
+    }
+
+    #[test]
+    fn a_from_header_with_several_addresses_has_no_sender() {
+        let from = |h: &str| {
+            message(
+                &json!({ "id": "m1", "payload": { "headers": [{ "name": "From", "value": h }] } }),
+            )
+            .unwrap()
+            .from
+        };
+        assert_eq!(
+            from("Ana <ana@cliente.test>").as_deref(),
+            Some("ana@cliente.test")
+        );
+        assert_eq!(
+            from("\"Ana, B\" <ana@cliente.test>").as_deref(),
+            Some("ana@cliente.test")
+        );
+        // Una lista no identifica a un remitente (D126): ninguna dirección, ni la primera.
+        assert_eq!(from("y@alfa.test, x@evil.test"), None);
+        assert_eq!(from("Ana <ana@cliente.test>, x@evil.test"), None);
+        // Una parte que no es dirección tampoco deja pasar la otra.
+        assert_eq!(from("ana@cliente.test, basura"), None);
+        assert_eq!(from("sin direccion"), None);
     }
 
     #[test]

@@ -129,6 +129,25 @@ pub fn is_address(address: &str) -> bool {
 /// Direcciones de una cabecera `To`/`From`: `Nombre <a@b.test>, c@d.test`. Las comas dentro
 /// de comillas forman parte del nombre.
 pub fn header_addresses(header: &str) -> Vec<String> {
+    split_header(header)
+        .iter()
+        .filter_map(|part| part_address(part))
+        .collect()
+}
+
+/// La única dirección de una cabecera `From`, o `None` si hay varias, ninguna o alguna parte
+/// no es una dirección válida (D126): una lista como `y@alfa.test, x@evil.test` no identifica
+/// a un remitente y no debe parecerse a ninguna regla.
+pub fn single_address(header: &str) -> Option<String> {
+    let parts = split_header(header);
+    match parts.as_slice() {
+        [only] => part_address(only),
+        _ => None,
+    }
+}
+
+/// Partes de una cabecera de direcciones, separadas por comas fuera de comillas.
+fn split_header(header: &str) -> Vec<String> {
     let mut parts = Vec::new();
     let mut current = String::new();
     let mut quoted = false;
@@ -144,17 +163,16 @@ pub fn header_addresses(header: &str) -> Vec<String> {
     }
     parts.push(current);
     parts
-        .iter()
-        .filter_map(|part| {
-            let part = part.trim();
-            let address = match (part.rfind('<'), part.rfind('>')) {
-                (Some(start), Some(end)) if start < end => &part[start + 1..end],
-                _ => part,
-            };
-            let address = address.trim();
-            is_address(address).then(|| address.to_owned())
-        })
-        .collect()
+}
+
+fn part_address(part: &str) -> Option<String> {
+    let part = part.trim();
+    let address = match (part.rfind('<'), part.rfind('>')) {
+        (Some(start), Some(end)) if start < end => &part[start + 1..end],
+        _ => part,
+    };
+    let address = address.trim();
+    is_address(address).then(|| address.to_owned())
 }
 
 /// Valor seguro para una cabecera: sin saltos de línea que permitan inyectar otras.

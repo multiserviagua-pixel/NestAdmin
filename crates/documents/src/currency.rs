@@ -36,6 +36,8 @@ const SYMBOLS: &[(char, &str)] = &[
     ('₡', "CRC"),
     ('₲', "PYG"),
     ('₮', "MNT"),
+    ('円', "JPY"),
+    ('元', "CNY"),
 ];
 
 /// Códigos ISO 4217 que se aceptan en cualquier caso (`usd 500`): no son palabras corrientes.
@@ -79,6 +81,13 @@ const NAMES: &[(&str, &str)] = &[
     ("yuan", "CNY"),
     ("kr", "KR"),
     ("zł", "PLN"),
+    ("kč", "CZK"),
+    // Plurales en español. `pesos` no dice de qué país: `PESO`, como `KR` con las coronas.
+    ("pesos", "PESO"),
+    ("libras", "GBP"),
+    ("francos", "CHF"),
+    ("reales", "BRL"),
+    ("soles", "PEN"),
 ];
 
 /// Prefijos de letras antes de `$` y la moneda que indican.
@@ -146,13 +155,26 @@ fn words(chars: &[char]) -> Vec<Word> {
     out
 }
 
-/// Separación corta (espacios o dos puntos, sin salto de línea) entre dos palabras.
+/// Separación horizontal entre dos palabras: espacios (también varios o tabuladores), dos
+/// puntos y paréntesis, sin salto de línea y de hasta 40 caracteres: `500.00   PEN`,
+/// `(TRY): 500,00`.
 fn adjacent(chars: &[char], a_end: usize, b_start: usize) -> bool {
     b_start >= a_end
-        && b_start - a_end <= 2
+        && b_start - a_end <= 40
         && chars[a_end..b_start]
             .iter()
-            .all(|c| matches!(c, ' ' | '\u{a0}' | ':' | '\t'))
+            .all(|c| matches!(c, ' ' | '\u{a0}' | ':' | '\t' | '(' | ')'))
+}
+
+/// `S/` (soles) delante de una cifra: `S/ 500`, `S/.500`. No cuenta `S/N` ni `A/S`.
+fn is_soles_symbol(chars: &[char], i: usize) -> bool {
+    if chars[i] != 'S' || chars.get(i + 1) != Some(&'/') || (i > 0 && is_word(chars[i - 1])) {
+        return false;
+    }
+    chars[i + 2..]
+        .iter()
+        .find(|c| !matches!(c, ' ' | '\u{a0}' | '.' | '\t'))
+        .is_some_and(char::is_ascii_digit)
 }
 
 /// Busca en `text` menciones de otras monedas y del euro. No distingue dónde aparecen: un
@@ -179,6 +201,8 @@ pub fn currency_evidence(text: &str) -> CurrencyEvidence {
             foreign.push((*code).to_owned());
         } else if c == '€' {
             euro = true;
+        } else if is_soles_symbol(&chars, i) {
+            foreign.push("PEN".to_owned());
         }
     }
     let words = words(&chars);
@@ -333,6 +357,33 @@ mod tests {
         // Euro y otra moneda a la vez: queda la extranjera para que lo revise una persona.
         let both = currency_evidence("Total 100 € (aprox. 108 USD)");
         assert_eq!((both.foreign, both.euro), (vec!["USD".to_owned()], true));
+    }
+
+    #[test]
+    fn more_names_and_symbols_are_found() {
+        assert_eq!(foreign("Total 500 pesos"), ["PESO"]);
+        assert_eq!(foreign("30 libras y 5 francos"), ["CHF", "GBP"]);
+        assert_eq!(foreign("Total 80 reales"), ["BRL"]);
+        assert_eq!(foreign("Total 100 soles"), ["PEN"]);
+        assert_eq!(foreign("Total S/ 100.00"), ["PEN"]);
+        assert_eq!(foreign("Total S/.100"), ["PEN"]);
+        assert_eq!(foreign("Total 2500 Kč"), ["CZK"]);
+        assert_eq!(foreign("合計 5000円"), ["JPY"]);
+        assert_eq!(foreign("合计 300元"), ["CNY"]);
+        // `S/N` y `A/S` no son soles.
+        assert!(foreign("Ref. S/N 123 y Nordic A/S").is_empty());
+    }
+
+    #[test]
+    fn wide_spacing_and_parentheses_do_not_hide_a_code() {
+        assert_eq!(foreign("Total 500.00   PEN"), ["PEN"]);
+        assert_eq!(foreign("Total 500.00\t\tPEN"), ["PEN"]);
+        assert_eq!(foreign("Total PEN      500"), ["PEN"]);
+        assert_eq!(foreign("Importe (TRY): 500,00"), ["TRY"]);
+        assert_eq!(foreign("Moneda   :   MAD"), ["MAD"]);
+        // Un salto de línea sigue separando.
+        assert!(foreign("Total 500.00\n   PEN drive").is_empty());
+        assert!(foreign("TOP      SECRET").is_empty());
     }
 
     #[test]

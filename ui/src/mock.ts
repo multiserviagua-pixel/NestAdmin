@@ -719,7 +719,7 @@ function ruleView(rule: Rule): RuleView {
   const stats: RuleStats = {
     rule_id: rule.id,
     applied: (seed.applied ?? 0) + applied.length,
-    last_applied_at: applied.length ? Math.max(...applied.map((t) => Math.floor(t.updated_at / 1000))) : (seed.last_applied_at ?? null),
+    last_applied_at: applied.length ? Math.max(...applied.map((t) => t.updated_at)) : (seed.last_applied_at ?? null),
     reviewed: seed.reviewed ?? 0,
     unclassified: seed.unclassified ?? 0,
   };
@@ -760,7 +760,7 @@ interface SeedRule extends Omit<Rule, "version" | "created_at"> {
   anySender?: boolean;
   stats?: Partial<RuleStats>;
 }
-const DAY = 86400;
+const DAY = 86_400_000; // milisegundos, como los guarda el backend
 const seedRules: SeedRule[] = [
   {
     id: "alfa-hasta-500",
@@ -768,7 +768,7 @@ const seedRules: SeedRule[] = [
     action_kind: "register_invoice",
     conditions: { supplier: "Suministros Alfa SL", max_total: "500.00", currency: "EUR" },
     active: true,
-    stats: { applied: 3, last_applied_at: Math.floor(now() / 1000) - 5 * DAY, reviewed: 1 },
+    stats: { applied: 3, last_applied_at: now() - 5 * DAY, reviewed: 1 },
   },
   { id: "beta-sin-limite", action_kind: "register_invoice", conditions: { supplier: "Beta Servicios SL" }, active: false },
   {
@@ -799,7 +799,7 @@ const seedRules: SeedRule[] = [
     action_kind: "send_draft",
     conditions: { category: "consulta_pago" },
     active: true,
-    stats: { applied: 2, last_applied_at: Math.floor(now() / 1000) - 40 * DAY, reviewed: 0, unclassified: 2 },
+    stats: { applied: 2, last_applied_at: now() - 40 * DAY, reviewed: 0, unclassified: 2 },
   },
   {
     id: "documentacion-cualquiera",
@@ -808,7 +808,7 @@ const seedRules: SeedRule[] = [
     conditions: { category: "documentacion" },
     active: true,
     anySender: true,
-    stats: { applied: 1, last_applied_at: Math.floor(now() / 1000) - 2 * DAY, reviewed: 0 },
+    stats: { applied: 1, last_applied_at: now() - 2 * DAY, reviewed: 0 },
   },
   { id: "alfa-antigua", name: "Alfa (regla antigua)", action_kind: "register_invoice", conditions: { supplier: "Suministros Alfa SL" }, active: false, archived: true },
   { id: "emitir-recurrente", action_kind: "issue_recurring", conditions: {}, active: false },
@@ -836,6 +836,14 @@ for (const [task_id, id] of [
 }
 audit.push({ task_id: 105, action: "register_invoice", status: "confirmed", authorization: "aprobación", detail: null });
 
+/** Monedas extranjeras de la evidencia local (D127); `null` si no consta o es defectuosa. */
+function foreignOf(result: any): string[] | null {
+  const foreign = result?.currency_evidence?.foreign;
+  if (!Array.isArray(foreign) || foreign.some((c) => typeof c !== "string")) return null;
+  const explicit = String(result.fields?.currency ?? "").trim();
+  return [...new Set([...foreign, ...(explicit && explicit.toUpperCase() !== "EUR" ? [explicit.toUpperCase()] : [])])].sort();
+}
+
 /** Coincidencia de unas condiciones con el resultado de una tarea, como `evaluate` (D125, D126). */
 function matchRule(
   kind: string,
@@ -848,7 +856,7 @@ function matchRule(
     const actual = String(result.fields?.supplier ?? "").trim();
     if (actual.toLowerCase() !== String(c.supplier ?? "").trim().toLowerCase())
       return no(actual ? `el proveedor es «${actual}» y la regla pide «${c.supplier}»` : `la factura no indica proveedor y la regla pide «${c.supplier}»`);
-    const foreign: string[] = result.currency_evidence?.foreign ?? [];
+    const foreign = foreignOf(result) ?? [];
     if (c.max_total && foreign.length) return no(`el documento menciona ${foreign.join(", ")} y el límite está en EUR`);
     if (c.max_total && Number(result.fields?.total) > Number(String(c.max_total).replace(",", ".")))
       return no(`el total ${result.fields?.total} supera el máximo ${c.max_total}`);
@@ -1003,6 +1011,30 @@ const handlers: Record<string, (a: any, options?: any) => unknown> = {
     setMeta(id, { any_sender_ack_at: null }); // editar borra la validación avanzada
     return addRule({ ...r, version: r.version + 1, conditions, created_at: now() });
   },
+  // Atómico: se valida todo antes de tocar nada (nombre, condiciones y validación avanzada).
+  update_rule_with_ack: ({ id, name, conditions, acknowledgeAnySender }) => {
+    const r = latest().find((r) => r.id === id);
+    if (!r) throw `regla ${id} inexistente`;
+    if (metaOf(id).archived_at) throw `la regla ${id} está archivada; desarchívela para volver a usarla`;
+    if (acknowledgeAnySender && (r.action_kind !== "send_draft" || hasSender(conditions)))
+      throw "la validación avanzada solo se aplica a reglas de envío sin remitente";
+    checkConditions(r.action_kind, conditions, Boolean(acknowledgeAnySender));
+    const clean = name === null || name === undefined ? undefined : String(name).trim() || null;
+    if (clean !== undefined && clean !== null && clean.length > 80) throw "el nombre de la regla admite como mucho 80 caracteres";
+    const hadAck = metaOf(id).any_sender_ack_at !== null;
+    const saved = addRule({ ...r, version: r.version + 1, conditions, created_at: now() });
+    if (hadAck) audit.push({ task_id: null, action: "rule_any_sender", status: "revoked", authorization: null, detail: `${id} v${saved.version}: retirada: las condiciones cambiaron` });
+    setMeta(id, { any_sender_ack_at: null });
+    if (clean !== undefined && clean !== metaOf(id).name) {
+      setMeta(id, { name: clean });
+      audit.push({ task_id: null, action: "rule_rename", status: "renamed", authorization: null, detail: `${id}: ${clean ?? "(sin nombre)"}` });
+    }
+    if (acknowledgeAnySender) {
+      setMeta(id, { any_sender_ack_at: now() });
+      audit.push({ task_id: null, action: "rule_any_sender", status: "acknowledged", authorization: null, detail: `${id} v${saved.version}: validada al guardar la regla` });
+    }
+    return ruleView(saved);
+  },
   set_rule_active: ({ id, active }) => {
     const r = latest().find((r) => r.id === id);
     if (!r) throw `regla ${id} inexistente`;
@@ -1037,7 +1069,11 @@ const handlers: Record<string, (a: any, options?: any) => unknown> = {
     if (!r) throw `regla ${id} inexistente`;
     if (metaOf(id).archived_at) return ruleView(r);
     if (r.active) r = addRule({ ...r, version: r.version + 1, active: false, created_at: now() });
-    setMeta(id, { archived_at: now() });
+    // Archivar retira la opción avanzada; desarchivar no la devuelve (D126).
+    if (metaOf(id).any_sender_ack_at !== null)
+      audit.push({ task_id: null, action: "rule_any_sender", status: "revoked", authorization: null, detail: `${id} v${r.version}: retirada: la regla se archivó` });
+    setMeta(id, { archived_at: now(), any_sender_ack_at: null });
+    audit.push({ task_id: null, action: "rule_archive", status: "archived", authorization: null, detail: `${id} v${r.version}` });
     return ruleView(r);
   },
   unarchive_rule: ({ id }) => {
@@ -1047,9 +1083,10 @@ const handlers: Record<string, (a: any, options?: any) => unknown> = {
     return ruleView(r);
   },
   rule_stats: (): RuleStats[] => latest().map((r) => ruleView(r).stats),
-  // Simulación con las tareas sintéticas: replica la lógica de la capa Rust (D125, D126, D129)
-  // sin llamar a nada; la real la hace el backend.
-  simulate_rule: ({ actionKind, conditions, limit, assumeAnySenderAck }): Simulation => {
+  // Simulación con las tareas sintéticas: replica el orden de la capa Rust (D125, D126, D129)
+  // sin llamar a nada: la regla no coincide, atajos (importe dudoso, factura separada), bloqueos
+  // de la tarea (incidencias, campos ilegibles, moneda, destinatario) y por último solapes.
+  simulate_rule: ({ actionKind, conditions, limit, assumeAnySenderAck, excludeRuleId }): Simulation => {
     checkConditions(actionKind, conditions, true);
     const max = limit ?? 200;
     const kind = actionKind === "register_invoice" ? "invoice" : "email";
@@ -1070,7 +1107,7 @@ const handlers: Record<string, (a: any, options?: any) => unknown> = {
       items,
     };
     const blocked = new Map<string, number[]>();
-    const live = latest().filter((r) => r.active && r.action_kind === actionKind && !metaOf(r.id).archived_at);
+    const live = latest().filter((r) => r.active && r.action_kind === actionKind && !metaOf(r.id).archived_at && r.id !== excludeRuleId);
     for (const t of ofKind.slice(0, max)) {
       const r = t.result;
       if (!r) {
@@ -1079,38 +1116,52 @@ const handlers: Record<string, (a: any, options?: any) => unknown> = {
       }
       sim.considered++;
       const label = kind === "invoice" ? (r.document ?? null) : (r.message?.subject ?? null);
-      const unchecked = kind === "invoice" && !r.currency_evidence;
-      if (unchecked) sim.without_currency_check++;
-      const mine = matchRule(kind, { conditions, ack: Boolean(assumeAnySenderAck) }, r);
+      if (kind === "invoice" && foreignOf(r) === null) sim.without_currency_check++;
       const push = (outcome: SimulationItem["outcome"], reason_code: string | null, explanation: string, overlapping_rules: string[] = []) =>
         items.push({ task_id: t.id, label, outcome, reason_code, explanation, overlapping_rules });
+      const review = (code: string, text: string) => {
+        sim.would_review[code] = (sim.would_review[code] ?? 0) + 1;
+        push("review", code, text);
+      };
+      const mine = matchRule(kind, { conditions, ack: Boolean(assumeAnySenderAck) }, r);
       if (!mine.matches) {
-        if (mine.senderRequired) {
-          sim.would_review.sender_required = (sim.would_review.sender_required ?? 0) + 1;
-          push("review", "sender_required", "la regla no indica remitente; añádalo o valide la opción avanzada");
-        } else {
+        if (mine.senderRequired) review("sender_required", "la regla no indica remitente; añádalo o valide la opción avanzada");
+        else {
           sim.no_match++;
           push("no_match", null, mine.mismatch ?? "la regla no coincide");
         }
         continue;
       }
-      const others = live
-        .filter((o) => matchRule(kind, { conditions: o.conditions, ack: metaOf(o.id).any_sender_ack_at !== null }, r).matches)
-        .map((o) => o.id);
-      const review = (code: string, text: string) => {
-        sim.would_review[code] = (sim.would_review[code] ?? 0) + 1;
-        push("review", code, text);
-      };
-      if (others.length) {
-        sim.overlaps++;
-        push("overlap", "several_rules_match", `${others.length + 1} reglas coinciden; la decisión no es inequívoca`, others);
-        for (const o of others) blocked.set(o, [...(blocked.get(o) ?? []), t.id]);
-      } else if (kind === "invoice" && r.issues?.length) review("invoice_issues", "la factura tiene incidencias");
-      else if (unchecked) review("currency_not_checked", "no consta la comprobación de moneda; reprocese o revise");
+      // Atajos previos a las reglas.
+      if (kind === "invoice" && r.amount_review) {
+        review("amount_review", String(r.amount_review));
+        continue;
+      }
+      if (kind === "invoice" && r.part && r.part.of > 1) {
+        review("split_invoice", "el documento contiene varias facturas; la IA las separó y cada una se revisa por separado");
+        continue;
+      }
+      // Bloqueos de la tarea, en el orden del backend.
+      const foreign = kind === "invoice" ? foreignOf(r) : [];
+      if (kind === "invoice" && r.issues?.length) review("invoice_issues", "la factura tiene incidencias");
+      else if (kind === "invoice" && r.unreadable?.length) review("unreadable_fields", "hay campos ilegibles");
+      else if (kind === "invoice" && foreign === null) review("currency_not_checked", "no consta la comprobación de moneda; reprocese o revise");
+      else if (kind === "invoice" && foreign && foreign.length) review("foreign_currency", `el documento menciona ${foreign.join(", ")}; hoy la aplicación solo registra facturas en euros`);
+      else if (kind === "invoice" && r.currency_evidence?.euro !== true) review("currency_not_shown", "el documento no muestra la moneda; no se puede comprobar que sea en euros");
       else if (kind === "email" && !(r.draft?.to ?? []).length) review("no_recipient", "el borrador no tiene destinatario");
       else {
-        sim.would_automate++;
-        push("automate", "automated", "la regla la automatizaría");
+        const others = live
+          .filter((o) => matchRule(kind, { conditions: o.conditions, ack: metaOf(o.id).any_sender_ack_at !== null }, r).matches)
+          .map((o) => o.id);
+        if (others.length) {
+          sim.overlaps++;
+          push("overlap", "several_rules_match", `también coincide ${others.join(", ")}; con dos reglas la decisión no es inequívoca y iría a revisión`, others);
+          // Solo deja de actuar la regla que sola habría automatizado esta tarea.
+          if (others.length === 1) blocked.set(others[0]!, [...(blocked.get(others[0]!) ?? []), t.id]);
+        } else {
+          sim.would_automate++;
+          push("automate", "automated", "la regla la automatizaría");
+        }
       }
     }
     sim.would_block_other = [...blocked].map(([rule_id, task_ids]) => ({ rule_id, task_ids }));
@@ -1214,6 +1265,7 @@ const mutating = new Set([
   "create_rule",
   "rename_rule",
   "update_rule",
+  "update_rule_with_ack",
   "set_rule_active",
   "set_rule_any_sender",
   "archive_rule",

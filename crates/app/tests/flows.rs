@@ -71,6 +71,14 @@ impl Provider for FakeProvider {
 /// La fecha depende del número para que facturas distintas no parezcan duplicadas
 /// (mismo proveedor, fecha y total).
 fn invoice(supplier: &str, number: &str, total: &str) -> String {
+    // Una factura que debe poder automatizarse muestra el euro (D127).
+    let mut value: Value = serde_json::from_str(&invoice_plain(supplier, number, total)).unwrap();
+    value["moneda"] = json!("EUR");
+    value.to_string()
+}
+
+/// Como `invoice`, pero sin ninguna marca de moneda en el texto.
+fn invoice_plain(supplier: &str, number: &str, total: &str) -> String {
     let day: u32 = number
         .trim_start_matches(|c: char| !c.is_ascii_digit())
         .parse()
@@ -148,7 +156,7 @@ fn only_text_pdf_and_image_files_are_imported_and_failures_are_visible() {
     let result = app.process_next().unwrap().unwrap().result.unwrap();
     assert_eq!(
         result["pages"],
-        json!([{ "number": 1, "method": "plain_text", "chars": 115, "offset": 0 }])
+        json!([{ "number": 1, "method": "plain_text", "chars": 130, "offset": 0 }])
     );
 }
 
@@ -1023,7 +1031,7 @@ fn mail_states(app: &mut App) -> Vec<(Option<String>, TaskState, Value)> {
 /// Factura cuyo texto lleva una nota (donde se puede ver una marca de moneda). Es JSON para
 /// que el proveedor simulado la lea; la extracción local de moneda ve todo el texto.
 fn invoice_note(supplier: &str, number: &str, total: &str, note: &str) -> String {
-    let mut value: Value = serde_json::from_str(&invoice(supplier, number, total)).unwrap();
+    let mut value: Value = serde_json::from_str(&invoice_plain(supplier, number, total)).unwrap();
     value["nota"] = json!(note);
     value.to_string()
 }
@@ -1040,9 +1048,14 @@ fn another_currency_mentioned_in_the_document_sends_it_to_review_with_or_without
         ("Total 500USD", false),
         ("Total ＄121.00", false),
         ("Total £121.00", false),
-        ("Factura sin ninguna marca de moneda", true),
+        // Sin ninguna marca de moneda no se puede comprobar que sea en euros (D127).
+        ("Factura sin ninguna marca de moneda", false),
+        ("CADENA USDA SCAD", false),
         ("Total 121,00 €", true),
-        ("CADENA USDA SCAD", true),
+        ("CADENA USDA SCAD y 121,00 EUR", true),
+        // Espaciado amplio y paréntesis no esconden otra moneda.
+        ("Total 121.00     PEN", false),
+        ("Importe (TRY): 121,00", false),
     ];
     for (rule_name, conditions) in [
         (
@@ -1081,7 +1094,14 @@ fn another_currency_mentioned_in_the_document_sends_it_to_review_with_or_without
                     .map(|c| c.as_str().unwrap())
                     .collect::<Vec<_>>()
                     .join(", ");
-                if rule_name == "con límite" {
+                if usd_like.is_empty() {
+                    // La regla coincide, pero el documento no muestra el euro.
+                    assert_eq!(result["evaluation"]["code"], "currency_not_shown", "{note}");
+                    assert_eq!(
+                        result["review_reason"],
+                        "el documento no muestra la moneda; no se puede comprobar que sea en euros"
+                    );
+                } else if rule_name == "con límite" {
                     // La regla no coincide, con el motivo concreto.
                     assert_eq!(result["review_reason"], "ninguna regla activa coincide");
                     assert_eq!(
@@ -1138,7 +1158,8 @@ fn tiny_bmp() -> Vec<u8> {
 
 #[test]
 fn a_scanned_invoice_without_a_legible_euro_goes_to_review_with_or_without_a_limit() {
-    // (texto que lee el OCR, ¿se registra por regla?). El `$` se lee como `S`.
+    // (texto que lee el OCR, ¿se registra por regla?). El `$` se lee como `S`. Sin euro a la
+    // vista no se puede comprobar la moneda, con texto digital o con OCR (D127).
     let cases = [
         ("Total S 121.00", false),
         ("Total 121.00", false),
@@ -1186,16 +1207,17 @@ fn a_scanned_invoice_without_a_legible_euro_goes_to_review_with_or_without_a_lim
                 before + registered
             );
             if !registers {
-                assert_eq!(result["evaluation"]["code"], "scanned_currency", "{text}");
+                assert_eq!(result["evaluation"]["code"], "currency_not_shown", "{text}");
                 assert_eq!(
                     result["review_reason"],
-                    "el documento está escaneado y no se lee la moneda"
+                    "el documento no muestra la moneda; no se puede comprobar que sea en euros"
                 );
             }
         }
     }
 
-    // Un documento con texto digital y sin ninguna marca de moneda sigue contando como euro.
+    // Un documento con texto digital sin ninguna marca de moneda tampoco se registra solo; con
+    // el euro a la vista, sí.
     let dir = tempfile::tempdir().unwrap();
     let mut app = open(&dir, FakeProvider::new());
     app.create_rule(
@@ -1205,7 +1227,14 @@ fn a_scanned_invoice_without_a_legible_euro_goes_to_review_with_or_without_a_lim
     )
     .unwrap();
     app.set_rule_active("alfa", true).unwrap();
-    app.import_document("1.txt", &invoice("Alfa SL", "F-1", "121.00"))
+    app.import_document("1.txt", &invoice_plain("Alfa SL", "F-1", "121.00"))
+        .unwrap();
+    let task = app.process_next().unwrap().unwrap();
+    assert_eq!(task.state, TaskState::AwaitingReview);
+    let result = task.result.unwrap();
+    assert_eq!(result["currency_evidence"]["ocr"], false);
+    assert_eq!(result["evaluation"]["code"], "currency_not_shown");
+    app.import_document("2.txt", &invoice("Alfa SL", "F-2", "121.00"))
         .unwrap();
     let task = app.process_next().unwrap().unwrap();
     assert_eq!(task.state, TaskState::Completed);
@@ -1232,6 +1261,7 @@ fn a_task_without_the_currency_check_is_never_registered_by_a_rule_and_the_simul
             &json!({ "supplier": "Alfa SL" }),
             None,
             false,
+            None,
         )
         .unwrap();
     assert_eq!(sim.without_currency_check, 1);
@@ -1792,7 +1822,7 @@ fn simulating_a_rule_writes_nothing_and_reports_overlaps_and_blocks() {
         .unwrap()
         .id;
     let sim = app
-        .simulate_rule("register_invoice", &conditions, None, false)
+        .simulate_rule("register_invoice", &conditions, None, false, None)
         .unwrap();
     assert_eq!(sim.considered, invoices);
     assert!(!sim.truncated);
@@ -1820,6 +1850,7 @@ fn simulating_a_rule_writes_nothing_and_reports_overlaps_and_blocks() {
             &json!({ "supplier": "beta sl", "max_total": "500.00" }),
             None,
             false,
+            None,
         )
         .unwrap();
     assert_eq!((beta.would_automate, beta.overlaps), (1, 0), "{beta:?}");
@@ -1827,14 +1858,20 @@ fn simulating_a_rule_writes_nothing_and_reports_overlaps_and_blocks() {
 
     // El límite recorta y lo dice.
     let small = app
-        .simulate_rule("register_invoice", &conditions, Some(2), false)
+        .simulate_rule("register_invoice", &conditions, Some(2), false, None)
         .unwrap();
     assert!(small.truncated && small.considered == 2, "{small:?}");
     assert!(app
-        .simulate_rule("register_invoice", &conditions, Some(0), false)
+        .simulate_rule("register_invoice", &conditions, Some(0), false, None)
         .is_err());
     assert!(app
-        .simulate_rule("register_invoice", &json!({ "colour": "x" }), None, false)
+        .simulate_rule(
+            "register_invoice",
+            &json!({ "colour": "x" }),
+            None,
+            false,
+            None
+        )
         .is_err());
 
     // Un tipo sin reglas: la hipotética automatizaría lo que coincide, sin solapes.
@@ -1844,6 +1881,7 @@ fn simulating_a_rule_writes_nothing_and_reports_overlaps_and_blocks() {
             &json!({ "category": "solicitud_factura", "sender": "facturas@proveedor-alfa.test" }),
             None,
             false,
+            None,
         )
         .unwrap();
     assert!(mail.would_automate >= 1);
@@ -1855,6 +1893,7 @@ fn simulating_a_rule_writes_nothing_and_reports_overlaps_and_blocks() {
             &json!({ "category": "solicitud_factura" }),
             None,
             false,
+            None,
         )
         .unwrap();
     assert_eq!(anyone.would_automate, 0);
@@ -2092,7 +2131,7 @@ fn simulating_with_the_any_sender_hypothesis_never_writes_the_mark() {
     while app.process_next().unwrap().is_some() {}
     let conditions = json!({ "category": "solicitud_factura" });
     let without = app
-        .simulate_rule("send_draft", &conditions, None, false)
+        .simulate_rule("send_draft", &conditions, None, false, None)
         .unwrap();
     assert_eq!(without.would_automate, 0);
     assert!(
@@ -2105,7 +2144,7 @@ fn simulating_with_the_any_sender_hypothesis_never_writes_the_mark() {
     );
     let before = dump(&dir, &["rule_meta", "audit_log", "rules"]);
     let assumed = app
-        .simulate_rule("send_draft", &conditions, None, true)
+        .simulate_rule("send_draft", &conditions, None, true, None)
         .unwrap();
     assert!(assumed.would_automate >= 1, "{assumed:?}");
     assert_eq!(assumed.would_review.get("sender_required"), None);

@@ -7,6 +7,7 @@ import {
   AUTHORIZED_BY_RULE,
   CATEGORY_HELP,
   CATEGORY_LABEL,
+  AUTOMATED_NOT_CONFIRMED,
   NOT_ACTING,
   NO_EVALUATION,
   PUBLIC_MAIL_DOMAINS,
@@ -25,6 +26,8 @@ import {
   formatAmount,
   formatDate,
   isPublicMailDomain,
+  isStoredAmount,
+  normalizeAmount,
   publicDomainWarning,
   reasonText,
   ruleProblem,
@@ -229,6 +232,13 @@ test("una regla con opción avanzada se edita como «cualquier remitente» sin c
   assert.match(anySenderEditNotice(advanced, { ...d, scope: "sender" }), /ya no la necesita/);
   assert.equal(anySenderEditNotice(ruleWith("send_draft", { category: "otros", sender: "a@b.test" }), d), null);
   assert.equal(anySenderEditNotice(null, d), null);
+  // Una regla activa que pasa a «cualquier remitente» empieza a contestar al guardar.
+  const active = ruleWith("send_draft", { category: "documentacion" }, { active: true, any_sender_ack_at: 7 });
+  assert.match(anySenderEditNotice(active, draftOf(active)), /está activa: empezará a contestar a cualquier remitente/);
+  const old = ruleWith("send_draft", { category: "documentacion" }, { active: true });
+  assert.match(anySenderEditNotice(old, { ...draftOf(old), scope: "any" }), /empezará a contestar/);
+  assert.equal(anySenderEditNotice(old, draftOf(old)), null);
+  assert.equal(anySenderEditNotice(ruleWith("send_draft", { category: "x" }, { active: false }), { ...d, scope: "any" }), null);
 });
 
 test("la confirmación de la opción avanzada exige casilla y texto exacto", () => {
@@ -264,8 +274,12 @@ test("el borrador dice qué falta", () => {
 // ---- Contadores ----
 
 test("contadores de una regla", () => {
-  const day = Math.floor(new Date(2026, 10, 3, 12).getTime() / 1000);
+  // El backend entrega milisegundos desde 1970 (`now_ms`).
+  const day = new Date(2026, 10, 3, 12).getTime();
+  assert.ok(day > 1_000_000_000_000, "un valor realista en milisegundos");
   assert.equal(formatDate(day), "03/11/2026");
+  assert.equal(formatDate(1_794_149_612_941), formatDate(new Date(1_794_149_612_941).getTime()));
+  assert.match(formatDate(1_794_149_612_941), /^\d{2}\/\d{2}\/2026$/, "no cae en 1970 ni en un año lejano");
   assert.deepEqual(statsText({ applied: 3, last_applied_at: day, reviewed: 1, unclassified: 0 }), {
     main: "Aplicada 3 veces · última el 03/11/2026 · pasó a revisión 1 vez",
     unclassified: null,
@@ -406,33 +420,6 @@ test("la simulación sin tareas lo dice", () => {
   assert.match(s.headline, /No hay tareas con resultado/);
 });
 
-test("probar una regla ya activa no cuenta su coincidencia consigo misma", () => {
-  const s = simulationSummary(
-    sim({
-      overlaps: 3,
-      would_automate: 0,
-      no_match: 3,
-      would_block_other: [
-        { rule_id: "esta", task_ids: [1, 2] },
-        { rule_id: "otra", task_ids: [3] },
-      ],
-      items: [
-        { task_id: 1, label: "a", outcome: "overlap", reason_code: "several_rules_match", explanation: "", overlapping_rules: ["esta"] },
-        { task_id: 2, label: "b", outcome: "overlap", reason_code: "several_rules_match", explanation: "", overlapping_rules: ["esta"] },
-        { task_id: 3, label: "c", outcome: "overlap", reason_code: "several_rules_match", explanation: "", overlapping_rules: ["esta", "otra"] },
-      ],
-    }),
-    "send_draft",
-    "esta",
-  );
-  assert.deepEqual(
-    s.groups.map((g) => [g.code, g.count]),
-    [["several_rules_match", 1]],
-  );
-  assert.deepEqual(s.blocked, [{ rule_id: "otra", count: 1 }]);
-  assert.match(s.notes[0], /2 correos coinciden solo con esta misma regla/);
-});
-
 // ---- Historial ----
 
 test("el historial se filtra por regla y por aprobación de una persona", () => {
@@ -451,4 +438,66 @@ test("el historial se filtra por regla y por aprobación de una persona", () => 
   assert.deepEqual(entries.filter((e) => auditMatches(e, APPROVED_BY_PERSON)).map((e) => e.task_id), [2]);
   assert.deepEqual(entries.filter((e) => auditMatches(e, AUTHORIZED_BY_RULE)).map((e) => e.task_id), [1, 3]);
   assert.equal(auditMentionsRule({ ...entries[1], detail: "alfa v1" }, "alfa"), false, "solo cuentan los cambios de reglas");
+});
+
+// ---- Importes ----
+
+test("el total máximo se normaliza a dos decimales antes de enviarlo", () => {
+  const ok = (raw, value) => assert.deepEqual(normalizeAmount(raw), { ok: true, value }, raw);
+  ok("500", "500.00");
+  ok(" 500 ", "500.00");
+  ok("500,5", "500.50");
+  ok("500.5", "500.50");
+  ok("500,50", "500.50");
+  ok("500.00", "500.00");
+  ok("1.234,5", "1234.50");
+  ok("1,234.50", "1234.50");
+  ok("1.234.567,00", "1234567.00");
+  ok("500 €", "500.00");
+  ok("500.00 EUR", "500.00");
+  const draft = { ...draftOf(null), supplier: "Alfa SL" };
+  assert.deepEqual(draftConditions({ ...draft, max_total: "500" }), { supplier: "Alfa SL", max_total: "500.00" });
+  assert.deepEqual(draftConditions({ ...draft, max_total: "500,5" }), { supplier: "Alfa SL", max_total: "500.50" });
+  assert.deepEqual(draftConditions({ ...draft, max_total: "" }), { supplier: "Alfa SL" });
+});
+
+test("lo ambiguo o inválido se rechaza con un mensaje claro", () => {
+  for (const raw of ["1.234", "1,234", "1.234.567", "500,555", "mucho", "-5", "5 000", "5,", ",5"]) {
+    const r = normalizeAmount(raw);
+    assert.equal(r.ok, false, raw);
+    assert.ok(r.message.length > 20, raw);
+  }
+  assert.match(normalizeAmount("1.234").message, /ambiguo/);
+  const base = { ...draftOf(null), name: "x", supplier: "Alfa SL" };
+  assert.match(draftProblems({ ...base, max_total: "1.234" }, true)[0], /ambiguo/);
+  assert.deepEqual(draftProblems({ ...base, max_total: "500" }, true), []);
+});
+
+test("un máximo guardado que el backend no entiende se muestra como «No actúa»", () => {
+  for (const good of ["500.00", "500,00", "1.234,56", "1,234.56", "1 234,56", "500.00 EUR"]) assert.equal(isStoredAmount(good), true, good);
+  for (const bad of ["500", "500,5", "1.234", "mucho", "1.234,5", ""]) assert.equal(isStoredAmount(bad), false, bad);
+  const broken = { ...invoice({ supplier: "Alfa SL", max_total: "500" }), active: true };
+  assert.match(ruleProblem(broken), /«500»\) no es un importe válido: no actuará/);
+  assert.equal(ruleStatus(broken).primary.text, "No actúa: la regla tiene un problema");
+  assert.equal(ruleStatus(broken).primary.tone, "warn");
+  assert.equal(ruleStatus(broken).extra.text, "Activa");
+  assert.equal(ruleStatus({ ...invoice({ supplier: "Alfa SL", max_total: "500.00" }), active: true }).primary.text, "Activa");
+  // Un tipo desconocido no se marca como problema: su aviso ya lo dice.
+  assert.equal(ruleStatus({ ...invoice({}), action_kind: "issue_recurring" }).primary.text, "Inactiva");
+});
+
+test("una tarea en revisión cuya evaluación dice «automatizada» explica el intento sin confirmar", () => {
+  const evaluation = { code: "automated", facts: {}, candidates: [{ id: "a", version: 1, active: true, matches: true }] };
+  const info = explainEvaluation(evaluation, true);
+  assert.ok(info.headline.startsWith("Una regla activa coincidía y se intentó la acción"));
+  assert.match(info.headline, /no consta que se completara/);
+  assert.doesNotMatch(info.headline, /nada que revisar/);
+  // Sin el contexto de revisión (simulación), sigue siendo el texto general.
+  assert.match(explainEvaluation(evaluation).headline, /nada que revisar/);
+  assert.ok(AUTOMATED_NOT_CONFIRMED.length > 40);
+});
+
+test("la moneda no mostrada tiene su propio motivo", () => {
+  assert.equal(reasonText("currency_not_shown"), "el documento no muestra la moneda; no se puede comprobar que sea en euros");
+  assert.match(reasonText("codigo_antiguo_scanned_currency"), /motivo no reconocido/);
 });

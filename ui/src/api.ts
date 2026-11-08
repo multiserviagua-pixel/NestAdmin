@@ -119,10 +119,20 @@ export const api = {
   ruleStats: () => invoke<RuleStats[]>("rule_stats"),
   /** Solo lectura: no escribe nada ni llama a la IA. `assumeAnySenderAck` es solo una hipótesis
    * (D126): ve qué haría una regla de envío sin remitente si tuviera la opción avanzada; nunca
-   * guarda la marca. */
-  simulateRule: (actionKind: string, conditions: Record<string, string>, limit: number | null, assumeAnySenderAck = false) =>
-    invoke<Simulation>("simulate_rule", { actionKind, conditions, limit, assumeAnySenderAck }),
+   * guarda la marca. `excludeRuleId` quita esa regla de la comparación (probar una regla
+   * guardada sin que coincida consigo misma). */
+  simulateRule: (
+    actionKind: string,
+    conditions: Record<string, string>,
+    limit: number | null,
+    assumeAnySenderAck = false,
+    excludeRuleId: string | null = null,
+  ) => invoke<Simulation>("simulate_rule", { actionKind, conditions, limit, assumeAnySenderAck, excludeRuleId }),
   updateRule: (id: string, conditions: Record<string, string>) => invoke<Rule>("update_rule", { id, conditions }),
+  /** Guarda de una vez condiciones, nombre y validación avanzada (D126): sin guardados
+   * parciales. `name`: `null` lo deja como está y `""` lo borra. */
+  updateRuleWithAck: (id: string, name: string | null, conditions: Record<string, string>, acknowledgeAnySender: boolean) =>
+    invoke<RuleView>("update_rule_with_ack", { id, name, conditions, acknowledgeAnySender }),
   setRuleActive: (id: string, active: boolean) => invoke<Rule>("set_rule_active", { id, active }),
   auditLog: () => invoke<AuditEntry[]>("audit_log"),
   settings: () => invoke<SettingsView>("settings"),
