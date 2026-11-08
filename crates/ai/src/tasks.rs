@@ -31,14 +31,20 @@ con punto decimal y dos decimales, sin símbolo de moneda. Fechas en formato AAA
 Si el texto contiene varias facturas distintas (por ejemplo, una foto con dos facturas), pon la \
 primera en esos campos y cada una de las demás en other_invoices, con los mismos seis campos y las \
 mismas reglas; no mezcles datos de una factura con los de otra. Si solo hay una factura, \
-other_invoices es una lista vacía.";
+other_invoices es una lista vacía. \
+Responde únicamente con un objeto JSON, sin texto ni Markdown alrededor, con exactamente estas \
+claves: supplier, invoice_number, date, subtotal, tax, total y other_invoices. Cada valor es una \
+cadena o null, salvo other_invoices, que es una lista de objetos con las seis primeras claves.";
 
 const EMAIL_INSTRUCTIONS: &str = "Clasifica el correo del usuario y propone un borrador de \
 respuesta en español. Categorías: solicitud_factura (piden una factura o su copia), consulta_pago \
 (preguntan por el estado de un pago), incidencia_factura (señalan un error en una factura), \
 documentacion (envían o piden documentos o certificados distintos de una factura) y otros. \
 El borrador queda pendiente de revisión humana: no afirmes que se ha enviado una factura, \
-confirmado un pago ni completado un registro, y no inventes importes, fechas ni números.";
+confirmado un pago ni completado un registro, y no inventes importes, fechas ni números. \
+Responde únicamente con un objeto JSON, sin texto ni Markdown alrededor, con exactamente dos \
+claves: category y draft. category es literalmente uno de estos valores: solicitud_factura, \
+consulta_pago, incidencia_factura, documentacion, otros. draft es el texto del borrador.";
 
 pub fn extraction_request(request_id: &str, text: &str) -> GenerateRequest {
     let nullable = json!({ "type": ["string", "null"] });

@@ -1714,3 +1714,67 @@ fn other_invoices_are_read_strictly_and_requested_in_the_schema() {
         Err(AiError::InvalidResponse(_))
     ));
 }
+
+/// T03i (D105): las instrucciones piden el JSON y nombran claves y valores, porque un proveedor
+/// puede ignorar el parámetro de esquema.
+#[test]
+fn instructions_name_the_json_keys_and_allowed_values() {
+    let email = email_request("E", "texto").instructions;
+    assert!(email.contains("objeto JSON"));
+    for word in ["category", "draft"] {
+        assert!(email.contains(word), "{word}");
+    }
+    for category in nestadmin_ai::tasks::CATEGORIES {
+        assert!(email.contains(category), "{category}");
+    }
+    let extraction = extraction_request("F", "texto").instructions;
+    assert!(extraction.contains("objeto JSON"));
+    for field in nestadmin_ai::tasks::INVOICE_FIELDS {
+        assert!(extraction.contains(field), "{field}");
+    }
+    assert!(extraction.contains(nestadmin_ai::tasks::OTHER_INVOICES));
+}
+
+/// T03i (D105): un servidor que ignora `format`. El Markdown libre es inválido, se admite un
+/// único bloque envolvente y una categoría con otra grafía no se corrige por parecido.
+#[test]
+fn output_is_validated_when_the_server_ignores_the_schema() {
+    let cloud = |url: &str| {
+        OllamaCloudProvider::with_endpoint(
+            &format!("{url}/api"),
+            "modelo-nube-de-prueba",
+            Secret::new(CLOUD_KEY),
+            Duration::from_secs(5),
+        )
+    };
+    let (url, seen) = serve(vec![ollama_ok("## Categoría\n\nSolicitud de factura")]);
+    let error = cloud(&url)
+        .generate(&email_request("E", "Envíen la factura"))
+        .unwrap_err();
+    assert!(matches!(error, AiError::InvalidResponse(_)), "{error:?}");
+    assert_eq!(
+        seen.lock().unwrap().len(),
+        1,
+        "sin reintentos ni otro destino"
+    );
+
+    let fenced = format!(
+        "```json\n{}\n```",
+        json!({ "category": "solicitud_factura", "draft": "Se la preparamos." })
+    );
+    let (url, _) = serve(vec![ollama_ok(&fenced)]);
+    let result = cloud(&url)
+        .generate(&email_request("E", "Envíen la factura"))
+        .unwrap();
+    assert_eq!(parse_email(&result.output).unwrap().0, "solicitud_factura");
+
+    let other = json!({ "category": "Solicitud de Factura", "draft": "Se la preparamos." });
+    let (url, _) = serve(vec![ollama_ok(&other.to_string())]);
+    let result = cloud(&url)
+        .generate(&email_request("E", "Envíen la factura"))
+        .unwrap();
+    assert!(matches!(
+        parse_email(&result.output),
+        Err(AiError::InvalidResponse(_))
+    ));
+}
