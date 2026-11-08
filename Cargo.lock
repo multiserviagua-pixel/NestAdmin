@@ -2327,6 +2327,7 @@ dependencies = [
  "nestadmin-mail",
  "nestadmin-simulators",
  "pdfium-render",
+ "rusqlite",
  "serde",
  "serde_json",
  "sha2",

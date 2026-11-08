@@ -23,54 +23,90 @@ pub struct Rule {
 impl Store {
     /// Crea la versión 1 de una regla, inactiva: activarla es otra decisión explícita.
     pub fn create_rule(&mut self, id: &str, action_kind: &str, conditions: &Value) -> Result<Rule> {
-        if self.rule(id)?.is_some() {
-            return Err(CoreError::IdempotencyConflict(format!("regla {id}")));
-        }
-        self.insert_rule_version(id, 1, action_kind, conditions, false)
+        self.create_rule_named(id, action_kind, conditions, None, false)
     }
 
-    /// Nueva versión con otras condiciones; conserva el estado activo de la anterior.
+    /// Como `create_rule`, con nombre visible (D124) y, si `any_sender_ack`, la validación
+    /// avanzada sin remitente (D126), todo en una transacción.
+    pub fn create_rule_named(
+        &mut self,
+        id: &str,
+        action_kind: &str,
+        conditions: &Value,
+        name: Option<&str>,
+        any_sender_ack: bool,
+    ) -> Result<Rule> {
+        let tx = self.conn.transaction()?;
+        if current_rule(&tx, id)?.is_some() {
+            return Err(CoreError::IdempotencyConflict(format!("regla {id}")));
+        }
+        let rule = insert_rule_version(&tx, id, 1, action_kind, conditions, false)?;
+        if name.is_some() || any_sender_ack {
+            tx.execute(
+                "INSERT INTO rule_meta (rule_id, name, allow_any_sender_ack_at) VALUES (?1, ?2, ?3)",
+                params![id, name, any_sender_ack.then_some(rule.created_at)],
+            )?;
+        }
+        if any_sender_ack {
+            audit_any_sender(&tx, &rule, true, "validada al crear la regla")?;
+        }
+        tx.commit()?;
+        Ok(rule)
+    }
+
+    /// Nueva versión con otras condiciones; conserva el estado activo de la anterior. Una
+    /// regla archivada no se edita (D128). Cambiar las condiciones borra la validación
+    /// avanzada sin remitente, que se dio a las condiciones anteriores (D126).
     pub fn update_rule(&mut self, id: &str, conditions: &Value) -> Result<Rule> {
-        let current = self
-            .rule(id)?
-            .ok_or_else(|| CoreError::RuleNotFound(id.to_owned()))?;
-        self.insert_rule_version(
+        let tx = self.conn.transaction()?;
+        let current = live_rule(&tx, id)?;
+        let rule = insert_rule_version(
+            &tx,
             id,
             current.version + 1,
             &current.action_kind,
             conditions,
             current.active,
-        )
+        )?;
+        let had_ack = tx.execute(
+            "UPDATE rule_meta SET allow_any_sender_ack_at = NULL
+             WHERE rule_id = ?1 AND allow_any_sender_ack_at IS NOT NULL",
+            [id],
+        )?;
+        if had_ack > 0 {
+            audit_any_sender(&tx, &rule, false, "retirada: las condiciones cambiaron")?;
+        }
+        tx.commit()?;
+        Ok(rule)
     }
 
-    /// Nueva versión con el estado indicado; si ya lo tiene, no crea versión.
+    /// Nueva versión con el estado indicado; si ya lo tiene, no crea versión. Una regla
+    /// archivada no se activa (D128).
     pub fn set_rule_active(&mut self, id: &str, active: bool) -> Result<Rule> {
-        let current = self
-            .rule(id)?
-            .ok_or_else(|| CoreError::RuleNotFound(id.to_owned()))?;
+        let tx = self.conn.transaction()?;
+        let current = if active {
+            live_rule(&tx, id)?
+        } else {
+            current_rule(&tx, id)?.ok_or_else(|| CoreError::RuleNotFound(id.to_owned()))?
+        };
         if current.active == active {
             return Ok(current);
         }
-        self.insert_rule_version(
+        let rule = insert_rule_version(
+            &tx,
             id,
             current.version + 1,
             &current.action_kind,
             &current.conditions,
             active,
-        )
+        )?;
+        tx.commit()?;
+        Ok(rule)
     }
 
     /// Versión vigente (la más reciente) de una regla.
     pub fn rule(&self, id: &str) -> Result<Option<Rule>> {
-        Ok(self
-            .conn
-            .query_row(
-                "SELECT id, version, action_kind, conditions, active, created_at FROM rules
-                 WHERE id = ?1 ORDER BY version DESC LIMIT 1",
-                [id],
-                rule_from_row,
-            )
-            .optional()?)
+        current_rule(&self.conn, id)
     }
 
     /// Versiones vigentes de todas las reglas, por identificador.
@@ -92,35 +128,6 @@ impl Store {
         let rows = stmt.query_map([id], rule_from_row)?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
-
-    fn insert_rule_version(
-        &mut self,
-        id: &str,
-        version: i64,
-        action_kind: &str,
-        conditions: &Value,
-        active: bool,
-    ) -> Result<Rule> {
-        let tx = self.conn.transaction()?;
-        let now = now_ms();
-        tx.execute(
-            "INSERT INTO rules (id, version, action_kind, conditions, active, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            params![id, version, action_kind, serde_json::to_string(conditions)?, active, now],
-        )?;
-        tx.execute(
-            "INSERT INTO audit_log (at, task_id, action, status, authorization, detail) VALUES (?1, NULL, 'rule', ?2, NULL, ?3)",
-            params![now, if active { "active" } else { "inactive" }, format!("{id} v{version} ({action_kind})")],
-        )?;
-        tx.commit()?;
-        Ok(Rule {
-            id: id.to_owned(),
-            version,
-            action_kind: action_kind.to_owned(),
-            conditions: conditions.clone(),
-            active,
-            created_at: now,
-        })
-    }
 }
 
 fn rule_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Rule> {
@@ -135,4 +142,82 @@ fn rule_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Rule> {
         active: row.get(4)?,
         created_at: row.get(5)?,
     })
+}
+
+/// Versión vigente de una regla.
+pub(crate) fn current_rule(conn: &rusqlite::Connection, id: &str) -> Result<Option<Rule>> {
+    Ok(conn
+        .query_row(
+            "SELECT id, version, action_kind, conditions, active, created_at FROM rules
+             WHERE id = ?1 ORDER BY version DESC LIMIT 1",
+            [id],
+            rule_from_row,
+        )
+        .optional()?)
+}
+
+/// Versión vigente de una regla que existe y no está archivada.
+pub(crate) fn live_rule(conn: &rusqlite::Connection, id: &str) -> Result<Rule> {
+    let rule = current_rule(conn, id)?.ok_or_else(|| CoreError::RuleNotFound(id.to_owned()))?;
+    if is_archived(conn, id)? {
+        return Err(CoreError::RuleArchived(id.to_owned()));
+    }
+    Ok(rule)
+}
+
+pub(crate) fn is_archived(conn: &rusqlite::Connection, id: &str) -> Result<bool> {
+    Ok(conn
+        .query_row(
+            "SELECT archived_at IS NOT NULL FROM rule_meta WHERE rule_id = ?1",
+            [id],
+            |r| r.get::<_, bool>(0),
+        )
+        .optional()?
+        .unwrap_or(false))
+}
+
+/// Inserta una versión y la deja en el historial visible.
+pub(crate) fn insert_rule_version(
+    tx: &rusqlite::Transaction<'_>,
+    id: &str,
+    version: i64,
+    action_kind: &str,
+    conditions: &Value,
+    active: bool,
+) -> Result<Rule> {
+    let now = now_ms();
+    tx.execute(
+        "INSERT INTO rules (id, version, action_kind, conditions, active, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        params![id, version, action_kind, serde_json::to_string(conditions)?, active, now],
+    )?;
+    tx.execute(
+        "INSERT INTO audit_log (at, task_id, action, status, authorization, detail) VALUES (?1, NULL, 'rule', ?2, NULL, ?3)",
+        params![now, if active { "active" } else { "inactive" }, format!("{id} v{version} ({action_kind})")],
+    )?;
+    Ok(Rule {
+        id: id.to_owned(),
+        version,
+        action_kind: action_kind.to_owned(),
+        conditions: conditions.clone(),
+        active,
+        created_at: now,
+    })
+}
+
+/// La validación avanzada sin remitente queda siempre en el historial, con su motivo (D126).
+pub(crate) fn audit_any_sender(
+    tx: &rusqlite::Transaction<'_>,
+    rule: &Rule,
+    acknowledged: bool,
+    reason: &str,
+) -> Result<()> {
+    tx.execute(
+        "INSERT INTO audit_log (at, task_id, action, status, authorization, detail) VALUES (?1, NULL, 'rule_any_sender', ?2, NULL, ?3)",
+        params![
+            now_ms(),
+            if acknowledged { "acknowledged" } else { "revoked" },
+            format!("{} v{}: {reason}", rule.id, rule.version)
+        ],
+    )?;
+    Ok(())
 }

@@ -661,7 +661,8 @@ fn a_cut_while_a_rule_sends_returns_to_review_without_asking_the_ai_again() {
     app.create_rule(
         "facturas",
         "send_draft",
-        &json!({ "category": "solicitud_factura" }),
+        // Una regla de envío indica el remitente (D126): el del mensaje de Graph de arriba.
+        &json!({ "category": "solicitud_factura", "sender": "facturas@proveedor-g.test" }),
     )
     .unwrap();
     app.set_rule_active("facturas", true).unwrap();
@@ -696,6 +697,11 @@ fn a_cut_while_a_rule_sends_returns_to_review_without_asking_the_ai_again() {
     assert_eq!(done.state, TaskState::Completed);
     let world = fixture.world();
     assert_eq!((world.created, world.sends.len()), (1, 1));
+    drop(world);
+    // El envío lo ejecutó la persona al aprobar, no la regla: no cuenta como aplicado.
+    let stats = app.rule_stats().unwrap();
+    let facturas = stats.iter().find(|s| s.rule_id == "facturas").unwrap();
+    assert_eq!((facturas.applied, facturas.unclassified), (0, 0));
 }
 
 #[test]

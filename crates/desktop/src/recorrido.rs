@@ -714,14 +714,19 @@ fn regla_expresa_se_activa_y_desactiva_desde_la_ventana() {
         "create_rule",
         json!({
             "id": "alfa-hasta-500",
+            "name": null,
             "actionKind": "register_invoice",
             "conditions": { "supplier": "Alfa SL", "max_total": "500.00" },
+            "acknowledgeAnySender": false,
         }),
     );
     assert_eq!(rule["active"], false);
     let invalid = s.call(
         "create_rule",
-        json!({ "id": "sin-proveedor", "actionKind": "register_invoice", "conditions": {} }),
+        json!({
+            "id": "sin-proveedor", "name": null, "actionKind": "register_invoice",
+            "conditions": {}, "acknowledgeAnySender": false,
+        }),
     );
     assert!(invalid.is_err());
 
@@ -810,6 +815,134 @@ fn regla_expresa_se_activa_y_desactiva_desde_la_ventana() {
     );
     // La factura que esperó con la regla inactiva sigue pendiente: activar no la ejecuta.
     assert_eq!(s.task(id(&inactive))["state"], "awaiting_review");
+    s.close();
+}
+
+/// D124–D129 por IPC, con los nombres y argumentos de `api.ts`: nombre e identificador
+/// generado, remitente obligatorio en reglas de envío, opción avanzada que borra el cambio de
+/// condiciones, archivado, contadores y simulación de solo lectura.
+#[test]
+fn panel_de_reglas_nombre_remitente_archivo_y_simulacion_desde_la_ventana() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = data_dir_for(&dir);
+    let ai = FakeOllama::start(Mode::Answer);
+    select_local(&data, &ai.url);
+    let s = Session::open(test_deps(&data, &ai.url));
+
+    // Sin identificador: se genera a partir del nombre y se muestra el nombre.
+    let alfa = s.ok(
+        "create_rule",
+        json!({
+            "id": null, "name": "Facturas de Alfa", "actionKind": "register_invoice",
+            "conditions": { "supplier": "Alfa SL" }, "acknowledgeAnySender": false,
+        }),
+    );
+    assert_eq!(alfa["id"], "facturas-de-alfa");
+    assert_eq!(alfa["name"], "Facturas de Alfa");
+    assert_eq!(alfa["stats"]["applied"], 0);
+    assert!(alfa["archived_at"].is_null());
+
+    // Una regla de envío sin remitente se rechaza; la validación avanzada no tiene valor por
+    // defecto (falta el argumento: error) y solo `true` la crea.
+    let without_sender = json!({ "category": "solicitud_factura" });
+    let rejected = s.call(
+        "create_rule",
+        json!({
+            "id": "envio", "name": null, "actionKind": "send_draft",
+            "conditions": without_sender, "acknowledgeAnySender": false,
+        }),
+    );
+    assert!(rejected.is_err());
+    let missing = s.call(
+        "create_rule",
+        json!({ "id": "envio", "actionKind": "send_draft", "conditions": without_sender }),
+    );
+    assert!(missing.is_err());
+    let advanced = s.ok(
+        "create_rule",
+        json!({
+            "id": "envio", "name": null, "actionKind": "send_draft",
+            "conditions": without_sender, "acknowledgeAnySender": true,
+        }),
+    );
+    assert!(advanced["any_sender_ack_at"].is_number());
+    assert_eq!(advanced["name"], "envio", "sin nombre se muestra el id");
+
+    // Editar las condiciones borra la validación avanzada.
+    s.ok(
+        "update_rule",
+        json!({ "id": "envio", "conditions": { "category": "consulta_pago" } }),
+    );
+    let views = s.ok("rule_views", json!({}));
+    let envio = views
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|v| v["id"] == "envio")
+        .unwrap();
+    assert!(envio["any_sender_ack_at"].is_null());
+    // Con remitente ya no necesita la opción avanzada.
+    s.ok(
+        "update_rule",
+        json!({ "id": "envio", "conditions": { "category": "consulta_pago", "sender_domain": "alfa.test" } }),
+    );
+    assert!(s
+        .call(
+            "set_rule_any_sender",
+            json!({ "id": "envio", "acknowledge": true })
+        )
+        .is_err());
+    s.ok(
+        "rename_rule",
+        json!({ "id": "envio", "name": "Pagos de Alfa" }),
+    );
+
+    // Archivar: inactiva, no se activa ni se edita; desarchivar la deja inactiva.
+    s.ok(
+        "set_rule_active",
+        json!({ "id": "facturas-de-alfa", "active": true }),
+    );
+    let archived = s.ok("archive_rule", json!({ "id": "facturas-de-alfa" }));
+    assert_eq!(archived["active"], false);
+    assert!(archived["archived_at"].is_number());
+    assert!(s
+        .call(
+            "set_rule_active",
+            json!({ "id": "facturas-de-alfa", "active": true })
+        )
+        .is_err());
+    assert!(s
+        .call(
+            "update_rule",
+            json!({ "id": "facturas-de-alfa", "conditions": { "supplier": "Beta SL" } })
+        )
+        .is_err());
+    let back = s.ok("unarchive_rule", json!({ "id": "facturas-de-alfa" }));
+    assert_eq!(
+        (back["active"].clone(), back["archived_at"].clone()),
+        (json!(false), Value::Null)
+    );
+
+    // Simulación: no escribe nada (ni tareas ni historial).
+    let pending = s.import("f1.txt", &invoice("Alfa SL", "F-1", 1, "121.00"));
+    s.wait_state(id(&pending), "awaiting_review");
+    let before = (s.tasks(), s.audit());
+    let sim = s.ok(
+        "simulate_rule",
+        json!({
+            "actionKind": "register_invoice",
+            "conditions": { "supplier": "Alfa SL", "max_total": "500.00" },
+            "limit": null,
+        }),
+    );
+    assert_eq!(sim["would_automate"], 1, "{sim}");
+    assert_eq!(sim["truncated"], false);
+    assert_eq!(sim["items"][0]["outcome"], "automate");
+    assert_eq!((s.tasks(), s.audit()), before);
+    assert_eq!(s.registered(), 0);
+
+    let stats = s.ok("rule_stats", json!({}));
+    assert_eq!(stats.as_array().unwrap().len(), 2);
     s.close();
 }
 

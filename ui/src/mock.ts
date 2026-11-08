@@ -14,7 +14,11 @@ import type {
   Memory,
   ProviderChoice,
   Rule,
+  RuleStats,
+  RuleView,
   SettingsView,
+  Simulation,
+  SimulationItem,
   SetupDone,
   SetupEvent,
   SetupStep,
@@ -584,14 +588,55 @@ function addRule(rule: Rule) {
   return rule;
 }
 
-// Condiciones cerradas por acción (D123), como en el backend.
-function checkConditions(kind: string, conditions: Record<string, unknown>) {
-  const allowed = kind === "register_invoice" ? ["supplier", "max_total"] : kind === "send_draft" ? ["category"] : null;
+// Nombre, archivado y opción avanzada de cada regla (D124, D126, D128).
+const ruleMeta = new Map<string, { name: string | null; archived_at: number | null; any_sender_ack_at: number | null }>();
+const metaOf = (id: string) => ruleMeta.get(id) ?? { name: null, archived_at: null, any_sender_ack_at: null };
+const setMeta = (id: string, patch: Partial<ReturnType<typeof metaOf>>) => ruleMeta.set(id, { ...metaOf(id), ...patch });
+const hasSender = (c: Record<string, unknown>) => "sender" in c || "sender_domain" in c;
+const slug = (name: string) =>
+  name
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 40)
+    .replace(/-+$/g, "") || "regla";
+
+function ruleView(rule: Rule): RuleView {
+  const meta = metaOf(rule.id);
+  const applied = tasks.filter((t) => t.result?.authorization?.rule_id === rule.id && t.state === "completed");
+  const stats: RuleStats = {
+    rule_id: rule.id,
+    applied: applied.length,
+    last_applied_at: applied.length ? Math.max(...applied.map((t) => t.updated_at)) : null,
+    reviewed: 0,
+    unclassified: 0,
+  };
+  return { ...rule, name: meta.name ?? rule.id, archived_at: meta.archived_at, any_sender_ack_at: meta.any_sender_ack_at, stats };
+}
+
+// Condiciones cerradas por acción (D123, D126, D127), como en el backend. `allowNoSender`: la
+// opción avanzada permite una regla de envío sin remitente.
+function checkConditions(kind: string, conditions: Record<string, unknown>, allowNoSender = false) {
+  const allowed =
+    kind === "register_invoice" ? ["supplier", "max_total", "currency"] : kind === "send_draft" ? ["category", "sender", "sender_domain"] : null;
   if (!allowed) throw `tipo de regla no admitido: ${kind}`;
   const unknown = Object.keys(conditions).find((k) => !allowed.includes(k));
   if (unknown) throw `condición no admitida: ${unknown}`;
   if (kind === "register_invoice" && !String(conditions.supplier ?? "").trim()) throw "la regla de registro necesita un proveedor";
   if (kind === "send_draft" && !String(conditions.category ?? "").trim()) throw "la regla de envío necesita una categoría";
+  if ("currency" in conditions && conditions.currency !== "EUR")
+    throw "Hoy la aplicación solo registra facturas en euros: la moneda de la regla solo puede ser EUR";
+  if (kind === "send_draft") {
+    if ("sender" in conditions && "sender_domain" in conditions) throw "indique la dirección del remitente o su dominio, no las dos cosas";
+    if ("sender" in conditions && !/^[^@\s,<>]+@[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)+$/.test(String(conditions.sender).trim()))
+      throw "el remitente debe ser una dirección de correo";
+    if ("sender_domain" in conditions && !/^[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)+$/.test(String(conditions.sender_domain).trim()))
+      throw "el dominio del remitente debe ser como proveedor.example";
+    if (!hasSender(conditions) && !allowNoSender)
+      throw "la regla de envío necesita un remitente (dirección o dominio); sin él solo puede guardarse con la validación avanzada";
+  }
   if ("max_total" in conditions && (typeof conditions.max_total !== "string" || !/^\d+([.,]\d{1,2})?$/.test(conditions.max_total)))
     throw "el total máximo debe ser un importe, por ejemplo 500.00";
 }
@@ -709,22 +754,129 @@ const handlers: Record<string, (a: any, options?: any) => unknown> = {
     return Object.assign(t, { state: "queued" });
   },
   rules: () => latest(),
-  create_rule: ({ id, actionKind, conditions }) => {
-    if (latest().some((r) => r.id === id)) throw `la regla ${id} ya existe`;
-    if (!/^[a-z0-9-]+$/.test(id)) throw "el identificador solo admite minúsculas, números y guiones";
-    checkConditions(actionKind, conditions);
-    return addRule({ id, version: 1, action_kind: actionKind, conditions, active: false, created_at: now() });
+  rule_views: () => latest().map(ruleView),
+  create_rule: ({ id, name, actionKind, conditions, acknowledgeAnySender }) => {
+    if (typeof acknowledgeAnySender !== "boolean") throw "missing required key acknowledgeAnySender";
+    const cleanName = String(name ?? "").trim() || null;
+    let ruleId = String(id ?? "").trim();
+    if (!ruleId) {
+      if (!cleanName) throw "indique un nombre o un identificador para la regla";
+      const base = slug(cleanName);
+      ruleId = base;
+      for (let n = 2; latest().some((r) => r.id === ruleId); n++) ruleId = `${base}-${n}`;
+    }
+    if (latest().some((r) => r.id === ruleId)) throw `la regla ${ruleId} ya existe`;
+    if (!/^[a-z0-9-]+$/.test(ruleId)) throw "el identificador solo admite minúsculas, números y guiones";
+    if (acknowledgeAnySender && (actionKind !== "send_draft" || hasSender(conditions)))
+      throw "la validación avanzada solo se aplica a reglas de envío sin remitente";
+    checkConditions(actionKind, conditions, acknowledgeAnySender);
+    const rule = addRule({ id: ruleId, version: 1, action_kind: actionKind, conditions, active: false, created_at: now() });
+    setMeta(ruleId, { name: cleanName, any_sender_ack_at: acknowledgeAnySender ? now() : null });
+    return ruleView(rule);
+  },
+  rename_rule: ({ id, name }) => {
+    const r = latest().find((r) => r.id === id);
+    if (!r) throw `regla ${id} inexistente`;
+    setMeta(id, { name: String(name ?? "").trim() || null });
+    return ruleView(r);
   },
   update_rule: ({ id, conditions }) => {
     const r = latest().find((r) => r.id === id);
     if (!r) throw `regla ${id} inexistente`;
-    checkConditions(r.action_kind, conditions);
+    if (metaOf(id).archived_at) throw `la regla ${id} está archivada; desarchívela para volver a usarla`;
+    checkConditions(r.action_kind, conditions, metaOf(id).any_sender_ack_at !== null);
+    setMeta(id, { any_sender_ack_at: null }); // editar borra la validación avanzada
     return addRule({ ...r, version: r.version + 1, conditions, created_at: now() });
   },
   set_rule_active: ({ id, active }) => {
     const r = latest().find((r) => r.id === id);
     if (!r) throw `regla ${id} inexistente`;
+    if (active) {
+      if (metaOf(id).archived_at) throw `la regla ${id} está archivada; desarchívela para volver a usarla`;
+      try {
+        checkConditions(r.action_kind, r.conditions, metaOf(id).any_sender_ack_at !== null);
+      } catch (why) {
+        throw `la regla ${id} no se puede activar: ${why}`;
+      }
+    }
     return r.active === active ? r : addRule({ ...r, version: r.version + 1, active, created_at: now() });
+  },
+  set_rule_any_sender: ({ id, acknowledge }) => {
+    const r = latest().find((r) => r.id === id);
+    if (!r) throw `regla ${id} inexistente`;
+    if (metaOf(id).archived_at) throw `la regla ${id} está archivada; desarchívela para volver a usarla`;
+    if (acknowledge && (r.action_kind !== "send_draft" || hasSender(r.conditions)))
+      throw "la opción avanzada solo existe en reglas de envío sin remitente";
+    setMeta(id, { any_sender_ack_at: acknowledge ? now() : null });
+    audit.push({
+      task_id: null,
+      action: "rule_any_sender",
+      status: acknowledge ? "acknowledged" : "revoked",
+      authorization: null,
+      detail: `${id} v${r.version}: ${acknowledge ? "validada la opción avanzada" : "retirada la opción avanzada"}`,
+    });
+    return ruleView(r);
+  },
+  archive_rule: ({ id }) => {
+    let r = latest().find((r) => r.id === id);
+    if (!r) throw `regla ${id} inexistente`;
+    if (metaOf(id).archived_at) return ruleView(r);
+    if (r.active) r = addRule({ ...r, version: r.version + 1, active: false, created_at: now() });
+    setMeta(id, { archived_at: now() });
+    return ruleView(r);
+  },
+  unarchive_rule: ({ id }) => {
+    const r = latest().find((r) => r.id === id);
+    if (!r) throw `regla ${id} inexistente`;
+    setMeta(id, { archived_at: null });
+    return ruleView(r);
+  },
+  rule_stats: (): RuleStats[] => latest().map((r) => ruleView(r).stats),
+  // Simulación aproximada con las tareas sintéticas; la real la hace la capa Rust.
+  simulate_rule: ({ actionKind, conditions, limit }): Simulation => {
+    checkConditions(actionKind, conditions, true);
+    const max = limit ?? 200;
+    const kind = actionKind === "register_invoice" ? "invoice" : "email";
+    const ofKind = tasks.filter((t) => t.kind === kind).sort((a, b) => b.id - a.id);
+    const items: SimulationItem[] = [];
+    const sim: Simulation = {
+      action_kind: actionKind,
+      limit: max,
+      considered: 0,
+      truncated: ofKind.length > max,
+      skipped_without_result: 0,
+      without_currency_check: 0,
+      would_automate: 0,
+      would_review: {},
+      overlaps: 0,
+      no_match: 0,
+      would_block_other: [],
+      items,
+    };
+    for (const t of ofKind.slice(0, max)) {
+      const r = t.result;
+      if (!r) {
+        sim.skipped_without_result++;
+        continue;
+      }
+      sim.considered++;
+      const label = kind === "invoice" ? (r.document ?? null) : (r.message?.subject ?? null);
+      const fits =
+        kind === "invoice"
+          ? String(r.fields?.supplier ?? "").toLowerCase() === String(conditions.supplier ?? "").toLowerCase()
+          : r.category === conditions.category;
+      if (!fits) {
+        sim.no_match++;
+        items.push({ task_id: t.id, label, outcome: "no_match", reason_code: null, explanation: "la regla no coincide", overlapping_rules: [] });
+      } else if (kind === "email" && !hasSender(conditions)) {
+        sim.would_review.sender_required = (sim.would_review.sender_required ?? 0) + 1;
+        items.push({ task_id: t.id, label, outcome: "review", reason_code: "sender_required", explanation: "la regla no indica remitente; añádalo o valide la opción avanzada", overlapping_rules: [] });
+      } else {
+        sim.would_automate++;
+        items.push({ task_id: t.id, label, outcome: "automate", reason_code: "automated", explanation: "la regla la automatizaría", overlapping_rules: [] });
+      }
+    }
+    return sim;
   },
   audit_log: () => structuredClone(audit),
   settings: (): SettingsView => {
@@ -822,8 +974,12 @@ const mutating = new Set([
   "reject",
   "retry",
   "create_rule",
+  "rename_rule",
   "update_rule",
   "set_rule_active",
+  "set_rule_any_sender",
+  "archive_rule",
+  "unarchive_rule",
   "remove_mail_account",
   "rename_mail_account",
   "add_simulated_mail_account",

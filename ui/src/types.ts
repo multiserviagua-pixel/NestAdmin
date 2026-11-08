@@ -27,6 +27,56 @@ export interface Rule {
   created_at: number;
 }
 
+/** Contadores de una regla (D129). */
+export interface RuleStats {
+  rule_id: string;
+  /** Acciones confirmadas que autorizó la regla. */
+  applied: number;
+  last_applied_at: number | null;
+  /** Tareas que la regla habría automatizado y fueron a revisión. */
+  reviewed: number;
+  /** Acciones antiguas que citan la regla en un formato ilegible. */
+  unclassified: number;
+}
+
+/** Una regla con lo que el panel muestra de ella (D124, D126, D128). */
+export interface RuleView extends Rule {
+  /** Nombre visible; si la regla no tiene, su identificador. */
+  name: string;
+  archived_at: number | null;
+  /** Marca de la opción avanzada: la regla de envío contesta a cualquier remitente. */
+  any_sender_ack_at: number | null;
+  stats: RuleStats;
+}
+
+export type SimulationOutcome = "automate" | "review" | "overlap" | "no_match";
+
+export interface SimulationItem {
+  task_id: number;
+  label: string | null;
+  outcome: SimulationOutcome;
+  reason_code: string | null;
+  explanation: string;
+  overlapping_rules: string[];
+}
+
+/** Resultado de simular una regla hipotética contra las últimas tareas (solo lectura). */
+export interface Simulation {
+  action_kind: string;
+  limit: number;
+  considered: number;
+  truncated: boolean;
+  skipped_without_result: number;
+  /** Facturas sin la comprobación local de moneda (tareas antiguas). */
+  without_currency_check: number;
+  would_automate: number;
+  would_review: Record<string, number>;
+  overlaps: number;
+  no_match: number;
+  would_block_other: Array<{ rule_id: string; task_ids: number[] }>;
+  items: SimulationItem[];
+}
+
 export interface AuditEntry {
   task_id: number | null;
   action: string;

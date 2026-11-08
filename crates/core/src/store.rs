@@ -67,6 +67,8 @@ CREATE TABLE rules (
 "#,
     // Facturación de venta (D72); ver sales/.
     include_str!("migrations/003_sales.sql"),
+    // Panel de reglas: nombre, archivado, evaluaciones, señales y regla de cada acción.
+    include_str!("migrations/004_rules_panel.sql"),
 ];
 
 /// Base de datos local. Cada operación pública se confirma en una transacción,

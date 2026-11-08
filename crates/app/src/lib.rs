@@ -8,6 +8,7 @@
 //! aplica reglas y deja la tarea completada, en revisión o fallida.
 
 pub mod accounts;
+pub mod panel;
 pub mod rules;
 
 use std::collections::{HashMap, HashSet};
@@ -38,7 +39,7 @@ use crate::accounts::{
     split_id, AccountFetch, AccountView, Accounts, AttachmentFetch, AttachmentIssue, FetchReport,
     MailAccountsView, MailEnv, MailIssue, MailProviderKind,
 };
-use crate::rules::{evaluate, Evaluation, Explanation, RuleDecision, REGISTER_INVOICE, SEND_DRAFT};
+use crate::rules::{evaluate_result, RuleDecision, REGISTER_INVOICE, SEND_DRAFT};
 
 pub const INVOICE: &str = "invoice";
 pub const EMAIL: &str = "email";
@@ -1127,27 +1128,19 @@ impl App {
             }
         }
         let kind = action_kind(&task);
-        // Un importe dudoso nunca se registra por regla: lo confirma una persona (D120).
-        if let Some(message) = result["amount_review"].as_str() {
-            let explanation = Explanation::amount_review(message);
-            result["review_reason"] = json!(explanation.summary());
-            result["evaluation"] = json!(explanation);
-            return Ok(self.store.await_review(task.id, &result)?);
-        }
-        let several = result["part"]["of"].as_u64().is_some_and(|n| n > 1);
-        let evaluation = if several {
-            // Una regla nunca registra sola una factura separada de un documento con varias:
-            // la separación la hizo el modelo y la revisa una persona.
-            let explanation = Explanation::split_invoice();
-            Evaluation {
-                decision: RuleDecision::Review(explanation.summary()),
-                explanation,
-            }
-        } else {
-            evaluate(&self.store.rules()?, kind, &result)
-        };
+        // Un importe dudoso o una factura separada de un documento con varias nunca se
+        // registran por regla (D120, D68): `evaluate_result` los resuelve antes de las reglas.
+        let (rules, any_sender) = self.rules_for_evaluation()?;
+        let evaluation = evaluate_result(&rules, &any_sender, kind, &result);
         // Solo ids, códigos e importes o nombres que ya están en el resultado (D125).
         result["evaluation"] = json!(evaluation.explanation);
+        // La evidencia (D129) no puede impedir ni duplicar la acción: si no se guarda, la
+        // acción sigue su curso y el fallo consta en el resultado de la tarea.
+        if let Err(error) =
+            self.record_evidence(&task, &result, kind, &rules, &any_sender, &evaluation)
+        {
+            result["evidence_error"] = json!(format!("no se guardó la evaluación: {error}"));
+        }
         let decision = evaluation.decision;
         match decision {
             RuleDecision::Automate {
@@ -1291,6 +1284,11 @@ impl App {
         };
         let amount_review = amount_review(&document, &report, &fields);
         let pages = extraction.and_then(|e| serde_json::to_value(&e.pages).ok());
+        // Moneda buscada en el texto local ya extraído (D127). Sin extracción no consta, y
+        // las reglas lo tratan como fallo cerrado.
+        let currency_evidence = extraction
+            .map(|e| nestadmin_documents::currency_evidence(&e.text))
+            .and_then(|e| serde_json::to_value(e).ok());
         let sources: serde_json::Map<String, Value> = extraction
             .map(|extraction| {
                 fields
@@ -1316,6 +1314,7 @@ impl App {
             "unreadable": report.unreadable,
             "recovered": report.recovered,
             "amount_review": amount_review,
+            "currency_evidence": currency_evidence,
             "provider": generated.provider,
             "model": generated.model,
             "latency_ms": generated.latency_ms,
@@ -1484,6 +1483,13 @@ impl App {
                 current,
             });
         }
+        // La aprobación es la decisión de la persona: se anota antes de ejecutar para que un
+        // fallo al anotarla conste en el resultado sin impedir ni repetir la acción.
+        let mut result = result;
+        let signal = panel::signal_for(&task, &result);
+        if let Err(error) = self.record_signal("approved", signal) {
+            result["evidence_error"] = json!(format!("no se guardó la señal: {error}"));
+        }
         self.execute(task, result, Authorization::Approval)
     }
 
@@ -1499,7 +1505,14 @@ impl App {
             return Err(AppError::Invalid("el borrador está vacío".into()));
         }
         result["draft"]["body"] = json!(body);
+        // Marca que una persona cambió el texto: la aprobación posterior ya no es «sin
+        // cambios» y no sirve de evidencia para sugerir una regla (D129).
+        result["edited"] = json!(true);
         result["version"] = json!(result["version"].as_i64().unwrap_or(1) + 1);
+        let signal = panel::signal_for(&task, &result);
+        if let Err(error) = self.record_signal("edited", signal) {
+            result["evidence_error"] = json!(format!("no se guardó la señal: {error}"));
+        }
         Ok(self.store.revise(task_id, &result)?)
     }
 
@@ -1561,6 +1574,17 @@ impl App {
 
     /// Descarta la tarea sin ejecutar ninguna acción.
     pub fn reject(&mut self, task_id: i64) -> AppResult<Task> {
+        let before = self.store.task(task_id)?;
+        // Solo cuenta como rechazo lo que estaba pendiente de revisión. Si la señal no se
+        // guarda, el fallo queda en el resultado antes de cancelar.
+        if before.state == TaskState::AwaitingReview {
+            let mut result = before.result.clone().unwrap_or(Value::Null);
+            let signal = panel::signal_for(&before, &result);
+            if let Err(error) = self.record_signal("rejected", signal) {
+                result["evidence_error"] = json!(format!("no se guardó la señal: {error}"));
+                self.store.revise(task_id, &result)?;
+            }
+        }
         Ok(self.store.cancel(task_id)?)
     }
 
@@ -1580,35 +1604,58 @@ impl App {
         Ok(self.store.rules()?)
     }
 
+    /// Crea una regla de tipo `action_kind` con identificador propio. Una regla de envío exige
+    /// remitente (D126): para una sin remitente, `create_rule_full` con la validación avanzada.
     pub fn create_rule(
         &mut self,
         id: &str,
         action_kind: &str,
         conditions: &Value,
     ) -> AppResult<Rule> {
-        check_rule_id(id)?;
-        check_rule(action_kind, conditions)?;
-        Ok(self.store.create_rule(id.trim(), action_kind, conditions)?)
+        let view = self.create_rule_full(panel::NewRule {
+            id: Some(id),
+            name: None,
+            action_kind,
+            conditions,
+            allow_any_sender: false,
+        })?;
+        Ok(view.rule)
     }
 
+    /// Cambia las condiciones de una regla. Una regla archivada no se edita (D128). Cambiar
+    /// las condiciones borra la validación avanzada sin remitente (D126): si la regla no
+    /// indicaba remitente, deja de automatizar hasta validarla otra vez.
     pub fn update_rule(&mut self, id: &str, conditions: &Value) -> AppResult<Rule> {
         let current = self
             .store
             .rule(id)?
             .ok_or_else(|| AppError::Invalid(format!("regla {id} inexistente")))?;
-        check_rule(&current.action_kind, conditions)?;
+        let meta = self.store.rule_meta(id)?;
+        if meta.as_ref().is_some_and(|m| m.archived_at.is_some()) {
+            return Err(CoreError::RuleArchived(id.to_owned()).into());
+        }
+        let validated = meta.is_some_and(|m| m.allow_any_sender_ack_at.is_some());
+        check_rule(&current.action_kind, conditions, validated)?;
         Ok(self.store.update_rule(id, conditions)?)
     }
 
-    /// Activar revalida las condiciones guardadas; desactivar es siempre posible.
+    /// Activar revalida las condiciones guardadas y no admite una regla archivada;
+    /// desactivar es siempre posible.
     pub fn set_rule_active(&mut self, id: &str, active: bool) -> AppResult<Rule> {
         if active {
             if let Some(current) = self.store.rule(id)? {
-                check_rule(&current.action_kind, &current.conditions).map_err(|e| match e {
-                    AppError::Invalid(why) => {
-                        AppError::Invalid(format!("la regla {id} no se puede activar: {why}"))
+                let meta = self.store.rule_meta(id)?;
+                if meta.as_ref().is_some_and(|m| m.archived_at.is_some()) {
+                    return Err(CoreError::RuleArchived(id.to_owned()).into());
+                }
+                let validated = meta.is_some_and(|m| m.allow_any_sender_ack_at.is_some());
+                check_rule(&current.action_kind, &current.conditions, validated).map_err(|e| {
+                    match e {
+                        AppError::Invalid(why) => {
+                            AppError::Invalid(format!("la regla {id} no se puede activar: {why}"))
+                        }
+                        other => other,
                     }
-                    other => other,
                 })?;
             }
         }
@@ -1676,15 +1723,17 @@ fn action_kind(task: &Task) -> &'static str {
     }
 }
 
-fn check_rule(action_kind: &str, conditions: &Value) -> AppResult<()> {
+/// Valida las condiciones de una regla (D123, D126, D127). `allow_no_sender`: la validación
+/// avanzada permite una regla de envío sin remitente.
+fn check_rule(action_kind: &str, conditions: &Value, allow_no_sender: bool) -> AppResult<()> {
     let Some(map) = conditions.as_object() else {
         return Err(AppError::Invalid(
             "las condiciones de la regla deben ser un objeto".into(),
         ));
     };
     let allowed: &[&str] = match action_kind {
-        REGISTER_INVOICE => &["supplier", "max_total"],
-        SEND_DRAFT => &["category"],
+        REGISTER_INVOICE => &["supplier", "max_total", "currency"],
+        SEND_DRAFT => &["category", "sender", "sender_domain"],
         other => {
             return Err(AppError::Invalid(format!(
                 "tipo de acción desconocido: {other}"
@@ -1703,18 +1752,24 @@ fn check_rule(action_kind: &str, conditions: &Value) -> AppResult<()> {
             .filter(|v| !v.trim().is_empty())
     };
     if action_kind == SEND_DRAFT {
-        return if nestadmin_ai::tasks::CATEGORIES.contains(&text("category").unwrap_or("")) {
-            Ok(())
-        } else {
-            Err(AppError::Invalid(
+        if !nestadmin_ai::tasks::CATEGORIES.contains(&text("category").unwrap_or("")) {
+            return Err(AppError::Invalid(
                 "la regla de envío necesita una categoría válida".into(),
-            ))
-        };
+            ));
+        }
+        return check_sender(map, allow_no_sender);
     }
     if text("supplier").is_none() {
         return Err(AppError::Invalid(
             "la regla de registro necesita un proveedor".into(),
         ));
+    }
+    if let Some(currency) = conditions.get("currency") {
+        if currency.as_str() != Some("EUR") {
+            return Err(AppError::Invalid(
+                "Hoy la aplicación solo registra facturas en euros: la moneda de la regla solo puede ser \"EUR\"".into(),
+            ));
+        }
     }
     match conditions.get("max_total") {
         None => Ok(()),
@@ -1722,6 +1777,33 @@ fn check_rule(action_kind: &str, conditions: &Value) -> AppResult<()> {
             .map(|_| ())
             .map_err(|_| max_total_error()),
         Some(_) => Err(max_total_error()),
+    }
+}
+
+/// Remitente de una regla de envío: dirección exacta o dominio, nunca los dos (D126).
+fn check_sender(map: &serde_json::Map<String, Value>, allow_no_sender: bool) -> AppResult<()> {
+    let invalid = |what: &str| AppError::Invalid(what.to_owned());
+    match (map.get("sender"), map.get("sender_domain")) {
+        (Some(_), Some(_)) => Err(invalid(
+            "indique la dirección del remitente o su dominio, no las dos cosas",
+        )),
+        (Some(value), None) => match value.as_str() {
+            Some(address) if rules::is_email_address(address.trim()) => Ok(()),
+            _ => Err(invalid(
+                "el remitente debe ser una dirección de correo, p. ej. \"pedidos@proveedor.example\"",
+            )),
+        },
+        (None, Some(value)) => match value.as_str() {
+            Some(domain) if rules::is_domain(domain.trim()) => Ok(()),
+            _ => Err(invalid(
+                "el dominio del remitente debe ser como \"proveedor.example\", sin @ ni subdominios implícitos",
+            )),
+        },
+        (None, None) if allow_no_sender => Ok(()),
+        (None, None) => Err(invalid(
+            "la regla de envío necesita un remitente (dirección o dominio); sin él solo puede \
+             guardarse con la validación avanzada de «cualquier remitente»",
+        )),
     }
 }
 

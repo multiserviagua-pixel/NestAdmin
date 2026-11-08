@@ -75,7 +75,11 @@ test("avisos de riesgo", () => {
 test("problemas que impiden que la regla actúe", () => {
   assert.equal(ruleProblem(invoice({ supplier: "Alfa SL", max_total: "500.00" })), null);
   assert.match(ruleProblem(invoice({ supplier: "Alfa SL", max_total: 500 })) ?? "", /no es un importe válido/);
-  assert.match(ruleProblem(invoice({ supplier: "Alfa SL", currency: "EUR" })) ?? "", /«currency»/);
+  assert.match(ruleProblem(invoice({ supplier: "Alfa SL", color: "rojo" })) ?? "", /«color»/);
+  // La moneda (D127) y el remitente (D126) son condiciones conocidas.
+  assert.equal(ruleProblem(invoice({ supplier: "Alfa SL", max_total: "500.00", currency: "EUR" })), null);
+  assert.equal(ruleProblem(send({ category: "consulta_pago", sender: "pedidos@alfa.test" })), null);
+  assert.equal(ruleProblem(send({ category: "consulta_pago", sender_domain: "alfa.test" })), null);
   assert.match(ruleProblem(invoice({})) ?? "", /no indica proveedor/);
   assert.match(ruleProblem(send({})) ?? "", /no indica categoría/);
 });

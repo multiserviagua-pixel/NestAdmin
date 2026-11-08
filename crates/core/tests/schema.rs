@@ -26,6 +26,10 @@ fn has_rules_table(path: &std::path::Path) -> bool {
 /// hubiera creado la versión anterior.
 const DROP_SALES: &str = "DROP TABLE received_delivery_notes; DROP TABLE payments;     DROP TABLE document_links; DROP TABLE sales_lines; DROP TABLE sales_documents;     DROP TABLE recurring_skips; DROP TABLE recurring_templates; DROP TABLE series; DROP TABLE products;     DROP TABLE customers; DROP TABLE company; DROP TABLE company_logos;";
 
+/// Quita lo que añadió la migración 4 (panel de reglas), como si la base la hubiera creado
+/// la versión anterior.
+const DROP_PANEL: &str = "DROP TABLE rule_settings; DROP TABLE rule_suggestions; DROP TABLE rule_signals; DROP TABLE rule_evaluations; DROP TABLE rule_meta; ALTER TABLE actions DROP COLUMN rule_id; ALTER TABLE actions DROP COLUMN rule_version;";
+
 fn has_table(path: &std::path::Path, name: &str) -> bool {
     rusqlite::Connection::open(path)
         .unwrap()
@@ -58,7 +62,7 @@ fn migrating_keeps_a_copy_of_the_previous_schema() {
     // Simula una base creada por la versión anterior (esquema 1, sin la tabla de reglas).
     let conn = rusqlite::Connection::open(&path).unwrap();
     conn.execute_batch(&format!(
-        "{DROP_SALES} DROP TABLE rules; PRAGMA user_version = 1;"
+        "{DROP_PANEL} {DROP_SALES} DROP TABLE rules; PRAGMA user_version = 1;"
     ))
     .unwrap();
     drop(conn);
@@ -89,8 +93,10 @@ fn migrating_from_schema_2_adds_sales_tables_and_keeps_a_copy() {
     drop(Store::open(&path).unwrap());
     // Base de la versión anterior (esquema 2): con reglas y sin tablas de venta.
     let conn = rusqlite::Connection::open(&path).unwrap();
-    conn.execute_batch(&format!("{DROP_SALES} PRAGMA user_version = 2;"))
-        .unwrap();
+    conn.execute_batch(&format!(
+        "{DROP_PANEL} {DROP_SALES} PRAGMA user_version = 2;"
+    ))
+    .unwrap();
     conn.execute(
         "INSERT INTO audit_log (at, action, status) VALUES (1, 'previa', 'ok')",
         [],
@@ -100,7 +106,7 @@ fn migrating_from_schema_2_adds_sales_tables_and_keeps_a_copy() {
 
     let store = Store::open(&path).unwrap();
     assert_eq!(store.schema_version().unwrap(), SCHEMA_VERSION);
-    assert_eq!(SCHEMA_VERSION, 3);
+    assert_eq!(SCHEMA_VERSION, 4);
     assert_eq!(
         store.audit_log().unwrap().len(),
         1,
@@ -133,6 +139,54 @@ fn migrating_from_schema_2_adds_sales_tables_and_keeps_a_copy() {
         assert!(has_table(&path, table), "{table} debe existir tras migrar");
     }
     assert!(!backup_path(&path, 1).exists());
+}
+
+/// La migración 4 (D124–D129) añade las tablas del panel y las columnas de `actions` sin
+/// tocar las filas anteriores, que quedan sin regla asignada.
+#[test]
+fn migrating_from_schema_3_adds_the_rules_panel_and_keeps_old_actions() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("nestadmin.db");
+    drop(Store::open(&path).unwrap());
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    conn.execute_batch(&format!("{DROP_PANEL} PRAGMA user_version = 3;"))
+        .unwrap();
+    conn.execute(
+        "INSERT INTO tasks (id, kind, input_ref, state, created_at, updated_at) VALUES (1, 'invoice', '{}', 'completed', 1, 1)",
+        [],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO actions (idempotency_key, task_id, kind, version, payload, authorization, status, created_at, updated_at)
+         VALUES ('task-1/register_invoice/v1', 1, 'register_invoice', 1, '{}', 'regla alfa v2', 'confirmed', 1, 1)",
+        [],
+    )
+    .unwrap();
+    drop(conn);
+
+    let store = Store::open(&path).unwrap();
+    assert_eq!(store.schema_version().unwrap(), 4);
+    drop(store);
+    for table in [
+        "rule_meta",
+        "rule_evaluations",
+        "rule_signals",
+        "rule_suggestions",
+        "rule_settings",
+    ] {
+        assert!(has_table(&path, table), "{table} debe existir tras migrar");
+        assert!(!has_table(&backup_path(&path, 3), table));
+    }
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    let (rule_id, rule_version, authorization): (Option<String>, Option<i64>, String) = conn
+        .query_row(
+            "SELECT rule_id, rule_version, authorization FROM actions",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!((rule_id, rule_version), (None, None));
+    assert_eq!(authorization, "regla alfa v2");
 }
 
 #[test]

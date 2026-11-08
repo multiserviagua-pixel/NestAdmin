@@ -36,6 +36,21 @@ pub enum Authorization {
 }
 
 impl Authorization {
+    /// Regla que autorizó la acción; `None` si la aprobó una persona.
+    pub fn rule_id(&self) -> Option<&str> {
+        match self {
+            Self::Approval => None,
+            Self::Rule { rule_id, .. } => Some(rule_id),
+        }
+    }
+
+    pub fn rule_version(&self) -> Option<i64> {
+        match self {
+            Self::Approval => None,
+            Self::Rule { rule_version, .. } => Some(*rule_version),
+        }
+    }
+
     fn label(&self) -> String {
         match self {
             Self::Approval => "aprobación".to_owned(),
@@ -139,18 +154,19 @@ impl Store {
         let authorization = request.authorization.label();
 
         let tx = self.conn.transaction()?;
-        let existing: Option<(String, String, Option<String>)> = tx
+        let existing: Option<(String, String, Option<String>, String)> = tx
             .query_row(
-                "SELECT payload, status, receipt FROM actions WHERE idempotency_key = ?1",
+                "SELECT payload, status, receipt, authorization FROM actions WHERE idempotency_key = ?1",
                 [&key],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
             )
             .optional()?;
+        let stored_authorization = existing.as_ref().map(|e| e.3.clone());
         let previously_started = match &existing {
-            Some((stored, _, _)) if *stored != payload => {
+            Some((stored, _, _, _)) if *stored != payload => {
                 return Err(CoreError::IdempotencyConflict(key))
             }
-            Some((_, status, Some(receipt))) if status == "confirmed" => {
+            Some((_, status, Some(receipt), _)) if status == "confirmed" => {
                 tx.commit()?;
                 return Ok(ActionOutcome::AlreadyConfirmed(serde_json::from_str(
                     receipt,
@@ -160,9 +176,19 @@ impl Store {
             None => {
                 let now = now_ms();
                 tx.execute(
-                    "INSERT INTO actions (idempotency_key, task_id, kind, version, payload, authorization, status, created_at, updated_at)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'pending', ?7, ?7)",
-                    params![key, request.task_id, request.kind, request.version, payload, authorization, now],
+                    "INSERT INTO actions (idempotency_key, task_id, kind, version, payload, authorization, status, created_at, updated_at, rule_id, rule_version)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'pending', ?7, ?7, ?8, ?9)",
+                    params![
+                        key,
+                        request.task_id,
+                        request.kind,
+                        request.version,
+                        payload,
+                        authorization,
+                        now,
+                        request.authorization.rule_id(),
+                        request.authorization.rule_version()
+                    ],
                 )?;
                 audit(
                     &tx,
@@ -183,7 +209,23 @@ impl Store {
                     self.confirm(request, &key, &authorization, &receipt, "reconciled")?;
                     return Ok(ActionOutcome::Reconciled(receipt));
                 }
-                Ok(None) => {}
+                Ok(None) => {
+                    // El intento anterior no llegó a ejecutarse y esta vez lo ejecuta quien
+                    // llama (por ejemplo, una persona que aprueba lo que una regla dejó a
+                    // medias): la fila dice quién lo hizo de verdad. Si el conector ya lo
+                    // había ejecutado (arriba), la fila conserva a quien lo hizo.
+                    if stored_authorization.as_deref() != Some(authorization.as_str()) {
+                        self.conn.execute(
+                            "UPDATE actions SET authorization = ?2, rule_id = ?3, rule_version = ?4 WHERE idempotency_key = ?1",
+                            params![
+                                key,
+                                authorization,
+                                request.authorization.rule_id(),
+                                request.authorization.rule_version()
+                            ],
+                        )?;
+                    }
+                }
                 Err(error) => return self.record_failure(request, &key, &authorization, error),
             }
         }

@@ -8,6 +8,7 @@ use std::sync::{Arc, Mutex};
 use nestadmin_ai::{
     AiError, GenerateRequest, GenerateResult, Provider, ProviderKind, Task as AiTask, Usage,
 };
+use nestadmin_app::panel::NewRule;
 use nestadmin_app::{App, AppError, AppPaths, EMAIL, INVOICE};
 use nestadmin_core::TaskState;
 use nestadmin_extract::{ExtractError, Extractor, Ocr};
@@ -286,27 +287,39 @@ fn rules_with_numeric_limit_or_unknown_keys_are_rejected() {
     for conditions in [
         json!({ "supplier": "Alfa SL", "max_total": 500 }),
         json!({ "supplier": "Alfa SL", "max_total": null }),
-        json!({ "supplier": "Alfa SL", "currency": "EUR" }),
+        json!({ "supplier": "Alfa SL", "colour": "EUR" }),
+        json!({ "supplier": "Alfa SL", "currency": "eur" }),
+        json!({ "supplier": "Alfa SL", "currency": "USD" }),
+        json!({ "supplier": "Alfa SL", "currency": 978 }),
         json!(["Alfa SL"]),
     ] {
         assert!(app
             .create_rule("r", "register_invoice", &conditions)
             .is_err());
     }
-    assert!(app
+    // Hoy solo se registran facturas en euros (D91): otra moneda se rechaza con un mensaje claro.
+    let error = app
         .create_rule(
-            "d",
-            "send_draft",
-            &json!({ "category": "solicitud_factura", "sender": "x@example.test" })
+            "r",
+            "register_invoice",
+            &json!({ "supplier": "Alfa SL", "currency": "USD" }),
         )
-        .is_err());
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("solo registra facturas en euros"), "{error}");
+    for conditions in [
+        json!({ "category": "solicitud_factura", "colour": "x@example.test" }),
+        json!({ "category": "solicitud_factura" }),
+    ] {
+        assert!(app.create_rule("d", "send_draft", &conditions).is_err());
+    }
     assert!(app.rules().unwrap().is_empty());
 
     app.create_rule("r", "register_invoice", &json!({ "supplier": "Alfa SL" }))
         .unwrap();
     for conditions in [
         json!({ "supplier": "Alfa SL", "max_total": 500 }),
-        json!({ "supplier": "Alfa SL", "currency": "EUR" }),
+        json!({ "supplier": "Alfa SL", "colour": "EUR" }),
     ] {
         assert!(app.update_rule("r", &conditions).is_err());
     }
@@ -342,7 +355,7 @@ fn legacy_rules_dir() -> tempfile::TempDir {
         ),
         (
             "clave-rara",
-            json!({ "supplier": "Alfa SL", "currency": "EUR" }),
+            json!({ "supplier": "Alfa SL", "colour": "EUR" }),
         ),
     ] {
         store
@@ -436,11 +449,15 @@ fn mail_is_fetched_once_and_edited_drafts_need_new_approval() {
 fn a_draft_without_sender_is_never_sent_by_a_rule() {
     let dir = tempfile::tempdir().unwrap();
     let mut app = open(&dir, FakeProvider::new());
-    app.create_rule(
-        "facturas",
-        "send_draft",
-        &json!({ "category": "solicitud_factura" }),
-    )
+    // Regla sin remitente con la validación avanzada (D126): coincide también con el correo
+    // sin remitente, que solo el destinatario ausente impide enviar.
+    app.create_rule_full(NewRule {
+        id: Some("facturas"),
+        name: None,
+        action_kind: "send_draft",
+        conditions: &json!({ "category": "solicitud_factura" }),
+        allow_any_sender: true,
+    })
     .unwrap();
     app.set_rule_active("facturas", true).unwrap();
     app.fetch_mail().unwrap();
@@ -929,4 +946,892 @@ fn an_update_waits_for_running_work_and_keeps_the_queue() {
     let next = app.process_next().unwrap().unwrap();
     assert_eq!(next.state, TaskState::AwaitingReview);
     assert_eq!(next.result.unwrap()["fields"]["invoice_number"], "F-2");
+}
+
+// ---- Panel de reglas: remitente, moneda, avanzada, archivo, evidencia y simulación ----
+
+/// Contenido de las tablas indicadas, fila a fila, para comparar antes y después.
+fn dump(dir: &tempfile::TempDir, tables: &[&str]) -> Vec<(String, Vec<String>)> {
+    let conn = rusqlite::Connection::open(dir.path().join("nestadmin.db")).unwrap();
+    tables
+        .iter()
+        .map(|table| {
+            let mut stmt = conn
+                .prepare(&format!("SELECT * FROM {table} ORDER BY rowid"))
+                .unwrap();
+            let columns = stmt.column_count();
+            let rows = stmt
+                .query_map([], |row| {
+                    Ok((0..columns)
+                        .map(|i| match row.get_ref(i).unwrap() {
+                            rusqlite::types::ValueRef::Text(bytes) => {
+                                String::from_utf8_lossy(bytes).into_owned()
+                            }
+                            other => format!("{other:?}"),
+                        })
+                        .collect::<Vec<_>>()
+                        .join("|"))
+                })
+                .unwrap()
+                .map(Result::unwrap)
+                .collect();
+            (table.to_string(), rows)
+        })
+        .collect()
+}
+
+const PANEL_TABLES: [&str; 5] = [
+    "audit_log",
+    "tasks",
+    "actions",
+    "rule_evaluations",
+    "rule_signals",
+];
+
+fn count(dir: &tempfile::TempDir, table: &str) -> usize {
+    dump(dir, &[table])[0].1.len()
+}
+
+/// Reglas escritas directamente en el almacén, como las guardaba la versión anterior.
+fn with_stored_rules(dir: &tempfile::TempDir, rules: &[(&str, &str, Value)]) {
+    let mut store = nestadmin_core::Store::open(&dir.path().join("nestadmin.db")).unwrap();
+    for (id, kind, conditions) in rules {
+        store.create_rule(id, kind, conditions).unwrap();
+        store.set_rule_active(id, true).unwrap();
+    }
+}
+
+/// Correos de la bandeja de ejemplo procesados: remitente, estado y resultado.
+fn mail_states(app: &mut App) -> Vec<(Option<String>, TaskState, Value)> {
+    app.fetch_mail().unwrap();
+    while app.process_next().unwrap().is_some() {}
+    app.tasks()
+        .unwrap()
+        .into_iter()
+        .filter(|t| t.kind == EMAIL)
+        .map(|t| {
+            let result = t.result.clone().unwrap();
+            (
+                result["message"]["from"].as_str().map(str::to_owned),
+                t.state,
+                result,
+            )
+        })
+        .collect()
+}
+
+/// Factura cuyo texto lleva una nota (donde se puede ver una marca de moneda). Es JSON para
+/// que el proveedor simulado la lea; la extracción local de moneda ve todo el texto.
+fn invoice_note(supplier: &str, number: &str, total: &str, note: &str) -> String {
+    let mut value: Value = serde_json::from_str(&invoice(supplier, number, total)).unwrap();
+    value["nota"] = json!(note);
+    value.to_string()
+}
+
+#[test]
+fn another_currency_mentioned_in_the_document_sends_it_to_review_with_or_without_a_limit() {
+    // (nota del documento, ¿se registra por regla?)
+    let notes = [
+        ("Total $ 121.00", false),
+        ("Total US$ 121.00", false),
+        ("Total 121.00 USD", false),
+        ("Total £121.00", false),
+        ("Factura sin ninguna marca de moneda", true),
+        ("Total 121,00 €", true),
+        ("CADENA USDA SCAD", true),
+    ];
+    for (rule_name, conditions) in [
+        (
+            "con límite",
+            json!({ "supplier": "Alfa SL", "max_total": "500.00" }),
+        ),
+        ("sin límite", json!({ "supplier": "Alfa SL" })),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = open(&dir, FakeProvider::new());
+        app.create_rule("alfa", "register_invoice", &conditions)
+            .unwrap();
+        app.set_rule_active("alfa", true).unwrap();
+        let before = app.simulators().1.record_count().unwrap();
+        for (n, (note, registers)) in notes.iter().enumerate() {
+            let number = format!("F-{}", n + 1);
+            app.import_document(
+                &format!("{n}.txt"),
+                &invoice_note("Alfa SL", &number, "121.00", note),
+            )
+            .unwrap();
+            let task = app.process_next().unwrap().unwrap();
+            let result = task.result.clone().unwrap();
+            assert_eq!(
+                task.state == TaskState::Completed,
+                *registers,
+                "{rule_name}: {note}"
+            );
+            // Solo códigos, nunca el texto.
+            assert!(!result["currency_evidence"].to_string().contains("Total"));
+            if !registers {
+                let usd_like = result["currency_evidence"]["foreign"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|c| c.as_str().unwrap())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                if rule_name == "con límite" {
+                    // La regla no coincide, con el motivo concreto.
+                    assert_eq!(result["review_reason"], "ninguna regla activa coincide");
+                    assert_eq!(
+                        result["evaluation"]["candidates"][0]["mismatch"],
+                        format!("el documento menciona {usd_like} y el límite está en EUR")
+                    );
+                } else {
+                    // La regla coincide, pero la factura no se registra sola.
+                    assert_eq!(result["evaluation"]["code"], "foreign_currency");
+                    assert_eq!(
+                        result["review_reason"],
+                        format!(
+                            "el documento menciona {usd_like}; hoy la aplicación solo registra facturas en euros"
+                        )
+                    );
+                }
+            }
+        }
+        let registered = notes.iter().filter(|(_, registers)| *registers).count();
+        assert_eq!(
+            app.simulators().1.record_count().unwrap(),
+            before + registered,
+            "{rule_name}"
+        );
+    }
+}
+
+#[test]
+fn a_task_without_the_currency_check_is_never_registered_by_a_rule_and_the_simulation_says_so() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = open(&dir, FakeProvider::new());
+    app.import_document("1.txt", &invoice("Alfa SL", "F-1", "121.00"))
+        .unwrap();
+    let old = app.process_next().unwrap().unwrap();
+    assert_eq!(old.state, TaskState::AwaitingReview);
+    // Una tarea guardada antes de D127: sin la comprobación local de moneda.
+    rusqlite::Connection::open(dir.path().join("nestadmin.db"))
+        .unwrap()
+        .execute_batch("UPDATE tasks SET result = json_remove(result, '$.currency_evidence');")
+        .unwrap();
+    let before = dump(&dir, &PANEL_TABLES);
+    let sim = app
+        .simulate_rule("register_invoice", &json!({ "supplier": "Alfa SL" }), None)
+        .unwrap();
+    assert_eq!(sim.without_currency_check, 1);
+    assert_eq!(sim.would_automate, 0);
+    assert_eq!(sim.would_review.get("currency_not_checked"), Some(&1));
+    assert_eq!(
+        sim.items[0].explanation,
+        "no consta la comprobación de moneda; reprocese o revise"
+    );
+    assert_eq!(dump(&dir, &PANEL_TABLES), before);
+}
+
+#[test]
+fn a_send_rule_acts_only_for_its_sender_address_or_domain() {
+    let cases: [(&str, Value, bool); 5] = [
+        (
+            "dirección con otras mayúsculas",
+            json!({ "sender": "FACTURAS@Proveedor-Alfa.test" }),
+            true,
+        ),
+        (
+            "dominio",
+            json!({ "sender_domain": "proveedor-alfa.TEST" }),
+            true,
+        ),
+        (
+            "otra dirección",
+            json!({ "sender": "otra@proveedor-alfa.test" }),
+            false,
+        ),
+        (
+            "subdominio no vale",
+            json!({ "sender_domain": "alfa.test" }),
+            false,
+        ),
+        (
+            "dominio que contiene al real",
+            json!({ "sender_domain": "xproveedor-alfa.test" }),
+            false,
+        ),
+    ];
+    for (name, sender, acts) in cases {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = open(&dir, FakeProvider::new());
+        let mut conditions = json!({ "category": "solicitud_factura" });
+        conditions
+            .as_object_mut()
+            .unwrap()
+            .extend(sender.as_object().unwrap().clone());
+        app.create_rule("envio", "send_draft", &conditions).unwrap();
+        app.set_rule_active("envio", true).unwrap();
+        let states = mail_states(&mut app);
+        assert!(!states.is_empty());
+        let completed = states
+            .iter()
+            .filter(|(_, state, _)| *state == TaskState::Completed)
+            .count();
+        assert_eq!(completed > 0, acts, "{name}");
+        for (from, state, _) in &states {
+            // Un correo sin remitente (M-0006) nunca coincide con una regla con remitente.
+            let own = from.as_deref() == Some("facturas@proveedor-alfa.test");
+            assert_eq!(
+                *state == TaskState::Completed,
+                acts && own,
+                "{name}: {from:?}"
+            );
+        }
+        assert_eq!(app.simulators().0.sent().unwrap().len(), completed);
+    }
+}
+
+#[test]
+fn a_stored_send_rule_without_sender_never_automates_and_says_so() {
+    let dir = tempfile::tempdir().unwrap();
+    with_stored_rules(
+        &dir,
+        &[(
+            "vieja",
+            "send_draft",
+            json!({ "category": "solicitud_factura" }),
+        )],
+    );
+    let mut app = open(&dir, FakeProvider::new());
+    let states = mail_states(&mut app);
+    assert!(!states.is_empty());
+    for (from, state, result) in &states {
+        assert_eq!(*state, TaskState::AwaitingReview, "{from:?}");
+        assert_eq!(result["evaluation"]["code"], "sender_required");
+        assert_eq!(
+            result["review_reason"],
+            "la regla no indica remitente; añádalo o valide la opción avanzada (regla: vieja)"
+        );
+    }
+    assert!(app.simulators().0.sent().unwrap().is_empty());
+    // No se puede activar de nuevo sin remitente ni validación.
+    app.set_rule_active("vieja", false).unwrap();
+    let error = app.set_rule_active("vieja", true).unwrap_err().to_string();
+    assert!(error.contains("necesita un remitente"), "{error}");
+}
+
+#[test]
+fn the_advanced_option_is_per_rule_audited_and_erased_by_editing() {
+    let dir = tempfile::tempdir().unwrap();
+    with_stored_rules(
+        &dir,
+        &[
+            (
+                "vieja",
+                "send_draft",
+                json!({ "category": "solicitud_factura" }),
+            ),
+            ("otra", "send_draft", json!({ "category": "consulta_pago" })),
+        ],
+    );
+    let mut app = open(&dir, FakeProvider::new());
+
+    // La marca de otra regla no sirve: «vieja» sigue sin automatizar.
+    app.set_rule_any_sender("otra", true).unwrap();
+    let states = mail_states(&mut app);
+    assert!(states
+        .iter()
+        .all(|(_, state, _)| *state == TaskState::AwaitingReview));
+
+    // Con su propia marca, automatiza los correos con destinatario (en una base nueva, para
+    // volver a procesar la misma bandeja).
+    let dir2 = tempfile::tempdir().unwrap();
+    with_stored_rules(
+        &dir2,
+        &[(
+            "vieja",
+            "send_draft",
+            json!({ "category": "solicitud_factura" }),
+        )],
+    );
+    let mut acked = open(&dir2, FakeProvider::new());
+    acked.set_rule_any_sender("vieja", true).unwrap();
+    let states = mail_states(&mut acked);
+    let completed = states
+        .iter()
+        .filter(|(_, state, _)| *state == TaskState::Completed)
+        .count();
+    assert!(completed > 0);
+    assert!(
+        states
+            .iter()
+            .any(|(from, state, _)| from.is_none() && *state == TaskState::AwaitingReview),
+        "el correo sin destinatario sigue en revisión"
+    );
+
+    // Queda en el historial, con su motivo.
+    let audit = acked.audit_log().unwrap();
+    let entry = audit
+        .iter()
+        .find(|e| e.action == "rule_any_sender" && e.status == "acknowledged")
+        .expect("la validación consta en el historial");
+    assert!(entry.detail.as_deref().unwrap().starts_with("vieja v"));
+    assert!(entry
+        .detail
+        .as_deref()
+        .unwrap()
+        .contains("cualquier remitente"));
+
+    // Editar las condiciones borra la marca: la regla deja de automatizar.
+    let view = |app: &App| {
+        app.rule_views()
+            .unwrap()
+            .into_iter()
+            .find(|v| v.rule.id == "vieja")
+            .unwrap()
+    };
+    assert!(view(&acked).any_sender_ack_at.is_some());
+    acked
+        .update_rule("vieja", &json!({ "category": "solicitud_factura" }))
+        .unwrap();
+    assert!(view(&acked).any_sender_ack_at.is_none());
+    assert!(acked
+        .audit_log()
+        .unwrap()
+        .iter()
+        .any(|e| e.action == "rule_any_sender" && e.status == "revoked"));
+    // Sin la marca ni remitente, tampoco se guarda otra edición sin remitente.
+    assert!(acked
+        .update_rule("vieja", &json!({ "category": "otros" }))
+        .is_err());
+    let again = acked.set_rule_any_sender("vieja", true).unwrap();
+    assert!(again.any_sender_ack_at.is_some());
+    // Una regla con remitente no admite la opción avanzada.
+    acked
+        .update_rule(
+            "vieja",
+            &json!({ "category": "otros", "sender": "a@alfa.test" }),
+        )
+        .unwrap();
+    assert!(acked.set_rule_any_sender("vieja", true).is_err());
+}
+
+#[test]
+fn creating_rules_generates_ids_from_names_and_the_advanced_option_is_explicit() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = open(&dir, FakeProvider::new());
+    let conditions = json!({ "supplier": "Alfa SL" });
+    let make = |app: &mut App, id: Option<&str>, name: Option<&str>| {
+        app.create_rule_full(NewRule {
+            id,
+            name,
+            action_kind: "register_invoice",
+            conditions: &conditions,
+            allow_any_sender: false,
+        })
+    };
+    let first = make(&mut app, None, Some("Facturas de Alfa")).unwrap();
+    assert_eq!(
+        (first.rule.id.as_str(), first.name.as_str()),
+        ("facturas-de-alfa", "Facturas de Alfa")
+    );
+    assert_eq!(first.rule.version, 1);
+    assert!(!first.rule.active);
+    let second = make(&mut app, None, Some("Facturas de Alfa")).unwrap();
+    assert_eq!(second.rule.id, "facturas-de-alfa-2");
+    // Con id y sin nombre: se muestra el id; los ids antiguos se conservan tal cual.
+    let plain = make(&mut app, Some("vieja-regla"), None).unwrap();
+    assert_eq!(
+        (plain.rule.id.as_str(), plain.name.as_str()),
+        ("vieja-regla", "vieja-regla")
+    );
+    assert!(make(&mut app, None, None).is_err());
+    assert!(make(&mut app, Some("vieja-regla"), None).is_err());
+    let renamed = app
+        .rename_rule("vieja-regla", Some("La de siempre"))
+        .unwrap();
+    assert_eq!(renamed.name, "La de siempre");
+
+    // La validación avanzada solo vale para envío sin remitente.
+    let send = json!({ "category": "solicitud_factura" });
+    let send_rule = |allow| NewRule {
+        id: Some("envio"),
+        name: None,
+        action_kind: "send_draft",
+        conditions: &send,
+        allow_any_sender: allow,
+    };
+    assert!(app.create_rule_full(send_rule(false)).is_err());
+    assert!(app.create_rule("envio", "send_draft", &send).is_err());
+    let advanced = app.create_rule_full(send_rule(true)).unwrap();
+    assert!(advanced.any_sender_ack_at.is_some());
+    assert!(!advanced.rule.active);
+    let on_invoice = NewRule {
+        id: Some("x"),
+        name: None,
+        action_kind: "register_invoice",
+        conditions: &conditions,
+        allow_any_sender: true,
+    };
+    assert!(app.create_rule_full(on_invoice).is_err());
+    let with_sender = json!({ "category": "solicitud_factura", "sender": "a@alfa.test" });
+    let both = NewRule {
+        id: Some("y"),
+        name: None,
+        action_kind: "send_draft",
+        conditions: &with_sender,
+        allow_any_sender: true,
+    };
+    assert!(app.create_rule_full(both).is_err());
+    // Formato del remitente.
+    for bad in [
+        json!({ "category": "solicitud_factura", "sender": "no-es-una-direccion" }),
+        json!({ "category": "solicitud_factura", "sender_domain": "@alfa.test" }),
+        json!({ "category": "solicitud_factura", "sender": "a@alfa.test", "sender_domain": "alfa.test" }),
+        json!({ "category": "solicitud_factura", "sender": 7 }),
+    ] {
+        assert!(app.create_rule("z", "send_draft", &bad).is_err(), "{bad}");
+    }
+}
+
+#[test]
+fn archived_rules_stay_inactive_and_cannot_be_activated_or_edited() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = open(&dir, FakeProvider::new());
+    app.create_rule(
+        "alfa",
+        "register_invoice",
+        &json!({ "supplier": "Alfa SL" }),
+    )
+    .unwrap();
+    app.set_rule_active("alfa", true).unwrap();
+    let archived = app.archive_rule("alfa").unwrap();
+    assert!(!archived.rule.active);
+    assert!(archived.archived_at.is_some());
+    assert_eq!(
+        archived.rule.version, 3,
+        "desactivar crea versión: el historial la conserva"
+    );
+
+    for error in [
+        app.set_rule_active("alfa", true).unwrap_err().to_string(),
+        app.update_rule("alfa", &json!({ "supplier": "Beta SL" }))
+            .unwrap_err()
+            .to_string(),
+    ] {
+        assert!(error.contains("archivada"), "{error}");
+    }
+    // No automatiza.
+    app.import_document("1.txt", &invoice("Alfa SL", "F-1", "121.00"))
+        .unwrap();
+    assert_eq!(
+        app.process_next().unwrap().unwrap().state,
+        TaskState::AwaitingReview
+    );
+    // Archivar de nuevo no hace nada; desarchivar la devuelve inactiva.
+    assert_eq!(app.archive_rule("alfa").unwrap().rule.version, 3);
+    let back = app.unarchive_rule("alfa").unwrap();
+    assert!(!back.rule.active && back.archived_at.is_none());
+    assert!(app.set_rule_active("alfa", true).unwrap().active);
+}
+
+#[test]
+fn evaluations_signals_and_counters_are_recorded_once_and_without_mail_content() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = open(&dir, FakeProvider::new());
+    app.create_rule(
+        "alfa",
+        "register_invoice",
+        &json!({ "supplier": "Alfa SL", "max_total": "500.00" }),
+    )
+    .unwrap();
+    app.set_rule_active("alfa", true).unwrap();
+    app.create_rule(
+        "envio",
+        "send_draft",
+        &json!({ "category": "solicitud_factura", "sender": "facturas@proveedor-alfa.test" }),
+    )
+    .unwrap();
+
+    // Una factura por regla y otra a revisión; los correos a revisión (regla inactiva).
+    app.import_document("1.txt", &invoice("Alfa SL", "F-1", "121.00"))
+        .unwrap();
+    app.import_document("2.txt", &invoice("Beta SL", "B-2", "121.00"))
+        .unwrap();
+    app.fetch_mail().unwrap();
+    while app.process_next().unwrap().is_some() {}
+    let tasks = app.tasks().unwrap();
+    let by_document = |label: &str| {
+        tasks
+            .iter()
+            .find(|t| t.result.as_ref().is_some_and(|r| r["document"] == label))
+            .unwrap()
+            .clone()
+    };
+    assert_eq!(by_document("1.txt").state, TaskState::Completed);
+    let beta = by_document("2.txt");
+    assert_eq!(beta.state, TaskState::AwaitingReview);
+
+    // Evidencia: una fila por tarea evaluada, con el motivo y sin contenido.
+    assert_eq!(
+        count(&dir, "rule_evaluations"),
+        tasks.iter().filter(|t| t.result.is_some()).count()
+    );
+    let evaluations = dump(&dir, &["rule_evaluations"])[0].1.join("\n");
+    assert!(evaluations.contains("automated") && evaluations.contains("no_active_rule_matches"));
+
+    // Aprobar la factura de revisión deja una señal sin edición; la regla no es señal.
+    app.approve(beta.id, 1).unwrap();
+    assert_eq!(count(&dir, "rule_signals"), 1);
+    let signals = dump(&dir, &["rule_signals"])[0].1.join("\n");
+    assert!(signals.contains("approved") && signals.contains("beta sl"));
+    assert!(signals.contains("unedited"));
+
+    // Correo: editar y aprobar deja `edited` y `approved` con edit_state `edited`.
+    let mail = tasks
+        .iter()
+        .find(|t| {
+            t.kind == EMAIL
+                && t.result.as_ref().unwrap()["message"]["from"] == "facturas@proveedor-alfa.test"
+        })
+        .unwrap()
+        .clone();
+    app.edit_draft(mail.id, "Texto corregido por una persona.")
+        .unwrap();
+    app.approve(mail.id, 2).unwrap();
+    let signals = dump(&dir, &["rule_signals"])[0].1.join("\n");
+    assert!(signals.contains("|edited|send_draft"), "{signals}");
+    assert!(signals.contains("|approved|send_draft"), "{signals}");
+    assert!(signals.contains("solicitud_factura|facturas@proveedor-alfa.test"));
+    assert_eq!(count(&dir, "rule_signals"), 3);
+
+    // Contadores: la regla aplicó una factura.
+    let stats = app.rule_stats().unwrap();
+    let alfa = stats.iter().find(|s| s.rule_id == "alfa").unwrap();
+    assert_eq!((alfa.applied, alfa.unclassified), (1, 0));
+    assert!(alfa.last_applied_at.is_some());
+    assert_eq!(app.rule_stats().unwrap(), stats);
+    let envio = stats.iter().find(|s| s.rule_id == "envio").unwrap();
+    assert_eq!(envio.applied, 0);
+
+    // Ninguna tabla nueva contiene el cuerpo de un correo ni del borrador.
+    let everything = dump(
+        &dir,
+        &[
+            "rule_evaluations",
+            "rule_signals",
+            "rule_meta",
+            "rule_suggestions",
+            "rule_settings",
+        ],
+    )
+    .into_iter()
+    .flat_map(|(_, rows)| rows)
+    .collect::<Vec<_>>()
+    .join("\n");
+    for private in [
+        "Adjuntamos la factura FS-2026-014",
+        "Texto corregido por una persona.",
+        "Adjuntamos la factura solicitada.",
+        "Recordatorio de renovación",
+    ] {
+        assert!(!everything.contains(private), "{private}");
+    }
+}
+
+#[test]
+fn a_retry_after_a_connector_failure_does_not_duplicate_evidence_or_counters() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = open(&dir, FakeProvider::new());
+    app.create_rule(
+        "alfa",
+        "register_invoice",
+        &json!({ "supplier": "Alfa SL" }),
+    )
+    .unwrap();
+    app.set_rule_active("alfa", true).unwrap();
+    let before = app.simulators().1.record_count().unwrap();
+    app.simulators()
+        .1
+        .set_failure(Some(FailureMode::Unavailable));
+    app.import_document("1.txt", &invoice("Alfa SL", "F-1", "121.00"))
+        .unwrap();
+    let failed = app.process_next().unwrap().unwrap();
+    assert_eq!(failed.state, TaskState::Failed);
+    assert_eq!(count(&dir, "rule_evaluations"), 1);
+    assert_eq!(app.rule_stats().unwrap()[0].applied, 0);
+
+    // El intento quedó sin resolver: al reprocesar vuelve a revisión (D50) y una persona
+    // lo aprueba. Ni la evidencia ni los contadores se duplican, y esa aprobación no es una
+    // señal porque la decisión fue de la regla.
+    app.simulators().1.set_failure(None);
+    app.retry(failed.id).unwrap();
+    let review = app.process_next().unwrap().unwrap();
+    assert_eq!(review.state, TaskState::AwaitingReview);
+    let done = app.approve(failed.id, 1).unwrap();
+    assert_eq!(done.state, TaskState::Completed);
+    assert_eq!(
+        count(&dir, "rule_evaluations"),
+        1,
+        "el reintento no repite la evidencia"
+    );
+    assert_eq!(
+        count(&dir, "rule_signals"),
+        0,
+        "una ejecución por regla no es señal"
+    );
+    assert_eq!(app.simulators().1.record_count().unwrap(), before + 1);
+    // El intento de la regla no llegó a ejecutarse y lo ejecutó una persona al aprobar: la
+    // fila lo dice y la regla no cuenta como aplicada.
+    let stats = app.rule_stats().unwrap();
+    assert_eq!((stats[0].applied, stats[0].unclassified), (0, 0));
+    let actions = dump(&dir, &["actions"])[0].1.clone();
+    assert_eq!(actions.len(), 1);
+    assert!(actions[0].contains("|aprobación|"), "{}", actions[0]);
+    assert!(!actions[0].contains("|alfa|"), "{}", actions[0]);
+
+    // Un fallo del modelo antes de evaluar no deja evidencia hasta que se reintenta.
+    let provider = FakeProvider::new();
+    let dir2 = tempfile::tempdir().unwrap();
+    let mut app2 = open(&dir2, provider.clone());
+    app2.import_document("2.txt", &invoice("Alfa SL", "F-2", "121.00"))
+        .unwrap();
+    *provider.fail.lock().unwrap() = true;
+    let model_failed = app2.process_next().unwrap().unwrap();
+    assert_eq!(model_failed.state, TaskState::Failed);
+    assert_eq!(count(&dir2, "rule_evaluations"), 0);
+    app2.retry(model_failed.id).unwrap();
+    app2.process_next().unwrap();
+    assert_eq!(count(&dir2, "rule_evaluations"), 1);
+}
+
+#[test]
+fn a_rule_that_cannot_record_evidence_still_acts_once() {
+    // Si la tabla de evidencia no se puede escribir, la acción sigue su curso una sola vez
+    // y el fallo consta en el resultado de la tarea.
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = open(&dir, FakeProvider::new());
+    app.create_rule(
+        "alfa",
+        "register_invoice",
+        &json!({ "supplier": "Alfa SL" }),
+    )
+    .unwrap();
+    app.set_rule_active("alfa", true).unwrap();
+    rusqlite::Connection::open(dir.path().join("nestadmin.db"))
+        .unwrap()
+        .execute_batch("DROP TABLE rule_evaluations;")
+        .unwrap();
+    let before = app.simulators().1.record_count().unwrap();
+    app.import_document("1.txt", &invoice("Alfa SL", "F-1", "121.00"))
+        .unwrap();
+    let done = app.process_next().unwrap().unwrap();
+    assert_eq!(done.state, TaskState::Completed);
+    let result = done.result.unwrap();
+    assert!(result["evidence_error"]
+        .as_str()
+        .unwrap()
+        .contains("no se guardó la evaluación"));
+    assert_eq!(app.simulators().1.record_count().unwrap(), before + 1);
+}
+
+#[test]
+fn simulating_a_rule_writes_nothing_and_reports_overlaps_and_blocks() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = open(&dir, FakeProvider::new());
+    app.create_rule(
+        "alfa",
+        "register_invoice",
+        &json!({ "supplier": "Alfa SL" }),
+    )
+    .unwrap();
+    app.set_rule_active("alfa", true).unwrap();
+    // Cuatro facturas: dos limpias de Alfa (la primera sin euro), una con incidencia y una
+    // de Beta; más los correos de ejemplo.
+    for (name, text) in [
+        ("1.txt", invoice("Alfa SL", "F-1", "121.00")),
+        ("2.txt", invoice("Alfa SL", "F-2", "121.00")),
+        ("3.txt", invoice("Alfa SL", "F-3", "130.00")),
+        ("4.txt", invoice("Beta SL", "B-4", "121.00")),
+        (
+            "5.txt",
+            invoice_note("Beta SL", "B-5", "121.00", "Total US$ 121.00"),
+        ),
+    ] {
+        app.import_document(name, &text).unwrap();
+    }
+    while app.process_next().unwrap().is_some() {}
+    app.fetch_mail().unwrap();
+    while app.process_next().unwrap().is_some() {}
+
+    let before = dump(&dir, &PANEL_TABLES);
+    let conditions = json!({ "supplier": "Alfa SL", "max_total": "500.00" });
+    let invoices = app
+        .tasks()
+        .unwrap()
+        .into_iter()
+        .filter(|t| t.kind == INVOICE)
+        .count();
+    let f2 = app
+        .tasks()
+        .unwrap()
+        .into_iter()
+        .find(|t| t.result.as_ref().is_some_and(|r| r["document"] == "2.txt"))
+        .unwrap()
+        .id;
+    let sim = app
+        .simulate_rule("register_invoice", &conditions, None)
+        .unwrap();
+    assert_eq!(sim.considered, invoices);
+    assert!(!sim.truncated);
+    assert_eq!(sim.skipped_without_result, 0);
+    // «alfa» ya cubre las facturas de Alfa: la hipotética solapa con ella en la F-1 y la F-2
+    // (limpias) y entonces «alfa» dejaría de actuar. La F-4 es de Beta y el adjunto de
+    // ejemplo de otro proveedor: no coinciden. La F-3 coincide, pero su suma no cuadra y una
+    // persona debe confirmar el importe (D120).
+    assert_eq!(sim.would_automate, 0);
+    assert_eq!(sim.overlaps, 2, "{sim:?}");
+    assert_eq!(sim.no_match, invoices - 3, "{sim:?}");
+    assert_eq!(sim.without_currency_check, 0);
+    assert_eq!(sim.would_review.get("amount_review"), Some(&1), "{sim:?}");
+    assert_eq!(sim.would_block_other.len(), 1, "{sim:?}");
+    assert_eq!(sim.would_block_other[0].rule_id, "alfa");
+    assert!(sim.would_block_other[0].task_ids.contains(&f2));
+    assert_eq!(sim.would_block_other[0].task_ids.len(), 2);
+    assert_eq!(sim.items.len(), invoices);
+    assert!(sim.items.iter().all(|i| i.label.is_some()));
+    // Una regla para un proveedor sin reglas automatizaría su factura limpia en euros, pero
+    // no la que menciona dólares.
+    let beta = app
+        .simulate_rule(
+            "register_invoice",
+            &json!({ "supplier": "beta sl", "max_total": "500.00" }),
+            None,
+        )
+        .unwrap();
+    assert_eq!((beta.would_automate, beta.overlaps), (1, 0), "{beta:?}");
+    assert!(beta.would_block_other.is_empty());
+
+    // El límite recorta y lo dice.
+    let small = app
+        .simulate_rule("register_invoice", &conditions, Some(2))
+        .unwrap();
+    assert!(small.truncated && small.considered == 2, "{small:?}");
+    assert!(app
+        .simulate_rule("register_invoice", &conditions, Some(0))
+        .is_err());
+    assert!(app
+        .simulate_rule("register_invoice", &json!({ "colour": "x" }), None)
+        .is_err());
+
+    // Un tipo sin reglas: la hipotética automatizaría lo que coincide, sin solapes.
+    let mail = app
+        .simulate_rule(
+            "send_draft",
+            &json!({ "category": "solicitud_factura", "sender": "facturas@proveedor-alfa.test" }),
+            None,
+        )
+        .unwrap();
+    assert!(mail.would_automate >= 1);
+    assert_eq!(mail.overlaps, 0);
+    // Sin remitente (y sin validación): no automatizaría y se dice por qué.
+    let anyone = app
+        .simulate_rule(
+            "send_draft",
+            &json!({ "category": "solicitud_factura" }),
+            None,
+        )
+        .unwrap();
+    assert_eq!(anyone.would_automate, 0);
+    assert!(
+        anyone
+            .would_review
+            .get("sender_required")
+            .copied()
+            .unwrap_or(0)
+            > 0
+    );
+
+    assert_eq!(
+        dump(&dir, &PANEL_TABLES),
+        before,
+        "la simulación no escribe"
+    );
+    assert!(app.simulators().0.sent().unwrap().is_empty());
+}
+
+#[test]
+fn rejecting_a_review_leaves_one_rejected_signal_and_other_states_leave_none() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = open(&dir, FakeProvider::new());
+    app.import_document("1.txt", &invoice("Alfa SL", "F-1", "121.00"))
+        .unwrap();
+    let review = app.process_next().unwrap().unwrap();
+    assert_eq!(review.state, TaskState::AwaitingReview);
+    app.reject(review.id).unwrap();
+    let signals = dump(&dir, &["rule_signals"])[0].1.join(
+        "
+",
+    );
+    assert!(
+        signals.contains("rejected|register_invoice|alfa sl|unedited"),
+        "{signals}"
+    );
+    assert_eq!(count(&dir, "rule_signals"), 1);
+    // Una tarea que no estaba en revisión no deja señal al cancelarla.
+    app.import_document("2.txt", &invoice("Alfa SL", "F-2", "121.00"))
+        .unwrap();
+    let queued = app
+        .tasks()
+        .unwrap()
+        .into_iter()
+        .find(|t| t.state == TaskState::Queued)
+        .unwrap();
+    app.reject(queued.id).unwrap();
+    assert_eq!(count(&dir, "rule_signals"), 1);
+}
+
+#[test]
+fn a_signal_that_cannot_be_saved_is_reported_without_blocking_the_action() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = open(&dir, FakeProvider::new());
+    app.import_document("1.txt", &invoice("Alfa SL", "F-1", "121.00"))
+        .unwrap();
+    let review = app.process_next().unwrap().unwrap();
+    rusqlite::Connection::open(dir.path().join("nestadmin.db"))
+        .unwrap()
+        .execute_batch("DROP TABLE rule_signals;")
+        .unwrap();
+    let before = app.simulators().1.record_count().unwrap();
+    let done = app.approve(review.id, 1).unwrap();
+    assert_eq!(done.state, TaskState::Completed);
+    assert!(done.result.unwrap()["evidence_error"]
+        .as_str()
+        .unwrap()
+        .contains("no se guardó la señal"));
+    assert_eq!(app.simulators().1.record_count().unwrap(), before + 1);
+
+    // Editar y rechazar también dejan constancia.
+    app.fetch_mail().unwrap();
+    while app.process_next().unwrap().is_some() {}
+    let mail = app
+        .tasks()
+        .unwrap()
+        .into_iter()
+        .find(|t| t.kind == EMAIL && t.state == TaskState::AwaitingReview)
+        .unwrap();
+    let edited = app.edit_draft(mail.id, "Otro texto.").unwrap();
+    assert!(edited.result.unwrap()["evidence_error"]
+        .as_str()
+        .unwrap()
+        .contains("no se guardó la señal"));
+    app.reject(mail.id).unwrap();
+    let rejected = app
+        .tasks()
+        .unwrap()
+        .into_iter()
+        .find(|t| t.id == mail.id)
+        .unwrap();
+    assert_eq!(rejected.state, TaskState::Cancelled);
+    assert!(rejected.result.unwrap()["evidence_error"].is_string());
 }

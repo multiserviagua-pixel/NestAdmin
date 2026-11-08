@@ -18,8 +18,9 @@ use nestadmin_ai::{CredentialStore, ProviderChoice, Secret};
 use nestadmin_app::accounts::{
     AccountView, FetchReport, MailAccountsView, MailEnv, MailProviderKind,
 };
+use nestadmin_app::panel::{NewRule, RuleView, Simulation};
 use nestadmin_app::{AiWait, App, AppPaths, LocalFallback, ProviderInfo};
-use nestadmin_core::{AuditEntry, Rule, Task};
+use nestadmin_core::{AuditEntry, Rule, RuleStats, Task};
 use nestadmin_extract::{Extractor, Tesseract};
 use nestadmin_mail::PendingAuthorization;
 use nestadmin_setup::{Cancel, Report, Setup, SetupError, Startup, Status, WindowsSystem};
@@ -482,20 +483,107 @@ fn rules(shared: State<'_, SharedState>) -> CmdResult<Vec<Rule>> {
     shared.app()?.rules().map_err(text)
 }
 
+/// Todas las reglas con nombre, archivado, validación avanzada y contadores.
+#[tauri::command]
+fn rule_views(shared: State<'_, SharedState>) -> CmdResult<Vec<RuleView>> {
+    shared.app()?.rule_views().map_err(text)
+}
+
+/// `id` puede faltar (se genera del nombre). `acknowledge_any_sender` no tiene valor por
+/// defecto: es la validación avanzada de una regla de envío sin remitente (D126).
 #[tauri::command]
 fn create_rule<R: Runtime>(
     shared: State<'_, SharedState>,
     handle: AppHandle<R>,
-    id: String,
+    id: Option<String>,
+    name: Option<String>,
     action_kind: String,
     conditions: Value,
-) -> CmdResult<Rule> {
-    let rule = shared
+    acknowledge_any_sender: bool,
+) -> CmdResult<RuleView> {
+    let view = shared
         .app()?
-        .create_rule(&id, &action_kind, &conditions)
+        .create_rule_full(NewRule {
+            id: id.as_deref(),
+            name: name.as_deref(),
+            action_kind: &action_kind,
+            conditions: &conditions,
+            allow_any_sender: acknowledge_any_sender,
+        })
         .map_err(text)?;
     changed(&handle);
-    Ok(rule)
+    Ok(view)
+}
+
+#[tauri::command]
+fn rename_rule<R: Runtime>(
+    shared: State<'_, SharedState>,
+    handle: AppHandle<R>,
+    id: String,
+    name: Option<String>,
+) -> CmdResult<RuleView> {
+    let view = shared
+        .app()?
+        .rename_rule(&id, name.as_deref())
+        .map_err(text)?;
+    changed(&handle);
+    Ok(view)
+}
+
+#[tauri::command]
+fn set_rule_any_sender<R: Runtime>(
+    shared: State<'_, SharedState>,
+    handle: AppHandle<R>,
+    id: String,
+    acknowledge: bool,
+) -> CmdResult<RuleView> {
+    let view = shared
+        .app()?
+        .set_rule_any_sender(&id, acknowledge)
+        .map_err(text)?;
+    changed(&handle);
+    Ok(view)
+}
+
+#[tauri::command]
+fn archive_rule<R: Runtime>(
+    shared: State<'_, SharedState>,
+    handle: AppHandle<R>,
+    id: String,
+) -> CmdResult<RuleView> {
+    let view = shared.app()?.archive_rule(&id).map_err(text)?;
+    changed(&handle);
+    Ok(view)
+}
+
+#[tauri::command]
+fn unarchive_rule<R: Runtime>(
+    shared: State<'_, SharedState>,
+    handle: AppHandle<R>,
+    id: String,
+) -> CmdResult<RuleView> {
+    let view = shared.app()?.unarchive_rule(&id).map_err(text)?;
+    changed(&handle);
+    Ok(view)
+}
+
+#[tauri::command]
+fn rule_stats(shared: State<'_, SharedState>) -> CmdResult<Vec<RuleStats>> {
+    shared.app()?.rule_stats().map_err(text)
+}
+
+/// Solo lectura: no escribe nada ni llama a la IA.
+#[tauri::command]
+fn simulate_rule(
+    shared: State<'_, SharedState>,
+    action_kind: String,
+    conditions: Value,
+    limit: Option<usize>,
+) -> CmdResult<Simulation> {
+    shared
+        .app()?
+        .simulate_rule(&action_kind, &conditions, limit)
+        .map_err(text)
 }
 
 #[tauri::command]
@@ -1255,9 +1343,16 @@ fn configure<R: Runtime>(builder: Builder<R>, prepare_only: bool) -> Builder<R> 
             reject,
             retry,
             rules,
+            rule_views,
             create_rule,
+            rename_rule,
             update_rule,
             set_rule_active,
+            set_rule_any_sender,
+            archive_rule,
+            unarchive_rule,
+            rule_stats,
+            simulate_rule,
             audit_log,
             settings,
             select_provider,

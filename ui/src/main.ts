@@ -1081,7 +1081,7 @@ function ruleForm(): HTMLElement {
           }, wasActive ? "Regla guardada; sigue activa y se aplicará a las tareas que se procesen desde ahora" : "Regla guardada; sigue inactiva");
         } else {
           void act(async () => {
-            await api.createRule(d.id, d.kind, conditions);
+            await api.createRule(d.id, d.kind, conditions, { name: null, acknowledgeAnySender: false });
             closeRuleEditor();
           }, "Regla creada inactiva; actívela cuando la haya comprobado");
         }

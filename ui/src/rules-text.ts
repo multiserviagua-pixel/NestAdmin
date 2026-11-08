@@ -134,8 +134,14 @@ export function ruleSentence(rule: RuleLike): string {
 
 /** Aviso que debe verse siempre junto a la regla. */
 export function ruleRisk(rule: RuleLike): string {
-  if (rule.action_kind === "send_draft")
+  if (rule.action_kind === "send_draft") {
+    const c = rule.conditions ?? {};
+    const sender = text(c.sender);
+    const domain = text(c.sender_domain);
+    if (sender) return `Enviará correos sin preguntarle a los mensajes de ${sender} que la IA clasifique en esta categoría.`;
+    if (domain) return `Enviará correos sin preguntarle a los mensajes de cualquier dirección de @${domain} que la IA clasifique en esta categoría.`;
     return "Enviará correos sin preguntarle a cualquier remitente que la IA clasifique en esta categoría.";
+  }
   if (rule.action_kind === "register_invoice")
     return "Registrará la factura sin preguntarle si coincide y no tiene incidencias.";
   return "La aplicación no reconoce este tipo de regla, así que no la aplicará.";
@@ -146,7 +152,7 @@ export function ruleProblem(rule: RuleLike): string | null {
   const c = rule.conditions;
   if (!c || typeof c !== "object" || Array.isArray(c)) return "Las condiciones de la regla no son válidas: no actuará.";
   if (!isKnownAction(rule.action_kind)) return null;
-  const allowed = rule.action_kind === "register_invoice" ? ["supplier", "max_total"] : ["category"];
+  const allowed = rule.action_kind === "register_invoice" ? ["supplier", "max_total", "currency"] : ["category", "sender", "sender_domain"];
   const unknown = Object.keys(c).find((k) => !allowed.includes(k));
   if (unknown) return `La regla tiene una condición desconocida («${unknown}»): no actuará.`;
   if (rule.action_kind === "register_invoice" && !text(c.supplier)) return "La regla no indica proveedor: no actuará.";

@@ -4,6 +4,7 @@
 pub mod actions;
 pub mod error;
 pub mod queue;
+pub mod rule_panel;
 pub mod rules;
 pub mod sales;
 pub mod store;
@@ -14,5 +15,8 @@ pub use actions::{
 };
 pub use error::{CoreError, Result};
 pub use queue::{Task, TaskError, TaskState};
+pub use rule_panel::{
+    EvaluationRecord, EvaluationRow, RuleMeta, RuleStats, SignalRecord, SignalRow,
+};
 pub use rules::Rule;
 pub use store::Store;

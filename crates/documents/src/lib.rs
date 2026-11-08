@@ -4,12 +4,14 @@
 //! La extracción de campos con IA, el PDF (D09) y el OCR (D10) quedan fuera de este crate
 //! por ahora: el texto de un PDF devuelve un error explícito de formato no soportado.
 
+pub mod currency;
 pub mod duplicates;
 pub mod error;
 pub mod invoice;
 pub mod text;
 pub mod validation;
 
+pub use currency::{currency_evidence, CurrencyEvidence};
 pub use duplicates::{DuplicateCandidate, DuplicateReason, DuplicateRegistry};
 pub use error::{DocumentError, Result};
 pub use invoice::{

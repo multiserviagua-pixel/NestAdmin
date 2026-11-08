@@ -12,7 +12,10 @@ import type {
   ProviderChoice,
   ProviderInfo,
   Rule,
+  RuleStats,
+  RuleView,
   SettingsView,
+  Simulation,
   SetupDone,
   SetupEvent,
   SetupStatus,
@@ -92,8 +95,31 @@ export const api = {
   reject: (id: number) => invoke<Task>("reject", { id }),
   retry: (id: number) => invoke<Task>("retry", { id }),
   rules: () => invoke<Rule[]>("rules"),
-  createRule: (id: string, actionKind: string, conditions: Record<string, string>) =>
-    invoke<Rule>("create_rule", { id, actionKind, conditions }),
+  ruleViews: () => invoke<RuleView[]>("rule_views"),
+  /** `id` puede ser `null` (se genera del nombre). `acknowledgeAnySender` no tiene valor por
+   * defecto: solo `true` crea una regla de envío sin remitente (D126). */
+  createRule: (
+    id: string | null,
+    actionKind: string,
+    conditions: Record<string, string>,
+    options: { name: string | null; acknowledgeAnySender: boolean },
+  ) =>
+    invoke<RuleView>("create_rule", {
+      id,
+      name: options.name,
+      actionKind,
+      conditions,
+      acknowledgeAnySender: options.acknowledgeAnySender,
+    }),
+  renameRule: (id: string, name: string | null) => invoke<RuleView>("rename_rule", { id, name }),
+  setRuleAnySender: (id: string, acknowledge: boolean) =>
+    invoke<RuleView>("set_rule_any_sender", { id, acknowledge }),
+  archiveRule: (id: string) => invoke<RuleView>("archive_rule", { id }),
+  unarchiveRule: (id: string) => invoke<RuleView>("unarchive_rule", { id }),
+  ruleStats: () => invoke<RuleStats[]>("rule_stats"),
+  /** Solo lectura: no escribe nada ni llama a la IA. */
+  simulateRule: (actionKind: string, conditions: Record<string, string>, limit: number | null) =>
+    invoke<Simulation>("simulate_rule", { actionKind, conditions, limit }),
   updateRule: (id: string, conditions: Record<string, string>) => invoke<Rule>("update_rule", { id, conditions }),
   setRuleActive: (id: string, active: boolean) => invoke<Rule>("set_rule_active", { id, active }),
   auditLog: () => invoke<AuditEntry[]>("audit_log"),

@@ -25,6 +25,8 @@ pub enum CoreError {
     IdempotencyConflict(String),
     #[error("regla {0} inexistente")]
     RuleNotFound(String),
+    #[error("la regla {0} está archivada; desarchívela para volver a usarla")]
+    RuleArchived(String),
     #[error("conector: {0}")]
     Connector(#[from] crate::actions::ConnectorError),
 }

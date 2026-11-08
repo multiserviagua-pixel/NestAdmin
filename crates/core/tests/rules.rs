@@ -102,3 +102,245 @@ fn rules_survive_restart() {
     let rule = store.rule("r").unwrap().unwrap();
     assert_eq!((rule.version, rule.active), (2, true));
 }
+
+// ---- Panel de reglas (D124–D129) ----
+
+use nestadmin_core::actions::ConnectorError;
+use nestadmin_core::{ActionRequest, Authorization, Connector, EvaluationRecord, SignalRecord};
+use serde_json::Value;
+
+struct Accepts;
+
+impl Connector for Accepts {
+    fn lookup(&self, _key: &str) -> Result<Option<Value>, ConnectorError> {
+        Ok(None)
+    }
+    fn execute(&self, key: &str, _payload: &Value) -> Result<Value, ConnectorError> {
+        Ok(json!({ "key": key }))
+    }
+}
+
+#[test]
+fn names_archive_and_the_advanced_mark_live_in_rule_meta() {
+    let mut store = Store::open_in_memory().unwrap();
+    let rule = store
+        .create_rule_named(
+            "envio",
+            "send_draft",
+            &json!({ "category": "otros" }),
+            Some("Respuestas"),
+            true,
+        )
+        .unwrap();
+    let meta = store.rule_meta("envio").unwrap().unwrap();
+    assert_eq!(meta.name.as_deref(), Some("Respuestas"));
+    assert!(meta.allow_any_sender_ack_at.is_some() && meta.archived_at.is_none());
+    assert!(matches!(
+        store.create_rule_named("envio", "send_draft", &json!({}), None, false),
+        Err(CoreError::IdempotencyConflict(_))
+    ));
+
+    // Editar las condiciones borra la marca y lo deja en el historial; el nombre se queda.
+    store.set_rule_active("envio", true).unwrap();
+    let edited = store
+        .update_rule("envio", &json!({ "category": "documentacion" }))
+        .unwrap();
+    assert!(edited.version > rule.version);
+    let meta = store.rule_meta("envio").unwrap().unwrap();
+    assert!(meta.allow_any_sender_ack_at.is_none());
+    assert_eq!(meta.name.as_deref(), Some("Respuestas"));
+    let log = store.audit_log().unwrap();
+    assert!(log
+        .iter()
+        .any(|e| e.action == "rule_any_sender" && e.status == "acknowledged"));
+    assert!(log
+        .iter()
+        .any(|e| e.action == "rule_any_sender" && e.status == "revoked"));
+
+    // Archivar: versión inactiva, marca, y ni se activa ni se edita; no hay borrado físico.
+    let archived = store.archive_rule("envio").unwrap();
+    assert!(!archived.active);
+    assert!(store
+        .rule_meta("envio")
+        .unwrap()
+        .unwrap()
+        .archived_at
+        .is_some());
+    assert!(matches!(
+        store.set_rule_active("envio", true),
+        Err(CoreError::RuleArchived(_))
+    ));
+    assert!(matches!(
+        store.update_rule("envio", &json!({ "category": "otros" })),
+        Err(CoreError::RuleArchived(_))
+    ));
+    // Desactivar una archivada sigue siendo posible (ya lo está), y archivar es idempotente.
+    assert!(!store.set_rule_active("envio", false).unwrap().active);
+    let versions = store.rule_history("envio").unwrap().len();
+    store.archive_rule("envio").unwrap();
+    assert_eq!(store.rule_history("envio").unwrap().len(), versions);
+    let back = store.unarchive_rule("envio").unwrap();
+    assert!(!back.active);
+    assert!(store
+        .rule_meta("envio")
+        .unwrap()
+        .unwrap()
+        .archived_at
+        .is_none());
+    assert!(store.set_rule_active("envio", true).unwrap().active);
+}
+
+#[test]
+fn evaluations_and_signals_ignore_repeats() {
+    let mut store = Store::open_in_memory().unwrap();
+    let task = store.enqueue("invoice", "{}").unwrap();
+    let checks = json!({ "candidates": [] });
+    let record = |fp: &'static str, version: i64| EvaluationRecord {
+        task_id: task.id,
+        content_version: version,
+        action_kind: "register_invoice",
+        outcome: "review",
+        reason_code: "no_active_rule_matches",
+        rules_fp: fp,
+        checks: &checks,
+    };
+    assert!(store.record_evaluation(&record("a", 1)).unwrap());
+    assert!(!store.record_evaluation(&record("a", 1)).unwrap());
+    // Otras reglas o otra versión del contenido sí son otra evaluación.
+    assert!(store.record_evaluation(&record("b", 1)).unwrap());
+    assert!(store.record_evaluation(&record("a", 2)).unwrap());
+    assert_eq!(store.rule_evaluations().unwrap().len(), 3);
+
+    let signal = |kind: &'static str| SignalRecord {
+        kind,
+        action_kind: "register_invoice",
+        subject_key: "alfa sl",
+        edit_state: "unedited",
+        task_id: task.id,
+        content_version: 1,
+        source_key: Some("abc"),
+    };
+    assert!(store.record_signal(&signal("approved")).unwrap());
+    assert!(!store.record_signal(&signal("approved")).unwrap());
+    assert!(store.record_signal(&signal("rejected")).unwrap());
+    assert_eq!(store.rule_signals().unwrap().len(), 2);
+}
+
+#[test]
+fn actions_keep_the_rule_that_authorized_them_and_stats_count_each_once() {
+    let mut store = Store::open_in_memory().unwrap();
+    for id in ["alfa", "beta"] {
+        store
+            .create_rule(id, "register_invoice", &json!({ "supplier": id }))
+            .unwrap();
+    }
+    let by_rule = |store: &mut Store, rule: &str, version: i64| {
+        let task = store.enqueue("invoice", "{}").unwrap();
+        let request = ActionRequest {
+            task_id: task.id,
+            kind: "register_invoice".into(),
+            version: 1,
+            payload: json!({ "n": task.id }),
+            authorization: Authorization::Rule {
+                rule_id: rule.into(),
+                rule_version: version,
+            },
+        };
+        store.perform_action(&request, &Accepts).unwrap();
+        // Repetir la misma acción no cuenta otra vez.
+        store.perform_action(&request, &Accepts).unwrap();
+        task.id
+    };
+    by_rule(&mut store, "alfa", 1);
+    let second = by_rule(&mut store, "alfa", 2);
+    let person = store.enqueue("invoice", "{}").unwrap();
+    store
+        .perform_action(
+            &ActionRequest {
+                task_id: person.id,
+                kind: "register_invoice".into(),
+                version: 1,
+                payload: json!({}),
+                authorization: Authorization::Approval,
+            },
+            &Accepts,
+        )
+        .unwrap();
+
+    let stats = store.rule_stats().unwrap();
+    let alfa = stats.iter().find(|s| s.rule_id == "alfa").unwrap();
+    let beta = stats.iter().find(|s| s.rule_id == "beta").unwrap();
+    assert_eq!((alfa.applied, alfa.unclassified, alfa.reviewed), (2, 0, 0));
+    assert!(alfa.last_applied_at.is_some());
+    assert_eq!((beta.applied, beta.last_applied_at), (0, None));
+    assert_eq!(store.task_actions(second).unwrap().len(), 1);
+
+    // Una evaluación que fue a revisión con «beta» coincidiendo suma «pasó a revisión»,
+    // una sola vez aunque conste con dos huellas.
+    let checks = json!({ "candidates": [
+        { "id": "beta", "version": 1, "active": true, "matches": true },
+        { "id": "alfa", "version": 2, "active": true, "matches": false },
+    ] });
+    for fp in ["a", "b"] {
+        store
+            .record_evaluation(&EvaluationRecord {
+                task_id: person.id,
+                content_version: 1,
+                action_kind: "register_invoice",
+                outcome: "review",
+                reason_code: "invoice_issues",
+                rules_fp: fp,
+                checks: &checks,
+            })
+            .unwrap();
+    }
+    let stats = store.rule_stats().unwrap();
+    assert_eq!(
+        stats.iter().find(|s| s.rule_id == "beta").unwrap().reviewed,
+        1
+    );
+    assert_eq!(
+        stats.iter().find(|s| s.rule_id == "alfa").unwrap().reviewed,
+        0
+    );
+}
+
+#[test]
+fn old_actions_are_read_strictly_and_the_rest_is_unclassified() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("nestadmin.db");
+    let mut store = Store::open(&path).unwrap();
+    store
+        .create_rule("alfa", "register_invoice", &json!({ "supplier": "Alfa" }))
+        .unwrap();
+    let task = store.enqueue("invoice", "{}").unwrap();
+    drop(store);
+    // Filas como las dejaba la versión anterior: sin `rule_id` y con la autorización en texto.
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    for (key, authorization) in [
+        ("k1", "regla alfa v3"),
+        ("k2", "regla alfa v"),
+        ("k3", "regla alfa vX"),
+        ("k4", "aprobación"),
+        ("k5", "regla inexistente v1"),
+    ] {
+        conn.execute(
+            "INSERT INTO actions (idempotency_key, task_id, kind, version, payload, authorization, status, created_at, updated_at)
+             VALUES (?1, ?2, 'register_invoice', 1, '{}', ?3, 'confirmed', 5, 7)",
+            rusqlite::params![key, task.id, authorization],
+        )
+        .unwrap();
+    }
+    drop(conn);
+    let store = Store::open(&path).unwrap();
+    let stats = store.rule_stats().unwrap();
+    assert_eq!(stats.len(), 1);
+    assert_eq!(
+        (
+            stats[0].applied,
+            stats[0].last_applied_at,
+            stats[0].unclassified
+        ),
+        (1, Some(7), 2)
+    );
+}
