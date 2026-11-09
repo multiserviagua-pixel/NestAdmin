@@ -61,10 +61,9 @@ impl OllamaProvider {
         if self.verified_local.load(Ordering::Acquire) {
             return Ok(());
         }
-        let info = http::post_json(
+        let info = http::post_json_local(
             &self.agent,
             &format!("{}/api/show", self.base_url),
-            None,
             &json!({ "model": self.model }),
         )?;
         if !info.is_object() {
@@ -137,12 +136,8 @@ impl Provider for OllamaProvider {
         self.ensure_local_model()?;
         let body = chat_body(&self.model, request);
         let started = Instant::now();
-        let response = http::post_json(
-            &self.agent,
-            &format!("{}/api/chat", self.base_url),
-            None,
-            &body,
-        )?;
+        let response =
+            http::post_json_local(&self.agent, &format!("{}/api/chat", self.base_url), &body)?;
         let latency_ms = started.elapsed().as_millis() as u64;
         chat_result(
             ProviderKind::Ollama,

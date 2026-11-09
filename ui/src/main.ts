@@ -1,6 +1,7 @@
 import "./style.css";
 import { api, isPreview, onChanged, onMailSignIn, onSetup, onSetupDone, onStartup } from "./api";
 import type {
+  AiWait,
   AuditEntry,
   DocumentOrigin,
   FetchReport,
@@ -117,6 +118,7 @@ import {
 } from "./rules-text";
 
 import { actionBar, dataTable, emptyState, h, helpTip, icon, sectionHeader, statusChip, tabs, type Child, type IconName, type Tone } from "./components";
+import { taskTitle } from "./tasks-text";
 import { ageText, chooseTab, emailFlags, formatAmount, invoiceFlags, isKnownKind, nextSelection, sortForReview, splitByTab, tabOf, totalIsProposed, type Flag, type ReviewTab } from "./pendientes-text";
 
 const STATE_LABEL: Record<string, string> = {
@@ -409,6 +411,13 @@ async function refresh(background = false) {
       api.mailAccounts(),
     ]);
     Object.assign(state, { tasks, rules, findings, findingsError, suggestions, suggestionsError, refinement, refinePreview, refineError, audit, settings, mail });
+    // La oferta de la IA local necesita saber si está preparada: se comprueba al aparecer la espera.
+    if (isProviderWait(settings?.ai_wait)) {
+      if (!checkedForWait) {
+        checkedForWait = true;
+        void refreshCheck();
+      }
+    } else checkedForWait = false;
     announceDoubtfulAmounts();
   } catch (error) {
     state.notice = { kind: "error", text: String(error) };
@@ -416,10 +425,9 @@ async function refresh(background = false) {
   render(background);
 }
 
+/** Título de una tarea (ver `tasks-text.ts`): el id de mensaje nunca lo es. */
 function title(task: Task): string {
-  const input = safeJson(task.input_ref);
-  if (task.kind === "invoice") return task.result?.document ?? input.document ?? `Documento ${task.id}`;
-  return task.result?.message?.subject ?? (input.message_id ? `Mensaje ${input.message_id}` : `Correo ${task.id}`);
+  return taskTitle(task);
 }
 
 function safeJson(text: string): Record<string, any> {
@@ -3400,6 +3408,77 @@ function alreadyConsented(kind: Kind, b: Block): boolean {
   return c.provider !== "openai_compatible" || hostOf(c.base_url) === hostOf(b.url);
 }
 
+/** Esperas que nacen de la respuesta del proveedor (D146), no de la configuración. */
+function isProviderWait(wait: AiWait | null | undefined): boolean {
+  return wait === "model_unavailable" || wait === "no_credit";
+}
+
+let probingProvider = false;
+let checkedForWait = false;
+
+/**
+ * «Probar de nuevo» (D146, D122): la prueba sintética con el proveedor elegido. Con éxito el
+ * backend levanta la espera y la cola sigue; si no, el error se muestra y la espera continúa.
+ */
+async function retryProvider() {
+  const choice = state.settings?.choice;
+  if (!choice || probingProvider) return;
+  probingProvider = true;
+  render(true);
+  try {
+    await api.testProvider(choice);
+    state.notice = { kind: "ok", text: "El proveedor responde: las tareas esperando se retoman." };
+  } catch (error) {
+    state.notice = { kind: "error", text: `La prueba sigue fallando: ${probeFailureText(error)}.` };
+  }
+  probingProvider = false;
+  await refresh();
+}
+
+/** Sin códigos técnicos: lo que el error de la prueba dice, en palabras. */
+function probeFailureText(error: unknown): string {
+  const text = String(error);
+  if (text.startsWith("model_unavailable")) return "el proveedor sigue sin encontrar el modelo o la dirección";
+  if (text.startsWith("no_credit")) return "la cuenta sigue sin crédito";
+  if (text.startsWith("unauthorized")) return "el proveedor rechazó la clave";
+  if (text.startsWith("timeout")) return "el proveedor no respondió a tiempo";
+  if (text.startsWith("invalid_response")) return "el proveedor responde, pero no con el formato pedido";
+  if (text.startsWith("request_rejected")) return "el proveedor rechazó la petición de prueba";
+  return text.replace(/^[a-z_]+: /, "");
+}
+
+/** La IA local está preparada o solo detenida (se arranca al usarla), como en D101. */
+const localCheckUsable = () => state.check?.status === "ready" || state.check?.status === "stopped";
+
+/** El botón explícito «Usar la IA local» (D146) solo se ofrece con la IA local preparada. */
+function canUseLocalAi(): boolean {
+  return localCheckUsable() && state.settings?.active.provider !== "ollama";
+}
+
+/**
+ * Cambio explícito a la IA local, nunca automático. Comprueba la preparación justo antes y reutiliza
+ * el flujo de «Usar este proveedor» (`useProvider`, con su prueba posterior) para que un fallo se vea.
+ */
+async function useLocalAi() {
+  const s = state.settings;
+  if (!s) return;
+  await refreshCheck();
+  if (!localCheckUsable()) {
+    state.notice = { kind: "warn", text: "La IA local ya no está preparada: prepárela en la sección Preparación antes de usarla." };
+    render();
+    return;
+  }
+  // D134: el consentimiento del afinado automático es de un destino concreto y se retira al cambiarlo.
+  if (state.refinement?.consent.state === "granted" && !confirm("Cambiar a la IA local retira el consentimiento del afinado automático de sugerencias (cambia el destino de los datos); podrá volver a activarlo después. ¿Continuar?")) return;
+  const b = block("ollama");
+  b.model = s.default_local_model;
+  b.url = s.default_local_url || LOCAL_URL;
+  await useProvider("ollama", {});
+  // El resultado de la prueba se ve aquí, no solo en Configuración.
+  state.notice = b.outcome ? { kind: b.outcome.kind, text: b.outcome.text } : null;
+  render();
+}
+
 function goToSettings() {
   state.view = "settings";
   state.notice = null;
@@ -4128,9 +4207,25 @@ function render(background = false) {
       ? h("div", { class: "notice error", role: "alert" }, h("span", {}, "Faltan componentes de OCR del paquete. Reinstale NestAdmin para recuperarlos; mientras tanto no se podrán leer documentos escaneados."))
       : null;
   const wait = state.settings?.ai_wait_message;
+  const providerWait = isProviderWait(state.settings?.ai_wait);
   const waitBanner =
     wait && state.view !== "settings"
-      ? h("div", { class: "banner", role: "status" }, h("span", {}, `${wait}. Las tareas esperan en la cola.`), h("button", { onclick: goToSettings }, "Ir a Configuración"))
+      ? providerWait
+        ? h(
+            "div",
+            { class: "banner", role: "status" },
+            // D146: el texto ya dice que las tareas esperan sin gastar intentos.
+            h("span", {}, wait),
+            h(
+              "div",
+              { class: "banner-actions" },
+              h("button", { disabled: probingProvider, "data-focus-key": "wait:retry", onclick: () => void retryProvider() }, probingProvider ? "Probando…" : "Probar de nuevo"),
+              // Sin crédito, otro modelo del mismo proveedor no ayuda: se ofrece elegir otro proveedor.
+              h("button", { "data-focus-key": "wait:change", onclick: goToSettings }, state.settings?.ai_wait === "no_credit" ? "Elegir otro proveedor" : "Cambiar modelo"),
+              canUseLocalAi() ? h("button", { "data-focus-key": "wait:local", onclick: () => void useLocalAi() }, "Usar la IA local") : null,
+            ),
+          )
+        : h("div", { class: "banner", role: "status" }, h("span", {}, `${wait}. Las tareas esperan en la cola.`), h("button", { onclick: goToSettings }, "Ir a Configuración"))
       : null;
   if (state.wizard) {
     root.replaceChildren(h("main", { class: "wizard-only" }, wizardView()));
@@ -4198,7 +4293,8 @@ void (async () => {
   });
   await refresh();
   // Primer uso (D101): una vez por arranque, y solo si falta elegir, la clave o el destino;
-  // con una clave rechazada basta el aviso.
+  // con una clave rechazada basta el aviso. Las esperas de D146 (404, 402) tampoco lo abren: la
+  // configuración ya existe y el aviso ofrece probar de nuevo, cambiar de modelo o la IA local.
   const wait = state.settings?.ai_wait;
   if (wait === "needs_choice" || wait === "needs_key" || wait === "needs_consent") {
     state.wizard = true;

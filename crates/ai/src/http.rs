@@ -8,7 +8,7 @@ use ureq::unversioned::transport::{DefaultConnector, NextTimeout};
 use ureq::{http::Uri, Agent};
 
 use crate::openai_compatible::is_blocked_ip;
-use crate::provider::AiError;
+use crate::provider::{AiError, ModelUnavailableCause};
 
 /// Agente sin proxy: ni las variables `HTTP_PROXY` del sistema desvían las peticiones (D12).
 /// La conexión tiene un plazo propio más corto: en Windows un puerto local cerrado no se
@@ -137,12 +137,28 @@ pub(crate) fn post_json_with_headers(
     headers: &[(&str, &str)],
     body: &Value,
 ) -> Result<Value, AiError> {
+    post_json_as(agent, url, headers, body, Endpoint::Generate)
+}
+
+/// POST JSON de la IA local (`/api/show`, `/api/chat`): sin el mapeo de D146, un 4xx sigue
+/// siendo `unavailable` (D101, R03).
+pub(crate) fn post_json_local(agent: &Agent, url: &str, body: &Value) -> Result<Value, AiError> {
+    post_json_as(agent, url, &[], body, Endpoint::Plain)
+}
+
+fn post_json_as(
+    agent: &Agent,
+    url: &str,
+    headers: &[(&str, &str)],
+    body: &Value,
+    endpoint: Endpoint,
+) -> Result<Value, AiError> {
     let mut request = agent.post(url);
     for (name, value) in headers {
         request = request.header(*name, *value);
     }
     let response = request.send_json(body).map_err(map_error)?;
-    response_json(response)
+    response_json(response, endpoint)
 }
 
 /// GET con respuesta JSON y cabeceras adicionales; mismos errores del contrato que el POST.
@@ -157,11 +173,24 @@ pub(crate) fn get_json_with_headers(
         request = request.header(*name, *value);
     }
     let response = request.call().map_err(map_error)?;
-    response_json(response)
+    response_json(response, Endpoint::Plain)
+}
+
+/// Qué se pidió: del mapeo depende el significado de un 4xx. Al generar con un proveedor externo
+/// (POST de chat), un 404 es una configuración que no sirve (D146). Al listar modelos (GET) y con
+/// la IA local, incluidos `/api/show` y la verificación del asistente, un 4xx sigue siendo
+/// `unavailable` (D101, R03): el mapeo nuevo solo es de proveedores externos.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Endpoint {
+    Generate,
+    Plain,
 }
 
 /// Estado HTTP de una respuesta a los errores del contrato (compartido por GET y POST).
-fn response_json(mut response: ureq::http::Response<ureq::Body>) -> Result<Value, AiError> {
+fn response_json(
+    mut response: ureq::http::Response<ureq::Body>,
+    endpoint: Endpoint,
+) -> Result<Value, AiError> {
     let status = response.status().as_u16();
     match status {
         200..=299 => response
@@ -178,19 +207,133 @@ fn response_json(mut response: ureq::http::Response<ureq::Body>) -> Result<Value
         }),
         408 | 504 => Err(AiError::Timeout),
         400..=499 => {
-            let kind = response
+            // El cuerpo se lee con límite, se interpreta y se descarta: nunca se guarda ni se
+            // registra, porque podría repetir contenido enviado.
+            let body = response
                 .body_mut()
                 .with_config()
                 .limit(64 * 1024)
                 .read_to_string()
-                .ok()
-                .and_then(|body| error_type(&body));
-            Err(AiError::Unavailable(match kind {
-                Some(kind) => format!("estado HTTP {status} ({kind})"),
-                None => format!("estado HTTP {status}"),
-            }))
+                .ok();
+            Err(client_error(endpoint, status, body.as_deref()))
         }
         _ => Err(AiError::Unavailable(format!("estado HTTP {status}"))),
+    }
+}
+
+/// Error de un 4xx que no es 401, 403, 408 ni 429 (D146). `body` solo se interpreta aquí.
+fn client_error(endpoint: Endpoint, status: u16, body: Option<&str>) -> AiError {
+    if endpoint == Endpoint::Generate {
+        match status {
+            404 | 410 => {
+                return AiError::ModelUnavailable {
+                    cause: body.map_or(ModelUnavailableCause::RouteNotFound, not_found_cause),
+                    status,
+                }
+            }
+            402 => return AiError::NoCredit,
+            400 if body.is_some_and(says_model_not_found) => {
+                return AiError::ModelUnavailable {
+                    cause: ModelUnavailableCause::ModelNotFound,
+                    status,
+                }
+            }
+            400 | 413 | 422 => {
+                return AiError::RequestRejected {
+                    status,
+                    kind: body.and_then(error_type),
+                }
+            }
+            _ => {}
+        }
+    }
+    let kind = body.and_then(error_type);
+    AiError::Unavailable(match kind {
+        Some(kind) => format!("estado HTTP {status} ({kind})"),
+        None => format!("estado HTTP {status}"),
+    })
+}
+
+/// Textos del cuerpo de error que hablan de la causa: `error` si es una cadena (formato de
+/// Ollama) o `error.code`, `error.type` y `error.message`, y `detail` o `message` de primer nivel. En minúsculas, solo para clasificar.
+fn error_texts(body: &str) -> Option<Vec<String>> {
+    let value: Value = serde_json::from_str(body).ok()?;
+    let mut texts = Vec::new();
+    match value.get("error") {
+        Some(Value::String(text)) => texts.push(text.to_ascii_lowercase()),
+        Some(error @ Value::Object(_)) => {
+            for key in ["code", "type", "message"] {
+                if let Some(text) = error.get(key).and_then(Value::as_str) {
+                    texts.push(text.to_ascii_lowercase());
+                }
+            }
+        }
+        _ => {}
+    }
+    // Servicios web genéricos: `{"detail": "Not Found"}` o `{"message": "Not Found"}`.
+    for key in ["detail", "message"] {
+        if let Some(text) = value.get(key).and_then(Value::as_str) {
+            texts.push(text.to_ascii_lowercase());
+        }
+    }
+    Some(texts)
+}
+
+/// Un 400 es «modelo no disponible» si `error.code` o `error.type` es `model_not_found`, o si
+/// `error.message` (o `error` como cadena) combina «model» con una mención de inexistencia o
+/// «invalid model» (por ejemplo «Model does not exist»). Solo clasifica: el mensaje no se guarda.
+fn says_model_not_found(body: &str) -> bool {
+    let Ok(value) = serde_json::from_str::<Value>(body) else {
+        return false;
+    };
+    let coded = ["/error/code", "/error/type"]
+        .iter()
+        .filter_map(|p| value.pointer(p).and_then(Value::as_str))
+        .any(|text| text.eq_ignore_ascii_case("model_not_found"));
+    let message = value
+        .pointer("/error/message")
+        .or_else(|| value.get("error"))
+        .and_then(Value::as_str)
+        .map(str::to_ascii_lowercase);
+    coded
+        || message.is_some_and(|m| {
+            m.contains("invalid model")
+                || (m.contains("model")
+                    && ["does not exist", "doesn't exist", "not found", "no such"]
+                        .iter()
+                        .any(|needle| m.contains(needle)))
+        })
+}
+
+fn mentions_missing(text: &str) -> bool {
+    [
+        "not found",
+        "not_found",
+        "does not exist",
+        "doesn't exist",
+        "no such",
+        "unknown",
+        "not available",
+        "unavailable",
+    ]
+    .iter()
+    .any(|needle| text.contains(needle))
+}
+
+/// Causa de un 404 o 410 a partir del cuerpo. Si no consta, `Other`: es la salida segura.
+pub(crate) fn not_found_cause(body: &str) -> ModelUnavailableCause {
+    let Some(texts) = error_texts(body) else {
+        // Cuerpo no JSON (o vacío): la ruta no es la del servicio.
+        return ModelUnavailableCause::RouteNotFound;
+    };
+    let joined = texts.join(" ");
+    let model = joined.contains("model");
+    if model && mentions_missing(&joined) {
+        ModelUnavailableCause::ModelNotFound
+    } else if !model && (joined.contains("not found") || joined.contains("not_found")) {
+        ModelUnavailableCause::RouteNotFound
+    } else {
+        ModelUnavailableCause::Other
     }
 }
 
@@ -293,6 +436,86 @@ mod tests {
             std::io::ErrorKind::WouldBlock,
             "no debe haber conexión"
         );
+    }
+
+    #[test]
+    fn not_found_cause_is_only_an_enumeration_of_what_the_body_supports() {
+        use ModelUnavailableCause::*;
+        let cause = |body: &str| not_found_cause(body);
+        // Formato de Ollama: `error` es una cadena.
+        assert_eq!(
+            cause(r#"{"error":"model \"x:1b\" not found, try pulling it first"}"#),
+            ModelNotFound
+        );
+        // Formato OpenAI y Anthropic.
+        assert_eq!(
+            cause(r#"{"error":{"code":"model_not_found","message":"x"}}"#),
+            ModelNotFound
+        );
+        assert_eq!(
+            cause(r#"{"type":"error","error":{"type":"not_found_error","message":"model: x"}}"#),
+            ModelNotFound
+        );
+        // Sin JSON o «not found» genérico sin modelo: la dirección.
+        assert_eq!(cause("404 page not found"), RouteNotFound);
+        assert_eq!(cause(""), RouteNotFound);
+        assert_eq!(cause(r#"{"error":"Not Found"}"#), RouteNotFound);
+        assert_eq!(cause(r#"{"detail":"Not Found"}"#), RouteNotFound);
+        // Lo demás: no consta.
+        assert_eq!(cause(r#"{"error":"cuenta suspendida"}"#), Other);
+        assert_eq!(cause("{}"), Other);
+        assert_eq!(cause("[1]"), Other);
+    }
+
+    #[test]
+    fn status_mapping_differs_between_generating_and_listing() {
+        use Endpoint::*;
+        let kind = |e, status, body| client_error(e, status, body).code();
+        // Un 400 con «Model does not exist» en el mensaje también es modelo no disponible.
+        assert_eq!(
+            kind(
+                Generate,
+                400,
+                Some(r#"{"error":{"message":"Model does not exist"}}"#)
+            ),
+            "model_unavailable"
+        );
+        assert_eq!(
+            kind(
+                Generate,
+                400,
+                Some(r#"{"error":{"message":"Invalid model: x"}}"#)
+            ),
+            "model_unavailable"
+        );
+        assert_eq!(
+            kind(
+                Generate,
+                400,
+                Some(r#"{"error":{"message":"unknown parameter: model"}}"#)
+            ),
+            "request_rejected"
+        );
+        for status in [404, 410] {
+            assert_eq!(kind(Generate, status, Some("{}")), "model_unavailable");
+            assert_eq!(kind(Plain, status, Some("{}")), "unavailable");
+        }
+        assert_eq!(kind(Generate, 402, None), "no_credit");
+        assert_eq!(kind(Plain, 402, None), "unavailable");
+        for status in [400, 413, 422] {
+            assert_eq!(kind(Generate, status, None), "request_rejected");
+            assert_eq!(kind(Plain, status, None), "unavailable");
+        }
+        assert_eq!(
+            kind(
+                Generate,
+                400,
+                Some(r#"{"error":{"code":"model_not_found"}}"#)
+            ),
+            "model_unavailable"
+        );
+        assert_eq!(kind(Generate, 418, None), "unavailable");
+        assert_eq!(kind(Generate, 409, None), "unavailable");
     }
 
     #[test]

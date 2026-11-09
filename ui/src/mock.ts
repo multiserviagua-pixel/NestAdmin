@@ -4,6 +4,7 @@
 import type {
   AccountFetch,
   AiWait,
+  AiWaitCause,
   AuditEntry,
   DocumentOrigin,
   MailOrigin,
@@ -52,7 +53,13 @@ const audit: AuditEntry[] = [];
 // - `?sin-ia`: instalación nueva (sin clave ni confirmación): abre el asistente de primer uso;
 // - `?local`: quien tenía la IA local (con la oferta única de pasar al externo);
 // - `?clave-revocada`: la clave guardada fue rechazada (aviso sin asistente);
-// - `?modelo-retirado`: el modelo guardado ya no aparece en la lista;
+// - `?modelo-retirado`: el modelo guardado ya no aparece en la lista y el proveedor ya no lo
+//   encuentra al generar (404 con «modelo no encontrado»): la espera de D146 con el modelo retirado;
+// - `?modelo-404`: el modelo sí aparece en la lista pero al generar da 404 sin causa que conste
+//   (espera de D146, causa `other`); `?modelo-404=ruta` es un 404 de dirección y
+//   `?modelo-404=modelo` uno de modelo no encontrado; cambiar de modelo o «Usar la IA local» la
+//   levanta, y «Probar de nuevo» sigue fallando mientras el modelo sea el mismo;
+// - `?sin-credito`: el proveedor responde 402 (espera de D146 sin crédito);
 // - `?sin-ollama`: la IA local no responde; `?sin-respaldo`: respaldo desactivado;
 // - `?periodo-respaldo`: periodo de 10 minutos tras un fallo del externo;
 // - `?prueba-falla`: la prueba sintética devuelve un JSON no válido (D105).
@@ -71,6 +78,43 @@ const consents = new Set<string>(freshInstall ? [] : ["ollama_cloud|ollama.com"]
 let localFallback = !aiParams.has("sin-respaldo");
 let offerShown = false;
 let keyRevoked = aiParams.has("clave-revocada");
+
+/// Espera nacida de la respuesta del proveedor al generar (D146); `model` es el modelo con el que se pidió.
+type ProviderWait = { kind: "model_unavailable"; cause: AiWaitCause; status: number; model: string } | { kind: "no_credit" };
+const MODEL_404_CAUSES: Record<string, AiWaitCause> = { ruta: "route_not_found", modelo: "model_not_found" };
+let providerWait: ProviderWait | null = aiParams.has("sin-credito")
+  ? { kind: "no_credit" }
+  : aiParams.has("modelo-404")
+    ? { kind: "model_unavailable", cause: MODEL_404_CAUSES[aiParams.get("modelo-404") ?? ""] ?? "other", status: 404, model: CLOUD_DEFAULT }
+    : aiParams.has("modelo-retirado")
+      ? { kind: "model_unavailable", cause: "model_not_found", status: 404, model: "gemma3:12b-retirado" }
+      : null;
+
+/// Mismos textos que `AiWait::describe` del backend.
+function providerWaitMessage(w: ProviderWait): string {
+  const name = choice ? PROVIDER_NAME[choice.provider] : "El proveedor";
+  const model = choice?.model ?? CLOUD_DEFAULT;
+  const waiting = "Las tareas esperan sin gastar intentos.";
+  if (w.kind === "no_credit") return `${name} indica que la cuenta no tiene crédito (error 402). ${waiting}`;
+  switch (w.cause) {
+    case "model_not_found":
+      return `${name} no encuentra el modelo «${model}» (error ${w.status}). ${waiting}`;
+    case "route_not_found":
+      // Con dirección fija (Ollama cloud, Claude) no se habla de dirección; solo con el compatible con OpenAI.
+      return choice?.provider === "openai_compatible"
+        ? `${name} no reconoce la dirección del servicio (error ${w.status}). ${waiting} Compruebe la dirección en Configuración. Dirección configurada: ${choice.base_url}.`
+        : `${name} respondió con un error ${w.status} sin indicar la causa. ${waiting} Pruebe de nuevo o elija otro modelo.`;
+    default:
+      return `${name} respondió con un error ${w.status} usando el modelo «${model}». No consta la causa exacta; puede que el modelo no esté disponible para su cuenta. ${waiting}`;
+  }
+}
+
+const PROVIDER_NAME: Record<ProviderChoice["provider"], string> = {
+  ollama: "Ollama (IA local)",
+  ollama_cloud: "Ollama cloud",
+  openai_compatible: "El servicio compatible con OpenAI",
+  anthropic: "Claude · Anthropic",
+};
 
 function credentialName(c: ProviderChoice): string | null {
   switch (c.provider) {
@@ -109,10 +153,12 @@ function aiWait(): AiWait | null {
   if (key === null) return null;
   if (!consents.has(key)) return "needs_consent";
   if (!savedKeys.has(credentialName(choice) ?? "")) return "needs_key";
-  return keyRevoked ? "invalid_key" : null;
+  if (keyRevoked) return "invalid_key";
+  return providerWait ? providerWait.kind : null;
 }
 
-const AI_WAIT_MESSAGE: Record<AiWait, string> = {
+// Las esperas de D146 llevan el texto compuesto por `providerWaitMessage`.
+const AI_WAIT_MESSAGE: Record<Exclude<AiWait, "model_unavailable" | "no_credit">, string> = {
   needs_choice: "Falta configurar la IA: elija un proveedor en Configuración",
   needs_key: "Falta configurar la IA: guarde la clave del proveedor en Configuración",
   needs_consent: "Falta configurar la IA: confirme el destino de los datos en Configuración",
@@ -570,7 +616,36 @@ task("invoice", { document: "escaneada.txt" }, "failed", null, {
   message: "unavailable: no se pudo conectar con Ollama",
   recoverable: true,
 });
-task("email", { message_id: "simulador:M-0001", account: "simulador" }, "queued", null);
+// Como el real: la entrada guarda el mensaje (D146, títulos).
+task(
+  "email",
+  {
+    message_id: "simulador:M-0001",
+    account: "simulador",
+    message: { id: "simulador:M-0001", subject: "Solicitud de presupuesto", from: "compras@cliente-gamma.test", to: ["oficina@empresa.test"], body: "¿Pueden enviarnos un presupuesto?", date: "2026-11-04" },
+  },
+  "queued",
+  null,
+);
+// Correo fallido (D146): el proveedor rechazó esta tarea; sin asunto, el título usa el remitente.
+task(
+  "email",
+  {
+    message_id: "google-1:18c2-sintetico-11",
+    account: "google-1",
+    message: { id: "google-1:18c2-sintetico-11", subject: null, from: "contabilidad@suministros-omega.test", to: ["oficina@empresa.test"], body: "Adjuntamos el extracto.", date: "2026-11-05" },
+  },
+  "failed",
+  null,
+  { code: "request_rejected", message: "Ollama cloud rechazó esta tarea (error 422). Las demás siguen en marcha. Puede reintentarla o elegir otro modelo.", recoverable: true },
+);
+// Sin asunto ni remitente: «Correo sin asunto». El id de mensaje nunca es título.
+task(
+  "email",
+  { message_id: "google-1:1a18c0ffee-sintetico", account: "google-1", message: { id: "google-1:1a18c0ffee-sintetico", subject: null, from: null, body: "(sin contenido de ejemplo)" } },
+  "queued",
+  null,
+);
 
 // Correo de un remitente de correo público: una regla inactiva habría aplicado (R22).
 task("email", { message_id: "google-1:18c2-sintetico-9", account: "google-1" }, "awaiting_review", {
@@ -1821,12 +1896,16 @@ const handlers: Record<string, (a: any, options?: any) => unknown> = {
       choice,
       active: choice ? { provider: choice.provider, model: choice.model } : { provider: "ollama_cloud", model: CLOUD_DEFAULT },
       ai_wait: wait,
-      ai_wait_message: wait ? AI_WAIT_MESSAGE[wait] : null,
+      ai_wait_message: wait === "model_unavailable" || wait === "no_credit" ? providerWaitMessage(providerWait!) : wait ? AI_WAIT_MESSAGE[wait] : null,
+      ai_wait_cause: wait === "model_unavailable" && providerWait?.kind === "model_unavailable" ? providerWait.cause : null,
+      ai_wait_status: providerWait && wait === providerWait.kind ? (providerWait.kind === "no_credit" ? 402 : providerWait.status) : null,
       local_fallback: localFallback,
       fallback_period_active: aiParams.has("periodo-respaldo"),
       consented,
       offer_external: !offerShown && choice?.provider === "ollama",
       default_cloud_model: CLOUD_DEFAULT,
+      default_local_model: "qwen3:8b",
+      default_local_url: "http://127.0.0.1:11434",
       data_dir: "%LOCALAPPDATA%\\NestAdmin (vista previa: datos en memoria)",
     };
   },
@@ -1837,6 +1916,8 @@ const handlers: Record<string, (a: any, options?: any) => unknown> = {
       else if (!consents.has(dest)) throw "Confirme antes el destino de los datos";
       if (!savedKeys.has(credentialName(next) ?? "")) throw "unauthorized: credencial ausente o rechazada";
     }
+    // Otro proveedor o modelo levanta la espera de D146 (como `select_provider` del backend).
+    if (!choice || choice.provider !== next.provider || choice.model !== next.model) providerWait = null;
     choice = next;
     keyRevoked = false;
     return { provider: next.provider, model: next.model };
@@ -1855,6 +1936,8 @@ const handlers: Record<string, (a: any, options?: any) => unknown> = {
     if (typed) {
       savedKeys.add(name);
       keyRevoked = false;
+      // Otra clave puede ser otra cuenta: solo levanta la espera si es la del proveedor vigente.
+      if (choice && credentialName(choice) === name) providerWait = null;
     }
     return structuredClone(MODEL_LISTS[target.provider]);
   },
@@ -1864,6 +1947,12 @@ const handlers: Record<string, (a: any, options?: any) => unknown> = {
     await new Promise((resolve) => setTimeout(resolve, 900));
     if (aiParams.has("prueba-falla"))
       throw "invalid_response: la respuesta del modelo no es el JSON esperado (se recibió texto libre)";
+    // D146: con el mismo modelo el proveedor sigue respondiendo igual; con éxito se levanta la espera.
+    // La espera es de la elección vigente: probar otro proveedor no depende de ella.
+    const isCurrent = !!choice && choice.provider === target.provider;
+    if (providerWait && isCurrent && (providerWait.kind === "no_credit" || providerWait.model === target.model))
+      throw providerWait.kind === "no_credit" ? "no_credit: la cuenta del proveedor no tiene crédito" : `model_unavailable: estado HTTP ${providerWait.status}`;
+    if (isCurrent && choice && choice.model === target.model) providerWait = null;
   },
   set_local_fallback: ({ enabled }) => {
     localFallback = Boolean(enabled);
@@ -1871,6 +1960,7 @@ const handlers: Record<string, (a: any, options?: any) => unknown> = {
   provider_key_saved: ({ choice: target }) => savedKeys.has(credentialName(target) ?? ""),
   delete_provider_key: ({ choice: target }) => {
     savedKeys.delete(credentialName(target) ?? "");
+    if (choice && credentialName(choice) === credentialName(target)) providerWait = null;
   },
   dismiss_external_offer: () => {
     offerShown = true;

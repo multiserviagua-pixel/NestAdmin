@@ -263,6 +263,23 @@ fn t03g_wait_serializes_in_snake_case() {
         serde_json::to_value(AiWait::InvalidKey).unwrap(),
         "invalid_key"
     );
+    // D146: las esperas nacidas de la respuesta del proveedor llevan su código y, en la
+    // interfaz, la causa enumerada y el estado.
+    let unavailable = AiWait::ModelUnavailable {
+        cause: nestadmin_ai::ModelUnavailableCause::RouteNotFound,
+        status: 404,
+    };
+    assert_eq!(
+        serde_json::to_value(unavailable).unwrap(),
+        "model_unavailable"
+    );
+    assert_eq!(serde_json::to_value(AiWait::NoCredit).unwrap(), "no_credit");
+    assert_eq!(unavailable.cause(), Some("route_not_found"));
+    assert_eq!(
+        (unavailable.status(), AiWait::NoCredit.status()),
+        (Some(404), Some(402))
+    );
+    assert_eq!(AiWait::InvalidKey.cause(), None);
     for wait in [AiWait::NeedsChoice, AiWait::NeedsKey, AiWait::NeedsConsent] {
         assert!(
             wait.message().starts_with("Falta configurar la IA"),

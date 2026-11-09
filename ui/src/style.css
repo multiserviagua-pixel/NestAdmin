@@ -440,6 +440,15 @@ h3 {
   background: var(--warn-soft);
 }
 
+/* Varias acciones en un aviso de espera (D146): se ajustan a la línea sin cortar el texto. */
+.banner-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: var(--s2);
+  flex: none;
+}
+
 .notice > button:not(.close),
 .banner > button {
   flex: none;

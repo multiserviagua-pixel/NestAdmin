@@ -358,3 +358,20 @@ fn an_external_provider_without_a_key_is_unauthorized_and_remote_local_is_refuse
         Err(AiError::Unavailable(_))
     ));
 }
+
+/// D146: un 404 al listar modelos (`GET /tags` o `/models`) sigue como siempre, `unavailable`:
+/// solo al generar es una configuración que no sirve.
+#[test]
+fn a_404_when_listing_models_stays_unavailable() {
+    for choice in [cloud(), compat(), claude()] {
+        for status in [404, 410, 402, 400, 422] {
+            let (url, _) = serve(vec![reply(
+                status,
+                json!({ "error": { "code": "model_not_found", "message": "x" } }),
+            )]);
+            let error =
+                list_models_with_endpoint(&choice, &url, Some(&secret()), TIMEOUT).unwrap_err();
+            assert_eq!(error.code(), "unavailable", "{choice:?} {status}: {error}");
+        }
+    }
+}

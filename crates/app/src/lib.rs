@@ -22,7 +22,9 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use nestadmin_ai::tasks::{
     email_request, extraction_request, parse_email, parse_extraction, parse_other_invoices,
 };
-use nestadmin_ai::{AiError, GenerateRequest, GenerateResult, Provider, ProviderKind};
+use nestadmin_ai::{
+    AiError, GenerateRequest, GenerateResult, ModelUnavailableCause, Provider, ProviderKind,
+};
 use nestadmin_core::{
     ActionRecord, ActionRequest, AuditEntry, Authorization, Connector, ConnectorError, CoreError,
     Rule, Store, Task, TaskError, TaskState,
@@ -33,7 +35,7 @@ use nestadmin_documents::{
 use nestadmin_extract::{Extraction, Extractor};
 use nestadmin_mail::{OAuthConfig, Tokens};
 use nestadmin_simulators::{AdminSimulator, MailSimulator, Message, NewDraft};
-use serde::Serialize;
+use serde::{Serialize, Serializer};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
@@ -108,10 +110,9 @@ pub struct ProviderInfo {
     pub model: String,
 }
 
-/// Por qué las tareas con IA esperan en la cola sin gastar intentos (D100, D101). Mientras
+/// Por qué las tareas con IA esperan en la cola sin gastar intentos (D100, D101, D146). Mientras
 /// haya una espera, nada se envía a ningún proveedor.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AiWait {
     /// No hay proveedor elegido (por ejemplo, una configuración antigua con Groq).
     NeedsChoice,
@@ -121,9 +122,63 @@ pub enum AiWait {
     NeedsConsent,
     /// El proveedor rechazó la clave (`unauthorized`): revocada o incorrecta.
     InvalidKey,
+    /// Al generar, el proveedor respondió 404 o 410 (o 400 con `model_not_found`): el modelo o la
+    /// dirección no sirven (D146). Solo en memoria, como `InvalidKey`; no activa el respaldo.
+    ModelUnavailable {
+        cause: ModelUnavailableCause,
+        status: u16,
+    },
+    /// El proveedor respondió 402: la cuenta no tiene crédito (D146). Solo en memoria.
+    NoCredit,
+}
+
+impl Serialize for AiWait {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.code())
+    }
 }
 
 impl AiWait {
+    /// Código estable para la interfaz y los registros.
+    pub fn code(self) -> &'static str {
+        match self {
+            Self::NeedsChoice => "needs_choice",
+            Self::NeedsKey => "needs_key",
+            Self::NeedsConsent => "needs_consent",
+            Self::InvalidKey => "invalid_key",
+            Self::ModelUnavailable { .. } => "model_unavailable",
+            Self::NoCredit => "no_credit",
+        }
+    }
+
+    /// Esperas que nacen de la respuesta del proveedor (D146) y no de la configuración: no las
+    /// levanta una nueva resolución del proveedor si este no ha cambiado.
+    pub fn is_provider_response(self) -> bool {
+        matches!(self, Self::ModelUnavailable { .. } | Self::NoCredit)
+    }
+
+    /// Causa enumerada de una espera de D146, para la interfaz.
+    pub fn cause(self) -> Option<&'static str> {
+        match self {
+            Self::ModelUnavailable { cause, .. } => Some(match cause {
+                ModelUnavailableCause::ModelNotFound => "model_not_found",
+                ModelUnavailableCause::RouteNotFound => "route_not_found",
+                ModelUnavailableCause::Other => "other",
+            }),
+            _ => None,
+        }
+    }
+
+    /// Estado HTTP que originó una espera de D146.
+    pub fn status(self) -> Option<u16> {
+        match self {
+            Self::ModelUnavailable { status, .. } => Some(status),
+            Self::NoCredit => Some(402),
+            _ => None,
+        }
+    }
+
+    /// Texto sin datos del proveedor; para las esperas de D146, `describe` da el completo.
     pub fn message(self) -> &'static str {
         match self {
             Self::NeedsChoice => "Falta configurar la IA: elija un proveedor en Configuración",
@@ -136,7 +191,79 @@ impl AiWait {
             Self::InvalidKey => {
                 "La clave de IA no es válida o fue revocada: corríjala en Configuración"
             }
+            Self::ModelUnavailable { .. } => {
+                "El proveedor de IA no responde con la configuración elegida. Las tareas esperan sin gastar intentos."
+            }
+            Self::NoCredit => {
+                "El proveedor de IA indica que la cuenta no tiene crédito. Las tareas esperan sin gastar intentos."
+            }
         }
+    }
+
+    /// Texto completo de la espera (D146). `address` es la dirección configurada y solo cuenta con
+    /// el compatible con OpenAI: con una dirección fija (Ollama cloud, Claude) un 404 de ruta no
+    /// permite hablar de dirección. Las esperas anteriores a D146 usan `message`.
+    pub fn describe(self, kind: ProviderKind, model: &str, address: Option<&str>) -> String {
+        const WAITING: &str = "Las tareas esperan sin gastar intentos.";
+        let provider = provider_label(kind);
+        match self {
+            Self::ModelUnavailable { cause, status } => match cause {
+                ModelUnavailableCause::ModelNotFound => format!(
+                    "{provider} no encuentra el modelo «{model}» (error {status}). {WAITING}"
+                ),
+                ModelUnavailableCause::RouteNotFound if kind != ProviderKind::OpenAiCompatible => {
+                    format!(
+                        "{provider} respondió con un error {status} sin indicar la causa. {WAITING} Pruebe de nuevo o elija otro modelo."
+                    )
+                }
+                ModelUnavailableCause::RouteNotFound => {
+                    let mut text = format!(
+                        "{provider} no reconoce la dirección del servicio (error {status}). {WAITING} Compruebe la dirección en Configuración."
+                    );
+                    if let Some(address) = address {
+                        text.push_str(&format!(" Dirección configurada: {address}."));
+                    }
+                    text
+                }
+                ModelUnavailableCause::Other => format!(
+                    "{provider} respondió con un error {status} usando el modelo «{model}». No consta la causa exacta; puede que el modelo no esté disponible para su cuenta. {WAITING}"
+                ),
+            },
+            Self::NoCredit => {
+                format!("{provider} indica que la cuenta no tiene crédito (error 402). {WAITING}")
+            }
+            other => other.message().to_owned(),
+        }
+    }
+}
+
+/// Nombre del proveedor en los textos que ve la persona (D146).
+pub fn provider_label(kind: ProviderKind) -> &'static str {
+    match kind {
+        ProviderKind::Ollama => "Ollama (IA local)",
+        ProviderKind::OllamaCloud => "Ollama cloud",
+        ProviderKind::OpenAiCompatible => "El servicio compatible con OpenAI",
+        ProviderKind::Anthropic => "Claude · Anthropic",
+    }
+}
+
+/// Motivo de la tarea cuando el proveedor rechaza esa petición (D146).
+fn request_rejected_text(provider: &str, status: u16) -> String {
+    format!(
+        "{provider} rechazó esta tarea (error {status}). Las demás siguen en marcha. Puede reintentarla o elegir otro modelo."
+    )
+}
+
+/// La espera global que implica un error del proveedor elegido, si implica alguna (D101, D146).
+fn wait_for(error: &AiError) -> Option<AiWait> {
+    match error {
+        AiError::Unauthorized => Some(AiWait::InvalidKey),
+        AiError::ModelUnavailable { cause, status } => Some(AiWait::ModelUnavailable {
+            cause: *cause,
+            status: *status,
+        }),
+        AiError::NoCredit => Some(AiWait::NoCredit),
+        _ => None,
     }
 }
 
@@ -264,9 +391,12 @@ pub struct Completed {
     outcome: Result<Outcome, TaskError>,
     /// Texto y páginas del documento (método de cada una: texto, PDF u OCR).
     extraction: Option<Extraction>,
-    /// El proveedor devolvió `unauthorized`. Se marca aquí y no por el código del error, porque
-    /// los conectores de correo también usan `unauthorized` y esos fallos siguen siendo fallos.
-    ai_unauthorized: bool,
+    /// Espera que impone el error del proveedor (`unauthorized`, 404, 402). Se marca aquí y no por
+    /// el código del error, porque los conectores de correo también usan `unauthorized` y esos
+    /// fallos siguen siendo fallos.
+    wait: Option<AiWait>,
+    /// Proveedor con el que se pidió: si ya no es el activo, la espera no se vuelve a poner.
+    used: Arc<dyn Provider>,
     /// `{from, reason}` si la respuesta la dio el respaldo local (D101).
     fallback: Option<Value>,
 }
@@ -276,21 +406,29 @@ struct Attempt {
     result: Result<GenerateResult, TaskError>,
     /// `{from, reason}` si respondió el respaldo local.
     fallback: Option<Value>,
-    /// El proveedor elegido devolvió `unauthorized` (y no hubo respaldo).
-    unauthorized: bool,
+    /// Espera que impone el error del proveedor elegido (y no hubo respaldo).
+    wait: Option<AiWait>,
 }
 
 /// Errores del externo que activan el respaldo local (D101). `unauthorized` e
 /// `invalid_response` no: el primero pide corregir la clave y el segundo no es un fallo de
-/// disponibilidad.
+/// disponibilidad. Tampoco `model_unavailable`, `no_credit` ni `request_rejected` (D146): son
+/// configuración o cuenta, y el respaldo nunca pasa a otro proveedor externo.
 fn triggers_fallback(error: &AiError) -> bool {
     matches!(error.code(), "unavailable" | "timeout" | "rate_limited")
 }
 
-fn failure(error: &AiError) -> TaskError {
+fn failure(provider: &dyn Provider, error: &AiError) -> TaskError {
+    // El rechazo de una petición (D146) se explica con el texto de la persona, no con el código.
+    let message = match error {
+        AiError::RequestRejected { status, .. } => {
+            request_rejected_text(provider_label(provider.kind()), *status)
+        }
+        other => other.to_string(),
+    };
     TaskError {
         code: error.code().to_owned(),
-        message: error.to_string(),
+        message,
         recoverable: true,
     }
 }
@@ -328,7 +466,7 @@ fn generate_with_fallback(
                         return Attempt {
                             result: Ok(result),
                             fallback: Some(fallback_note(from, "unavailable")),
-                            unauthorized: false,
+                            wait: None,
                         }
                     }
                     Err(error) => local_failure = Some(error),
@@ -340,14 +478,14 @@ fn generate_with_fallback(
         Ok(result) => Attempt {
             result: Ok(result),
             fallback: None,
-            unauthorized: false,
+            wait: None,
         },
         Err(error) => {
             let Some(local) = fallback.filter(|_| triggers_fallback(&error)) else {
                 return Attempt {
-                    result: Err(failure(&error)),
+                    result: Err(failure(provider, &error)),
                     fallback: None,
-                    unauthorized: error == AiError::Unauthorized,
+                    wait: wait_for(&error),
                 };
             };
             let outcome = match local_failure {
@@ -357,9 +495,9 @@ fn generate_with_fallback(
                     // Sin IA local preparada: el error del externo, como sin respaldo.
                     None => {
                         return Attempt {
-                            result: Err(failure(&error)),
+                            result: Err(failure(provider, &error)),
                             fallback: None,
-                            unauthorized: false,
+                            wait: None,
                         }
                     }
                 },
@@ -374,7 +512,7 @@ fn generate_with_fallback(
                     Attempt {
                         result: Ok(result),
                         fallback: Some(fallback_note(from, error.code())),
-                        unauthorized: false,
+                        wait: None,
                     }
                 }
                 Err(local_error) => Attempt {
@@ -384,7 +522,7 @@ fn generate_with_fallback(
                         recoverable: true,
                     }),
                     fallback: None,
-                    unauthorized: false,
+                    wait: None,
                 },
             }
         }
@@ -404,7 +542,7 @@ impl Job {
             prepared,
         } = self;
         let mut extracted = None;
-        let mut ai_unauthorized = false;
+        let mut wait = None;
         let mut used_fallback = None;
         let outcome = prepared.and_then(|prepared| {
             let request = match prepared {
@@ -425,7 +563,7 @@ impl Job {
             };
             let attempt =
                 generate_with_fallback(&*provider, fallback.as_ref(), &fallback_until, &request);
-            ai_unauthorized = attempt.unauthorized;
+            wait = attempt.wait;
             used_fallback = attempt.fallback;
             attempt.result.map(Outcome::Generated)
         });
@@ -433,7 +571,8 @@ impl Job {
             task,
             outcome,
             extraction: extracted,
-            ai_unauthorized,
+            wait,
+            used: provider,
             fallback: used_fallback,
         }
     }
@@ -689,6 +828,15 @@ impl App {
 
     /// Cambio explícito de proveedor; afecta a las tareas que empiecen después.
     pub fn select_provider(&mut self, provider: Arc<dyn Provider>) {
+        // Una espera nacida de la respuesta del proveedor (D146) deja de valer si cambia el
+        // proveedor, el modelo o el destino; una nueva resolución del mismo no la levanta.
+        let same = self.provider.kind() == provider.kind()
+            && self.provider.model() == provider.model()
+            && self.provider.destination() == provider.destination()
+            && self.provider.configured_url() == provider.configured_url();
+        if !same {
+            self.lift_provider_wait();
+        }
         self.provider = provider;
         self.key_fixed = true;
         // El consentimiento del afinado automático es de un destino concreto (D134).
@@ -698,11 +846,42 @@ impl App {
 
     /// Fija o quita la espera de IA (D101). Con una espera, las tareas que necesitan el
     /// proveedor se quedan en `queued` sin gastar intentos; al quitarla se retoman.
+    ///
+    /// Quitarla (`None`) no levanta una espera de D146 (404, 402): esas dependen de lo que
+    /// respondió el proveedor y solo las quitan un cambio de proveedor o de modelo
+    /// (`select_provider`), una prueba con éxito o el sondeo (`lift_provider_wait`).
     pub fn set_ai_wait(&mut self, wait: Option<AiWait>) {
+        if wait.is_none() && self.ai_wait.is_some_and(AiWait::is_provider_response) {
+            return;
+        }
         if wait.is_none() && self.ai_wait == Some(AiWait::InvalidKey) {
             self.key_fixed = true;
         }
         self.ai_wait = wait;
+    }
+
+    /// Levanta la espera de D146 (modelo no disponible o sin crédito) y devuelve si había una.
+    /// La usan el cambio de modelo o de clave, la prueba sintética con éxito y el sondeo.
+    pub fn lift_provider_wait(&mut self) -> bool {
+        if self.ai_wait.is_some_and(AiWait::is_provider_response) {
+            self.ai_wait = None;
+            // Como al corregir una clave: un fallo de afinado por esta causa ya no vale (D134).
+            self.key_fixed = true;
+            return true;
+        }
+        false
+    }
+
+    /// Texto de la espera actual, con el proveedor y el modelo de ahora. `address` es la dirección
+    /// configurada; solo se cita con el compatible con OpenAI.
+    pub fn ai_wait_message(&self, address: Option<&str>) -> Option<String> {
+        let wait = self.ai_wait?;
+        let kind = self.provider.kind();
+        let address = address
+            .map(str::to_owned)
+            .or_else(|| self.provider.configured_url())
+            .filter(|_| kind == ProviderKind::OpenAiCompatible);
+        Some(wait.describe(kind, self.provider.model(), address.as_deref()))
     }
 
     pub fn ai_wait(&self) -> Option<AiWait> {
@@ -1132,11 +1311,17 @@ impl App {
     pub fn finish(&mut self, completed: Completed) -> AppResult<Task> {
         let task = completed.task;
         let fallback = completed.fallback;
-        if completed.ai_unauthorized {
-            // La clave no sirve: la tarea vuelve a la cola sin gastar intento ni fallar y la
-            // ventana pide corregir la clave (D101).
-            self.ai_wait = Some(AiWait::InvalidKey);
-            return Ok(self.store.release(task.id, AiWait::InvalidKey.message())?);
+        if let Some(wait) = completed.wait {
+            // La clave no sirve, el modelo no existe o no hay crédito: la tarea vuelve a la cola
+            // sin gastar intento ni fallar y la ventana lo explica (D101, D146). Si el proveedor
+            // ya cambió mientras la llamada seguía en curso, la respuesta es del anterior y no se
+            // vuelve a poner la espera; la tarea igualmente vuelve a la cola.
+            if Arc::ptr_eq(&completed.used, &self.provider) {
+                self.ai_wait = Some(wait);
+            }
+            let used = &completed.used;
+            let reason = wait.describe(used.kind(), used.model(), used.configured_url().as_deref());
+            return Ok(self.store.release(task.id, &reason)?);
         }
         let generated = match completed.outcome {
             Ok(Outcome::Generated(generated)) => generated,
@@ -2179,7 +2364,8 @@ mod tests {
                 task: job.task,
                 outcome: Err(error),
                 extraction: None,
-                ai_unauthorized: false,
+                wait: None,
+                used: Arc::new(Silent),
                 fallback: None,
             })
             .unwrap();

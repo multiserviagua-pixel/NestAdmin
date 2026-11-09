@@ -1609,6 +1609,9 @@ const FAILURE_TEXT: Record<string, string> = {
   rate_limited: "el proveedor limitó las peticiones",
   unauthorized: "el proveedor rechazó la clave; corríjala en Configuración",
   invalid_response: "la respuesta del proveedor no tenía el formato pedido",
+  model_unavailable: "el proveedor no encuentra el modelo o la dirección elegidos",
+  no_credit: "la cuenta del proveedor no tiene crédito",
+  request_rejected: "el proveedor rechazó la petición",
 };
 
 /** Un motivo de respaldo, en palabras. */
@@ -1621,6 +1624,8 @@ const WAIT_TEXT: Record<string, string> = {
   needs_key: "falta guardar la clave del proveedor en Configuración",
   needs_consent: "falta confirmar en Configuración el destino de los datos",
   invalid_key: "la clave de IA no es válida o fue revocada",
+  model_unavailable: "el proveedor no encuentra el modelo o la dirección elegidos",
+  no_credit: "la cuenta del proveedor no tiene crédito",
 };
 
 export interface RefinementStatus {
@@ -1668,6 +1673,9 @@ function pendingReason(v: RefinementLike): string {
       return `La respuesta de la IA se descartó entera porque ${REJECTION_TEXT[v.detail ?? ""] ?? "no cumplía el formato"}. No se aplicó nada de ella.`;
     default: {
       const code = v.reason ?? "";
+      // Un afinado que se envió y falló (failures > 0) no es una espera: algo salió al proveedor,
+      // así que no se dice «No se envió nada», aunque el código coincida con el de una espera.
+      if (FAILURE_TEXT[code] && v.failures > 0) return `El último intento falló: ${FAILURE_TEXT[code]}.`;
       if (WAIT_TEXT[code]) return `No se envió nada: ${WAIT_TEXT[code]}.`;
       if (FAILURE_TEXT[code]) return `El último intento falló: ${FAILURE_TEXT[code]}.`;
       return "No se pudo afinar.";

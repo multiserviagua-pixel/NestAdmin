@@ -15,8 +15,8 @@ use nestadmin_ai::ollama_cloud::OllamaCloudProvider;
 use nestadmin_ai::openai_compatible::{parse_base_url, OpenAiCompatibleProvider};
 use nestadmin_ai::tasks::{email_request, extraction_request, parse_email, parse_extraction};
 use nestadmin_ai::{
-    build_provider, AiError, AiService, CredentialStore, MemoryCredentialStore, Provider,
-    ProviderChoice, ProviderKind, Secret,
+    build_provider, AiError, AiService, CredentialStore, MemoryCredentialStore,
+    ModelUnavailableCause, Provider, ProviderChoice, ProviderKind, Secret,
 };
 use serde_json::{json, Value};
 
@@ -1606,7 +1606,8 @@ fn anthropic_4xx_reports_only_the_short_error_type() {
     let third = provider.generate(&request).unwrap_err();
     assert!(!second.to_string().contains("Tipo Raro"), "{second}");
     for error in [first, second, third] {
-        assert_eq!(error.code(), "unavailable");
+        // D146: un 400 al generar rechaza esa petición; no es «proveedor no disponible».
+        assert_eq!(error.code(), "request_rejected");
         assert!(!format!("{error} {error:?}").contains(MARK), "{error}");
         assert!(!format!("{error:?}").contains(ANTHROPIC_KEY));
     }
@@ -1816,4 +1817,209 @@ fn output_is_validated_when_the_server_ignores_the_schema() {
         parse_email(&result.output),
         Err(AiError::InvalidResponse(_))
     ));
+}
+
+/// D146: el 4xx al generar se explica por su causa. Cada fila de la tabla, con los cuatro
+/// adaptadores que generan por HTTP.
+#[test]
+fn http_4xx_when_generating_follows_the_d146_table_for_every_adapter() {
+    let timeout = Duration::from_secs(2);
+    let rows: [(u16, Value, &str); 9] = [
+        (
+            404,
+            json!({ "error": "model \"x\" not found" }),
+            "model_unavailable",
+        ),
+        (410, json!({}), "model_unavailable"),
+        (
+            400,
+            json!({ "error": { "code": "model_not_found", "type": "invalid_request_error" } }),
+            "model_unavailable",
+        ),
+        (402, json!({}), "no_credit"),
+        (
+            400,
+            json!({ "error": { "type": "invalid_request_error" } }),
+            "request_rejected",
+        ),
+        (413, json!({}), "request_rejected"),
+        (422, json!({}), "request_rejected"),
+        (409, json!({}), "unavailable"),
+        (418, json!({}), "unavailable"),
+    ];
+    let request = extraction_request("x", "t");
+    for (status, body, code) in rows {
+        let replies = || vec![reply(status, body.clone())];
+        let (url, _) = serve(replies());
+        let cloud = OllamaCloudProvider::with_endpoint(
+            &format!("{url}/api"),
+            "m",
+            Secret::new(CLOUD_KEY),
+            timeout,
+        );
+        let (url, _) = serve(replies());
+        let compat = OpenAiCompatibleProvider::with_endpoint(
+            &format!("{url}/v1/"),
+            "m",
+            Secret::new(COMPAT_KEY),
+            timeout,
+        );
+        let (url, _) = serve(replies());
+        let claude =
+            AnthropicProvider::with_endpoint(&url, "m", Secret::new(ANTHROPIC_KEY), timeout);
+        let (url, _) = serve(vec![show_local(), reply(status, body.clone())]);
+        let local = OllamaProvider::new(&url, "m", timeout).unwrap();
+        let providers: [(&str, &dyn Provider); 3] = [
+            ("ollama_cloud", &cloud),
+            ("openai_compatible", &compat),
+            ("anthropic", &claude),
+        ];
+        for (name, provider) in providers {
+            let error = provider.generate(&request).unwrap_err();
+            assert_eq!(error.code(), code, "{name} {status}: {error}");
+        }
+        // La IA local conserva el mapeo anterior (D101, R03): todo 4xx es `unavailable`.
+        let error = local.generate(&request).unwrap_err();
+        let expected = if (400..500).contains(&status) {
+            "unavailable"
+        } else {
+            code
+        };
+        assert_eq!(error.code(), expected, "ollama {status}: {error}");
+    }
+}
+
+/// D146 solo vale para proveedores externos: un 404 de `/api/show` o del chat local sigue siendo
+/// `unavailable`, sin espera (la tarea falla como hasta ahora).
+#[test]
+fn the_local_provider_keeps_4xx_as_unavailable_on_show_and_chat() {
+    let timeout = Duration::from_secs(2);
+    let not_found = || reply(404, json!({ "error": "model \"m\" not found" }));
+    let (url, _) = serve(vec![not_found()]);
+    let provider = OllamaProvider::new(&url, "m", timeout).unwrap();
+    let error = provider
+        .generate(&extraction_request("x", "t"))
+        .unwrap_err();
+    assert_eq!(error.code(), "unavailable", "/api/show: {error}");
+    let (url, _) = serve(vec![show_local(), not_found()]);
+    let provider = OllamaProvider::new(&url, "m", timeout).unwrap();
+    let error = provider
+        .generate(&extraction_request("x", "t"))
+        .unwrap_err();
+    assert_eq!(error.code(), "unavailable", "/api/chat: {error}");
+}
+
+/// Ningún cuerpo de error de 400, 413 o 422 aparece en el error, aunque repita lo enviado.
+#[test]
+fn the_body_of_a_rejected_request_never_appears_in_the_error() {
+    const MARK: &str = "TEXTO_MARCADO_DEL_CONTENIDO_ENVIADO";
+    let timeout = Duration::from_secs(2);
+    for status in [400u16, 413, 422] {
+        let body = json!({ "error": { "type": "invalid_request_error",
+            "message": format!("contenido rechazado: {MARK}") } });
+        let (url, _) = serve(vec![reply(status, body.clone())]);
+        let cloud = OllamaCloudProvider::with_endpoint(
+            &format!("{url}/api"),
+            "m",
+            Secret::new(CLOUD_KEY),
+            timeout,
+        );
+        let (url, _) = serve(vec![reply(status, body)]);
+        let compat = OpenAiCompatibleProvider::with_endpoint(
+            &format!("{url}/v1/"),
+            "m",
+            Secret::new(COMPAT_KEY),
+            timeout,
+        );
+        for provider in [&cloud as &dyn Provider, &compat] {
+            let error = provider
+                .generate(&extraction_request("x", "t"))
+                .unwrap_err();
+            assert_eq!(error.code(), "request_rejected");
+            let printed = format!("{error} {error:?}");
+            assert!(!printed.contains(MARK), "{status}: {printed}");
+        }
+    }
+}
+
+/// D146: la causa del 404 sale del cuerpo y solo se conserva la enumeración; ni el cuerpo ni su
+/// texto aparecen en el error, aunque repita contenido enviado.
+#[test]
+fn a_404_when_generating_keeps_only_the_cause_and_never_the_body() {
+    const MARK: &str = "TEXTO_MARCADO_DEL_CONTENIDO_ENVIADO";
+    let timeout = Duration::from_secs(2);
+    let bodies: [(String, ModelUnavailableCause); 5] = [
+        (
+            json!({ "error": format!("model \"{MARK}\" not found, try pulling it first") })
+                .to_string(),
+            ModelUnavailableCause::ModelNotFound,
+        ),
+        (
+            json!({ "error": { "message": format!("The model `{MARK}` does not exist") } })
+                .to_string(),
+            ModelUnavailableCause::ModelNotFound,
+        ),
+        (
+            format!("404 page not found {MARK}"),
+            ModelUnavailableCause::RouteNotFound,
+        ),
+        (
+            json!({ "detail": "Not Found", "echo": MARK }).to_string(),
+            ModelUnavailableCause::RouteNotFound,
+        ),
+        (
+            json!({ "error": format!("cuenta sin acceso {MARK}") }).to_string(),
+            ModelUnavailableCause::Other,
+        ),
+    ];
+    for (body, expected) in bodies {
+        let (url, _) = serve(vec![Reply {
+            status: 404,
+            body,
+            delay: Duration::ZERO,
+            headers: String::new(),
+        }]);
+        let provider = OllamaCloudProvider::with_endpoint(
+            &format!("{url}/api"),
+            "m",
+            Secret::new(CLOUD_KEY),
+            timeout,
+        );
+        let error = provider
+            .generate(&extraction_request("x", "t"))
+            .unwrap_err();
+        assert_eq!(
+            error,
+            AiError::ModelUnavailable {
+                cause: expected,
+                status: 404
+            }
+        );
+        let printed = format!("{error} {error:?}");
+        assert!(!printed.contains(MARK), "{printed}");
+        assert!(!printed.contains(CLOUD_KEY), "{printed}");
+    }
+}
+
+/// D146: ninguno de los errores nuevos cambia de proveedor ni abre el respaldo: no es un código
+/// de `triggers_fallback` y el contrato sigue sin autorizar otro proveedor.
+#[test]
+fn new_errors_have_their_own_codes() {
+    assert_eq!(
+        AiError::ModelUnavailable {
+            cause: ModelUnavailableCause::Other,
+            status: 404
+        }
+        .code(),
+        "model_unavailable"
+    );
+    assert_eq!(AiError::NoCredit.code(), "no_credit");
+    assert_eq!(
+        AiError::RequestRejected {
+            status: 422,
+            kind: None
+        }
+        .code(),
+        "request_rejected"
+    );
 }
