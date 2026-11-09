@@ -32,7 +32,7 @@
 <p>This policy explains what information the NestAdmin desktop app uses, what for, where it is stored and what control you have over it. It applies to the NestAdmin app for Windows and to this website.</p>
 
 <div class="caja">
-<p><strong>In short:</strong> NestAdmin runs on your computer. The publisher has no servers that receive, store or process your email or documents, and no one at the publisher reads them. AI analysis is done by an external provider that you choose (by default Ollama cloud, from Ollama Inc.) with your own key and after you confirm the destination, or by optional local AI; section 7 details which text leaves your computer. Your Gmail data is not used for advertising, is not sold and is not used to train AI models.</p>
+<p><strong>In short:</strong> NestAdmin runs on your computer. The publisher has no servers that receive, store or process your email or documents, and no one at the publisher reads them. AI analysis is done by an external provider that you choose (by default Ollama cloud, from Ollama Inc.) with your own key and after you confirm the destination, or by optional local AI; section 7 details which text leaves your computer. NestAdmin does not sell your Gmail data or use it for advertising or to train AI models.</p>
 </div>
 
 <h2 id="controller">1. Who is responsible</h2>
@@ -44,12 +44,16 @@
 <p>Only if you connect a Gmail or Microsoft 365 account, NestAdmin accesses, through that provider's official API:</p>
 <ul>
   <li>the messages in your inbox: sender, recipients, subject, date, message and thread identifiers, labels or status, and the body text;</li>
+  <li>the <strong>file attachments</strong> of the types it processes (text, PDF, and JPG, PNG, TIFF, BMP and WebP images), which it downloads to import them as documents and extract invoice data. Attachments of other types and images embedded in the body are not downloaded;</li>
+  <li>the message headers, which are examined in memory to recognize automated email (for example, <code>Auto-Submitted</code> or <code>List-Id</code>). Only the result of that check is stored, not the headers;</li>
+  <li>the account's email address, at sign-in, to show which mailbox each message comes from;</li>
+  <li>in Gmail, the labels and a NestAdmin header of the messages in a reply's thread, only to confirm whether an interrupted send actually went out, so nothing is sent twice;</li>
   <li>the reply drafts that the app itself creates, and their sending status.</li>
 </ul>
-<p>The current version does not download message attachments. NestAdmin does not delete messages.</p>
+<p>NestAdmin does not delete, archive or relabel messages.</p>
 
-<h3>Documents you import</h3>
-<p>The text and PDF files (including scanned ones) you add to the app, and the data extracted from them, such as supplier, dates, amounts and taxes.</p>
+<h3>Documents you import or that arrive as attachments</h3>
+<p>The text, PDF (including scanned ones) and image files, such as photos of invoices, that you add to the app or that arrive as attachments, and the data extracted from them, such as supplier, dates, amounts and taxes.</p>
 
 <h3>Credentials</h3>
 <p>The access and refresh tokens that Google or Microsoft issue when you sign in with OAuth 2.0 and the API key of the AI provider you choose (by default, Ollama cloud). NestAdmin never sees or stores your email account password: you type it on the provider's own page.</p>
@@ -62,8 +66,8 @@
 <table>
   <thead><tr><th>Provider</th><th>Permission</th><th>Use</th></tr></thead>
   <tbody>
-    <tr><td>Google (Gmail API)</td><td><code>https://www.googleapis.com/auth/gmail.modify</code></td><td>Read inbox messages, create reply drafts in the original thread and send a draft only when you approve it or a rule you enabled covers it. It is not used to delete email.</td></tr>
-    <tr><td>Microsoft (Graph)</td><td><code>Mail.ReadWrite</code></td><td>Read messages and create reply drafts.</td></tr>
+    <tr><td>Google (Gmail API)</td><td><code>https://www.googleapis.com/auth/gmail.modify</code></td><td>Read inbox messages and download their attachments of the types it processes, read the account's address, create reply drafts in the original thread and send a draft only when you approve it or a rule you enabled covers it. It is not used to delete, archive or relabel email.</td></tr>
+    <tr><td>Microsoft (Graph)</td><td><code>Mail.ReadWrite</code></td><td>Read messages, download their attachments of the types it processes, and create reply drafts.</td></tr>
     <tr><td>Microsoft (Graph)</td><td><code>Mail.Send</code></td><td>Send a draft only when you approve it or a rule you enabled covers it.</td></tr>
     <tr><td>Microsoft (Graph)</td><td><code>User.Read</code></td><td>Read the account's email address when you sign in, to show which mailbox each message came from. It is stored only on your computer.</td></tr>
     <tr><td>Microsoft (Graph)</td><td><code>offline_access</code></td><td>Stay connected without asking you to sign in every time.</td></tr>
@@ -75,9 +79,10 @@
 <p>NestAdmin uses this data only to provide the features you see in the app:</p>
 <ul>
   <li>showing and classifying your messages and documents;</li>
-  <li>extracting and checking invoice data;</li>
+  <li>importing attachments as documents and extracting and checking invoice data;</li>
   <li>preparing reply drafts for you to review;</li>
   <li>sending a draft when you approve it, or when a specific rule you created and enabled covers it;</li>
+  <li>suggesting rules based on decisions you have already made, which only take effect if you enable them;</li>
   <li>showing you the history of decisions and actions.</li>
 </ul>
 <p>AI analysis is done by the external provider you have chosen (by default Ollama cloud, through its API; you can also choose an OpenAI-compatible service or Claude) or, if you install it, by a local language model (Qwen3 8B, via Ollama) running on your computer. NestAdmin sends nothing to an external provider until you save your key, pick the model and confirm the destination, and it then runs a test with synthetic text that does not contain your data. Models are only used to process what you ask for; NestAdmin does not train or fine-tune them with your data.</p>
@@ -90,9 +95,9 @@
 <ul>
   <li>It is used only to provide the user-facing features of the app described in this policy.</li>
   <li>It is not used for advertising, personalized or otherwise.</li>
-  <li>It is not sold or transferred to third parties, including data brokers or information resellers.</li>
-  <li>No one at the publisher reads it: the publisher does not receive it, because it is processed on your computer.</li>
-  <li>It is not used to train or improve AI or machine learning models, whether the publisher's or anyone else's.</li>
+  <li>It is not sold or transferred to third parties, including data brokers or information resellers. The only transfer is the text a task needs, including that of the initial read and of suggestion refinement, sent to the AI provider you choose, for the feature you see in the app and only after you confirm that destination (section 7).</li>
+  <li>No one at the publisher reads it: the publisher does not receive it, because it travels only between your computer, Google and the AI provider you choose.</li>
+  <li>NestAdmin does not use it to train or improve AI or machine learning models. Use by the AI provider you choose is governed by that provider's terms.</li>
   <li>It is not used to determine creditworthiness or for lending purposes.</li>
 </ul>
 <p>It only leaves your computer in the cases described in section 7, and always to provide a feature you asked for.</p>
@@ -114,7 +119,9 @@
 </ul>
 <h3>What text is sent to the external AI provider</h3>
 <ul>
-  <li><strong>Sent</strong>: only what each task needs: the instructions and the response schema; the text of a document that NestAdmin has already extracted on your computer; and, for an email, its subject, sender, recipients, date and body as text.</li>
+  <li><strong>Sent</strong>: only what each task needs: the instructions and the response schema; the text of a document or attachment that NestAdmin has already extracted on your computer; and, for an email, its subject, sender, recipients, date and body as text.</li>
+  <li><strong>Initial read.</strong> When you connect an account, and after showing you a summary, NestAdmin reads once up to 100 emails older than 7 days to learn from your invoices. It downloads their attachments and sends the provider only the text of documents that, according to a check made on your computer, look like an invoice. The emails in that read are not sent or answered.</li>
+  <li><strong>Rule suggestions.</strong> If you ask to refine suggestions with the button, or enable automatic refinement (off by default), a summary of your decisions is sent: counts, the category, the supplier name as written on its invoices or the sender's domain, and the lowest and highest amount. With few invoices, those amounts belong to specific invoices, and a sole trader's name identifies a person. Before each send with the button, and before enabling automatic refinement, you see a literal preview of what would be sent. Names that appear to contain an email address, a tax ID, an IBAN, a phone number or a postal address are not sent.</li>
   <li><strong>Not sent</strong>: the original document file, images, its fingerprint, the database, tokens or email credentials, other keys, your mailbox addresses (unless they appear in the email itself), your account names, the paths on your computer or the history. PDF reading and OCR are always done on your computer. Each key goes only to its own provider.</li>
   <li><strong>Local alternative.</strong> If you prefer the text not to leave your computer, you can install and choose local AI. If the external provider does not respond and you have the local fallback enabled, NestAdmin repeats that task with the local AI on your computer (and says so in the result); it never switches to another external provider.</li>
 </ul>
