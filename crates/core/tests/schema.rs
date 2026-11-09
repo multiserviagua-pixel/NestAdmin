@@ -28,7 +28,7 @@ const DROP_SALES: &str = "DROP TABLE received_delivery_notes; DROP TABLE payment
 
 /// Quita lo que añadió la migración 4 (panel de reglas), como si la base la hubiera creado
 /// la versión anterior.
-const DROP_PANEL: &str = "DROP TABLE rule_settings; DROP TABLE rule_suggestions; DROP TABLE rule_signals; DROP TABLE rule_evaluations; DROP TABLE rule_meta; ALTER TABLE actions DROP COLUMN rule_id; ALTER TABLE actions DROP COLUMN rule_version; DROP INDEX IF EXISTS tasks_redraft_of; DROP TABLE IF EXISTS sender_preferences;";
+const DROP_PANEL: &str = "DROP TABLE rule_settings; DROP TABLE rule_suggestions; DROP TABLE rule_signals; DROP TABLE rule_evaluations; DROP TABLE rule_meta; ALTER TABLE actions DROP COLUMN rule_id; ALTER TABLE actions DROP COLUMN rule_version; DROP INDEX IF EXISTS tasks_redraft_of; DROP TABLE IF EXISTS sender_preferences; DROP TABLE IF EXISTS business_profile;";
 
 fn has_table(path: &std::path::Path, name: &str) -> bool {
     rusqlite::Connection::open(path)
@@ -106,7 +106,7 @@ fn migrating_from_schema_2_adds_sales_tables_and_keeps_a_copy() {
 
     let store = Store::open(&path).unwrap();
     assert_eq!(store.schema_version().unwrap(), SCHEMA_VERSION);
-    assert_eq!(SCHEMA_VERSION, 6);
+    assert_eq!(SCHEMA_VERSION, 7);
     assert_eq!(
         store.audit_log().unwrap().len(),
         1,
@@ -327,7 +327,7 @@ fn migrating_from_schema_4_adds_the_redraft_index_and_keeps_a_copy() {
     drop(Store::open(&path).unwrap());
     let conn = rusqlite::Connection::open(&path).unwrap();
     conn.execute_batch(
-        "DROP INDEX tasks_redraft_of; DROP TABLE sender_preferences; PRAGMA user_version = 4;",
+        "DROP INDEX tasks_redraft_of; DROP TABLE sender_preferences; DROP TABLE business_profile; PRAGMA user_version = 4;",
     )
     .unwrap();
     for (id, input) in [(1, "{}"), (2, "no es json"), (3, r#"{"redraft_of": 1}"#)] {
@@ -364,8 +364,10 @@ fn migrating_from_schema_5_adds_sender_preferences_and_keeps_a_copy() {
     let path = dir.path().join("nestadmin.db");
     drop(Store::open(&path).unwrap());
     let conn = rusqlite::Connection::open(&path).unwrap();
-    conn.execute_batch("DROP TABLE sender_preferences; PRAGMA user_version = 5;")
-        .unwrap();
+    conn.execute_batch(
+        "DROP TABLE sender_preferences; DROP TABLE business_profile; PRAGMA user_version = 5;",
+    )
+    .unwrap();
     conn.execute(
         "INSERT INTO audit_log (at, action, status) VALUES (1, 'previa', 'ok')",
         [],
@@ -409,4 +411,70 @@ fn migrating_from_schema_5_adds_sender_preferences_and_keeps_a_copy() {
             "{scope} {key:?} {route}"
         );
     }
+}
+
+/// La migración 7 añade el perfil del negocio (D163), con copia previa del esquema 6, sin tocar
+/// nada de lo anterior; la tabla es de fila única y rechaza más de 2.000 caracteres en total.
+#[test]
+fn migrating_from_schema_6_adds_the_business_profile_and_keeps_a_copy() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("nestadmin.db");
+    drop(Store::open(&path).unwrap());
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    conn.execute_batch("DROP TABLE business_profile; PRAGMA user_version = 6;")
+        .unwrap();
+    conn.execute(
+        "INSERT INTO audit_log (at, action, status) VALUES (1, 'previa', 'ok')",
+        [],
+    )
+    .unwrap();
+    drop(conn);
+
+    let mut store = Store::open(&path).unwrap();
+    assert_eq!(store.schema_version().unwrap(), SCHEMA_VERSION);
+    assert_eq!(store.audit_log().unwrap().len(), 1);
+    assert!(store.business_profile().unwrap().is_none());
+
+    let backup = backup_path(&path, 6);
+    assert_eq!(backup.file_name().unwrap(), "nestadmin.esquema-6.db");
+    assert_eq!(user_version(&backup), 6);
+    assert!(!has_table(&backup, "business_profile"));
+    assert!(has_table(&path, "business_profile"));
+
+    // Guardar, sustituir y borrar: una sola fila y un evento por cambio, sin el texto.
+    let mut profile = nestadmin_core::BusinessProfile {
+        hours: "Lunes a viernes de 9 a 14".into(),
+        ..Default::default()
+    };
+    store.save_business_profile(&profile).unwrap();
+    profile.tone = "Cercano".into();
+    store.save_business_profile(&profile).unwrap();
+    assert_eq!(store.business_profile().unwrap().unwrap().0, profile);
+    assert!(store.clear_business_profile().unwrap());
+    assert!(!store.clear_business_profile().unwrap());
+    let log = store.audit_log().unwrap();
+    let events: Vec<_> = log
+        .iter()
+        .filter(|e| e.action == "business_profile")
+        .collect();
+    assert_eq!(events.len(), 3);
+    assert!(events
+        .iter()
+        .all(|e| !e.detail.as_deref().unwrap_or("").contains("Lunes")));
+
+    // La tabla misma impone la fila única y el tope.
+    drop(store);
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    let insert = |id: i64, hours: String| {
+        conn.execute(
+            "INSERT INTO business_profile (id, hours, updated_at) VALUES (?1, ?2, 1)",
+            rusqlite::params![id, hours],
+        )
+    };
+    assert!(insert(2, "x".into()).is_err(), "solo la fila 1");
+    assert!(
+        insert(1, "x".repeat(2001)).is_err(),
+        "más de 2.000 caracteres"
+    );
+    assert!(insert(1, "x".repeat(2000)).is_ok());
 }

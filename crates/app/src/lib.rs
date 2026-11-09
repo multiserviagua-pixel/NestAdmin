@@ -11,6 +11,7 @@ pub mod accounts;
 pub mod initial_read;
 pub mod panel;
 pub mod preferences;
+pub mod profile;
 pub mod refine;
 pub mod rules;
 pub mod suggest;
@@ -22,7 +23,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use nestadmin_ai::tasks::{
-    draft_flags, draft_leaks_internals, draft_request, extraction_request, parse_draft,
+    draft_flags_allowing, draft_leaks_internals, draft_request, extraction_request, parse_draft,
     parse_extraction, parse_other_invoices, parse_triage, triage_request,
 };
 use nestadmin_ai::{
@@ -345,7 +346,10 @@ enum Prepared {
         text: String,
     },
     /// «Redactar respuesta» (D159): solo la redacción, sin clasificar de nuevo.
-    Redraft(GenerateRequest),
+    Redraft {
+        id: String,
+        text: String,
+    },
 }
 
 /// Lo que dan las dos llamadas de un correo (D158).
@@ -357,6 +361,11 @@ struct EmailGenerated {
     needs_reply: bool,
     /// Texto del borrador, ya leído; `None` si no hacía falta respuesta.
     draft: Option<String>,
+    /// Huella del perfil del negocio que llevó la redacción (D163); `None` si no llevó ninguno.
+    profile_fp: Option<String>,
+    /// Texto de ese perfil, solo en memoria: sirve para no marcar sus contactos en el borrador y
+    /// nunca se guarda en el resultado.
+    profile_text: Option<String>,
 }
 
 /// Lo que devuelve el trabajo de una tarea.
@@ -443,6 +452,8 @@ pub struct Job {
     fallback: Option<LocalFallback>,
     fallback_until: Arc<Mutex<Option<Instant>>>,
     extractor: Arc<Extractor>,
+    /// Perfil del negocio para la redacción de esta tarea, ya comprobado el consentimiento (D163).
+    profile: Option<profile::ProfileUse>,
     prepared: Result<Prepared, TaskError>,
 }
 
@@ -510,6 +521,19 @@ fn generate_with_fallback(
     until: &Mutex<Option<Instant>>,
     request: &GenerateRequest,
 ) -> Attempt {
+    generate_with_fallback_split(provider, fallback, until, request, request)
+}
+
+/// Como `generate_with_fallback`, con una petición para el proveedor elegido y otra para la IA
+/// local: la redacción lleva el perfil del negocio a la IA local sin consentimiento extra (no sale
+/// del equipo) y al externo solo con él (D163).
+fn generate_with_fallback_split(
+    provider: &dyn Provider,
+    fallback: Option<&LocalFallback>,
+    until: &Mutex<Option<Instant>>,
+    request: &GenerateRequest,
+    local_request: &GenerateRequest,
+) -> Attempt {
     let from = provider.kind();
     let fallback = fallback.filter(|_| from != ProviderKind::Ollama);
     // El respaldo es siempre la IA local: lo que no sea Ollama se descarta, de modo que ningún
@@ -524,7 +548,7 @@ fn generate_with_fallback(
             .unwrap_or(false);
         if active {
             if let Some(local) = local_provider(local) {
-                match local.generate(request) {
+                match local.generate(local_request) {
                     Ok(result) => {
                         return Attempt {
                             result: Ok(result),
@@ -554,7 +578,7 @@ fn generate_with_fallback(
             let outcome = match local_failure {
                 Some(previous) => Err(previous),
                 None => match local_provider(local) {
-                    Some(local) => local.generate(request),
+                    Some(local) => local.generate(local_request),
                     // Sin IA local preparada: el error del externo, como sin respaldo.
                     None => {
                         return Attempt {
@@ -640,6 +664,7 @@ impl Job {
             fallback,
             fallback_until,
             extractor,
+            profile,
             prepared,
         } = self;
         let read_source: Option<String> = serde_json::from_str::<Value>(&task.input_ref)
@@ -674,19 +699,23 @@ impl Job {
                             category: Some(category),
                             needs_reply,
                             draft: None,
+                            profile_fp: None,
+                            profile_text: None,
                         }));
                     }
-                    let request = draft_request(&format!("{id}/draft"), &text, None);
+                    let (request, local_request) =
+                        draft_requests(&format!("{id}/draft"), &text, profile.as_ref());
                     // Si la clasificación la atendió el respaldo local (o el periodo de respaldo
                     // sigue abierto), la redacción se queda en local: el mismo correo nunca vuelve
                     // al proveedor externo (D101).
                     let second = match &used_fallback {
-                        Some(note) => generate_local_only(fallback.as_ref(), note, &request),
-                        None => generate_with_fallback(
+                        Some(note) => generate_local_only(fallback.as_ref(), note, &local_request),
+                        None => generate_with_fallback_split(
                             &*provider,
                             fallback.as_ref(),
                             &fallback_until,
                             &request,
+                            &local_request,
                         ),
                     };
                     wait = second.wait;
@@ -696,30 +725,43 @@ impl Job {
                     let drafted = second.result?;
                     let draft = parse_draft(&drafted.output)
                         .map_err(|e| task_error(e.code(), e.to_string(), true))?;
+                    // La redacción salió por la IA local si hubo respaldo (en la clasificación o
+                    // en ella); si no, por el proveedor elegido.
+                    let (profile_fp, profile_text) =
+                        profile_sent(profile.as_ref(), used_fallback.is_some());
                     return Ok(Outcome::Email(EmailGenerated {
                         meta: drafted,
                         category: Some(category),
                         needs_reply,
                         draft: Some(draft),
+                        profile_fp,
+                        profile_text,
                     }));
                 }
-                Prepared::Redraft(request) => {
-                    let attempt = generate_with_fallback(
+                Prepared::Redraft { id, text } => {
+                    let (request, local_request) =
+                        draft_requests(&format!("{id}/draft"), &text, profile.as_ref());
+                    let attempt = generate_with_fallback_split(
                         &*provider,
                         fallback.as_ref(),
                         &fallback_until,
                         &request,
+                        &local_request,
                     );
                     wait = attempt.wait;
                     used_fallback = attempt.fallback;
                     let drafted = attempt.result?;
                     let draft = parse_draft(&drafted.output)
                         .map_err(|e| task_error(e.code(), e.to_string(), true))?;
+                    let (profile_fp, profile_text) =
+                        profile_sent(profile.as_ref(), used_fallback.is_some());
                     return Ok(Outcome::Email(EmailGenerated {
                         meta: drafted,
                         category: None,
                         needs_reply: true,
                         draft: Some(draft),
+                        profile_fp,
+                        profile_text,
                     }));
                 }
                 Prepared::Document(path) => {
@@ -769,6 +811,34 @@ impl Job {
             fallback: used_fallback,
             destination,
         }
+    }
+}
+
+/// Peticiones de redacción para el proveedor elegido y para la IA local (D163). El perfil va al
+/// elegido si es local o hay consentimiento (`primary_ok`), y a la IA local siempre: no sale del
+/// equipo. Sin perfil, ambas son iguales y no llevan nada.
+fn draft_requests(
+    id: &str,
+    text: &str,
+    profile: Option<&profile::ProfileUse>,
+) -> (GenerateRequest, GenerateRequest) {
+    let primary = profile.filter(|p| p.primary_ok).map(|p| p.text.as_str());
+    let local = profile.map(|p| p.text.as_str());
+    (
+        draft_request(id, text, primary),
+        draft_request(id, text, local),
+    )
+}
+
+/// Huella y texto del perfil que de verdad llevó la redacción: el de la IA local si ella la
+/// atendió, el del proveedor elegido si no (y solo si pudo recibirlo).
+fn profile_sent(
+    profile: Option<&profile::ProfileUse>,
+    served_locally: bool,
+) -> (Option<String>, Option<String>) {
+    match profile.filter(|p| served_locally || p.primary_ok) {
+        Some(p) => (Some(p.fp.clone()), Some(p.text.clone())),
+        None => (None, None),
     }
 }
 
@@ -1044,6 +1114,7 @@ impl App {
         self.refresh_read_gate();
         // El consentimiento del afinado automático es de un destino concreto (D134).
         self.drop_consent_if_destination_changed();
+        self.drop_profile_consent_if_destination_changed();
         self.expire_fallback_period();
     }
 
@@ -1556,6 +1627,7 @@ impl App {
                 fallback: self.fallback.clone(),
                 fallback_until: Arc::clone(&self.fallback_until),
                 extractor: Arc::clone(&self.extractor),
+                profile: None,
                 prepared: Ok(Prepared::Resume(result)),
             }));
         }
@@ -1598,11 +1670,10 @@ impl App {
                             ))
                         } else if input["redraft_of"].as_i64().is_some() {
                             // «Redactar respuesta» (D159): solo la redacción; no se clasifica otra vez.
-                            Ok(Prepared::Redraft(draft_request(
-                                &format!("{id}/draft"),
-                                &text,
-                                None,
-                            )))
+                            Ok(Prepared::Redraft {
+                                id: id.clone(),
+                                text,
+                            })
                         } else {
                             Ok(Prepared::Email { id: id.clone(), text })
                         }
@@ -1629,6 +1700,12 @@ impl App {
             fallback: self.fallback.clone(),
             fallback_until: Arc::clone(&self.fallback_until),
             extractor: Arc::clone(&self.extractor),
+            // Solo la redacción de un correo lleva el perfil (D163); se decide al tomar la tarea,
+            // con el consentimiento de ese momento.
+            profile: match &prepared {
+                Ok(Prepared::Email { .. } | Prepared::Redraft { .. }) => self.profile_for_draft(),
+                _ => None,
+            },
             prepared,
         }))
     }
@@ -2091,7 +2168,12 @@ impl App {
             .map(|s| s.code())
             .collect();
         result["draft"] = json!({ "to": to, "subject": subject, "body": body });
-        result["draft_flags"] = json!(draft_flags(body));
+        // Los contactos del perfil que llevó la redacción no se marcan (D160, D163); el resto sí.
+        result["draft_flags"] = json!(draft_flags_allowing(body, mail.profile_text.as_deref()));
+        if let Some(fp) = &mail.profile_fp {
+            // Solo la huella: el texto del perfil no se guarda en ningún resultado.
+            result["profile_fp"] = json!(fp);
+        }
         if !automatic.is_empty() {
             // Aviso para la revisión: el destinatario parece una dirección automática.
             result["recipient_signals"] = json!(automatic);

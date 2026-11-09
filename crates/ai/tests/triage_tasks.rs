@@ -2,8 +2,9 @@
 //! correo delimitado como dato y perfil de confianza separado. No hay red.
 
 use nestadmin_ai::tasks::{
-    document_text, draft_flags, draft_leaks_internals, draft_request, extraction_request,
-    parse_draft, parse_triage, triage_request, CATEGORIES, DOCUMENT_START, MAIL_END, MAIL_START,
+    document_text, draft_flags, draft_flags_allowing, draft_leaks_internals, draft_request,
+    extraction_request, parse_draft, parse_triage, profile_section, triage_request, CATEGORIES,
+    DOCUMENT_START, MAIL_END, MAIL_START,
 };
 use nestadmin_ai::{AiError, Task};
 use serde_json::json;
@@ -245,4 +246,81 @@ fn drafts_with_contact_data_get_flags_even_if_the_mail_asked_for_them() {
     ] {
         assert!(flags(plain).is_empty(), "{plain}");
     }
+}
+
+const PROFILE: &str = "Nombre del negocio: Taller Ficticio SL\nHorario: lunes a viernes\nFirma: Taller Ficticio SL - hola@taller-ficticio.test - +34 600 111 222\nPolíticas: Web https://taller-ficticio.test/contacto.";
+
+/// D163: el bloque del perfil es una sola función para la petición y para la vista previa.
+#[test]
+fn the_profile_section_is_exactly_what_the_draft_request_appends() {
+    assert_eq!(profile_section("  \n "), None);
+    let section = profile_section(PROFILE).unwrap();
+    let base = draft_request("X", "Hola", None).instructions;
+    assert_eq!(
+        draft_request("X", "Hola", Some(PROFILE)).instructions,
+        format!("{base}{section}")
+    );
+    assert!(section.contains(PROFILE));
+}
+
+/// D160 y D163: los contactos del perfil no se marcan; ni una variante ni un contacto ajeno.
+#[test]
+fn contacts_declared_in_the_profile_are_not_flagged_but_variants_and_others_are() {
+    let allowed = |draft: &str| draft_flags_allowing(draft, Some(PROFILE));
+    // Escritos como en el perfil.
+    assert!(allowed("Escriba a hola@taller-ficticio.test.").is_empty());
+    assert!(allowed("Escriba a HOLA@Taller-Ficticio.test o llame al +34 600 111 222.").is_empty());
+    assert!(allowed("Llame al 600111222 y gracias").is_empty());
+    assert!(allowed("Nuestra web: https://taller-ficticio.test/contacto").is_empty());
+    assert!(allowed("Vea (https://taller-ficticio.test/contacto), por favor").is_empty());
+    // Sin perfil, todo se marca.
+    assert_eq!(
+        draft_flags_allowing("Escriba a hola@taller-ficticio.test", None),
+        vec!["email", "url"]
+    );
+    // Un contacto que no es del perfil se marca, aunque haya otros del perfil en el mismo texto.
+    assert_eq!(
+        allowed("Escriba a hola@taller-ficticio.test o a pagos@banco-falso.test"),
+        vec!["email", "url"]
+    );
+    assert_eq!(allowed("Llame al 611 222 333"), vec!["phone"]);
+    // Pegar algo al contacto del perfil no lo hace del perfil.
+    for trick in [
+        "Escriba a xhola@taller-ficticio.test",
+        "Escriba a hola@taller-ficticio.test.evil.test",
+        "Escriba a hola@taller-ficticio.test@evil.test",
+        "Vea https://taller-ficticio.test.evil.test/contacto",
+        "Vea www.taller-ficticio.test",
+        "Vea https://evil.test/https://taller-ficticio.test/contacto",
+        "Llame al 600 111 2223",
+        "Llame al 9 600 111 222",
+    ] {
+        assert!(!allowed(trick).is_empty(), "{trick}");
+    }
+    // Un IBAN nunca se admite, esté o no en el perfil.
+    let with_iban = "Pagos: ES91 2100 0418 4502 0005 1332";
+    assert_eq!(
+        draft_flags_allowing("Pague en ES91 2100 0418 4502 0005 1332", Some(with_iban)),
+        vec!["iban", "phone"]
+    );
+}
+
+/// Un teléfono nacional del perfil vale también con el prefijo de España, y al revés.
+#[test]
+fn a_profile_phone_is_accepted_with_or_without_the_spanish_prefix() {
+    for (profile, draft) in [
+        ("Tel. 600 111 222", "Llame al 600 111 222"),
+        ("Tel. 600 111 222", "Llame al +34 600 111 222"),
+        ("Tel. 600 111 222", "Llame al 0034600111222"),
+        ("Tel. +34 600 111 222", "Llame al 600111222"),
+    ] {
+        assert!(
+            draft_flags_allowing(draft, Some(profile)).is_empty(),
+            "{profile} / {draft}"
+        );
+    }
+    assert_eq!(
+        draft_flags_allowing("Llame al +34 600 111 223", Some("Tel. 600 111 222")),
+        vec!["phone"]
+    );
 }

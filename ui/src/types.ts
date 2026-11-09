@@ -733,3 +733,65 @@ export interface PreferenceChange {
   changed: boolean;
   warnings: PreferenceWarning[];
 }
+
+// ---- Perfil del negocio (E6, D163) ----
+
+/** Los cinco textos del perfil. Un campo en blanco es un campo sin rellenar; el tope es de 2.000 caracteres en total. */
+export interface BusinessProfile {
+  display_name: string;
+  hours: string;
+  tone: string;
+  signature: string;
+  policies: string;
+}
+
+export interface ProfileView {
+  profile: BusinessProfile;
+  saved: boolean;
+  updated_at: number | null;
+  chars: number;
+  max_chars: number;
+}
+
+/** Hallazgo del examen del contenido: bloqueos `iban`, `card`, `secret`, `too_long`; avisos `phone`, `email`. */
+export interface ProfileFinding {
+  field: keyof BusinessProfile | "total";
+  code: "iban" | "card" | "secret" | "too_long" | "phone" | "email";
+}
+
+export interface ProfileSaved {
+  view: ProfileView;
+  warnings: ProfileFinding[];
+  /** El consentimiento se retiró porque cambió lo que saldría. */
+  consent_withdrawn: boolean;
+}
+
+/** Consentimiento del perfil: ligado a proveedor, modelo, servidor y contenido; no hace falta con la IA local. */
+export interface ProfileConsentView {
+  required: boolean;
+  state: "not_needed" | "missing" | "granted" | "stale";
+  provider: string | null;
+  model: string | null;
+  host: string | null;
+  at: number | null;
+}
+
+/** Lo que saldría en la redacción y a quién: el bloque literal, el destino y el consentimiento. */
+export interface ProfilePreview {
+  provider: ProviderInfo;
+  host: string | null;
+  external: boolean;
+  has_profile: boolean;
+  /** El bloque literal añadido a las instrucciones de la redacción; `null` si no hay perfil o no puede enviarse. */
+  block: string | null;
+  /** Huella corta del bloque; el consentimiento la exige. */
+  fp: string | null;
+  /** Por qué el perfil guardado no puede enviarse. */
+  blocked: ProfileFinding["code"] | null;
+  /** Si la próxima redacción lo llevaría ahora mismo. */
+  will_send: boolean;
+  local_fallback: boolean;
+  consent: ProfileConsentView;
+  warnings: ProfileFinding[];
+  notice: string;
+}

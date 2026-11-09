@@ -181,16 +181,26 @@ pub fn triage_request(request_id: &str, text: &str) -> GenerateRequest {
     }
 }
 
+/// Bloque del perfil del negocio tal como se añade a las instrucciones de la redacción (D163),
+/// con su separación previa; `None` si el perfil está en blanco. Es lo que la vista previa
+/// muestra y lo que sale: una sola función para las dos cosas.
+pub fn profile_section(profile: &str) -> Option<String> {
+    let profile = profile.trim();
+    if profile.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "\n\nInformación del negocio (de confianza, no procede del correo; es la única fuente de \
+datos de contacto, horarios y precios que puedes usar):\n{profile}"
+    ))
+}
+
 /// Borrador (D158). El perfil es de confianza y viaja en las instrucciones, nunca mezclado con
 /// el correo; sin perfil (o en blanco) no aparece nada.
 pub fn draft_request(request_id: &str, text: &str, profile: Option<&str>) -> GenerateRequest {
     let mut instructions = DRAFT_INSTRUCTIONS.to_owned();
-    if let Some(profile) = profile.map(str::trim).filter(|p| !p.is_empty()) {
-        instructions.push_str(
-            "\n\nInformación del negocio (de confianza, no procede del correo; es la única \
-fuente de datos de contacto, horarios y precios que puedes usar):\n",
-        );
-        instructions.push_str(profile);
+    if let Some(section) = profile.and_then(profile_section) {
+        instructions.push_str(&section);
     }
     GenerateRequest {
         request_id: request_id.to_owned(),
@@ -402,6 +412,146 @@ pub fn draft_flags(draft: &str) -> Vec<&'static str> {
         flags.push("url");
     }
     flags
+}
+
+/// Como [`draft_flags`], pero los contactos que el perfil del negocio declara (direcciones de
+/// correo, enlaces o dominios y teléfonos, escritos igual) no se marcan (D160, D163). Solo vale
+/// cuando el perfil iba de verdad en la petición que produjo el borrador; el resto sigue
+/// marcándose, y un dato que solo aparece en el correo no se avala. La coincidencia es literal y
+/// por palabras enteras: «www.» delante o «.otro.com» detrás del dominio del perfil no valen.
+pub fn draft_flags_allowing(draft: &str, profile: Option<&str>) -> Vec<&'static str> {
+    let Some(profile) = profile.map(str::trim).filter(|p| !p.is_empty()) else {
+        return draft_flags(draft);
+    };
+    draft_flags(&without_profile_contacts(draft, profile))
+}
+
+/// El borrador sin los contactos del perfil (sustituidos por un espacio).
+fn without_profile_contacts(draft: &str, profile: &str) -> String {
+    let profile: String = profile
+        .chars()
+        .filter(|c| !crate::refine::is_format_char(*c))
+        .collect();
+    let mut words: Vec<String> = Vec::new();
+    for token in profile.split_whitespace() {
+        let token = token.trim_matches(|c: char| {
+            matches!(
+                c,
+                '.' | ','
+                    | ';'
+                    | ':'
+                    | '('
+                    | ')'
+                    | '<'
+                    | '>'
+                    | '['
+                    | ']'
+                    | '"'
+                    | '\''
+                    | '!'
+                    | '?'
+                    | '/'
+            )
+        });
+        if !token.is_empty() && (has_email(token) || has_url(token)) {
+            words.push(token.to_ascii_lowercase());
+        }
+    }
+    words.sort_by_key(|w| std::cmp::Reverse(w.len()));
+    words.dedup();
+    // Un teléfono del perfil vale con o sin el prefijo de España («+34», «0034»).
+    let mut phones: Vec<String> = Vec::new();
+    for (_, _, digits) in phone_runs(&profile) {
+        // Nueve a quince cifras (el máximo de un número internacional): una racha más larga es
+        // otra cosa (un IBAN, una tarjeta) y nunca se admite.
+        if !(9..=15).contains(&digits.len()) {
+            continue;
+        }
+        for prefix in ["0034", "34"] {
+            if let Some(national) = digits.strip_prefix(prefix).filter(|n| n.len() == 9) {
+                phones.push(national.to_owned());
+            }
+        }
+        // Y al revés: un teléfono nacional del perfil vale también con el prefijo.
+        if digits.len() == 9 {
+            phones.push(format!("34{digits}"));
+            phones.push(format!("0034{digits}"));
+        }
+        phones.push(digits);
+    }
+
+    let mut text: String = draft
+        .chars()
+        .filter(|c| !crate::refine::is_format_char(*c))
+        .collect();
+    for word in &words {
+        text = replace_whole_word(&text, word);
+    }
+    // De atrás adelante, para que los índices anteriores sigan valiendo.
+    for (start, end, digits) in phone_runs(&text).into_iter().rev() {
+        if digits.len() >= 9 && phones.contains(&digits) {
+            text.replace_range(start..end, " ");
+        }
+    }
+    text
+}
+
+/// Sustituye por un espacio cada aparición de `word` (en minúsculas) que sea una palabra entera.
+fn replace_whole_word(text: &str, word: &str) -> String {
+    let lower = text.to_ascii_lowercase();
+    let mut out = String::with_capacity(text.len());
+    let mut from = 0;
+    while let Some(found) = lower[from..].find(word) {
+        let start = from + found;
+        let end = start + word.len();
+        let before = text[..start].chars().next_back();
+        let mut after = text[end..].chars();
+        let (first, second) = (after.next(), after.next());
+        let before_ok = before
+            .is_none_or(|c| !(c.is_alphanumeric() || matches!(c, '-' | '_' | '.' | '@' | '/')));
+        let after_ok = match first {
+            None => true,
+            Some(c) if c.is_whitespace() => true,
+            Some(',' | ';' | ':' | '!' | '?' | ')' | ']' | '}' | '>' | '"' | '\'' | '»') => true,
+            Some('.') => second.is_none_or(|c| !c.is_alphanumeric()),
+            Some('/') => second.is_none_or(char::is_whitespace),
+            Some(_) => false,
+        };
+        out.push_str(&text[from..start]);
+        out.push_str(if before_ok && after_ok {
+            " "
+        } else {
+            &text[start..end]
+        });
+        from = end;
+    }
+    out.push_str(&text[from..]);
+    out
+}
+
+/// Secuencias de cifras con separadores (como en `has_phone`): inicio y fin en bytes y las cifras
+/// solas.
+fn phone_runs(text: &str) -> Vec<(usize, usize, String)> {
+    let mut runs = Vec::new();
+    let mut digits = String::new();
+    let (mut start, mut end) = (0, 0);
+    for (i, c) in text
+        .char_indices()
+        .chain(std::iter::once((text.len(), '\u{0}')))
+    {
+        if c.is_ascii_digit() {
+            if digits.is_empty() {
+                start = i;
+            }
+            digits.push(c);
+            end = i + 1;
+        } else if !(c.is_whitespace() || matches!(c, '.' | '-' | '/' | '(' | ')' | '+'))
+            && !digits.is_empty()
+        {
+            runs.push((start, end, std::mem::take(&mut digits)));
+        }
+    }
+    runs
 }
 
 /// Un `@` (también el de ancho completo) o su escritura en letra: «(at)», «[arroba]»,

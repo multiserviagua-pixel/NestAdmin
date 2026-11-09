@@ -73,6 +73,8 @@ CREATE TABLE rules (
     include_str!("migrations/005_redraft.sql"),
     // Preferencias por remitente (D161).
     include_str!("migrations/006_sender_preferences.sql"),
+    // Perfil del negocio para la redacción (D163).
+    include_str!("migrations/007_business_profile.sql"),
 ];
 
 /// Base de datos local. Cada operación pública se confirma en una transacción,

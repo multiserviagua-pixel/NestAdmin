@@ -33,7 +33,13 @@ import type {
   PreferenceChange,
   SettingsView,
   Simulation,
+  BusinessProfile,
   ConsentView,
+  ProfileConsentView,
+  ProfileFinding,
+  ProfilePreview,
+  ProfileSaved,
+  ProfileView,
   RefinePreview,
   RefinementView,
   Suggestion,
@@ -1497,6 +1503,96 @@ const mockScenario = new URLSearchParams(location.search).get("refine") ?? "";
 const mockRefine = { fps: null as string | null, ranAt: 0, failed: null as null | { code: string; detail: string | null }, consent: mockScenario === "auto-consent" };
 const mockAuto = mockScenario === "auto" || mockScenario === "auto-consent";
 
+// ---- Perfil del negocio (D163) ----
+
+let mockProfile: { profile: BusinessProfile; at: number } | null = null;
+let mockProfileConsent: { fp: string; at: number } | null = null;
+
+const PROFILE_LABELS: Array<[keyof BusinessProfile, string]> = [
+  ["display_name", "Nombre del negocio"],
+  ["hours", "Horario"],
+  ["tone", "Tono"],
+  ["signature", "Firma"],
+  ["policies", "Políticas"],
+];
+
+function cleanProfile(p: BusinessProfile): BusinessProfile {
+  return { display_name: p.display_name.trim(), hours: p.hours.trim(), tone: p.tone.trim(), signature: p.signature.trim(), policies: p.policies.trim() };
+}
+
+const blankProfile = (p: BusinessProfile) => PROFILE_LABELS.every(([k]) => !p[k].trim());
+const profileLength = (p: BusinessProfile) => PROFILE_LABELS.reduce((n, [k]) => n + [...p[k]].length, 0);
+
+function luhnOk(digits: string): boolean {
+  let sum = 0;
+  [...digits].reverse().forEach((c, i) => {
+    let d = Number(c);
+    if (i % 2 === 1) {
+      d *= 2;
+      if (d > 9) d -= 9;
+    }
+    sum += d;
+  });
+  return sum % 10 === 0;
+}
+
+/** Espejo mínimo del examen real (IBAN, tarjeta con Luhn, claves y tamaño), solo para ver los mensajes. */
+function mockProfileBlocks(p: BusinessProfile): string[] {
+  const out: string[] = [];
+  if (profileLength(p) > 2000) out.push("El perfil supera los 2000 caracteres: acórtelo.");
+  const text = PROFILE_LABELS.map(([k]) => p[k]).join("\n");
+  if (/\b[A-Za-z]{2}\d{2}(?:\s?[A-Za-z0-9]{4}){3,}/.test(text)) out.push("Hay un IBAN: quítelo, no puede ir en el perfil.");
+  const card = text.match(/\b\d{4}(?:[ -]?\d{4}){2,3}\b/g)?.some((c) => luhnOk(c.replace(/\D/g, "")));
+  if (card) out.push("Hay un número de tarjeta: quítelo, no puede ir en el perfil.");
+  if (/sk-[A-Za-z0-9]{8,}|contraseña\s*[:=]|password\s*[:=]/i.test(text)) out.push("Hay algo que parece una clave o un token: quítelo.");
+  return out;
+}
+
+function mockProfileBlock(): string | null {
+  if (!mockProfile || blankProfile(mockProfile.profile)) return null;
+  const text = PROFILE_LABELS.filter(([k]) => mockProfile!.profile[k]).map(([k, label]) => `${label}: ${mockProfile!.profile[k]}`).join("\n");
+  return `Información del negocio (de confianza, no procede del correo; es la única fuente de datos de contacto, horarios y precios que puedes usar):\n${text}`;
+}
+
+/** Huella corta del bloque (no criptográfica: solo para que el consentimiento se ligue a él). */
+function mockProfileFp(): string | null {
+  const block = mockProfileBlock();
+  if (!block) return null;
+  let h = 5381;
+  for (const c of block) h = ((h << 5) + h + c.charCodeAt(0)) | 0;
+  return (h >>> 0).toString(16).padStart(8, "0").repeat(2);
+}
+
+function mockProfileView(): ProfileView {
+  const p = mockProfile?.profile ?? { display_name: "", hours: "", tone: "", signature: "", policies: "" };
+  return { profile: p, saved: mockProfile !== null, updated_at: mockProfile?.at ?? null, chars: profileLength(p), max_chars: 2000 };
+}
+
+function mockProfileConsentView(): ProfileConsentView {
+  const base = { provider: "ollama_cloud", model: "gemma4:31b", host: "ollama.com" };
+  if (mockProfileConsent && mockProfileConsent.fp === mockProfileFp()) return { required: true, state: "granted", ...base, at: mockProfileConsent.at };
+  return { required: true, state: mockProfileConsent ? "stale" : "missing", ...base, at: mockProfileConsent?.at ?? null };
+}
+
+function mockProfilePreview(): ProfilePreview {
+  const block = mockProfileBlock();
+  const consent = mockProfileConsentView();
+  return {
+    provider: { provider: "ollama_cloud", model: "gemma4:31b" },
+    host: "ollama.com",
+    external: true,
+    has_profile: block !== null,
+    block,
+    fp: mockProfileFp(),
+    blocked: null,
+    will_send: block !== null && consent.state === "granted",
+    local_fallback: true,
+    consent,
+    warnings: [],
+    notice: "Escriba solo lo que pueda leer cualquier remitente: la IA puede citarlo en una respuesta.",
+  };
+}
+
 function mockConsent(): ConsentView {
   if (!mockAuto) return { required: false, state: "not_needed", provider: null, model: null, host: null, at: null };
   return mockRefine.consent
@@ -2181,6 +2277,60 @@ const handlers: Record<string, (a: any, options?: any) => unknown> = {
   // Sugerencias (D132): datos sintéticos fijos; el cálculo real vive en la capa Rust.
   rule_suggestions: (): Suggestions => mockSuggestions(),
   suggestion_refinement: (): RefinementView => mockRefinementView(),
+  // Perfil del negocio (D163): datos sintéticos; la validación y el consentimiento reales viven en la capa Rust.
+  business_profile: (): ProfileView => mockProfileView(),
+  business_profile_prefill: (): BusinessProfile => ({
+    display_name: "Taller Ficticio SL",
+    hours: "",
+    tone: "",
+    signature: "Taller Ficticio SL\nCalle Falsa 1, Ciudad Ficticia\nhola@taller-ficticio.test",
+    policies: "",
+  }),
+  save_business_profile: ({ profile }): ProfileSaved => {
+    const p = cleanProfile(profile as BusinessProfile);
+    const blocked = mockProfileBlocks(p);
+    if (blocked.length) throw blocked.join(" ");
+    const before = mockProfileFp();
+    mockProfile = blankProfile(p) ? null : { profile: p, at: now() };
+    const after = mockProfileFp();
+    let withdrawn = false;
+    if (mockProfileConsent && before !== after) {
+      mockProfileConsent = null;
+      withdrawn = true;
+      audit.push({ task_id: null, action: "rule_setting", status: "removed", authorization: null, detail: "consentimiento del perfil del negocio retirado: cambió el perfil" });
+    }
+    audit.push({ task_id: null, action: "business_profile", status: "saved", authorization: null, detail: `perfil del negocio guardado (${profileLength(p)} caracteres)` });
+    const warnings: ProfileFinding[] = [];
+    for (const key of Object.keys(p) as Array<keyof BusinessProfile>) {
+      if (/\d{3}[\s.-]?\d{3}[\s.-]?\d{3}/.test(p[key])) warnings.push({ field: key, code: "phone" });
+      if (p[key].includes("@")) warnings.push({ field: key, code: "email" });
+    }
+    return { view: mockProfileView(), warnings, consent_withdrawn: withdrawn };
+  },
+  clear_business_profile: (): ProfileSaved => {
+    const had = mockProfile !== null;
+    mockProfile = null;
+    if (had && mockProfileConsent) mockProfileConsent = null;
+    if (had) audit.push({ task_id: null, action: "business_profile", status: "removed", authorization: null, detail: "perfil del negocio borrado" });
+    return { view: mockProfileView(), warnings: [], consent_withdrawn: false };
+  },
+  business_profile_preview: (): ProfilePreview => {
+    if (mockScenario === "broken") throw "no se pudo abrir la base de datos de ejemplo";
+    return mockProfilePreview();
+  },
+  grant_profile_consent: ({ provider, model, host, fp }): ProfileConsentView => {
+    const current = mockProfileFp();
+    if (provider !== "ollama_cloud" || model !== "gemma4:31b" || host !== "ollama.com" || !current || fp !== current)
+      throw "El proveedor, el modelo, el servidor o el perfil han cambiado desde que lo vio: revise la vista previa de nuevo antes de aceptar.";
+    mockProfileConsent = { fp: current, at: now() };
+    audit.push({ task_id: null, action: "rule_setting", status: "changed", authorization: null, detail: `consentimiento del perfil del negocio concedido: proveedor ${provider}, modelo ${model}, servidor ${host}` });
+    return mockProfileConsentView();
+  },
+  withdraw_profile_consent: (): ProfileConsentView => {
+    if (mockProfileConsent) audit.push({ task_id: null, action: "rule_setting", status: "removed", authorization: null, detail: "consentimiento del perfil del negocio retirado" });
+    mockProfileConsent = null;
+    return mockProfileConsentView();
+  },
   refinement_preview: (): RefinePreview => {
     if (mockScenario === "broken") throw "no se pudo abrir la base de datos de ejemplo";
     return {
@@ -2464,6 +2614,10 @@ function startup(): Startup {
 }
 
 const mutating = new Set([
+  "save_business_profile",
+  "clear_business_profile",
+  "grant_profile_consent",
+  "withdraw_profile_consent",
   "set_sender_preference",
   "remove_sender_preference",
   "import_file",

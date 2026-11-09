@@ -16,8 +16,13 @@ import type {
   PreferenceChange,
   ProviderInfo,
   ReadExpectation,
+  BusinessProfile,
   ConsentView,
   MergePreview,
+  ProfileConsentView,
+  ProfilePreview,
+  ProfileSaved,
+  ProfileView,
   RefinePreview,
   RefinementView,
   SeenInvoice,
@@ -164,6 +169,19 @@ export const api = {
     invoke<RuleView>("accept_suggestion", { fingerprint, shown, name, modelLimit, userLimit }),
   /** Las facturas solo leídas de la serie de una sugerencia, con documento, fecha e importe. Solo lectura. */
   seenInvoices: (fingerprint: string) => invoke<SeenInvoice[]>("seen_invoices", { fingerprint }),
+  /** Perfil del negocio (D163). Solo lectura. */
+  businessProfile: () => invoke<ProfileView>("business_profile"),
+  /** Nombre y firma (dirección y correo) desde los datos de la empresa, sin NIF ni IBAN. Solo lectura: nada se guarda ni se envía. */
+  businessProfilePrefill: () => invoke<BusinessProfile>("business_profile_prefill"),
+  /** Guarda el perfil. Bloquea IBAN, tarjetas y claves; avisa de teléfono y correo; retira el consentimiento si cambia lo que saldría. */
+  saveBusinessProfile: (profile: BusinessProfile) => invoke<ProfileSaved>("save_business_profile", { profile }),
+  clearBusinessProfile: () => invoke<ProfileSaved>("clear_business_profile"),
+  /** El bloque literal que saldría en la redacción y a qué destino. Solo lectura. */
+  businessProfilePreview: () => invoke<ProfilePreview>("business_profile_preview"),
+  /** Consiente a lo que la persona vio: proveedor, modelo, servidor y huella del bloque. Se rechaza si algo cambió. */
+  grantProfileConsent: (seen: ProfilePreview) =>
+    invoke<ProfileConsentView>("grant_profile_consent", { provider: seen.provider.provider, model: seen.provider.model, host: seen.host ?? "", fp: seen.fp ?? "" }),
+  withdrawProfileConsent: () => invoke<ProfileConsentView>("withdraw_profile_consent"),
   /** Estado del afinado con IA (D134). Solo lectura: no llama al proveedor. */
   suggestionRefinement: () => invoke<RefinementView>("suggestion_refinement"),
   /** A qué proveedor y qué datos se enviarían al afinar. Solo lectura. */

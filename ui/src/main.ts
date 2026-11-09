@@ -15,6 +15,10 @@ import type {
   MailView,
   Memory,
   MergePreview,
+  BusinessProfile,
+  ProfileFinding,
+  ProfilePreview,
+  ProfileView,
   ProviderChoice,
   ProviderInfo,
   SeenInvoice,
@@ -171,6 +175,20 @@ import {
   type TaskReason,
   type TasksView,
 } from "./tasks-text";
+import {
+  PROFILE_FIELDS,
+  PROFILE_INTRO,
+  PROFILE_NOTICE,
+  PROFILE_TITLE,
+  applyPrefill,
+  canSave as canSaveProfile,
+  consentLines as profileConsentLines,
+  counterText,
+  emptyProfile,
+  savedNotice,
+  statusOf as profileStatus,
+  warningTexts,
+} from "./profile-text";
 import { ageText, chooseTab, emailFlags, formatAmount, invoiceFlags, isKnownKind, nextSelection, sortForReview, splitByTab, tabOf, totalIsProposed, type Flag, type QueueTab, type ReviewTab } from "./pendientes-text";
 import {
   ARCHIVED_NOTICE,
@@ -328,6 +346,16 @@ const state = {
   // escrito por fuente, la lectura que se está confirmando y las que están en marcha.
   read: null as InitialReadOverview | null,
   readError: null as string | null,
+  // Perfil del negocio (E6, D163): lo guardado, su vista previa, lo que se está escribiendo, los
+  // avisos del último guardado y el recuadro de consentimiento.
+  profile: null as ProfileView | null,
+  profilePreview: null as ProfilePreview | null,
+  profileError: null as string | null,
+  profileDraft: null as BusinessProfile | null,
+  profileWarnings: [] as ProfileFinding[],
+  profileShowBlock: false,
+  profileConfirming: false,
+  profileBusy: false,
   readVolume: {} as Record<string, string>,
   readConfirm: null as null | { source: string; kind: "account" | "folder"; target: string },
   readBusy: {} as Record<string, boolean>,
@@ -512,7 +540,8 @@ async function refresh(background = false) {
     let suggestionsError: string | null = null;
     let refineError: string | null = null;
     let readError: string | null = null;
-    const [tasks, preferences, rules, findings, suggestions, refinement, refinePreview, audit, settings, mail, read] = await Promise.all([
+    let profileError: string | null = null;
+    const [tasks, preferences, rules, findings, suggestions, refinement, refinePreview, audit, settings, mail, read, profile, profilePreview] = await Promise.all([
       api.tasks(),
       api.senderPreferences(),
       api.ruleViews(),
@@ -539,8 +568,16 @@ async function refresh(background = false) {
         readError = String(error);
         return null;
       }),
+      api.businessProfile().catch((error) => {
+        profileError = String(error);
+        return null;
+      }),
+      api.businessProfilePreview().catch((error) => {
+        profileError = String(error);
+        return null;
+      }),
     ]);
-    Object.assign(state, { tasks, preferences, rules, findings, findingsError, suggestions, suggestionsError, refinement, refinePreview, refineError, audit, settings, mail, read, readError });
+    Object.assign(state, { tasks, preferences, rules, findings, findingsError, suggestions, suggestionsError, refinement, refinePreview, refineError, audit, settings, mail, read, readError, profile, profilePreview, profileError });
     // La oferta de la IA local necesita saber si está preparada: se comprueba al aparecer la espera.
     if (isProviderWait(settings?.ai_wait)) {
       if (!checkedForWait) {
@@ -4787,8 +4824,202 @@ function settingsView() {
         ),
       ),
     ),
+    profileSection(),
     h("section", { class: "section" }, sectionHeader("Datos locales"), h("p", { class: "mono" }, s.data_dir || missing())),
   );
+}
+
+/// Perfil del negocio (E6, D163): editor, vista previa literal y consentimiento. El backend valida
+/// y decide qué sale; aquí solo se escribe, se ve y se autoriza.
+function profileSection() {
+  if (state.profileError && !state.profile)
+    return h("section", { class: "section" }, sectionHeader(PROFILE_TITLE), h("div", { class: "notice error", role: "alert" }, h("span", {}, state.profileError)));
+  const saved = state.profile;
+  if (!saved) return h("section", { class: "section" }, sectionHeader(PROFILE_TITLE), h("p", {}, "Cargando…"));
+  const draft: BusinessProfile = (state.profileDraft ??= { ...saved.profile });
+  const counter = h("span", { class: "meta", role: "status" });
+  const saveButton = h("button", { type: "button", class: "primary", "data-focus-key": "profile:save", onclick: () => void saveProfile() }, "Guardar perfil") as HTMLButtonElement;
+  const refreshControls = () => {
+    const c = counterText(draft);
+    counter.textContent = c.text;
+    counter.className = c.over ? "meta error-text" : "meta";
+    saveButton.disabled = state.profileBusy || !canSaveProfile(draft, saved.profile);
+  };
+  const fields = PROFILE_FIELDS.map((f) => {
+    const input = h(f.rows === 1 ? "input" : "textarea", {
+      ...(f.rows === 1 ? { type: "text" } : { rows: String(f.rows) }),
+      id: `profile-${f.key}`,
+      "data-focus-key": `profile:${f.key}`,
+      placeholder: f.hint,
+      oninput: () => {
+        draft[f.key] = (input as HTMLInputElement | HTMLTextAreaElement).value;
+        refreshControls();
+      },
+    }) as HTMLInputElement | HTMLTextAreaElement;
+    input.value = draft[f.key];
+    return h("div", { class: "field" }, h("label", { for: `profile-${f.key}` }, f.label), input);
+  });
+  refreshControls();
+  const preview = state.profilePreview;
+  const status = preview ? profileStatus(preview) : null;
+  const dirty = canSaveProfile(draft, saved.profile);
+  const buttons: Child[] = [
+    saveButton,
+    h(
+      "button",
+      {
+        type: "button",
+        "data-focus-key": "profile:prefill",
+        disabled: state.profileBusy,
+        title: "Rellena los campos vacíos con el nombre, la dirección y el correo de su empresa. No incluye NIF ni IBAN.",
+        onclick: () => void prefillProfile(),
+      },
+      "Precargar desde los datos de la empresa",
+    ),
+  ];
+  if (saved.saved)
+    buttons.push(
+      h("button", { type: "button", "data-focus-key": "profile:clear", disabled: state.profileBusy, onclick: () => void runProfile(() => api.clearBusinessProfile(), true, "Perfil borrado") }, "Borrar perfil"),
+    );
+  const body: Child[] = [
+    h("p", { class: "intro" }, PROFILE_INTRO),
+    h("div", { class: "notice warn", role: "note" }, h("span", {}, PROFILE_NOTICE)),
+    ...fields,
+    h("div", { class: "buttons" }, ...buttons, counter),
+    ...warningTexts(state.profileWarnings).map((text) => h("div", { class: "notice warn", role: "status" }, h("span", {}, text))),
+  ];
+  if (preview) {
+    body.push(
+      h(
+        "div",
+        { class: "sub-block" },
+        h("h4", {}, "Qué se enviaría"),
+        h("p", {}, status?.line ?? ""),
+        dirty ? h("p", { class: "meta" }, "Guarde los cambios para que esto los refleje: la vista previa muestra el perfil guardado.") : null,
+        h(
+          "div",
+          { class: "buttons" },
+          h(
+            "button",
+            {
+              type: "button",
+              "data-focus-key": "profile:preview",
+              disabled: !preview.block,
+              onclick: () => {
+                state.profileShowBlock = !state.profileShowBlock;
+                render();
+              },
+            },
+            state.profileShowBlock ? "Ocultar el bloque" : "Ver el bloque que se enviaría",
+          ),
+          status?.canGrant
+            ? h(
+                "button",
+                {
+                  type: "button",
+                  class: "primary",
+                  "data-focus-key": "profile:consent-open",
+                  disabled: state.profileBusy || dirty,
+                  title: dirty ? "Guarde primero los cambios" : undefined,
+                  onclick: () => {
+                    state.profileConfirming = true;
+                    render();
+                  },
+                },
+                "Autorizar el envío…",
+              )
+            : null,
+          status?.canWithdraw
+            ? h("button", { type: "button", "data-focus-key": "profile:withdraw", disabled: state.profileBusy, onclick: () => void runProfile(() => api.withdrawProfileConsent(), false, "Autorización retirada") }, "Retirar autorización")
+            : null,
+        ),
+        state.profileShowBlock && preview.block ? h("pre", { class: "mono block", "aria-label": "Bloque del perfil que se enviaría" }, preview.block) : null,
+      ),
+    );
+    if (state.profileConfirming && preview.block && status?.canGrant) {
+      const c = profileConsentLines(preview);
+      body.push(
+        h(
+          "div",
+          { class: "confirm", role: "group", "aria-label": "Autorizar el envío del perfil" },
+          h("p", {}, h("strong", {}, `${c.heading}. `)),
+          ...c.lines.map((line) => h("p", { class: "meta" }, line)),
+          h("pre", { class: "mono block" }, preview.block),
+          h(
+            "div",
+            { class: "buttons" },
+            h("button", { type: "button", class: "primary", "data-focus-key": "profile:consent-accept", onclick: () => void runProfile(() => api.grantProfileConsent(preview), false, "Envío del perfil autorizado") }, "Aceptar y autorizar"),
+            h(
+              "button",
+              {
+                type: "button",
+                "data-focus-key": "profile:consent-cancel",
+                onclick: () => {
+                  state.profileConfirming = false;
+                  render();
+                },
+              },
+              "Cancelar",
+            ),
+          ),
+        ),
+      );
+    }
+  } else if (state.profileError) body.push(h("div", { class: "notice error", role: "alert" }, h("span", {}, state.profileError)));
+  return h("section", { class: "section" }, sectionHeader(PROFILE_TITLE), ...body);
+}
+
+/// Ejecuta una acción del perfil sin repetirla si se pulsa dos veces; `reset` vuelve a cargar lo
+/// escrito desde lo guardado.
+async function runProfile(work: () => Promise<unknown>, reset: boolean, success?: string) {
+  if (state.profileBusy) return;
+  state.profileBusy = true;
+  state.profileConfirming = false;
+  render();
+  try {
+    await work();
+    if (reset) {
+      state.profileDraft = null;
+      state.profileWarnings = [];
+    }
+    if (success) state.notice = { kind: "ok", text: success };
+  } catch (error) {
+    state.notice = { kind: "error", text: String(error) };
+  } finally {
+    state.profileBusy = false;
+    await refresh();
+  }
+}
+
+async function saveProfile() {
+  const draft = state.profileDraft;
+  if (!draft || state.profileBusy) return;
+  state.profileBusy = true;
+  render();
+  try {
+    const saved = await api.saveBusinessProfile(draft);
+    state.profileDraft = { ...saved.view.profile };
+    state.profileWarnings = saved.warnings;
+    state.profileShowBlock = false;
+    state.notice = { kind: "ok", text: savedNotice(saved) };
+  } catch (error) {
+    // Un bloqueo (IBAN, tarjeta, clave, tamaño) deja lo escrito tal cual para corregirlo.
+    state.notice = { kind: "error", text: String(error) };
+  } finally {
+    state.profileBusy = false;
+    await refresh();
+  }
+}
+
+async function prefillProfile() {
+  try {
+    const prefill = await api.businessProfilePrefill();
+    state.profileDraft = applyPrefill(state.profileDraft ?? state.profile?.profile ?? emptyProfile(), prefill);
+    state.notice = { kind: "ok", text: "Datos de la empresa precargados en los campos vacíos. Revíselos y guarde." };
+    render();
+  } catch (error) {
+    notify("error", error);
+  }
 }
 
 /// Oferta única (D100) a quien tenía la IA local: pasar a Ollama cloud. No cambia nada hasta que
