@@ -121,8 +121,8 @@ En `tests/mail_accounts.rs`, la prueba de respuesta perdida en Graph termina aho
 
 ## Pendiente para completar T13
 
-- Microsoft 365 real: inicio de sesión, lectura y borradores hechos el 2026-11-07 (ver al final); falta un envío aprobado.
-- Gmail: provocar con la cuenta real un corte entre el envío y el recibo y comprobar que la reconciliación por `Message-ID` propio (D41) lo confirma; en particular, que Gmail mantiene esa cabecera al enviar. La parte simulada está hecha.
+- Microsoft 365 real: inicio de sesión, lectura y borradores hechos el 2026-11-07; envío aprobado hecho el 2026-11-09, recibido una vez en el destino, en su carpeta de spam (ver al final).
+- Gmail: corte real provocado el 2026-11-09 desde la terminal. D41 no funcionaba, porque Gmail sustituye el `Message-ID` al enviar; corregido con D156 y comprobado con otro corte real (ver al final). Falta provocarlo desde la ventana de la aplicación.
 - Recorrido con una cuenta real desde la ventana: añadir la cuenta, consultar, aprobar un envío y desconectar. Requiere `correo-oauth.json` con los clientes del editor (D43).
 - Calidad de clasificación y borradores con correo real: sin medir.
 
@@ -153,3 +153,55 @@ Equipo de desarrollo (Windows 11), `scripts\dev-pruebas.ps1` con datos aparte y 
 | Consulta | 3 mensajes leídos, 3 tareas encoladas con ID `microsoft-1:…`; una segunda consulta no encola nada (0 nuevos). En la misma consulta se leyeron también el simulador y una cuenta de Gmail. |
 | Borradores | Con la IA local (`qwen3:8b`, límite de 180 s) las 3 tareas fallaron primero por `timeout` mientras el equipo compilaba; reintentadas desde «Tareas», terminaron en 21–100 s y quedaron en revisión con borrador. Los 3 remitentes eran automáticos (aviso de seguridad y publicidad) y la IA propuso responder igualmente: dato para la calidad de borradores. |
 | Envío | No ejecutado: responder a esos remitentes escribiría a terceros. Pendiente con un mensaje enviado desde una dirección propia. |
+
+## 2026-11-09 — Envío real por Microsoft desde la ventana
+
+Mismo equipo y carpeta de datos, `main` en `577a4a1`, versión de desarrollo. Mensaje sintético enviado desde una cuenta propia de Gmail a la cuenta de Outlook de prueba, con la aprobación del responsable. Aquí no constan direcciones ni contenido. Ollama cloud (`gemma4:31b`), confirmado en la carpeta de pruebas.
+
+| Paso | Resultado |
+|---|---|
+| Consulta | El mensaje entra en la bandeja y crea una tarea con ID `microsoft-1:…` (4 leídos, 1 nuevo). Las consultas siguientes dan 0 nuevos y no crean otra tarea. |
+| Borrador | Clasificado como `solicitud_factura` en 1,0 s, con el remitente como único destinatario. No afirma haber enviado la factura. |
+| Aprobación | Una aprobación en la ventana. La pantalla muestra «Respuesta enviada» con la cuenta de origen. |
+| Registro local | Una sola clave, `microsoft-1/task-N/send_draft/v1`, con recibo. En el historial, la misma acción con `pending` y `confirmed`. |
+| Salida | El responsable comprueba en Outlook una sola respuesta dentro del hilo, con el mensaje original marcado como respondido. |
+| Recepción | El responsable la ve en Gmail, abriendo el hilo: una sola respuesta, con el original citado, **en la carpeta de spam**. El hilo cuenta 2 mensajes (el original y la respuesta). No aparece en la búsqueda por remitente del conector de Gmail usado para comprobarlo, ni en la consulta de la cuenta de Google en NestAdmin (0 nuevos). |
+
+**Hallazgos:**
+
+- En Graph, el recibo y el estado `confirmed` acreditan que Microsoft aceptó el envío, no que se haya entregado. La pantalla decía «Respuesta enviada» con ese mismo dato; ahora dice «Enviada desde … ; la entrega al destinatario no se comprueba».
+- Gmail clasificó como spam una respuesta de esta cuenta personal de Outlook. Es un solo caso y no se ha medido con otras cuentas ni destinos: una respuesta aprobada puede no llegar a la bandeja de quien la espera, sin que NestAdmin lo sepa.
+
+No se ha provocado un corte real entre el envío y el recibo con esta cuenta.
+
+## 2026-11-09 — Corte real entre el envío y el recibo en Gmail (D41)
+
+`probar_gmail`, orden nueva `cortar-envio`: llama de verdad a `drafts.send` y termina el proceso antes de anotar el recibo. Cuenta de Gmail propia; mensaje sintético enviado a sí misma, sin terceros.
+
+| Paso | Resultado |
+|---|---|
+| Borrador | Creado en el hilo, con `Message-ID` propio `<nestadmin.…@nestadmin.invalid>` anotado en el registro local. Repetir la clave devuelve el mismo borrador. |
+| Corte | Salida con código 3. El registro local queda con 1 envío y 0 recibos. |
+| Reanudación | `not_found: … ya no existe y no consta enviado; no se reenvía`, a los 20 s y de nuevo pasado más de un minuto. Sigue con 0 recibos. |
+| Efecto en el buzón | El hilo tiene el original y **una sola** respuesta, con etiqueta `SENT`: no hubo segundo envío. |
+| Causa | El mensaje enviado lleva `Message-Id: <…@mail.gmail.com>`, generado por Gmail, y no el propio. Buscar `rfc822msgid:` con el ID propio no da resultados. El ID del mensaje del borrador tampoco se conserva (hallazgo anterior). |
+
+**Hallazgos:**
+
+- **D41 no funciona con Gmail real.** Las pruebas `lost_send_is_confirmed_*` pasan porque el simulador conserva la cabecera, cosa que Gmail real no hace. El resultado es seguro en cuanto a que no reenvía, pero el envío nunca se confirma.
+- **Riesgo de duplicado por decisión humana.** Por el código, sin probarlo en la ventana: ese `not_found` lleva la tarea a revisión con `needs_confirmation` («ya no existe en el buzón y no consta enviado») y ofrece «Confirmo que no se envió: preparar uno nuevo». Tras un corte real en Gmail, ese texto aparecería aunque el correo sí haya salido; si el usuario confirma y aprueba, se enviaría otra respuesta.
+
+### Después de corregirlo (D156)
+
+Mismo procedimiento, con otro mensaje sintético enviado a sí misma y con el cambio de D156 aplicado.
+
+| Paso | Resultado |
+|---|---|
+| Corte | Salida con código 3. El registro local queda con 1 envío, 0 recibos y `thread_id`. |
+| Reanudación | Confirma el envío con el ID real del mensaje, a los 10 s. Repetir la clave devuelve el mismo recibo, sin segundo envío. El registro queda con 1 recibo. |
+| Efecto en el buzón | El hilo tiene el original y una sola respuesta, con etiqueta `SENT`. |
+| Cabeceras del enviado | `Message-Id` sustituido por Gmail y `X-NestAdmin-Id` conservada con el identificador propio. |
+
+Las pruebas simuladas pasaban antes con un comportamiento que Gmail no tiene: los simuladores de `crates/mail` y `crates/app` conservaban la cabecera. Ahora cambian el ID y el `Message-ID` al enviar, como se ha observado en Gmail real, y las pruebas de reproceso (D50) pasan por el hilo.
+
+**Sin cubrir:** el corte es un `process::exit` justo después de la llamada a `drafts.send` en la herramienta de terminal, no un corte durante la petición ni en la ventana de la aplicación. El registro del primer corte, anterior a D156, sigue sin recibo; es el límite que anota D156.

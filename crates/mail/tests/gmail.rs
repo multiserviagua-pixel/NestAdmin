@@ -53,6 +53,56 @@ fn handler(req: &Req, w: &mut World) -> Resp {
                 None => not_found(),
             }
         }
+        ("GET", ["threads", id]) => {
+            // Como Gmail: sin `format=metadata` y `metadataHeaders=X-NestAdmin-Id` no hay
+            // cabeceras propias que comparar, y solo se devuelven las cabeceras pedidas.
+            if req.query("format").as_deref() != Some("metadata")
+                || req.query("metadataHeaders").as_deref() != Some("X-NestAdmin-Id")
+            {
+                return Resp::Json(400, json!({ "error": { "status": "INVALID_ARGUMENT" } }));
+            }
+            let only_requested = |m: &Value, labels: Value| {
+                let headers: Vec<Value> = m
+                    .pointer("/payload/headers")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .filter(|h| h["name"] == "X-NestAdmin-Id")
+                    .cloned()
+                    .collect();
+                json!({
+                    "id": m["id"], "threadId": m["threadId"], "labelIds": labels,
+                    "payload": { "headers": headers },
+                })
+            };
+            let mut messages: Vec<Value> = w
+                .messages
+                .iter()
+                .filter(|m| m["threadId"] == *id)
+                .map(|m| only_requested(m, m["labelIds"].clone()))
+                .collect();
+            // Mientras existe el borrador, el hilo incluye su mensaje (DRAFT) con la marca.
+            for (_, message_id, stored) in &w.drafts {
+                if stored["threadId"] == *id {
+                    let headers: Vec<Value> = raw_header(stored, "X-NestAdmin-Id")
+                        .map(|own| json!({ "name": "X-NestAdmin-Id", "value": own }))
+                        .into_iter()
+                        .collect();
+                    messages.push(json!({
+                        "id": message_id, "threadId": id, "labelIds": ["DRAFT"],
+                        "payload": { "headers": headers },
+                    }));
+                }
+            }
+            if w.thread_without_messages && !messages.is_empty() {
+                return Resp::Json(200, json!({ "id": id }));
+            }
+            if messages.is_empty() {
+                not_found()
+            } else {
+                Resp::Json(200, json!({ "id": id, "messages": messages }))
+            }
+        }
         ("GET", ["messages", id]) => {
             if let Some(m) = w.messages.iter().find(|m| m["id"] == *id) {
                 return Resp::Json(200, m.clone());
@@ -85,8 +135,9 @@ fn handler(req: &Req, w: &mut World) -> Resp {
             let Some(index) = w.drafts.iter().position(|d| d.0 == id) else {
                 return not_found();
             };
-            // Como Gmail, el borrador desaparece y queda un mensaje con la etiqueta SENT, la
-            // misma cabecera Message-ID y, salvo `keep_sent_id`, otro ID.
+            // Como Gmail, el borrador desaparece y queda un mensaje con la etiqueta SENT, otro
+            // `Message-ID` (salvo `keep_message_id`), la cabecera X-NestAdmin-Id intacta y,
+            // salvo `keep_sent_id`, otro ID.
             let (_, draft_message_id, stored) = w.drafts.remove(index);
             let sent_id = if w.keep_sent_id {
                 draft_message_id
@@ -94,8 +145,13 @@ fn handler(req: &Req, w: &mut World) -> Resp {
                 format!("s-{}", w.sent.len() + 1)
             };
             let mut headers = Vec::new();
-            if let Some(own) = raw_header(&stored, "Message-ID") {
-                headers.push(json!({ "name": "Message-ID", "value": own }));
+            let message_id = match raw_header(&stored, "Message-ID") {
+                Some(own) if w.keep_message_id => own,
+                _ => format!("<CAF{}@mail.gmail.com>", w.sent.len() + 1),
+            };
+            headers.push(json!({ "name": "Message-ID", "value": message_id }));
+            if let Some(own) = raw_header(&stored, "X-NestAdmin-Id") {
+                headers.push(json!({ "name": "X-NestAdmin-Id", "value": own }));
             }
             w.messages.push(json!({
                 "id": sent_id,
@@ -269,6 +325,10 @@ fn reply_is_created_in_the_original_thread() {
     assert!(raw.contains("In-Reply-To: <pedido-77@beta.test>\r\n"));
     let own = raw_header(stored, "Message-ID").unwrap();
     assert!(own.starts_with("<nestadmin.") && own.ends_with("@nestadmin.invalid>"));
+    assert_eq!(
+        raw_header(stored, "X-NestAdmin-Id").as_deref(),
+        Some(own.as_str())
+    );
     let body = raw.split("\r\n\r\n").nth(1).unwrap().replace("\r\n", "");
     assert_eq!(
         String::from_utf8(STANDARD.decode(body).unwrap()).unwrap(),
@@ -286,8 +346,8 @@ fn draft_is_sent_once_even_if_the_response_is_lost() {
         "unavailable"
     );
 
-    // El borrador ya no existe y el mensaje enviado tiene otro ID, pero conserva el
-    // Message-ID propio y la etiqueta SENT: enviado, sin repetir, con el ID real.
+    // El borrador ya no existe y el mensaje enviado tiene otro ID y otro Message-ID, pero
+    // sigue en el hilo con X-NestAdmin-Id y la etiqueta SENT: enviado, sin repetir.
     let receipt = mailbox.lookup("k-send").unwrap().unwrap();
     assert_eq!(receipt["receipt_id"], "s-1");
     assert_eq!(receipt["message_id"], "g-1");
@@ -298,6 +358,12 @@ fn draft_is_sent_once_even_if_the_response_is_lost() {
         count(&world, "GET", "/messages/dm-1"),
         1,
         "el ID del mensaje del borrador ya no sirve"
+    );
+    assert_eq!(count(&world, "GET", "/threads/t-1"), 1);
+    assert_eq!(
+        rfc_searches(&world),
+        0,
+        "el hilo basta: no hace falta buscar por Message-ID"
     );
 }
 
@@ -334,10 +400,15 @@ fn lost_send_is_confirmed_after_reopening_the_connector() {
     let saved = std::fs::read_to_string(&path).unwrap();
     assert!(
         saved.contains("@nestadmin.invalid>"),
-        "el Message-ID propio se guarda"
+        "el identificador propio se guarda"
+    );
+    let saved_json: Value = serde_json::from_str(&saved).unwrap();
+    assert_eq!(
+        saved_json["drafts"][0]["thread_id"], "t-1",
+        "el hilo se guarda"
     );
 
-    // Proceso nuevo: solo el registro local recuerda el Message-ID del borrador.
+    // Proceso nuevo: solo el registro local recuerda el identificador y el hilo del borrador.
     let mailbox = Mailbox::open(gmail(&base), &path).unwrap();
     let receipt = mailbox.lookup("k-send").unwrap().unwrap();
     assert_eq!(receipt["receipt_id"], "s-1");
@@ -377,6 +448,45 @@ fn another_sent_message_in_the_thread_is_not_taken_as_ours() {
         1,
         "solo el intento fallido"
     );
+}
+
+/// Mensajes `SENT` del mismo hilo cuya marca falta o es otra no confirman el envío.
+#[test]
+fn sent_messages_in_the_thread_without_our_mark_do_not_confirm() {
+    for other in [None, Some("<nestadmin.otro@nestadmin.invalid>")] {
+        let (mailbox, world) = mailbox();
+        let id = mailbox.create_draft("g-1", &draft(), "k-draft").unwrap();
+        world.lock().unwrap().send_status = Some(503);
+        let _ = mailbox.send_draft(&id, "k-send");
+        {
+            let mut w = world.lock().unwrap();
+            w.send_status = None;
+            let own = raw_header(&w.drafts[0].2, "X-NestAdmin-Id").unwrap();
+            w.drafts.clear();
+            let headers = other.map_or_else(Vec::new, |v| {
+                vec![json!({ "name": "X-NestAdmin-Id", "value": v })]
+            });
+            w.messages.push(json!({
+                "id": "s-otro",
+                "threadId": "t-1",
+                "labelIds": ["SENT"],
+                "payload": { "headers": headers },
+            }));
+            // Con la marca nuestra pero sin SENT (p. ej. una copia recibida) tampoco vale.
+            w.messages.push(json!({
+                "id": "i-copia",
+                "threadId": "t-1",
+                "labelIds": ["INBOX"],
+                "payload": { "headers": [{
+                    "name": "X-NestAdmin-Id",
+                    "value": own
+                }] },
+            }));
+        }
+        assert_eq!(mailbox.lookup("k-send").unwrap_err().code, "not_found");
+        assert!(world.lock().unwrap().sent.is_empty());
+        assert_eq!(count(&world, "POST", "/drafts/send"), 1);
+    }
 }
 
 #[test]
@@ -422,6 +532,162 @@ fn draft_deleted_by_the_user_is_not_resent() {
         searches, 2,
         "se buscó el envío por su Message-ID antes de rendirse"
     );
+}
+
+fn rfc_searches(world: &common::Shared) -> usize {
+    world
+        .lock()
+        .unwrap()
+        .requests
+        .iter()
+        .filter(|r| {
+            r.query("q")
+                .is_some_and(|q| q.starts_with("rfc822msgid:nestadmin."))
+        })
+        .count()
+}
+
+/// Cuenta una cuenta con borrador creado y envío cortado, con el registro en disco.
+fn cut_send_on_disk(
+    base: &str,
+    path: &std::path::Path,
+    world: &common::Shared,
+) -> (String, String) {
+    let mailbox = Mailbox::open(gmail(base), path).unwrap();
+    let id = mailbox.create_draft("g-1", &draft(), "k-draft").unwrap();
+    world.lock().unwrap().drop_send_response = true;
+    assert!(mailbox.send_draft(&id, "k-send").is_err());
+    (id, std::fs::read_to_string(path).unwrap())
+}
+
+#[test]
+fn old_record_without_thread_id_loads_and_falls_back_to_the_message_id_search() {
+    let (base, world) = serve(handler);
+    {
+        let mut w = world.lock().unwrap();
+        w.messages = sample_messages();
+        w.keep_message_id = true;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("cuenta-gmail.json");
+    let (id, saved) = cut_send_on_disk(&base, &path, &world);
+
+    // Registro anterior a esta versión: sin `thread_id`.
+    let mut json: Value = serde_json::from_str(&saved).unwrap();
+    assert_eq!(json["drafts"][0]["thread_id"], "t-1");
+    json["drafts"][0]
+        .as_object_mut()
+        .unwrap()
+        .remove("thread_id");
+    std::fs::write(&path, json.to_string()).unwrap();
+
+    let mailbox = Mailbox::open(gmail(&base), &path).unwrap();
+    assert_eq!(
+        mailbox.lookup("k-send").unwrap().unwrap()["receipt_id"],
+        "s-1"
+    );
+    assert_eq!(mailbox.send_draft(&id, "k-send").unwrap().receipt_id, "s-1");
+    assert_eq!(count(&world, "GET", "/threads/t-1"), 0);
+    assert_eq!(rfc_searches(&world), 1);
+    assert_eq!(count(&world, "POST", "/drafts/send"), 1);
+}
+
+#[test]
+fn old_record_without_thread_id_is_not_confirmed_when_gmail_replaced_the_message_id() {
+    let (base, world) = serve(handler);
+    world.lock().unwrap().messages = sample_messages();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("cuenta-gmail.json");
+    let (id, saved) = cut_send_on_disk(&base, &path, &world);
+    let mut json: Value = serde_json::from_str(&saved).unwrap();
+    json["drafts"][0]
+        .as_object_mut()
+        .unwrap()
+        .remove("thread_id");
+    std::fs::write(&path, json.to_string()).unwrap();
+
+    let mailbox = Mailbox::open(gmail(&base), &path).unwrap();
+    assert_eq!(mailbox.lookup("k-send").unwrap_err().code, "not_found");
+    assert_eq!(
+        mailbox.send_draft(&id, "k-send").unwrap_err().code,
+        "not_found"
+    );
+    assert_eq!(count(&world, "POST", "/drafts/send"), 1, "no se reenvía");
+}
+
+#[test]
+fn thread_not_found_means_not_found_without_resending() {
+    let (mailbox, world) = mailbox();
+    let id = mailbox.create_draft("g-1", &draft(), "k-draft").unwrap();
+    {
+        let mut w = world.lock().unwrap();
+        w.drop_send_response = true;
+        w.force = None;
+    }
+    let _ = mailbox.send_draft(&id, "k-send");
+    world.lock().unwrap().force = Some(("/threads/".into(), 404));
+    assert_eq!(mailbox.lookup("k-send").unwrap_err().code, "not_found");
+    assert_eq!(
+        mailbox.send_draft(&id, "k-send").unwrap_err().code,
+        "not_found"
+    );
+    assert_eq!(count(&world, "POST", "/drafts/send"), 1);
+}
+
+/// Un 200 de `threads.get` sin lista `messages` no prueba nada: `unavailable`, no `not_found`,
+/// sin reenviar y sin dar el envío por hecho. Solo el 404 del hilo es no encontrado.
+#[test]
+fn thread_200_without_messages_is_unavailable_never_assumed_sent() {
+    let (mailbox, world) = mailbox();
+    let id = mailbox.create_draft("g-1", &draft(), "k-draft").unwrap();
+    world.lock().unwrap().drop_send_response = true;
+    let _ = mailbox.send_draft(&id, "k-send");
+    world.lock().unwrap().thread_without_messages = true;
+    assert_eq!(mailbox.lookup("k-send").unwrap_err().code, "unavailable");
+    assert_eq!(
+        mailbox.send_draft(&id, "k-send").unwrap_err().code,
+        "unavailable"
+    );
+    assert!(count(&world, "GET", "/threads/t-1") >= 2);
+    assert_eq!(count(&world, "POST", "/drafts/send"), 1, "no se reenvía");
+
+    // Al responder bien el servicio, la misma consulta confirma el envío real.
+    world.lock().unwrap().thread_without_messages = false;
+    assert_eq!(mailbox.send_draft(&id, "k-send").unwrap().receipt_id, "s-1");
+    assert_eq!(count(&world, "POST", "/drafts/send"), 1);
+}
+
+/// Mientras el borrador existe, su mensaje (DRAFT) lleva la marca en el hilo y no confirma
+/// nada: con el envío fallado sin efecto no consta enviado.
+#[test]
+fn a_draft_message_carrying_our_mark_does_not_confirm_the_send() {
+    let (mailbox, world) = mailbox();
+    let id = mailbox.create_draft("g-1", &draft(), "k-draft").unwrap();
+    world.lock().unwrap().send_status = Some(503);
+    let _ = mailbox.send_draft(&id, "k-send");
+    assert!(world.lock().unwrap().sent.is_empty());
+    assert_eq!(mailbox.lookup("k-send").unwrap(), None);
+    assert!(world.lock().unwrap().sent.is_empty());
+}
+
+#[test]
+fn thread_server_error_is_unavailable_and_never_assumed_sent() {
+    let (mailbox, world) = mailbox();
+    let id = mailbox.create_draft("g-1", &draft(), "k-draft").unwrap();
+    world.lock().unwrap().drop_send_response = true;
+    let _ = mailbox.send_draft(&id, "k-send");
+    world.lock().unwrap().force = Some(("/threads/".into(), 500));
+    assert_eq!(mailbox.lookup("k-send").unwrap_err().code, "unavailable");
+    assert_eq!(
+        mailbox.send_draft(&id, "k-send").unwrap_err().code,
+        "unavailable"
+    );
+    assert_eq!(count(&world, "POST", "/drafts/send"), 1);
+
+    // Al volver el servicio, la misma consulta confirma el envío real.
+    world.lock().unwrap().force = None;
+    assert_eq!(mailbox.send_draft(&id, "k-send").unwrap().receipt_id, "s-1");
+    assert_eq!(count(&world, "POST", "/drafts/send"), 1);
 }
 
 /// Hace de navegador: sigue la redirección al puerto local con la query indicada.

@@ -1,9 +1,11 @@
 //! Gmail y Google Workspace mediante Gmail API v1 (D30). La respuesta se compone como
 //! mensaje MIME en el hilo original (`In-Reply-To`, `References` y `threadId`).
 //!
-//! Gmail da al mensaje enviado un ID distinto del que tenía el borrador. Por eso cada
-//! borrador lleva un `Message-ID` generado aquí y anotado en el registro local: tras un corte
-//! durante el envío, se busca un mensaje con la etiqueta `SENT` y esa cabecera (D41).
+//! Gmail da al mensaje enviado un ID y un `Message-ID` distintos de los del borrador. Por eso
+//! cada borrador lleva un identificador propio, en `X-NestAdmin-Id` (que Gmail conserva) y en
+//! `Message-ID`, anotado en el registro local junto al hilo: tras un corte durante el envío se
+//! busca en el hilo un mensaje con la etiqueta `SENT` y esa cabecera; la búsqueda por
+//! `Message-ID` queda como último recurso (D41).
 
 use base64::engine::general_purpose::{URL_SAFE, URL_SAFE_NO_PAD};
 use base64::Engine;
@@ -217,6 +219,9 @@ fn new_message_id() -> MailResult<String> {
     Ok(format!("<nestadmin.{hex}@{MESSAGE_ID_DOMAIN}>"))
 }
 
+/// Cabecera con el identificador propio; Gmail la conserva al enviar.
+const OWN_ID_HEADER: &str = "X-NestAdmin-Id";
+
 /// Mensaje RFC 5322 de respuesta, en UTF-8 con el cuerpo en base64.
 fn reply_mime(draft: &NewDraft, original: &Value, own_id: &str) -> String {
     let subject = draft.subject.clone().unwrap_or_else(|| {
@@ -230,7 +235,8 @@ fn reply_mime(draft: &NewDraft, original: &Value, own_id: &str) -> String {
     let mut lines = vec![
         format!("To: {}", header_value(&draft.to.join(", "))),
         format!("Subject: {}", encode_header(&subject)),
-        format!("Message-ID: {own_id}"),
+        format!("Message-ID: {}", header_value(own_id)),
+        format!("{OWN_ID_HEADER}: {}", header_value(own_id)),
     ];
     if let Some(id) = header(original, "Message-ID").map(header_value) {
         let references = header(original, "References")
@@ -273,6 +279,35 @@ fn same_message_id(a: &str, b: &str) -> bool {
 }
 
 impl Gmail {
+    /// Mensaje del hilo con la etiqueta `SENT` y `X-NestAdmin-Id` igual al identificador. Un
+    /// hilo inexistente equivale a no encontrado.
+    fn find_sent_in_thread(&self, thread_id: &str, own_id: &str) -> MailResult<Option<String>> {
+        let url = self.api.url(
+            &["threads", thread_id],
+            &[("format", "metadata"), ("metadataHeaders", OWN_ID_HEADER)],
+        );
+        let thread = match self.api.call(Method::Get, &url, None) {
+            Ok(thread) => thread,
+            Err(e) if e.code == codes::NOT_FOUND => return Ok(None),
+            Err(e) => return Err(e),
+        };
+        // Un 200 sin lista de mensajes o con cuerpo ilegible no prueba nada: no es "no
+        // encontrado" (solo el 404 lo es) y no se da por enviado.
+        let Some(messages) = thread.get("messages").and_then(Value::as_array) else {
+            return Err(error(
+                codes::UNAVAILABLE,
+                "Gmail devolvió el hilo sin la lista de mensajes",
+            ));
+        };
+        Ok(messages
+            .iter()
+            .find(|m| {
+                is_sent(m) && header(m, OWN_ID_HEADER).is_some_and(|h| same_message_id(h, own_id))
+            })
+            .and_then(|m| m.get("id").and_then(Value::as_str))
+            .map(str::to_owned))
+    }
+
     /// Mensaje con la etiqueta `SENT` y la cabecera `Message-ID` indicada, si existe. Incluye
     /// papelera y spam: un mensaje enviado y luego borrado sigue estando enviado.
     fn find_sent(&self, rfc822_id: &str) -> MailResult<Option<String>> {
@@ -407,6 +442,11 @@ impl MailProvider for Gmail {
                 .and_then(Value::as_str)
                 .map(str::to_owned),
             rfc822_id: Some(own_id),
+            thread_id: created
+                .pointer("/message/threadId")
+                .and_then(Value::as_str)
+                .or_else(|| original.get("threadId").and_then(Value::as_str))
+                .map(str::to_owned),
         })
     }
 
@@ -427,9 +467,9 @@ impl MailProvider for Gmail {
     }
 
     /// Si el borrador existe, no se ha enviado. Si ya no existe, se busca el mensaje enviado:
-    /// primero por el ID del mensaje del borrador (por si Gmail lo conserva) y después por el
-    /// `Message-ID` propio con la etiqueta `SENT`. Sin esa prueba no se da por enviado ni se
-    /// reenvía.
+    /// primero por el ID del mensaje del borrador (por si Gmail lo conserva), después en el hilo
+    /// por `X-NestAdmin-Id` con la etiqueta `SENT` y, como último recurso (registros antiguos),
+    /// por el `Message-ID` propio. Sin esa prueba no se da por enviado ni se reenvía.
     fn status(&self, draft: &CreatedDraft) -> MailResult<DraftStatus> {
         let draft_id = draft.draft_id.as_str();
         let url = self
@@ -451,6 +491,11 @@ impl MailProvider for Gmail {
             }
         }
         if let Some(rfc822_id) = &draft.rfc822_id {
+            if let Some(thread_id) = &draft.thread_id {
+                if let Some(sent_id) = self.find_sent_in_thread(thread_id, rfc822_id)? {
+                    return Ok(DraftStatus::Sent(sent_id));
+                }
+            }
             if let Some(sent_id) = self.find_sent(rfc822_id)? {
                 return Ok(DraftStatus::Sent(sent_id));
             }
@@ -484,11 +529,25 @@ mod tests {
         assert!(mime.contains("In-Reply-To: <abc@cliente.test>\r\n"));
         assert!(mime.contains("References: <prev@cliente.test> <abc@cliente.test>\r\n"));
         assert!(mime.contains("Message-ID: <propio@nestadmin.invalid>\r\n"));
+        assert!(mime.contains("X-NestAdmin-Id: <propio@nestadmin.invalid>\r\n"));
         let encoded = mime.split("\r\n\r\n").nth(1).unwrap().replace("\r\n", "");
         let decoded = base64::engine::general_purpose::STANDARD
             .decode(encoded)
             .unwrap();
         assert_eq!(String::from_utf8(decoded).unwrap(), draft.body);
+    }
+
+    #[test]
+    fn own_id_header_cannot_inject_headers() {
+        let draft = NewDraft {
+            to: vec!["ana@cliente.test".into()],
+            subject: Some("Hola".into()),
+            body: "x".into(),
+        };
+        let mime = reply_mime(&draft, &json!({}), "<a@b.test>\r\nBcc: x@evil.test");
+        let head = mime.split("\r\n\r\n").next().unwrap();
+        assert!(head.contains("X-NestAdmin-Id:"));
+        assert!(!head.lines().any(|l| l.starts_with("Bcc:")));
     }
 
     #[test]

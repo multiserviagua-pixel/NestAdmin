@@ -17,7 +17,7 @@ use url::Url;
 
 pub use gmail::Gmail;
 pub use graph::Graph;
-pub use mailbox::{MailProvider, Mailbox};
+pub use mailbox::{CreatedDraft, DraftStatus, MailProvider, Mailbox};
 pub use oauth::{OAuthConfig, PendingAuthorization, TokenSource, Tokens};
 
 pub(crate) type MailResult<T> = Result<T, ConnectorError>;

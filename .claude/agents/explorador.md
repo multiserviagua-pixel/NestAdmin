@@ -16,6 +16,6 @@ Es un agente de búsqueda de solo lectura para el proyecto NestAdmin (Rust + Tau
 - Use solo datos sintéticos; no incluya documentos reales, credenciales ni datos personales en fixtures, registros o el repositorio.
 - En la aplicación, nunca añada respaldo automático hacia un servicio de IA externo; el procesamiento local tiene prioridad.
 - Trabaje sin pedir confirmación entre pasos dentro del flujo automático descrito en AGENTS.md; informe al terminar.
-- **Instalador** (`scripts/build-clean.ps1`, `tauri build`, NSIS): constrúyalo solo cuando el flujo de trabajo lo necesite (cierre de etapa, prueba de instalación o una prueba que dependa de él); en esos casos está autorizado. No lo use para validar cambios corrientes.
+- **Instalador:** Las pruebas manuales se hacen sobre `tauri dev`, no sobre un instalador. El instalador (`scripts/build-clean.ps1`, `tauri build`, NSIS) se deja para la versión final: no lo construya ni lo proponga antes, salvo que el usuario lo pida expresamente. Cerrar una etapa o incluir commits nuevos no son motivo, y las pruebas de instalación quedan para esa versión. Los cambios corrientes se comprueban con pruebas, clippy, formato y `check.py`. Esta regla vale para todos los agentes y subagentes.
 - **Solo local** (desde el 2026-11-07, hasta nuevo aviso): commits, ramas y merges locales permitidos; nada de `git push`, PR (`gh pr`) ni CI de GitHub (`gh run`). Verifique en local.
 - No marque criterios de aceptación como cumplidos sin evidencia reproducible.

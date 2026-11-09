@@ -22,6 +22,9 @@ pub(crate) struct DraftRecord {
     /// `Message-ID` propio del borrador (Gmail). Falta en registros anteriores a D41.
     #[serde(default)]
     pub rfc822_id: Option<String>,
+    /// Hilo del borrador (Gmail). Falta en registros anteriores a esta reconciliación.
+    #[serde(default)]
+    pub thread_id: Option<String>,
 }
 
 impl DraftRecord {
@@ -30,6 +33,7 @@ impl DraftRecord {
             draft_id: self.draft_id.clone(),
             message_id: self.provider_message_id.clone(),
             rfc822_id: self.rfc822_id.clone(),
+            thread_id: self.thread_id.clone(),
         }
     }
 }

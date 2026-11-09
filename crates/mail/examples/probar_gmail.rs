@@ -7,8 +7,13 @@
 //! cargo run -p nestadmin-mail --example probar_gmail -- buscar <texto del asunto>
 //! cargo run -p nestadmin-mail --example probar_gmail -- borrador <id_mensaje> <para>
 //! cargo run -p nestadmin-mail --example probar_gmail -- enviar <id_borrador> --confirmar
+//! cargo run -p nestadmin-mail --example probar_gmail -- cortar-envio <id_borrador> --confirmar
 //! cargo run -p nestadmin-mail --example probar_gmail -- salir
 //! ```
+//!
+//! `entrar` acepta el JSON que descarga Google Cloud o el `correo-oauth.json` de la aplicación.
+//! `cortar-envio` envía de verdad y termina el proceso antes de anotar el recibo; después,
+//! `enviar` con el mismo borrador debe confirmarlo por el `Message-ID` propio (D41) sin reenviar.
 //!
 //! Los tokens se guardan en el administrador de credenciales de Windows (`mail/prueba-gmail`)
 //! y el registro local de borradores y el cliente OAuth en `%LOCALAPPDATA%\NestAdmin-pruebas`,
@@ -21,14 +26,20 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use nestadmin_ai::CredentialStore;
+use nestadmin_core::ConnectorError;
 use nestadmin_mail::gmail::DEFAULT_BASE;
-use nestadmin_mail::{Gmail, Mailbox, OAuthConfig, PendingAuthorization, TokenSource};
-use nestadmin_simulators::{MailConnector, Message, NewDraft};
+use nestadmin_mail::{
+    CreatedDraft, DraftStatus, Gmail, MailProvider, Mailbox, OAuthConfig, PendingAuthorization,
+    TokenSource,
+};
+use nestadmin_simulators::{MailConnector, Message, MessagePage, NewDraft};
 use serde_json::{json, Value};
 
 const ACCOUNT: &str = "prueba-gmail";
 const CLIENT_FILE: &str = "cliente-google.json";
 const STATE_FILE: &str = "gmail-prueba.json";
+/// Código de salida de `cortar-envio`: el envío se hizo y el recibo no se anotó.
+const CUT_EXIT: i32 = 3;
 
 type Result<T> = std::result::Result<T, String>;
 
@@ -42,8 +53,12 @@ fn main() -> ExitCode {
         ["borrador", message_id, to] => draft(message_id, to),
         ["enviar", draft_id, "--confirmar"] => send(draft_id),
         ["enviar", _] => Err("enviar manda un correo real: repita la orden con --confirmar".into()),
+        ["cortar-envio", draft_id, "--confirmar"] => send_and_cut(draft_id),
+        ["cortar-envio", _] => {
+            Err("cortar-envio manda un correo real: repita la orden con --confirmar".into())
+        }
         ["salir"] => sign_out(),
-        _ => Err("uso: entrar <client_secret.json> | leer [--mostrar] | buscar <asunto> | borrador <id_mensaje> <para> | enviar <id_borrador> --confirmar | salir".into()),
+        _ => Err("uso: entrar <client_secret.json> | leer [--mostrar] | buscar <asunto> | borrador <id_mensaje> <para> | enviar <id_borrador> --confirmar | cortar-envio <id_borrador> --confirmar | salir".into()),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,
@@ -76,14 +91,18 @@ fn store() -> Result<Arc<dyn CredentialStore>> {
     Err("esta prueba guarda los tokens en el administrador de credenciales de Windows".into())
 }
 
-/// El JSON que descarga Google Cloud para un cliente de tipo «Aplicación de escritorio».
+/// El JSON que descarga Google Cloud para un cliente de tipo «Aplicación de escritorio», o el
+/// `correo-oauth.json` de la aplicación.
 fn client_from_download(path: &Path) -> Result<(String, String)> {
     let text = std::fs::read_to_string(path)
         .map_err(|e| format!("no se pudo leer {}: {e}", path.display()))?;
     let value: Value = serde_json::from_str(&text).map_err(|e| format!("JSON no válido: {e}"))?;
     let installed = value
         .get("installed")
-        .ok_or("el archivo no es de un cliente «Aplicación de escritorio» (falta «installed»)")?;
+        .or_else(|| value.get("google"))
+        .ok_or(
+            "el archivo no es de un cliente de escritorio de Google (falta «installed» o «google»)",
+        )?;
     let field = |name: &str| {
         installed[name]
             .as_str()
@@ -107,14 +126,62 @@ fn oauth_config() -> Result<OAuthConfig> {
 }
 
 fn mailbox() -> Result<Mailbox<Gmail>> {
+    Mailbox::open(gmail()?, &work_dir()?.join(STATE_FILE)).map_err(|e| e.message)
+}
+
+fn gmail() -> Result<Gmail> {
     let tokens = TokenSource::new(oauth_config()?, store()?, ACCOUNT);
     if !tokens.signed_in().map_err(|e| e.message)? {
         return Err(
             "no hay sesión de prueba: ejecute primero «entrar <client_secret.json>»".into(),
         );
     }
-    let gmail = Gmail::new(DEFAULT_BASE, tokens, 10).map_err(|e| e.message)?;
-    Mailbox::open(gmail, &work_dir()?.join(STATE_FILE)).map_err(|e| e.message)
+    Gmail::new(DEFAULT_BASE, tokens, 10).map_err(|e| e.message)
+}
+
+/// Gmail real que termina el proceso justo después de enviar, antes de anotar el recibo.
+struct CutAfterSend(Gmail);
+
+impl MailProvider for CutAfterSend {
+    fn list(&self, cursor: Option<&str>) -> std::result::Result<MessagePage, ConnectorError> {
+        self.0.list(cursor)
+    }
+
+    fn create_reply(
+        &self,
+        message_id: &str,
+        draft: &NewDraft,
+    ) -> std::result::Result<CreatedDraft, ConnectorError> {
+        self.0.create_reply(message_id, draft)
+    }
+
+    fn send(&self, draft_id: &str) -> std::result::Result<String, ConnectorError> {
+        self.0.send(draft_id)?;
+        println!("Enviado. Se corta el proceso sin anotar el recibo.");
+        std::process::exit(CUT_EXIT);
+    }
+
+    fn status(&self, draft: &CreatedDraft) -> std::result::Result<DraftStatus, ConnectorError> {
+        self.0.status(draft)
+    }
+
+    fn attachment(
+        &self,
+        message_id: &str,
+        attachment_id: &str,
+    ) -> std::result::Result<Vec<u8>, ConnectorError> {
+        self.0.attachment(message_id, attachment_id)
+    }
+}
+
+/// Usa la misma clave que `send`, de modo que `enviar` retome este envío.
+fn send_and_cut(draft_id: &str) -> Result<()> {
+    let mailbox = Mailbox::open(CutAfterSend(gmail()?), &work_dir()?.join(STATE_FILE))
+        .map_err(|e| e.message)?;
+    mailbox
+        .send_draft(draft_id, &format!("prueba-envio-{draft_id}"))
+        .map_err(|e| format!("{}: {}", e.code, e.message))?;
+    Err("el envío terminó sin pasar por el corte".into())
 }
 
 fn open_browser(url: &str) {

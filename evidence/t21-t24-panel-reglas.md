@@ -1,6 +1,6 @@
 # Evidencia T07b, T07c, T21–T24c (parcial): panel de reglas, sugerencias y primera lectura
 
-Cubre R07, R21, R22, R23 y R24, y las decisiones D123–D134. Todos los datos son sintéticos (`ui/src/mock.ts`, proveedor simulado, correo simulado, dominio `.test`). Nada de esto prueba la aplicación instalada, un proveedor externo real ni un buzón real.
+Cubre R07, R21, R22, R23 y R24, y las decisiones D123–D134. Todos los datos son sintéticos (`ui/src/mock.ts`, proveedor simulado, correo simulado, dominio `.test`). Nada de esto prueba la aplicación de escritorio, un proveedor externo real ni un buzón real.
 
 ## Cómo reproducir
 
@@ -14,7 +14,6 @@ cargo test -p nestadmin-app -p nestadmin-desktop --features lectura-bajo-demanda
 cd ui && npm ci && npm run build && npm test
 python -m unittest discover -s evaluation/tests
 python -m unittest discover -s scripts/tests
-powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-clean.ps1 -Prueba
 ```
 
 La vista previa (`npx vite` en `ui/`) admite `?refine=auto`, `auto-consent`, `blocked`, `failed`, `invalid` y `broken`, y `?read=reading`, `interrupted`, `listing_failed`, `stopped`, `held`, `waiting` y `pending`.
@@ -46,8 +45,8 @@ Cada etapa (E3, E4a, E4b, E5) pasó por revisión de `arquitecto`, por lectura d
 
 ## Sin verificar
 
-- Recorrido manual en la aplicación de escritorio instalada (WebView2): ratón, teclado y Esc en las ayudas; todas las pantallas con reglas y tareas reales. Ningún criterio de T21 a T24c queda cumplido sin él.
-- El instalador no se ha instalado ni ejecutado.
+- Recorrido manual en la aplicación de escritorio con `tauri dev` (WebView2): ratón, teclado y Esc en las ayudas; todas las pantallas con reglas y tareas reales. Ningún criterio de T21 a T24c queda cumplido sin él, y no necesita instalador.
+- Instalación y empaquetado: quedan para la versión final. El instalador de prueba construido no se instaló ni se ejecutó.
 - Proveedor externo real y correo real de Google o Microsoft, incluida una lectura de 100 mensajes y sus tiempos.
 - `evaluation/evaluate_refine.py` no se ha ejecutado contra ningún modelo: la calidad del afinado está sin medir.
 - La retención del cerrojo durante cada paso de la lectura, en uso real.
