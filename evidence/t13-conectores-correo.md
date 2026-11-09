@@ -122,7 +122,7 @@ En `tests/mail_accounts.rs`, la prueba de respuesta perdida en Graph termina aho
 ## Pendiente para completar T13
 
 - Microsoft 365 real: inicio de sesión, lectura y borradores hechos el 2026-11-07; envío aprobado hecho el 2026-11-09, recibido una vez en el destino, en su carpeta de spam (ver al final).
-- Gmail: provocar con la cuenta real un corte entre el envío y el recibo y comprobar que la reconciliación por `Message-ID` propio (D41) lo confirma; en particular, que Gmail mantiene esa cabecera al enviar. La parte simulada está hecha.
+- Gmail: corte real provocado el 2026-11-09: no hay reenvío, pero **la reconciliación por `Message-ID` propio (D41) no funciona**, porque Gmail sustituye esa cabecera al enviar (ver al final). Falta corregirla y repetir el corte.
 - Recorrido con una cuenta real desde la ventana: añadir la cuenta, consultar, aprobar un envío y desconectar. Requiere `correo-oauth.json` con los clientes del editor (D43).
 - Calidad de clasificación y borradores con correo real: sin medir.
 
@@ -173,3 +173,20 @@ Mismo equipo y carpeta de datos, `main` en `577a4a1`, versión de desarrollo. Me
 - Gmail clasificó como spam una respuesta de esta cuenta personal de Outlook. Es un solo caso y no se ha medido con otras cuentas ni destinos: una respuesta aprobada puede no llegar a la bandeja de quien la espera, sin que NestAdmin lo sepa.
 
 No se ha provocado un corte real entre el envío y el recibo con esta cuenta.
+
+## 2026-11-09 — Corte real entre el envío y el recibo en Gmail (D41)
+
+`probar_gmail`, orden nueva `cortar-envio`: llama de verdad a `drafts.send` y termina el proceso antes de anotar el recibo. Cuenta de Gmail propia; mensaje sintético enviado a sí misma, sin terceros.
+
+| Paso | Resultado |
+|---|---|
+| Borrador | Creado en el hilo, con `Message-ID` propio `<nestadmin.…@nestadmin.invalid>` anotado en el registro local. Repetir la clave devuelve el mismo borrador. |
+| Corte | Salida con código 3. El registro local queda con 1 envío y 0 recibos. |
+| Reanudación | `not_found: … ya no existe y no consta enviado; no se reenvía`, a los 20 s y de nuevo pasado más de un minuto. Sigue con 0 recibos. |
+| Efecto en el buzón | El hilo tiene el original y **una sola** respuesta, con etiqueta `SENT`: no hubo segundo envío. |
+| Causa | El mensaje enviado lleva `Message-Id: <…@mail.gmail.com>`, generado por Gmail, y no el propio. Buscar `rfc822msgid:` con el ID propio no da resultados. El ID del mensaje del borrador tampoco se conserva (hallazgo anterior). |
+
+**Hallazgos:**
+
+- **D41 no funciona con Gmail real.** Las pruebas `lost_send_is_confirmed_*` pasan porque el simulador conserva la cabecera, cosa que Gmail real no hace. El resultado es seguro en cuanto a que no reenvía, pero el envío nunca se confirma.
+- **Riesgo de duplicado por decisión humana.** Por el código, sin probarlo en la ventana: ese `not_found` lleva la tarea a revisión con `needs_confirmation` («ya no existe en el buzón y no consta enviado») y ofrece «Confirmo que no se envió: preparar uno nuevo». Tras un corte real en Gmail, ese texto aparecería aunque el correo sí haya salido; si el usuario confirma y aprueba, se enviaría otra respuesta.
