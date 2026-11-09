@@ -99,10 +99,15 @@ fn handler(req: &Req, w: &mut World) -> Resp {
         }
         ("GET", ["me", "messages", id]) if w.messages.iter().any(|m| m["id"] == *id) => {
             let m = w.messages.iter().find(|m| m["id"] == *id).unwrap();
-            Resp::Json(
-                200,
-                json!({ "id": id, "receivedDateTime": m["receivedDateTime"] }),
-            )
+            // Como Graph con `$select`: solo lo pedido.
+            let wanted = req.query("$select").unwrap_or_default();
+            let mut out = json!({ "id": id, "receivedDateTime": m["receivedDateTime"] });
+            for field in ["from", "uniqueBody"] {
+                if wanted.split(',').any(|w| w == field) {
+                    out[field] = m[field].clone();
+                }
+            }
+            Resp::Json(200, out)
         }
         ("GET", ["me", "messages", id]) => match w.drafts.iter().find(|d| d.0 == *id) {
             Some(draft) => Resp::Json(200, json!({ "id": id, "isDraft": draft.2["isDraft"] })),
@@ -577,6 +582,7 @@ fn sent_item(id: &str, conversation: &str, sent: &str, body: &str) -> Value {
     json!({
         "id": id, "_sent": true, "conversationId": conversation, "sentDateTime": sent,
         "body": { "contentType": "text", "content": body },
+        "toRecipients": [{ "emailAddress": { "address": "ana@cliente.test" } }],
     })
 }
 
@@ -604,6 +610,8 @@ fn graph_finds_the_first_own_reply_after_the_received_message() {
     assert_eq!(reply.id, "s-1");
     assert_eq!(reply.date.as_deref(), Some("2026-11-03T10:00:00Z"));
     assert_eq!(reply.body.as_deref(), Some("Hola,\r\nLo vemos hoy."));
+    // M2: a quién iba la respuesta (aprender descarta un reenvío interno).
+    assert_eq!(reply.to, vec!["ana@cliente.test".to_owned()]);
     // Conversación sin respuestas, o mensaje desconocido: `None`, no error.
     assert_eq!(mailbox.own_reply_in_thread("c-7", "m-1").unwrap(), None);
     assert_eq!(
@@ -652,4 +660,76 @@ fn graph_without_a_received_date_gives_no_reply() {
     // m-2 no tiene `receivedDateTime`.
     assert_eq!(mailbox.own_reply_in_thread("c-1", "m-2").unwrap(), None);
     assert_eq!(count(&world, "GET", "/sentitems/messages"), 0);
+}
+
+/// A1: con `uniqueBody` (sin la cita del hilo) la respuesta propia no lleva el historial, que al
+/// convertir el HTML pierde las `>` de `<blockquote>`; sin él, el cuerpo de siempre. Y los
+/// destinatarios salen de `toRecipients`.
+#[test]
+fn graph_sent_reply_prefers_the_unique_body_and_carries_the_recipients() {
+    let (mailbox, world) = mailbox();
+    let mut unique = sent_item(
+        "s-1",
+        "c-1",
+        "2026-11-03T10:00:00Z",
+        "Hola, vale.\nEl lun, Ana escribió:\nhistorial sin marcas",
+    );
+    unique["uniqueBody"] = json!({ "contentType": "html", "content": "<p>Hola, vale.</p>" });
+    unique["toRecipients"] = json!([
+        { "emailAddress": { "address": "ana@cliente.test" } },
+        { "emailAddress": { "address": "jefe@empresa.test" } },
+    ]);
+    world.lock().unwrap().messages.push(unique);
+    let reply = mailbox.own_reply_in_thread("c-1", "m-1").unwrap().unwrap();
+    assert_eq!(reply.body.as_deref(), Some("Hola, vale."));
+    assert_eq!(
+        reply.to,
+        vec![
+            "ana@cliente.test".to_owned(),
+            "jefe@empresa.test".to_owned()
+        ]
+    );
+    let w = world.lock().unwrap();
+    let select = w
+        .requests
+        .iter()
+        .find(|r| r.url.path().ends_with("/sentitems/messages"))
+        .and_then(|r| r.query("$select"))
+        .unwrap();
+    assert!(select.contains("uniqueBody") && select.contains("toRecipients"));
+}
+
+/// Una respuesta sin `toRecipients` queda con la lista vacía: aprender no sabe a quién iba.
+#[test]
+fn graph_sent_reply_without_recipients_has_an_empty_list() {
+    let (mailbox, world) = mailbox();
+    let mut item = sent_item("s-1", "c-1", "2026-11-03T10:00:00Z", "ok");
+    item.as_object_mut().unwrap().remove("toRecipients");
+    world.lock().unwrap().messages.push(item);
+    let reply = mailbox.own_reply_in_thread("c-1", "m-1").unwrap().unwrap();
+    assert!(reply.to.is_empty());
+}
+
+/// A1/M1: el recibido da su cuerpo sin cita y el nombre visible del remitente, solo de lectura.
+#[test]
+fn graph_received_extra_gives_the_unique_body_and_the_sender_name() {
+    let (mailbox, world) = mailbox();
+    world.lock().unwrap().messages[0]["uniqueBody"] =
+        json!({ "contentType": "text", "content": "Adjunto la factura.\r\n" });
+    let extra = mailbox.received_extra("m-1").unwrap();
+    assert_eq!(extra.unique_body.as_deref(), Some("Adjunto la factura."));
+    assert_eq!(extra.sender_name.as_deref(), Some("Ana"));
+    // Sin nombre ni cuerpo sin cita: nada.
+    let none = mailbox.received_extra("m-2").unwrap();
+    assert_eq!((none.unique_body, none.sender_name), (None, None));
+    // Un mensaje que ya no existe no es un error; un identificador vacío no llama al servicio.
+    assert_eq!(
+        mailbox.received_extra("no-existe").unwrap(),
+        Default::default()
+    );
+    let before = world.lock().unwrap().requests.len();
+    assert_eq!(mailbox.received_extra(" ").unwrap(), Default::default());
+    assert_eq!(world.lock().unwrap().requests.len(), before);
+    let w = world.lock().unwrap();
+    assert!(w.requests.iter().all(|r| r.method == "GET"));
 }

@@ -15,10 +15,19 @@
 //! `category`, `needs_reply` y `reply_kind`, con el id real del mensaje y la **dirección real** del
 //! remitente (E5 cuenta por dirección). Son enums y ids, no contenido.
 //!
+//! # Recogida por pasos
+//!
+//! La recogida (bandeja y Enviados, hasta unas 350 consultas) no retiene el cerrojo de la
+//! aplicación de una vez: un [`Collector`] avanza **un paso por página o por candidato** y quien lo
+//! lleva suelta el cerrojo entre un paso y el siguiente, como la primera lectura
+//! ([`App::read_step`]). El progreso vive solo en memoria (`LearningRuntime::collecting`); un corte
+//! vuelve a empezar. El resultado es idéntico al de recoger de una vez.
+//!
 //! # Transiciones
 //!
 //! - [`App::learning_tick`] (lo llama el hilo de trabajo en reposo, también al reanudar): con la
-//!   primera lectura de un buzón terminada y sin marca, recoge una sola vez. Con 0 pares: `nothing`
+//!   primera lectura de un buzón terminada y sin marca, recoge una sola vez (un paso por llamada).
+//!   Con 0 pares: `nothing`
 //!   (con recuentos). Con pares y destino externo: `awaiting_consent`, sin enviar nada. Con destino
 //!   local: `sent` y devuelve el trabajo para ejecutarlo sin el cerrojo de `App`; al terminar,
 //!   `done`.
@@ -33,18 +42,20 @@
 //!   misma transacción que la marca: reanudar no la duplica.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 use nestadmin_ai::ProviderKind;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::initial_read::Destination;
-use crate::learn::{collect, Collected, LearnCounts};
+use crate::learn::{CollectStep, Collected, Collector, LearnCounts};
 use crate::learn_consent::{
-    LearnChoice, LearnExpectation, LearnJob, LearnRun, LearnSource, LearnStatus, LearningPreview,
+    ConsentGate, LearnChoice, LearnExpectation, LearnJob, LearnRun, LearnSource, LearnStatus,
+    LearningPreview,
 };
 use crate::refine::{now_ms, ConsentView};
-use crate::{App, AppError, AppResult};
+use crate::{App, AppError, AppResult, LocalFallback};
 
 const MARK_VERSION: u32 = 1;
 const COLLECTED: &str = "collected";
@@ -96,22 +107,52 @@ struct LearnMark {
     error: Option<LearningIssue>,
 }
 
-/// Estilo aprendido (D170): campos opcionales y acotados por el validador de E3.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+/// Estilo aprendido (D170): campos opcionales y acotados por el validador de E3. El saludo y la
+/// despedida salen de líneas de las respuestas propias: el `Debug` no los muestra.
+#[derive(Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LearnedStyle {
+    /// Uno de `formal | cercano | neutro` (enum cerrado, D170).
     pub tone: Option<String>,
+    /// Uno de `breve | detallado`.
+    #[serde(default)]
+    pub length: Option<String>,
+    /// Solo si coincide con una línea presente en 2 o más respuestas propias (D170).
     pub greeting: Option<String>,
     pub closing: Option<String>,
 }
 
-/// Lo aprendido de un mensaje: ids y enums, nunca texto. La dirección es la real (no el alias).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+impl std::fmt::Debug for LearnedStyle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LearnedStyle")
+            .field("tone", &self.tone)
+            .field("length", &self.length)
+            .field("greeting", &self.greeting.as_ref().map(|_| "<oculto>"))
+            .field("closing", &self.closing.as_ref().map(|_| "<oculto>"))
+            .finish()
+    }
+}
+
+/// Lo aprendido de un mensaje: ids y enums, nunca texto. La dirección es la real (no el alias) y
+/// el `Debug` no la muestra.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LearnedMessage {
     pub message_id: String,
     pub address: String,
     pub category: String,
     pub needs_reply: bool,
     pub reply_kind: String,
+}
+
+impl std::fmt::Debug for LearnedMessage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LearnedMessage")
+            .field("message_id", &self.message_id)
+            .field("address", &"<oculta>")
+            .field("category", &self.category)
+            .field("needs_reply", &self.needs_reply)
+            .field("reply_kind", &self.reply_kind)
+            .finish()
+    }
 }
 
 /// Resultado guardado para E5 (`first_learning_result:<fuente>`).
@@ -204,12 +245,22 @@ impl LearnChoiceArg {
 
 // ---- Trabajo fuera del cerrojo ----
 
-/// Lo que hay que saber de un par para guardar lo aprendido por id y dirección reales.
-#[derive(Debug, Clone)]
+/// Lo que hay que saber de un par para guardar lo aprendido por id y dirección reales. El `Debug`
+/// no muestra la dirección.
+#[derive(Clone)]
 struct PairRef {
     pair_id: String,
     message_id: String,
     address: String,
+}
+
+impl std::fmt::Debug for PairRef {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PairRef")
+            .field("pair_id", &self.pair_id)
+            .field("message_id", &self.message_id)
+            .finish()
+    }
 }
 
 /// Llamada preparada: no toca `App`, se ejecuta en otro hilo.
@@ -249,13 +300,30 @@ pub enum LearningStep {
     Job(Box<LearningJob>),
 }
 
-/// Estado en memoria (no se guarda): reanudaciones ya hechas en este proceso, trabajos en curso y
-/// lo recogido, para que lo enviado sea idéntico a la vista previa sin volver a leer el buzón.
+/// Recogida en curso de un buzón: solo en memoria.
+struct Collecting {
+    collector: Collector,
+    /// Marca previa (para conservar la fecha de inicio y limpiar errores).
+    prior: Option<LearnMark>,
+    /// Con destino local, lanzar la llamada al terminar (solo en el primer arranque).
+    auto_local: bool,
+    /// La lleva la ventana (la persona la pidió): el hilo de trabajo no la toca.
+    by_person: bool,
+}
+
+/// Estado en memoria (no se guarda): reanudaciones ya hechas en este proceso, trabajos en curso,
+/// recogidas por pasos y lo recogido, para que lo enviado sea idéntico a la vista previa sin
+/// volver a leer el buzón.
 #[derive(Default)]
 pub(crate) struct LearningRuntime {
     checked: HashSet<String>,
     running: HashSet<String>,
     cache: HashMap<String, Collected>,
+    collecting: HashMap<String, Collecting>,
+    /// Huellas con consentimiento vigente (se vuelve a comprobar justo antes de enviar).
+    pub(crate) gate: ConsentGate,
+    /// Resolvedor de la IA local para «Usar IA local», independiente de `local_fallback`.
+    pub(crate) local_ai: Option<LocalFallback>,
 }
 
 // ---- App ----
@@ -557,25 +625,6 @@ impl App {
         self.save_learn(source, &mark, None, None)
     }
 
-    /// Recoge y aplica (la bandeja y Enviados, solo lectura).
-    fn recollect(
-        &mut self,
-        source: &str,
-        account: &str,
-        prior: Option<LearnMark>,
-        auto_local: bool,
-    ) -> AppResult<Option<LearningJob>> {
-        match collect(&self.mail, account) {
-            Ok(collected) => {
-                self.apply_collection(source, account, prior.as_ref(), collected, auto_local)
-            }
-            Err(e) => {
-                self.note_learning_error(source, account, prior, &e.code, &e.message)?;
-                Ok(None)
-            }
-        }
-    }
-
     /// Un paso de la fase para los buzones con la primera lectura terminada. Sin la cola en
     /// pausa. No llama nunca a la IA externa; con destino local devuelve el trabajo. Un error de
     /// un buzón queda en su marca y no impide los demás ni se repite cada pocos segundos.
@@ -599,6 +648,15 @@ impl App {
             {
                 continue;
             }
+            // Recogida en curso: un paso por llamada (la lleva este hilo, salvo que la pidiera la
+            // persona).
+            if let Some(c) = self.learning.collecting.get(&source) {
+                if c.by_person {
+                    continue;
+                }
+                let (_, job) = self.step_collection(&source, &account)?;
+                return Ok(job.map_or(LearningStep::Progress, |j| LearningStep::Job(Box::new(j))));
+            }
             let mark = self.load_learn(&source)?;
             let auto_local = match &mark {
                 None => true,
@@ -619,18 +677,83 @@ impl App {
             // Una sola vez por proceso y buzón: ni recoger ni reanudar se repiten cada pocos
             // segundos. Un error al recoger queda en la marca y tampoco se repite.
             self.learning.checked.insert(source.clone());
-            return Ok(match self.recollect(&source, &account, mark, auto_local)? {
-                Some(job) => LearningStep::Job(Box::new(job)),
-                None => LearningStep::Progress,
-            });
+            self.begin_collection(&source, &account, mark, auto_local, false);
+            return Ok(LearningStep::Progress);
         }
         Ok(LearningStep::Idle)
     }
 
+    /// Prepara una recogida por pasos (solo en memoria). Sustituye a la que hubiera en curso.
+    fn begin_collection(
+        &mut self,
+        source: &str,
+        account: &str,
+        prior: Option<LearnMark>,
+        auto_local: bool,
+        by_person: bool,
+    ) {
+        self.learning.collecting.insert(
+            source.to_owned(),
+            Collecting {
+                collector: Collector::new(account),
+                prior,
+                auto_local,
+                by_person,
+            },
+        );
+    }
+
+    /// Un paso de la recogida de `source` (una página del buzón o un candidato). Devuelve si queda
+    /// recogida en curso y, al terminar con destino local, la llamada que ejecutar sin el cerrojo.
+    /// Un fallo al leer la bandeja queda en la marca y no se repite solo. Sin recogida en curso,
+    /// no hace nada.
+    fn step_collection(
+        &mut self,
+        source: &str,
+        account: &str,
+    ) -> AppResult<(bool, Option<LearningJob>)> {
+        let Some(mut collecting) = self.learning.collecting.remove(source) else {
+            return Ok((false, None));
+        };
+        match collecting.collector.step(&self.mail) {
+            Ok(CollectStep::Continue) => {
+                self.learning
+                    .collecting
+                    .insert(source.to_owned(), collecting);
+                Ok((true, None))
+            }
+            Ok(CollectStep::Done(collected)) => {
+                let job = self.apply_collection(
+                    source,
+                    account,
+                    collecting.prior.as_ref(),
+                    *collected,
+                    collecting.auto_local,
+                )?;
+                Ok((false, job))
+            }
+            Err(e) => {
+                self.note_learning_error(source, account, collecting.prior, &e.code, &e.message)?;
+                Ok((false, None))
+            }
+        }
+    }
+
     /// Vuelve a recoger por orden de la persona y deja la vista previa vigente. Sustituye a la
     /// anterior si la huella cambió (el consentimiento anterior deja de valer) y fija el destino
-    /// de ahora, lo que levanta una retención por cambio de destino.
+    /// de ahora, lo que levanta una retención por cambio de destino. Todo en este hilo: la
+    /// ventana usa [`App::start_account_learning_preview`] y [`App::step_account_learning_preview`]
+    /// para soltar el cerrojo entre pasos.
     pub fn account_learning_preview(&mut self, account: &str) -> AppResult<AccountLearningPreview> {
+        if self.start_account_learning_preview(account)? {
+            while self.step_account_learning_preview(account)? {}
+        }
+        self.account_learning_preview_view(account)
+    }
+
+    /// Empieza la recogida pedida por la persona (solo en memoria; no lee nada todavía). Devuelve
+    /// `false` si no hay nada que recoger (la fase terminó o hay una llamada en curso).
+    pub fn start_account_learning_preview(&mut self, account: &str) -> AppResult<bool> {
         let source = self.learning_source_of(account)?;
         let Some(mark) = self.load_learn(&source)? else {
             return Err(AppError::Invalid(
@@ -640,18 +763,58 @@ impl App {
         };
         if matches!(mark.phase.as_str(), DONE | NOTHING) || self.learning.running.contains(&source)
         {
+            return Ok(false);
+        }
+        self.start_person_collection(&source, account, mark);
+        Ok(true)
+    }
+
+    /// Un paso de la recogida que pidió la persona. Devuelve si queda más por hacer.
+    pub fn step_account_learning_preview(&mut self, account: &str) -> AppResult<bool> {
+        let source = self.learning_source_of(account)?;
+        if !self
+            .learning
+            .collecting
+            .get(&source)
+            .is_some_and(|c| c.by_person)
+        {
+            return Ok(false);
+        }
+        Ok(self.step_collection(&source, account)?.0)
+    }
+
+    /// Estado y vista previa vigente (la de la última recogida terminada). Solo lectura.
+    pub fn account_learning_preview_view(
+        &self,
+        account: &str,
+    ) -> AppResult<AccountLearningPreview> {
+        let source = self.learning_source_of(account)?;
+        let Some(mark) = self.load_learn(&source)? else {
+            return Err(AppError::Invalid(
+                "La recogida de esta cuenta aún no ha empezado.".into(),
+            ));
+        };
+        if matches!(mark.phase.as_str(), DONE | NOTHING) || self.learning.running.contains(&source)
+        {
             return Ok(AccountLearningPreview {
                 status: self.learning_status_of(&source, account)?,
                 preview: None,
             });
         }
-        self.refresh_for_person(&source, account, mark)?;
         self.preview_of(&source, account)
     }
 
     /// Reintenta tras un fallo, una lectura de la bandeja fallida o un corte: vuelve a recoger y
-    /// deja una vista previa nueva. No llama a la IA.
+    /// deja una vista previa nueva. No llama a la IA. Todo en este hilo; la ventana usa
+    /// [`App::start_retry_learning`] y [`App::step_account_learning_preview`].
     pub fn retry_learning(&mut self, account: &str) -> AppResult<LearningStatus> {
+        self.start_retry_learning(account)?;
+        while self.step_account_learning_preview(account)? {}
+        self.learning_status(account)
+    }
+
+    /// Empieza el reintento (solo en memoria). Rechaza si no hay nada que reintentar.
+    pub fn start_retry_learning(&mut self, account: &str) -> AppResult<()> {
         let source = self.learning_source_of(account)?;
         let Some(mark) = self.load_learn(&source)? else {
             return Err(AppError::Invalid(
@@ -667,28 +830,23 @@ impl App {
                 "No hay nada que reintentar en esta cuenta.".into(),
             ));
         }
-        self.refresh_for_person(&source, account, mark)?;
-        self.learning_status_of(&source, account)
+        self.start_person_collection(&source, account, mark);
+        Ok(())
     }
 
     /// Recogida pedida por la persona: no lanza llamadas (decide ella) y limpia errores previos.
-    fn refresh_for_person(
-        &mut self,
-        source: &str,
-        account: &str,
-        mut mark: LearnMark,
-    ) -> AppResult<()> {
+    fn start_person_collection(&mut self, source: &str, account: &str, mut mark: LearnMark) {
         mark.error = None;
         mark.failure = None;
         mark.phase = AWAITING.into();
-        match collect(&self.mail, account) {
-            Ok(collected) => {
-                self.apply_collection(source, account, Some(&mark), collected, false)?;
-                self.learning.checked.insert(source.to_owned());
-                Ok(())
-            }
-            Err(e) => self.note_learning_error(source, account, Some(mark), &e.code, &e.message),
-        }
+        self.learning.checked.insert(source.to_owned());
+        self.begin_collection(source, account, Some(mark), false, true);
+    }
+
+    /// Resolvedor de la IA local para la elección explícita «Usar IA local», independiente del
+    /// interruptor de respaldo (`local_fallback`): es una elección de la persona, no un respaldo.
+    pub fn set_local_ai(&mut self, local_ai: Option<LocalFallback>) {
+        self.learning.local_ai = local_ai;
     }
 
     fn preview_of(&self, source: &str, account: &str) -> AppResult<AccountLearningPreview> {
@@ -724,10 +882,12 @@ impl App {
         if let Some(c) = self.learning.cache.get(source) {
             return Ok(c.clone());
         }
-        self.refresh_for_person(source, account, mark)?;
-        self.learning.cache.get(source).cloned().ok_or_else(|| {
-            AppError::Invalid("No hay nada que aprender o no se pudo recoger de nuevo.".into())
-        })
+        // Sin lo recogido en memoria no se vuelve a leer el buzón bajo el cerrojo: la persona
+        // genera la vista previa de nuevo (por pasos) y decide sobre ella.
+        let _ = (account, mark);
+        Err(AppError::Invalid(
+            "La vista previa ya no está en memoria: genérela de nuevo antes de continuar.".into(),
+        ))
     }
 
     /// La persona consiente enviar lo que vio. Rechaza si lo recogido cambió o el destino no es
@@ -780,6 +940,17 @@ impl App {
             run,
         } = completed;
         self.learning.running.remove(&source);
+        // Como las demás tareas (D101, D146): una clave que no sirve, un modelo que no existe o la
+        // falta de crédito fijan la espera de IA. Si el proveedor ya cambió, el aviso es del
+        // anterior y no se vuelve a poner.
+        if let (Some(wait), Some(used)) = (run.wait, run.used.as_ref()) {
+            if Arc::ptr_eq(used, &self.provider) {
+                self.ai_wait = Some(wait);
+                if wait == crate::AiWait::InvalidKey {
+                    self.key_fixed = false;
+                }
+            }
+        }
         let mark = self.load_learn(&source)?;
         let account = mark.as_ref().map(|m| m.target.clone()).unwrap_or_default();
         let Some(mut mark) = mark.filter(|m| m.phase == SENT && m.input_fp == input_fp) else {
@@ -801,6 +972,7 @@ impl App {
                     at: now,
                     style: LearnedStyle {
                         tone: learned.style.tone.clone(),
+                        length: learned.style.length.clone(),
                         greeting: learned.style.greeting.clone(),
                         closing: learned.style.closing.clone(),
                     },
@@ -1063,7 +1235,7 @@ mod tests {
             .unwrap();
         while app.process_next().unwrap().is_some() {}
 
-        assert_eq!(app.run_learning_ticks().unwrap(), 1);
+        assert!(app.run_learning_ticks().unwrap() >= 1);
         let s = app.learning_status("sin-enviados").unwrap();
         assert_eq!(s.state, "nothing");
         let counts = s.counts.unwrap();

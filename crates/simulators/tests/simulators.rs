@@ -727,6 +727,7 @@ fn sent(id: &str, thread: &str, date: Option<&str>, body: &str) -> SentMessage {
         thread_key: thread.into(),
         date: date.map(str::to_owned),
         body: Some(body.into()),
+        to: vec!["cliente@cliente.test".into()],
     }
 }
 
@@ -750,6 +751,8 @@ fn own_reply_is_the_first_sent_message_of_the_thread_after_the_received_one() {
     assert_eq!(reply.id, "S-1");
     assert_eq!(reply.date.as_deref(), Some("2026-10-03T09:00:00Z"));
     assert_eq!(reply.body.as_deref(), Some("primera"));
+    // Los destinatarios del mensaje propio llegan con la respuesta (M2).
+    assert_eq!(reply.to, vec!["cliente@cliente.test".to_owned()]);
     // Sin respuesta en el hilo, recibido desconocido o sin fecha: `None`.
     assert_eq!(mail.own_reply_in_thread("h-7", "M-1").unwrap(), None);
     assert_eq!(mail.own_reply_in_thread("h-1", "M-0").unwrap(), None);
@@ -787,5 +790,9 @@ fn sent_messages_persist_and_an_older_state_file_without_them_still_opens() {
     std::fs::write(&path, serde_json::to_string(&value).unwrap()).unwrap();
     let mail = MailSimulator::open(&path).unwrap();
     assert_eq!(mail.own_reply_in_thread("h-1", "M-0001").unwrap(), None);
+    // Un mensaje de Enviados guardado antes de los destinatarios se lee con la lista vacía.
+    let old: SentMessage =
+        serde_json::from_str(r#"{"id":"S-9","thread_key":"h-1","date":null,"body":"ok"}"#).unwrap();
+    assert!(old.to.is_empty());
     assert_eq!(mail.list_messages(None).unwrap().messages.len(), 6);
 }

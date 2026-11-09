@@ -6,7 +6,9 @@
 use std::path::Path;
 
 use nestadmin_core::{Connector, ConnectorError};
-use nestadmin_simulators::{codes, MailConnector, MessagePage, NewDraft, OwnReply, SendReceipt};
+use nestadmin_simulators::{
+    codes, MailConnector, MessagePage, NewDraft, OwnReply, ReceivedExtra, SendReceipt,
+};
 use serde_json::Value;
 
 use crate::state::{DraftRecord, LocalState, SendRecord};
@@ -66,6 +68,11 @@ pub trait MailProvider {
         _after_id: &str,
     ) -> MailResult<Option<OwnReply>> {
         Ok(None)
+    }
+    /// Cuerpo sin cita y nombre visible del remitente de un mensaje recibido (solo para
+    /// aprender, D169). Por defecto, nada.
+    fn received_extra(&self, _message_id: &str) -> MailResult<ReceivedExtra> {
+        Ok(ReceivedExtra::default())
     }
 }
 
@@ -237,6 +244,14 @@ impl<P: MailProvider> MailConnector for Mailbox<P> {
             return Ok(None);
         }
         self.provider.own_reply_in_thread(thread_key, after_id)
+    }
+
+    /// Solo lectura. Un identificador vacío no llama al servicio.
+    fn received_extra(&self, message_id: &str) -> Result<ReceivedExtra, ConnectorError> {
+        if message_id.trim().is_empty() {
+            return Ok(ReceivedExtra::default());
+        }
+        self.provider.received_extra(message_id)
     }
 
     /// Solo lectura: no anota nada en el registro local ni en el buzón.

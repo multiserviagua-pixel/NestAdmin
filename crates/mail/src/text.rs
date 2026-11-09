@@ -139,6 +139,16 @@ pub fn header_addresses(header: &str) -> Vec<String> {
         .collect()
 }
 
+/// Nombre visible de una cabecera `From`/`To` con una sola dirección entre ángulos
+/// (`Ana Pérez <ana@x.test>`), sin comillas. `None` si no hay nombre, si lleva una `@` o si está
+/// codificado (RFC 2047): sin descodificar no serviría para reconocerlo en el texto.
+pub fn display_name(header: &str) -> Option<String> {
+    let header = header.trim();
+    let name = header[..header.find('<')?].trim().trim_matches('"').trim();
+    (!name.is_empty() && !name.contains(['@', ',', ';']) && !name.starts_with("=?"))
+        .then(|| name.to_owned())
+}
+
 /// La única dirección de una cabecera `From`, o `None` si hay varias, ninguna o alguna parte
 /// no es una dirección válida (D126): una lista como `y@alfa.test, x@evil.test` no identifica
 /// a un remitente y no debe parecerse a ninguna regla.

@@ -14,7 +14,8 @@ use nestadmin_ai::CredentialStore;
 use nestadmin_core::{Connector, ConnectorError};
 use nestadmin_mail::{Gmail, Graph, Mailbox, OAuthConfig, TokenSource, Tokens};
 use nestadmin_simulators::{
-    codes, MailConnector, MailSimulator, Message, MessagePage, NewDraft, OwnReply, SendReceipt,
+    codes, MailConnector, MailSimulator, Message, MessagePage, NewDraft, OwnReply, ReceivedExtra,
+    SendReceipt,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -328,6 +329,9 @@ impl MailConnector for SharedSimulator {
         after_id: &str,
     ) -> Result<Option<OwnReply>, ConnectorError> {
         self.0.own_reply_in_thread(thread_key, after_id)
+    }
+    fn received_extra(&self, message_id: &str) -> Result<ReceivedExtra, ConnectorError> {
+        self.0.received_extra(message_id)
     }
     fn fetch_attachment(
         &self,
@@ -804,6 +808,16 @@ impl Accounts {
     ) -> Result<Option<OwnReply>, ConnectorError> {
         self.connector(account)?
             .own_reply_in_thread(thread_key, after_id)
+    }
+
+    /// Cuerpo sin cita y nombre visible del remitente de un mensaje recibido con ID del conector
+    /// (sin prefijo de cuenta). Solo para aprender; solo lectura.
+    pub(crate) fn received_extra(
+        &self,
+        account: &str,
+        message_id: &str,
+    ) -> Result<ReceivedExtra, ConnectorError> {
+        self.connector(account)?.received_extra(message_id)
     }
 
     /// Contenido de un adjunto de un mensaje con ID de cuenta (`<cuenta>:<mensaje>`).

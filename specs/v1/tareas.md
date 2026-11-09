@@ -49,7 +49,7 @@ Plan por etapas; cada una acaba con `cargo fmt`, clippy, `cargo test --workspace
 2. **E1** (hecha) Enviados en conectores (`crates/mail/src/{mailbox,gmail,graph}.rs`), en el simulador y pares sintéticos (T33a).
 3. **E2** (hecha) `crates/app/src/learn.rs`: recogida, filtro con `mail_signals::decide`, emparejado, recorte de citas, firma local, enmascarado, topes e `input_fp`; pruebas unitarias puras.
 4. **E3** (hecha) `crates/ai/src/learn.rs`: `Task::LearnReplies`, `learn_request` y validador `parse_learn`; `crates/app/src/learn_consent.rs`: vista previa, consentimiento (patrón de `refine.rs`) y `run_learning` con respaldo local (T33b, T33c, T33h).
-5. **E4** (hecha) Estado en la marca (`crates/app/src/learn_state.rs`), reanudación, «nada que aprender», arranque desde el hilo de trabajo en reposo (`resume_learning` junto a `resume_initial_reads`) y comandos Tauri sin interfaz (T33d, T33e; las pruebas D133 siguen en verde).
+5. **E4** (hecha, con la revisión de seguridad aplicada: citas y firma, alias que seudonimiza, respuesta dirigida al remitente, estilo en enums, consentimiento consumido, recogida por pasos) Estado en la marca (`crates/app/src/learn_state.rs`), reanudación, «nada que aprender», arranque desde el hilo de trabajo en reposo (`resume_learning` junto a `resume_initial_reads`) y comandos Tauri sin interfaz (T33d, T33e; las pruebas D133 siguen en verde).
 6. **E5** Evidencia `learned`, umbral `learned_reply` en `suggest.rs`, propuesta de perfil, migración `reply_style` y línea en `draft_request`.
 7. **E6** Aceptar y activar en lote y Rodaje (T33f, T33g).
 8. **E7** Interfaz: tarjeta «Aprender a responder», vista previa, resumen, diferencias del perfil, «Aceptar y activar todas» y «Desactivar las aprendidas»; recorrido en `tauri dev`.

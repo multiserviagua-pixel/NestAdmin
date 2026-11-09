@@ -1044,7 +1044,11 @@ fn an_unknown_missing_or_failing_thread_is_unknown_or_an_error_never_a_guess() {
 fn full_message(id: &str, labels: Value, date: &str, body: &str) -> Value {
     json!({
         "id": id, "threadId": "t-9", "labelIds": labels, "internalDate": date,
-        "payload": { "mimeType": "text/plain", "headers": [],
+        "payload": { "mimeType": "text/plain",
+                     "headers": [
+                         { "name": "To", "value": "Ana Pérez <ana@cliente.test>, jefe@empresa.test" },
+                         { "name": "From", "value": "Ana Pérez <ana@cliente.test>" },
+                     ],
                      "body": { "data": b64(body) } },
     })
 }
@@ -1072,6 +1076,14 @@ fn gmail_finds_the_first_sent_message_after_the_received_one() {
     let reply = mailbox.own_reply_in_thread("t-9", "in-1").unwrap().unwrap();
     assert_eq!(reply.id, "out-1");
     assert_eq!(reply.date.as_deref(), Some("1970-01-01T00:33:20Z"));
+    // M2: los destinatarios de la cabecera `To` (direcciones, sin nombre visible).
+    assert_eq!(
+        reply.to,
+        vec![
+            "ana@cliente.test".to_owned(),
+            "jefe@empresa.test".to_owned()
+        ]
+    );
     // Tal como llega: la cita no se recorta aquí.
     assert_eq!(
         reply.body.as_deref(),
@@ -1112,4 +1124,45 @@ fn gmail_without_a_later_sent_message_has_no_own_reply() {
     assert_eq!(mailbox.own_reply_in_thread("  ", "in-1").unwrap(), None);
     assert_eq!(mailbox.own_reply_in_thread("t-9", "").unwrap(), None);
     assert_eq!(world.lock().unwrap().requests.len(), before);
+}
+
+/// Sin cabecera `To` no se sabe a quién iba el mensaje propio: lista vacía, y aprender descarta
+/// el par.
+#[test]
+fn gmail_sent_reply_without_a_to_header_has_an_empty_recipient_list() {
+    let (mailbox, world) = mailbox();
+    let mut out = full_message("out-1", json!(["SENT"]), "2000000", "ok");
+    out["payload"]["headers"] = json!([]);
+    world.lock().unwrap().messages = vec![
+        full_message("in-1", json!(["INBOX"]), "1000000", "pregunta"),
+        out,
+    ];
+    let reply = mailbox.own_reply_in_thread("t-9", "in-1").unwrap().unwrap();
+    assert!(reply.to.is_empty());
+}
+
+/// M1: el nombre visible del remitente (cabecera `From`) se pide solo con metadatos; el cuerpo no
+/// se lee. Un mensaje inexistente no es un error.
+#[test]
+fn gmail_received_extra_gives_only_the_sender_name() {
+    let (mailbox, world) = mailbox();
+    world.lock().unwrap().messages = vec![full_message(
+        "in-1",
+        json!(["INBOX"]),
+        "1000000",
+        "pregunta",
+    )];
+    let extra = mailbox.received_extra("in-1").unwrap();
+    assert_eq!(extra.sender_name.as_deref(), Some("Ana Pérez"));
+    assert_eq!(extra.unique_body, None);
+    assert_eq!(
+        mailbox.received_extra("no-esta").unwrap(),
+        Default::default()
+    );
+    let w = world.lock().unwrap();
+    for r in &w.requests {
+        assert_eq!(r.method, "GET");
+        assert_eq!(r.query("format").as_deref(), Some("metadata"));
+        assert_eq!(r.query("metadataHeaders").as_deref(), Some("From"));
+    }
 }

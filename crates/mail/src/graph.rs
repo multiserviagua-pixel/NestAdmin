@@ -10,7 +10,9 @@
 use base64::engine::general_purpose::STANDARD;
 use base64::Engine;
 use nestadmin_core::mail_signals;
-use nestadmin_simulators::{codes, Attachment, Message, MessagePage, NewDraft, OwnReply};
+use nestadmin_simulators::{
+    codes, Attachment, Message, MessagePage, NewDraft, OwnReply, ReceivedExtra,
+};
 use serde_json::{json, Value};
 
 use crate::http::{Api, Method};
@@ -99,7 +101,11 @@ fn signals(value: &Value, from: Option<&str>) -> Option<Vec<String>> {
 
 /// Cuerpo en texto: el HTML se convierte; vacío es dato ausente.
 fn body_text(value: &Value) -> Option<String> {
-    let body = value.get("body")?;
+    text_of(value.get("body")?)
+}
+
+/// Texto de un objeto `{contentType, content}` de Graph (`body` o `uniqueBody`).
+fn text_of(body: &Value) -> Option<String> {
     let content = body.get("content").and_then(Value::as_str)?;
     let html = body
         .get("contentType")
@@ -207,7 +213,10 @@ impl MailProvider for Graph {
             &["me", "mailFolders", "sentitems", "messages"],
             &[
                 ("$filter", filter.as_str()),
-                ("$select", "id,sentDateTime,body,conversationId"),
+                (
+                    "$select",
+                    "id,sentDateTime,body,uniqueBody,toRecipients,conversationId",
+                ),
                 ("$top", SENT_PAGE),
             ],
         );
@@ -230,8 +239,40 @@ impl MailProvider for Graph {
         Ok(value.get("id").and_then(Value::as_str).map(|id| OwnReply {
             id: id.to_owned(),
             date: Some(sent),
-            body: body_text(value),
+            // Sin la cita del hilo si Graph la da: al pasar el HTML a texto se pierden las `>` de
+            // `<blockquote>` y la cita ya no se reconocería por sus marcas.
+            body: value
+                .get("uniqueBody")
+                .and_then(text_of)
+                .or_else(|| body_text(value)),
+            to: value
+                .get("toRecipients")
+                .and_then(Value::as_array)
+                .map(|list| list.iter().filter_map(address).collect())
+                .unwrap_or_default(),
         }))
+    }
+
+    /// `uniqueBody` (sin el texto citado del hilo) y nombre visible del remitente del recibido.
+    fn received_extra(&self, message_id: &str) -> MailResult<ReceivedExtra> {
+        let url = self.api.url(
+            &["me", "messages", message_id],
+            &[("$select", "id,from,uniqueBody")],
+        );
+        let value = match self.api.call(Method::Get, &url, None) {
+            Ok(value) => value,
+            Err(e) if e.code == codes::NOT_FOUND => return Ok(ReceivedExtra::default()),
+            Err(e) => return Err(e),
+        };
+        Ok(ReceivedExtra {
+            unique_body: value.get("uniqueBody").and_then(text_of),
+            sender_name: value
+                .pointer("/from/emailAddress/name")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|n| !n.is_empty() && !n.contains('@'))
+                .map(str::to_owned),
+        })
     }
 
     fn attachment(&self, message_id: &str, attachment_id: &str) -> MailResult<Vec<u8>> {

@@ -10,15 +10,17 @@
 use base64::engine::general_purpose::{URL_SAFE, URL_SAFE_NO_PAD};
 use base64::Engine;
 use nestadmin_core::mail_signals;
-use nestadmin_simulators::{codes, Attachment, Message, MessagePage, NewDraft, OwnReply};
+use nestadmin_simulators::{
+    codes, Attachment, Message, MessagePage, NewDraft, OwnReply, ReceivedExtra,
+};
 use serde_json::{json, Value};
 
 use crate::http::{Api, Method};
 use crate::mailbox::{CreatedDraft, DraftStatus, MailProvider};
 use crate::oauth::TokenSource;
 use crate::text::{
-    decode_text, encode_header, format_utc_millis, header_addresses, header_value, html_to_text,
-    mime_base64, single_address,
+    decode_text, display_name, encode_header, format_utc_millis, header_addresses, header_value,
+    html_to_text, mime_base64, single_address,
 };
 use crate::{error, MailResult};
 
@@ -434,6 +436,10 @@ fn thread_own_reply(thread: &Value, after_id: &str) -> Option<OwnReply> {
         id: reply.get("id").and_then(Value::as_str)?.to_owned(),
         date: Some(format_utc_millis(millis)),
         body: body(reply),
+        // Sin cabecera `To` no se sabe a quién iba: aprender descarta el par.
+        to: header(reply, "To")
+            .map(header_addresses)
+            .unwrap_or_default(),
     })
 }
 
@@ -458,6 +464,23 @@ impl MailProvider for Gmail {
             Err(e) if e.code == codes::NOT_FOUND => Ok(None),
             Err(e) => Err(e),
         }
+    }
+
+    /// Solo el nombre visible del remitente (`format=metadata`, cabecera `From`): Gmail ya da el
+    /// texto sin HTML, así que no hay cuerpo aparte.
+    fn received_extra(&self, message_id: &str) -> MailResult<ReceivedExtra> {
+        let message = match self.get_message(
+            message_id,
+            &[("format", "metadata"), ("metadataHeaders", "From")],
+        ) {
+            Ok(message) => message,
+            Err(e) if e.code == codes::NOT_FOUND => return Ok(ReceivedExtra::default()),
+            Err(e) => return Err(e),
+        };
+        Ok(ReceivedExtra {
+            unique_body: None,
+            sender_name: header(&message, "From").and_then(display_name),
+        })
     }
 
     /// `threads.get` con `format=metadata` y solo la cabecera propia: nunca el cuerpo ni el texto

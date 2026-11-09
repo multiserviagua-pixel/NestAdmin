@@ -59,6 +59,21 @@ pub struct OwnReply {
     pub date: Option<String>,
     /// Cuerpo en texto plano; `None` si el mensaje no trae texto.
     pub body: Option<String>,
+    /// Destinatarios (direcciones) del mensaje propio. Aprender solo usa respuestas dirigidas al
+    /// remitente del recibido (no un reenvío interno): sin destinatarios conocidos, la lista
+    /// queda vacía.
+    #[serde(default)]
+    pub to: Vec<String>,
+}
+
+/// Lo que algunos conectores dan de un mensaje recibido además de [`Message`] y que solo usa la
+/// fase de aprender (D168, D169). Todo opcional: lo que el proveedor no da queda en `None`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ReceivedExtra {
+    /// Cuerpo sin el texto citado del hilo (`uniqueBody` de Graph), en texto plano.
+    pub unique_body: Option<String>,
+    /// Nombre visible del remitente (sin la dirección).
+    pub sender_name: Option<String>,
 }
 
 /// Mensaje propio del simulador en Enviados, con el hilo al que responde.
@@ -68,6 +83,9 @@ pub struct SentMessage {
     pub thread_key: String,
     pub date: Option<String>,
     pub body: Option<String>,
+    /// Destinatarios del mensaje propio (ver [`OwnReply::to`]).
+    #[serde(default)]
+    pub to: Vec<String>,
 }
 
 /// Adjunto de un mensaje. El contenido se pide aparte con
@@ -400,6 +418,7 @@ impl MailConnector for MailSimulator {
                     id: r.id.clone(),
                     date: r.date.clone(),
                     body: r.body.clone(),
+                    to: r.to.clone(),
                 }))
         })
     }

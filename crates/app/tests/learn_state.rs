@@ -87,7 +87,7 @@ impl Provider for Spy {
                             "reply_kind": "confirm" })
                 })
                 .collect();
-            json!({ "style": { "tone": "cercano y breve", "greeting": "Hola,", "closing": "Un saludo" },
+            json!({ "style": { "tone": "cercano", "length": "breve", "greeting": "Hola,", "closing": "Un saludo" },
                     "pairs": pairs })
         } else {
             json!({ "category": "solicitud_factura", "draft": "Adjuntamos la factura solicitada." })
@@ -182,8 +182,20 @@ fn sent(app: &App, i: usize, body: &str) {
             thread_key: format!("t{i}"),
             date: Some("2026-11-01T12:00:00Z".into()),
             body: Some(body.into()),
+            to: vec![sender(i).into()],
         })
         .unwrap();
+}
+
+/// Remitente del recibido `i` de `mailbox_with_pairs`: a él va la respuesta.
+fn sender(i: usize) -> &'static str {
+    match i {
+        1 => "ana@cliente.test",
+        2 => "luis@proveedor.test",
+        3 => "marta@empresa.test",
+        6 => "eva@nueva.test",
+        _ => "otro@cliente.test",
+    }
 }
 
 /// Tres correos de personas con su respuesta propia, uno sin respuesta y uno automático.
@@ -266,6 +278,20 @@ fn expectation(app: &mut App) -> LearnExpectation {
     }
 }
 
+/// Un paso completo para las pruebas: la recogida avanza por pasos (una página o un candidato
+/// por llamada), así que se repite hasta que no queda nada en curso. `Progress` si hizo algo,
+/// `Idle` si no, y `Job` si hay una llamada que ejecutar.
+fn tick(app: &mut App) -> LearningStep {
+    let mut worked = false;
+    loop {
+        match app.learning_tick().unwrap() {
+            LearningStep::Progress => worked = true,
+            LearningStep::Idle if worked => return LearningStep::Progress,
+            other => return other,
+        }
+    }
+}
+
 fn is_progress(step: LearningStep) -> bool {
     matches!(step, LearningStep::Progress)
 }
@@ -287,22 +313,19 @@ fn a_cut_in_every_state_resumes_without_duplicating_calls_entries_or_results() {
     // Antes de terminar la primera lectura no se recoge nada.
     assert_eq!(status(&app).state, "not_started");
     assert!(!status(&app).read_done);
-    assert!(is_idle(app.learning_tick().unwrap()));
+    assert!(is_idle(tick(&mut app)));
     finish_first_read(&mut app);
     assert!(status(&app).read_done);
 
     // Recoger: con pares y destino externo queda esperando; no se envía nada.
-    assert!(is_progress(app.learning_tick().unwrap()));
+    assert!(is_progress(tick(&mut app)));
     let s = status(&app);
     assert_eq!(s.state, "awaiting_consent");
     assert_eq!((s.pairs, s.counts.as_ref().unwrap().automatic), (3, 1));
     assert_eq!(s.counts.as_ref().unwrap().no_own_reply, 1);
     let first_fp = s.input_fp.clone().unwrap();
     assert_eq!(spy.calls(), 0);
-    assert!(
-        is_idle(app.learning_tick().unwrap()),
-        "una sola vez por proceso"
-    );
+    assert!(is_idle(tick(&mut app)), "una sola vez por proceso");
     assert!(learning_entries(&app).is_empty());
 
     // La marca guarda ids, recuentos y huella; nunca cuerpos.
@@ -326,9 +349,9 @@ fn a_cut_in_every_state_resumes_without_duplicating_calls_entries_or_results() {
     drop(app);
     let mut app = open(dir.path(), spy.clone());
     assert_eq!(status(&app).state, "awaiting_consent");
-    assert!(is_progress(app.learning_tick().unwrap()));
+    assert!(is_progress(tick(&mut app)));
     assert_eq!(status(&app).input_fp.as_deref(), Some(first_fp.as_str()));
-    assert!(is_idle(app.learning_tick().unwrap()));
+    assert!(is_idle(tick(&mut app)));
     assert_eq!((spy.calls(), learning_entries(&app).len()), (0, 0));
 
     // Consentimiento ligado a la huella; un corte lo conserva si nada cambió.
@@ -342,7 +365,7 @@ fn a_cut_in_every_state_resumes_without_duplicating_calls_entries_or_results() {
     );
     drop(app);
     let mut app = open(dir.path(), spy.clone());
-    assert!(is_progress(app.learning_tick().unwrap()));
+    assert!(is_progress(tick(&mut app)));
     let preview = app.account_learning_preview(ACCOUNT).unwrap();
     assert_eq!(preview.preview.unwrap().consent.state, "granted");
 
@@ -355,7 +378,7 @@ fn a_cut_in_every_state_resumes_without_duplicating_calls_entries_or_results() {
     sent(&app, 6, "Respondida.");
     drop(app);
     let mut app = open(dir.path(), spy.clone());
-    assert!(is_progress(app.learning_tick().unwrap()));
+    assert!(is_progress(tick(&mut app)));
     let s = status(&app);
     assert_eq!((s.state, s.pairs), ("awaiting_consent", 4));
     assert_ne!(s.input_fp.as_deref(), Some(first_fp.as_str()));
@@ -379,7 +402,7 @@ fn a_cut_in_every_state_resumes_without_duplicating_calls_entries_or_results() {
     drop(app);
     let mut app = open(dir.path(), spy.clone());
     assert_eq!(status(&app).state, "collected");
-    assert!(is_progress(app.learning_tick().unwrap()));
+    assert!(is_progress(tick(&mut app)));
     assert_eq!(status(&app).state, "awaiting_consent");
     assert_eq!(spy.calls(), 0);
 
@@ -392,11 +415,22 @@ fn a_cut_in_every_state_resumes_without_duplicating_calls_entries_or_results() {
     assert_eq!((done.state, done.ai.as_deref()), ("done", Some("external")));
     assert_eq!(spy.calls(), 1);
     assert_eq!(learning_entries(&app).len(), 1);
+    // B4: el `Debug` de lo aprendido y de los estados no muestra direcciones ni texto.
+    let stored = app.learned_result(ACCOUNT).unwrap().unwrap();
+    // (El estado puede llevar la dirección del propio buzón; lo aprendido, ninguna.)
+    let shown = format!("{stored:?} {:?}", status(&app));
+    assert!(!format!("{stored:?}").contains('@'), "{shown}");
+    assert!(!shown.contains("cliente.test"), "{shown}");
     let (mark, result) = mark_and_result(dir.path());
     let result_text = result.unwrap();
     let result: Value = serde_json::from_str(&result_text).unwrap();
     assert_eq!(result["source"], "external");
-    assert_eq!(result["style"]["greeting"], "Hola,");
+    // Enums cerrados; el saludo y la despedida que inventa el modelo no coinciden con ninguna
+    // línea de dos respuestas propias y se descartan.
+    assert_eq!(result["style"]["tone"], "cercano");
+    assert_eq!(result["style"]["length"], "breve");
+    assert!(result["style"]["greeting"].is_null());
+    assert!(result["style"]["closing"].is_null());
     let pairs = result["pairs"].as_array().unwrap();
     assert_eq!(pairs.len(), 4);
     // Por id de mensaje real y por dirección real, no por alias; solo enums.
@@ -416,7 +450,7 @@ fn a_cut_in_every_state_resumes_without_duplicating_calls_entries_or_results() {
     for _ in 0..2 {
         drop(app);
         app = open(dir.path(), spy.clone());
-        assert!(is_idle(app.learning_tick().unwrap()));
+        assert!(is_idle(tick(&mut app)));
         assert_eq!(app.run_learning_ticks().unwrap(), 0);
         assert_eq!(status(&app).state, "done");
     }
@@ -442,7 +476,7 @@ fn a_cut_in_sent_is_never_repeated_by_itself_and_the_person_decides() {
     let mut app = open(dir.path(), spy.clone());
     add_replies(&app);
     finish_first_read(&mut app);
-    app.learning_tick().unwrap();
+    tick(&mut app);
     let seen = expectation(&mut app);
     app.grant_account_learning_consent(ACCOUNT, &seen).unwrap();
 
@@ -466,7 +500,7 @@ fn a_cut_in_sent_is_never_repeated_by_itself_and_the_person_decides() {
     let mut app = open(dir.path(), spy.clone());
     assert_eq!(status(&app).state, "sent");
     assert!(status(&app).interrupted);
-    assert!(is_idle(app.learning_tick().unwrap()));
+    assert!(is_idle(tick(&mut app)));
     assert_eq!(app.run_learning_ticks().unwrap(), 0);
     assert_eq!((spy.calls(), learning_entries(&app).len()), (0, 0));
 
@@ -477,8 +511,10 @@ fn a_cut_in_sent_is_never_repeated_by_itself_and_the_person_decides() {
     );
     assert_eq!(spy.calls(), 0);
 
-    // Corte 2: la llamada salió pero no se guardó el resultado.
+    // Corte 2: la llamada salió pero no se guardó el resultado. El consentimiento anterior se
+    // consumió al pasar a `sent`: hace falta uno nuevo.
     let seen = expectation(&mut app);
+    app.grant_account_learning_consent(ACCOUNT, &seen).unwrap();
     let job = app
         .begin_account_learning(ACCOUNT, &LearnChoiceArg::Send { expect: seen })
         .unwrap();
@@ -488,7 +524,7 @@ fn a_cut_in_sent_is_never_repeated_by_itself_and_the_person_decides() {
     drop(app);
     let mut app = open(dir.path(), spy.clone());
     assert!(status(&app).interrupted);
-    assert!(is_idle(app.learning_tick().unwrap()));
+    assert!(is_idle(tick(&mut app)));
     assert_eq!(spy.calls(), 1, "reanudar no vuelve a llamar");
     assert!(mark_and_result(dir.path()).1.is_none());
     assert!(learning_entries(&app).is_empty());
@@ -496,6 +532,20 @@ fn a_cut_in_sent_is_never_repeated_by_itself_and_the_person_decides() {
     // Solo la persona puede repetirlo; el resultado y el Historial quedan una sola vez.
     app.retry_learning(ACCOUNT).unwrap();
     let seen = expectation(&mut app);
+    // Sin un consentimiento nuevo no se reenvía: el anterior se consumió al pasar a `sent`.
+    let held_back = app
+        .run_account_learning(
+            ACCOUNT,
+            &LearnChoiceArg::Send {
+                expect: seen.clone(),
+            },
+        )
+        .unwrap();
+    assert_eq!(held_back.state, "awaiting_consent");
+    assert_eq!(spy.calls(), 1, "sin consentimiento nuevo no sale nada");
+    app.retry_learning(ACCOUNT).ok();
+    let seen = expectation(&mut app);
+    app.grant_account_learning_consent(ACCOUNT, &seen).unwrap();
     let done = app
         .run_account_learning(ACCOUNT, &LearnChoiceArg::Send { expect: seen })
         .unwrap();
@@ -512,7 +562,7 @@ fn a_failed_call_waits_for_the_person_and_is_not_retried_by_itself() {
     let mut app = open(dir.path(), spy.clone());
     add_replies(&app);
     finish_first_read(&mut app);
-    app.learning_tick().unwrap();
+    tick(&mut app);
     let seen = expectation(&mut app);
     app.grant_account_learning_consent(ACCOUNT, &seen).unwrap();
 
@@ -524,11 +574,24 @@ fn a_failed_call_waits_for_the_person_and_is_not_retried_by_itself() {
     assert_eq!(failed.state, "awaiting_consent");
     assert!(failed.failure.is_some());
     assert_eq!(spy.calls(), 1);
+    // B1: una clave que no sirve fija la espera de IA, como en las demás tareas.
+    assert_eq!(app.ai_wait(), Some(nestadmin_app::AiWait::InvalidKey));
+    // El consentimiento se consumió al enviar: repetir sin uno nuevo no reenvía nada (B3).
+    app.retry_learning(ACCOUNT).unwrap();
+    let again = expectation(&mut app);
+    app.set_ai_wait(None);
+    let held = app
+        .run_account_learning(ACCOUNT, &LearnChoiceArg::Send { expect: again })
+        .unwrap();
+    assert_eq!(held.state, "awaiting_consent");
+    assert_eq!(spy.calls(), 1, "sin consentimiento nuevo no se reenvía");
+    // Para el resto de la prueba, como antes del reintento.
+    app.set_ai_wait(None);
     assert!(learning_entries(&app).is_empty());
     assert!(mark_and_result(dir.path()).1.is_none());
 
     // Ni al reanudar ni en los pasos siguientes se vuelve a llamar.
-    assert!(is_idle(app.learning_tick().unwrap()));
+    assert!(is_idle(tick(&mut app)));
     drop(app);
     let mut app = open(dir.path(), spy.clone());
     app.run_learning_ticks().unwrap();
@@ -547,7 +610,7 @@ fn a_change_of_destination_holds_the_phase_until_a_new_preview() {
     let mut app = open(dir.path(), spy.clone());
     add_replies(&app);
     finish_first_read(&mut app);
-    app.learning_tick().unwrap();
+    tick(&mut app);
     let seen = expectation(&mut app);
     app.grant_account_learning_consent(ACCOUNT, &seen).unwrap();
     assert_eq!(status(&app).state, "awaiting_consent");
@@ -564,7 +627,7 @@ fn a_change_of_destination_holds_the_phase_until_a_new_preview() {
         Some(HOST)
     );
     assert_eq!(reason.now.host.as_deref(), Some("otro.test"));
-    assert!(is_idle(app.learning_tick().unwrap()));
+    assert!(is_idle(tick(&mut app)));
     assert!(app
         .run_account_learning(ACCOUNT, &LearnChoiceArg::Send { expect: seen })
         .is_err());
@@ -573,7 +636,7 @@ fn a_change_of_destination_holds_the_phase_until_a_new_preview() {
     drop(app);
     let mut app = open(dir.path(), other.clone());
     assert_eq!(status(&app).state, "held");
-    assert!(is_idle(app.learning_tick().unwrap()));
+    assert!(is_idle(tick(&mut app)));
 
     // Una vista previa nueva fija el destino de ahora y el consentimiento no vale.
     let preview = app.account_learning_preview(ACCOUNT).unwrap();
@@ -613,7 +676,7 @@ fn a_local_destination_runs_locally_once_and_never_again() {
     add_replies(&app);
     finish_first_read(&mut app);
     // Sin llamar a la IA: se deja la marca en `collected` como si se hubiera cortado ahí.
-    match app.learning_tick().unwrap() {
+    match tick(&mut app) {
         LearningStep::Job(job) => drop(job),
         _ => panic!("con destino local se espera el trabajo"),
     }
@@ -621,7 +684,7 @@ fn a_local_destination_runs_locally_once_and_never_again() {
     set_phase(dir.path(), "collected");
     drop(app);
     let mut app = open(dir.path(), spy.clone());
-    assert_eq!(app.run_learning_ticks().unwrap(), 1);
+    assert!(app.run_learning_ticks().unwrap() >= 1);
     assert_eq!((status(&app).state, spy.calls()), ("done", 1));
     assert_eq!(learning_entries(&app).len(), 1);
 }
@@ -661,7 +724,7 @@ fn a_fully_automatic_mailbox_ends_in_nothing_with_counts_and_one_history_entry()
     let mut app = open(dir.path(), spy.clone());
     finish_first_read(&mut app);
 
-    assert!(is_progress(app.learning_tick().unwrap()));
+    assert!(is_progress(tick(&mut app)));
     let s = status(&app);
     assert_eq!(s.state, "nothing");
     let counts = s.counts.unwrap();
@@ -685,7 +748,7 @@ fn a_fully_automatic_mailbox_ends_in_nothing_with_counts_and_one_history_entry()
     for _ in 0..2 {
         drop(app);
         app = open(dir.path(), spy.clone());
-        assert!(is_idle(app.learning_tick().unwrap()));
+        assert!(is_idle(tick(&mut app)));
         assert_eq!(status(&app).state, "nothing");
     }
     assert_eq!((spy.calls(), learning_entries(&app).len()), (0, 1));
@@ -741,4 +804,121 @@ fn the_first_read_creates_no_tasks_for_learning_and_the_learning_creates_none() 
     assert!(app.simulators().0.sent().unwrap().is_empty());
     assert!(app.simulators().0.drafts().unwrap().is_empty());
     assert!(app.rules().unwrap().is_empty(), "no crea reglas");
+}
+
+// ---- Revisión: consentimiento retirado, recogida por pasos ----
+
+/// B3: si el consentimiento se retira entre preparar la llamada (`sent`) y ejecutarla, no sale
+/// nada y la fase vuelve a esperar a la persona.
+#[test]
+fn a_consent_withdrawn_between_begin_and_run_sends_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    mailbox_with_pairs(dir.path());
+    let spy = Spy::external();
+    let mut app = open(dir.path(), spy.clone());
+    add_replies(&app);
+    finish_first_read(&mut app);
+    tick(&mut app);
+    let seen = expectation(&mut app);
+    app.grant_account_learning_consent(ACCOUNT, &seen).unwrap();
+
+    let job = app
+        .begin_account_learning(
+            ACCOUNT,
+            &LearnChoiceArg::Send {
+                expect: seen.clone(),
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        status(&app).state,
+        "sent",
+        "`sent` se anota antes de la llamada"
+    );
+    app.withdraw_learning_consent(&seen.input_fp).unwrap();
+    let completed = job.run();
+    assert_eq!(spy.calls(), 0, "retirado el consentimiento, no sale nada");
+    let s = app.finish_learning(completed).unwrap();
+    assert_eq!(s.state, "awaiting_consent");
+    assert!(s.failure.unwrap().contains("no_consent"));
+    assert!(learning_entries(&app).is_empty());
+}
+
+/// EXTRA: la recogida va por pasos (una página del buzón o un candidato), no retiene el cerrojo
+/// de una vez, guarda el progreso solo en memoria y su resultado es idéntico al de la persona.
+#[test]
+fn the_collection_goes_step_by_step_and_matches_the_one_shot_result() {
+    let dir = tempfile::tempdir().unwrap();
+    let messages: Vec<Message> = (1..=45)
+        .map(|i| {
+            let mut m = incoming(
+                i,
+                &format!("c{i}@cliente.test"),
+                &format!("{BODY_SENTINEL} consulta número {i}."),
+            );
+            m.date = Some("2026-11-01T10:00:00Z".into());
+            m
+        })
+        .collect();
+    seed_mail(dir.path(), messages);
+    let spy = Spy::external();
+    let mut app = open(dir.path(), spy.clone());
+    for i in (1..=45).filter(|i| i % 4 != 0) {
+        app.simulators()
+            .0
+            .add_sent_message(SentMessage {
+                id: format!("s{i}"),
+                thread_key: format!("t{i}"),
+                date: Some("2026-11-01T12:00:00Z".into()),
+                body: Some(format!("Respuesta número {i}.")),
+                to: vec![format!("c{i}@cliente.test")],
+            })
+            .unwrap();
+    }
+    finish_first_read(&mut app);
+
+    // Cada llamada a `learning_tick` es un paso: entre uno y otro la aplicación está libre y
+    // no hay nada persistido (ni marca ni cuerpos).
+    let mut steps = 0;
+    while status(&app).state == "not_started" {
+        match app.learning_tick().unwrap() {
+            LearningStep::Progress => steps += 1,
+            _ => panic!("la recogida debería avanzar paso a paso"),
+        }
+        if status(&app).state == "not_started" {
+            assert!(
+                mark_and_result(dir.path()).0.is_none(),
+                "sin progreso guardado"
+            );
+            assert!(app.learning_overview().is_ok());
+        }
+    }
+    assert!(
+        steps > 10,
+        "{steps} pasos: una página o un candidato por paso"
+    );
+    let s = status(&app);
+    assert_eq!((s.state, s.pairs), ("awaiting_consent", 34));
+    let stepped_fp = s.input_fp.clone().unwrap();
+    let mark = mark_and_result(dir.path()).0.unwrap();
+    assert!(!mark.contains(BODY_SENTINEL) && !mark.contains("Respuesta número"));
+
+    // La persona, también por pasos: mismo resultado.
+    assert!(app.start_account_learning_preview(ACCOUNT).unwrap());
+    let mut person_steps = 0;
+    while app.step_account_learning_preview(ACCOUNT).unwrap() {
+        person_steps += 1;
+        assert!(app.learning_overview().is_ok());
+    }
+    assert!(person_steps > 10, "{person_steps}");
+    let view = app.account_learning_preview_view(ACCOUNT).unwrap();
+    let preview = view.preview.expect("vista previa");
+    assert_eq!(preview.input_fp, stepped_fp);
+    assert_eq!(preview.pairs, 34);
+    // Sin recogida en curso, un paso no hace nada.
+    assert!(!app.step_account_learning_preview(ACCOUNT).unwrap());
+    // Una sola vez y de golpe (lo que usan las pruebas y las llamadas sin ventana): igual.
+    let once = app.account_learning_preview(ACCOUNT).unwrap();
+    assert_eq!(once.preview.unwrap().input_fp, stepped_fp);
+    assert_eq!(spy.calls(), 0, "recoger no llama a la IA");
 }

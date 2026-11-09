@@ -6,7 +6,7 @@
 use nestadmin_core::{Connector, ConnectorError};
 
 use crate::admin::{Invoice, InvoiceCriteria, InvoiceMatch, InvoiceReceipt};
-use crate::mail::{MessagePage, NewDraft, OwnReply, SendReceipt};
+use crate::mail::{MessagePage, NewDraft, OwnReply, ReceivedExtra, SendReceipt};
 
 /// Tamaño máximo de un adjunto que se descarga (igual que el de un documento importado).
 pub const MAX_ATTACHMENT_BYTES: u64 = 50_000_000;
@@ -59,6 +59,13 @@ pub trait MailConnector: Connector {
         _after_id: &str,
     ) -> Result<Option<OwnReply>, ConnectorError> {
         Ok(None)
+    }
+
+    /// Datos extra de un mensaje recibido que solo hacen falta para aprender (D168, D169): la
+    /// parte del cuerpo que no es cita del hilo (`uniqueBody` de Graph) y el nombre visible del
+    /// remitente. Solo lectura. Por defecto, nada: quien llama usa el cuerpo del mensaje.
+    fn received_extra(&self, _message_id: &str) -> Result<ReceivedExtra, ConnectorError> {
+        Ok(ReceivedExtra::default())
     }
 
     /// Envía un borrador una sola vez; repetir la clave devuelve el recibo original.

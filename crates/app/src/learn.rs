@@ -1,23 +1,30 @@
 //! Parte local de la fase «Aprender a responder» (E2, D167–D169, R30, T33): recogida de pares
 //! «correo recibido + respuesta propia», recorte de la cita, firma local, enmascarado, alias de
 //! direcciones y topes. No usa IA, no envía nada, no tiene estado persistido (eso es E3–E4) y no
-//! guarda cuerpos: [`Collected`] vive solo en memoria y no es serializable a propósito.
+//! guarda cuerpos: [`Collected`] vive solo en memoria, no es serializable a propósito y su `Debug`
+//! no muestra texto ni direcciones.
 //!
-//! Orden de [`collect`]: lee hasta [`SCAN_MAX`] recibidos recientes, [`select_candidates`] toma
-//! los [`PAIRS_MAX`] primeros que pasan el filtro local de `mail_signals`, [`build_pairs`] busca
-//! la respuesta propia de cada hilo en Enviados, recorta la cita, quita la firma común, enmascara
-//! y aplica los topes. Todo lo que se descarta se cuenta en [`LearnCounts`]; un buzón sin nada que
-//! aprender da cero pares con recuentos, no un error.
+//! La recogida es un [`Collector`] que avanza **por pasos** (una página del buzón o un candidato
+//! por paso) para que quien la lleva suelte el cerrojo de la aplicación entre paso y paso. Su
+//! progreso vive solo en memoria; un corte vuelve a empezar. Orden: lee hasta [`SCAN_MAX`] recibidos
+//! recientes, [`select_candidates`] toma los [`PAIRS_MAX`] primeros que pasan el filtro local de
+//! `mail_signals`, [`build_pairs`] busca la respuesta propia de cada hilo en Enviados, recorta la
+//! cita, quita la firma, sustituye la identidad del remitente por su alias, enmascara y aplica los
+//! topes. Todo lo que se descarta se cuenta en [`LearnCounts`]; un buzón sin nada que aprender da
+//! cero pares con recuentos, no un error.
 //!
 //! Lo que sale hacia la IA es [`payload`]: el texto literal, cada par entre `MAIL_START` y
-//! `MAIL_END`, con alias `R1`, `R2`… en lugar de direcciones. [`input_fp`] es la huella de ese
-//! texto exacto (la vista previa y el consentimiento de E3 se ligan a ella).
+//! `MAIL_END`, con alias `R1`, `R2`… en lugar de direcciones y nombres del remitente.
+//! [`input_fp`] es la huella de ese texto exacto (la vista previa y el consentimiento de E3 se
+//! ligan a ella).
+
+use std::collections::{HashMap, HashSet};
 
 use nestadmin_ai::refine::is_format_char;
 use nestadmin_ai::tasks::{draft_flags, phone_runs, MAIL_END, MAIL_START};
 use nestadmin_core::mail_signals::{decide, route_of_message, sender_parts, Route};
 use nestadmin_core::ConnectorError;
-use nestadmin_simulators::{Message, OwnReply};
+use nestadmin_simulators::{Message, OwnReply, ReceivedExtra};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -39,6 +46,7 @@ pub const TOTAL_MAX_CHARS: usize = 60_000;
 
 /// Recuentos de la recogida. Solo números: es lo que puede guardarse y mostrarse sin contenido.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct LearnCounts {
     /// Recibidos examinados (hasta [`SCAN_MAX`]; se para al reunir [`PAIRS_MAX`] candidatos).
     pub scanned: usize,
@@ -58,6 +66,12 @@ pub struct LearnCounts {
     pub no_own_reply: usize,
     /// Pares descartados por una cita dudosa o por repetir el recibido en la respuesta.
     pub quote_dropped: usize,
+    /// Pares cuya respuesta propia no iba dirigida al remitente del recibido (un reenvío
+    /// interno, por ejemplo) o no consta a quién iba.
+    pub not_reply_to_sender: usize,
+    /// Pares descartados porque, tras quitar la firma, aún quedaba una línea con aspecto de
+    /// firma (nombre, cargo, web, teléfono).
+    pub signature_dropped: usize,
     /// Pares sin texto (recibido o respuesta vacíos, también tras quitar la firma).
     pub empty_text: usize,
     /// Pares descartados porque, tras enmascarar, aún quedaba un dato sensible.
@@ -70,15 +84,25 @@ pub struct LearnCounts {
     pub pairs: usize,
 }
 
-/// Resultado de [`select_candidates`].
-#[derive(Debug, Clone)]
+/// Resultado de [`select_candidates`]. Su `Debug` no muestra los mensajes.
+#[derive(Clone)]
 pub struct Selection {
     pub candidates: Vec<Message>,
     pub counts: LearnCounts,
 }
 
-/// Un par listo para salir: ya sin cita, sin firma y enmascarado. El remitente es un alias.
-#[derive(Debug, Clone, PartialEq, Eq)]
+impl std::fmt::Debug for Selection {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Selection")
+            .field("candidates", &self.candidates.len())
+            .field("counts", &self.counts)
+            .finish()
+    }
+}
+
+/// Un par listo para salir: ya sin cita, sin firma y enmascarado. El remitente es un alias. El
+/// `Debug` solo muestra identificadores y longitudes.
+#[derive(Clone, PartialEq, Eq)]
 pub struct LearnPair {
     /// `p1`, `p2`… en el orden en que salen.
     pub pair_id: String,
@@ -93,15 +117,38 @@ pub struct LearnPair {
     pub reply: String,
 }
 
-/// Alias → dirección real. Solo en memoria local: lo necesita E5 para contar por dirección.
-#[derive(Debug, Clone, PartialEq, Eq)]
+impl std::fmt::Debug for LearnPair {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LearnPair")
+            .field("pair_id", &self.pair_id)
+            .field("alias", &self.alias)
+            .field("message_id", &self.message_id)
+            .field("chars", &self.received_body.chars().count())
+            .field("reply_chars", &self.reply.chars().count())
+            .finish()
+    }
+}
+
+/// Alias → dirección real. Solo en memoria local: lo necesita E5 para contar por dirección. El
+/// `Debug` no muestra la dirección.
+#[derive(Clone, PartialEq, Eq)]
 pub struct AliasEntry {
     pub alias: String,
     pub address: String,
 }
 
-/// Lo recogido en local. Sin `Serialize`: lleva texto de correo y direcciones.
-#[derive(Debug, Clone)]
+impl std::fmt::Debug for AliasEntry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AliasEntry")
+            .field("alias", &self.alias)
+            .field("address", &"<oculta>")
+            .finish()
+    }
+}
+
+/// Lo recogido en local. Sin `Serialize`: lleva texto de correo y direcciones. Su `Debug` solo
+/// muestra recuentos, identificadores y la huella.
+#[derive(Clone)]
 pub struct Collected {
     pub pairs: Vec<LearnPair>,
     pub aliases: Vec<AliasEntry>,
@@ -112,111 +159,255 @@ pub struct Collected {
     pub input_fp: String,
     /// Código del primer fallo de Enviados, si lo hubo.
     pub first_error: Option<String>,
+    /// Líneas (normalizadas con [`style_line_key`]) que aparecen en dos o más respuestas ya
+    /// recortadas: con ellas se comprueba en local que el saludo y la despedida que devuelve la IA
+    /// existen de verdad (M3). Solo en memoria.
+    pub style_lines: HashSet<String>,
+}
+
+impl std::fmt::Debug for Collected {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Collected")
+            .field("pairs", &self.pairs)
+            .field("aliases", &self.aliases.len())
+            .field("counts", &self.counts)
+            .field("payload_chars", &self.payload.chars().count())
+            .field("input_fp", &self.input_fp)
+            .field("first_error", &self.first_error)
+            .field("style_lines", &self.style_lines.len())
+            .finish()
+    }
 }
 
 // ---- Filtro local ----
 
-/// Toma, de los recibidos recientes (como mucho [`SCAN_MAX`] examinados), los [`PAIRS_MAX`]
-/// primeros que pasan el filtro local (D167): señales comprobadas, ninguna señal fuerte ni
-/// rebote (la misma decisión de `mail_signals::decide`), remitente legible y `thread_key`.
-pub fn select_candidates<I: IntoIterator<Item = Message>>(messages: I) -> Selection {
-    let mut counts = LearnCounts::default();
-    let mut candidates = Vec::new();
-    for message in messages {
-        if counts.scanned >= SCAN_MAX || candidates.len() >= PAIRS_MAX {
-            break;
+/// Acumula los recibidos de uno en uno con el filtro local (D167). [`select_candidates`] y la
+/// recogida por pasos usan la misma lógica.
+#[derive(Default)]
+struct Selector {
+    counts: LearnCounts,
+    candidates: Vec<Message>,
+}
+
+impl Selector {
+    fn full(&self) -> bool {
+        self.counts.scanned >= SCAN_MAX || self.candidates.len() >= PAIRS_MAX
+    }
+
+    /// Examina un mensaje. `false` si ya hay [`SCAN_MAX`] examinados o [`PAIRS_MAX`] candidatos
+    /// (el mensaje no se examina).
+    fn push(&mut self, message: Message) -> bool {
+        if self.full() {
+            return false;
         }
-        counts.scanned += 1;
+        self.counts.scanned += 1;
         let Some(codes) = message.signals.as_deref() else {
-            counts.unchecked += 1;
-            continue;
+            self.counts.unchecked += 1;
+            return true;
         };
         let (_, signals) = route_of_message(message.from.as_deref(), Some(codes));
         if decide(&signals, None, None).route != Route::Ia {
-            counts.automatic += 1;
-            continue;
+            self.counts.automatic += 1;
+            return true;
         }
         if message.from.as_deref().and_then(sender_parts).is_none() {
-            counts.no_sender += 1;
-            continue;
+            self.counts.no_sender += 1;
+            return true;
         }
         if message
             .thread_key
             .as_deref()
             .is_none_or(|k| k.trim().is_empty())
         {
-            counts.no_thread += 1;
-            continue;
+            self.counts.no_thread += 1;
+            return true;
         }
-        candidates.push(message);
+        self.candidates.push(message);
+        true
     }
-    counts.candidates = candidates.len();
-    Selection { candidates, counts }
+
+    fn finish(mut self) -> Selection {
+        self.counts.candidates = self.candidates.len();
+        Selection {
+            candidates: self.candidates,
+            counts: self.counts,
+        }
+    }
+}
+
+/// Toma, de los recibidos recientes (como mucho [`SCAN_MAX`] examinados), los [`PAIRS_MAX`]
+/// primeros que pasan el filtro local (D167): señales comprobadas, ninguna señal fuerte ni
+/// rebote (la misma decisión de `mail_signals::decide`), remitente legible y `thread_key`.
+pub fn select_candidates<I: IntoIterator<Item = Message>>(messages: I) -> Selection {
+    let mut selector = Selector::default();
+    for message in messages {
+        if !selector.push(message) {
+            break;
+        }
+    }
+    selector.finish()
 }
 
 // ---- Recorte de la cita ----
 
-const WROTE_SUFFIXES: [&str; 6] = [
+/// Finales de la línea que presenta una cita («… escribió:»), en minúsculas y con los espacios
+/// no separables ya normalizados.
+const WROTE_SUFFIXES: [&str; 14] = [
     "wrote:",
     "escribió:",
     "escribio:",
     "ha escrito:",
     "a écrit :",
     "a écrit:",
+    "va escriure:",
+    "ha escrit:",
+    "escreveu:",
+    "ha scritto:",
+    "hat geschrieben:",
+    "schrieb:",
+    "schreef:",
+    "ha escrito :",
+];
+
+/// Inicios de una línea que presenta la cita partida en dos («On …», «El …», «Em …»).
+const WRAP_STARTS: [&str; 10] = [
+    "on ", "el ", "le ", "en ", "am ", "il ", "em ", "dia ", "den ", "op ",
 ];
 
 fn ends_wrote(line: &str) -> bool {
     let lower = line.trim().to_lowercase();
     WROTE_SUFFIXES.iter().any(|s| lower.ends_with(s))
+        // «Am 03.11.2026 um 10:00 schrieb Ana <ana@x.test>:».
+        || (lower.ends_with(':') && (lower.contains(" schrieb ") || lower.contains(" schreef ")))
 }
 
-/// «El … escribió:» / «On … wrote:», también partido en dos líneas.
+/// «El … escribió:» / «On … wrote:» / «El … va escriure:» / «Am … schrieb …:», también partido en
+/// dos líneas.
 fn is_wrote_header(lines: &[&str], i: usize) -> bool {
     let t = lines[i].trim();
-    if t.chars().count() > 300 {
+    if t.is_empty() || t.chars().count() > 300 {
         return false;
     }
     if ends_wrote(t) {
         return true;
     }
     let lower = t.to_lowercase();
-    (lower.starts_with("on ") || lower.starts_with("el ") || lower.starts_with("le "))
-        && lines.get(i + 1).is_some_and(|next| ends_wrote(next))
+    WRAP_STARTS.iter().any(|p| lower.starts_with(p))
+        && lines.get(i + 1).is_some_and(|n| ends_wrote(n))
+}
+
+/// Núcleo de una línea de marca («-----Original Message-----» → «original message»).
+fn marker_core(line: &str) -> String {
+    line.trim()
+        .trim_matches(|c: char| matches!(c, '-' | '_' | '=' | '*' | ':' | ' '))
+        .to_lowercase()
 }
 
 fn is_original_marker(line: &str) -> bool {
-    let lower = line.trim().to_lowercase();
-    lower.starts_with(['-', '_', '='])
-        && (lower.contains("original message") || lower.contains("mensaje original"))
+    let t = line.trim();
+    t.starts_with(['-', '_', '='])
+        && [
+            "original message",
+            "mensaje original",
+            "missatge original",
+            "messaggio originale",
+            "message d'origine",
+            "ursprüngliche nachricht",
+            "mensagem original",
+        ]
+        .iter()
+        .any(|m| marker_core(t).starts_with(m))
 }
 
 fn is_forward_marker(line: &str) -> bool {
-    let lower = line.trim().to_lowercase();
-    lower.starts_with(['-', '_', '='])
-        && (lower.contains("forwarded message") || lower.contains("mensaje reenviado"))
-}
-
-/// Bloque «De:/From:» seguido, en las líneas siguientes, de «Enviado:/Sent:».
-fn is_outlook_block(lines: &[&str], i: usize) -> bool {
-    let lower = lines[i].trim().to_lowercase();
-    if !(lower.starts_with("de:") || lower.starts_with("from:")) {
+    let t = line.trim();
+    if t.chars().count() > 80 {
         return false;
     }
-    lines.iter().skip(i + 1).take(5).any(|l| {
-        let l = l.trim().to_lowercase();
-        ["enviado:", "enviado el:", "sent:", "fecha:", "date:"]
-            .iter()
-            .any(|p| l.starts_with(p))
-    })
+    let core = marker_core(t);
+    [
+        "forwarded message",
+        "begin forwarded message",
+        "mensaje reenviado",
+        "inicio del mensaje reenviado",
+        "missatge reenviat",
+        "inici del missatge reenviat",
+        "messaggio inoltrato",
+        "inizio messaggio inoltrato",
+        "weitergeleitete nachricht",
+        "anfang der weitergeleiteten nachricht",
+        "message transféré",
+        "début du message réexpédié",
+        "mensagem encaminhada",
+    ]
+    .iter()
+    .any(|m| core.starts_with(m))
+}
+
+/// Nombre de campo de una línea de cabecera («De :», «Enviat:», «Per a:»), en minúsculas.
+fn field_name(line: &str) -> Option<String> {
+    let t = line.trim_start();
+    let colon = t.find(':')?;
+    if colon > 16 {
+        return None;
+    }
+    let name = t[..colon].trim().to_lowercase();
+    (!name.is_empty() && name.split_whitespace().count() <= 2).then_some(name)
+}
+
+const FROM_FIELDS: [&str; 5] = ["de", "from", "da", "von", "van"];
+const DATE_FIELDS: [&str; 12] = [
+    "enviado",
+    "enviado el",
+    "enviada",
+    "sent",
+    "fecha",
+    "date",
+    "envoyé",
+    "enviat",
+    "inviato",
+    "gesendet",
+    "datum",
+    "verzonden",
+];
+const OTHER_FIELDS: [&str; 16] = [
+    "para",
+    "to",
+    "per a",
+    "an",
+    "à",
+    "pour",
+    "asunto",
+    "assumpte",
+    "subject",
+    "objet",
+    "betreff",
+    "oggetto",
+    "cc",
+    "bcc",
+    "cco",
+    "onderwerp",
+];
+
+/// Bloque «De:/From:/Da:/Von:» seguido, en las líneas siguientes, de «Enviado:/Sent:/Enviat:/
+/// Inviato:/Gesendet:…».
+fn is_outlook_block(lines: &[&str], i: usize) -> bool {
+    if !field_name(lines[i]).is_some_and(|f| FROM_FIELDS.contains(&f.as_str())) {
+        return false;
+    }
+    lines
+        .iter()
+        .skip(i + 1)
+        .take(5)
+        .any(|l| field_name(l).is_some_and(|f| DATE_FIELDS.contains(&f.as_str())))
 }
 
 fn is_header_field(line: &str) -> bool {
-    let lower = line.trim().to_lowercase();
-    [
-        "de:", "from:", "para:", "to:", "asunto:", "subject:", "enviado:", "sent:", "cc:",
-    ]
-    .iter()
-    .any(|p| lower.starts_with(p))
+    field_name(line).is_some_and(|f| {
+        [&FROM_FIELDS[..], &DATE_FIELDS[..], &OTHER_FIELDS[..]]
+            .iter()
+            .any(|set| set.contains(&f.as_str()))
+    })
 }
 
 fn is_separator_line(line: &str) -> bool {
@@ -224,13 +415,16 @@ fn is_separator_line(line: &str) -> bool {
     t.is_empty() || t.chars().all(|c| matches!(c, '_' | '-' | '=' | '*'))
 }
 
-/// Recorta la cita del texto de un correo: «El … escribió:», «On … wrote:», líneas que empiezan
-/// por `>`, bloque «De:/From:» + «Enviado:/Sent:», «-----Original Message-----» y
-/// «-----Mensaje original-----». Devuelve `None` (par descartado) si el resultado queda vacío o
-/// hay indicios de una cita no reconocida: una línea `>` intercalada con texto propio (respuesta
-/// en línea o debajo de la cita), cabeceras sueltas en lo que se conserva o un reenvío.
+/// Recorta la cita del texto de un correo: «El … escribió:» / «On … wrote:» / «va escriure:» /
+/// «escreveu:» / «ha scritto:» / «schrieb», líneas que empiezan por `>`, bloque «De:/From:/Da:/
+/// Von:» + «Enviado:/Sent:/Enviat:/Inviato:/Gesendet:», «-----Original Message-----» y sus
+/// equivalentes. Cada línea se mira tras [`examined`] (espacios no separables, invisibles).
+/// Devuelve `None` (par descartado) si el resultado queda vacío o hay indicios de una cita no
+/// reconocida: una línea `>` intercalada con texto propio (respuesta en línea o debajo de la
+/// cita), cabeceras sueltas en lo que se conserva, una cabecera reconocida con una `@` en ella o
+/// en las cinco líneas siguientes, o un reenvío.
 pub fn strip_quote(body: &str) -> Option<String> {
-    let text = body.replace("\r\n", "\n").replace('\r', "\n");
+    let text = examined(&body.replace("\r\n", "\n").replace('\r', "\n"));
     let lines: Vec<&str> = text.split('\n').collect();
     let mut cut = lines.len();
     for i in 0..lines.len() {
@@ -263,19 +457,41 @@ pub fn strip_quote(body: &str) -> Option<String> {
     if head.iter().filter(|l| is_header_field(l)).count() >= 2 {
         return None;
     }
+    // Una sola cabecera reconocida y una dirección cerca: es el principio de una cita cuyo resto
+    // no se reconoció.
+    for (i, line) in head.iter().enumerate() {
+        if is_header_field(line)
+            && head[i..(i + 6).min(head.len())]
+                .iter()
+                .any(|l| l.contains('@'))
+        {
+            return None;
+        }
+    }
     let kept = head.join("\n").trim().to_owned();
     (!kept.is_empty()).then_some(kept)
+}
+
+/// Texto en minúsculas y con los espacios compactados, para comparar líneas.
+fn squash(text: &str) -> String {
+    examined(text)
+        .to_lowercase()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Líneas largas (de 25 o más caracteres) de un texto, compactadas.
+fn long_lines(text: &str) -> HashSet<String> {
+    text.lines()
+        .map(squash)
+        .filter(|l| l.chars().count() >= 25)
+        .collect()
 }
 
 /// ¿Repite la respuesta (ya sin cita) el asunto o una línea larga del recibido? Es un indicio de
 /// cita no reconocida (por ejemplo, el texto original pegado sin marcas).
 fn repeats_received(reply: &str, subject: &str, received: &str) -> bool {
-    fn squash(text: &str) -> String {
-        text.to_lowercase()
-            .split_whitespace()
-            .collect::<Vec<_>>()
-            .join(" ")
-    }
     let reply = squash(reply);
     let mut subject = squash(subject);
     while let Some(rest) = ["re:", "rv:", "fwd:", "fw:", "r:"]
@@ -295,79 +511,273 @@ fn repeats_received(reply: &str, subject: &str, received: &str) -> bool {
 
 // ---- Firma local ----
 
-fn normalized_lines(text: &str) -> Vec<String> {
+/// Líneas de firma como mucho.
+const SIGNATURE_MAX_LINES: usize = 12;
+/// Una línea de firma tras la despedida mide como mucho esto.
+const SIGNATURE_LINE_MAX_CHARS: usize = 60;
+
+/// Despedidas habituales (minúsculas, sin la puntuación final). Se comparan por igualdad: una
+/// frase que solo empieza igual no es una despedida.
+const CLOSINGS: [&str; 48] = [
+    "saludos",
+    "un saludo",
+    "saludos cordiales",
+    "un saludo cordial",
+    "cordiales saludos",
+    "un cordial saludo",
+    "reciba un cordial saludo",
+    "atentamente",
+    "atte",
+    "cordialmente",
+    "un abrazo",
+    "abrazos",
+    "un beso",
+    "hasta pronto",
+    "gracias",
+    "muchas gracias",
+    "mil gracias",
+    "gracias de antemano",
+    "quedo a su disposición",
+    "a su disposición",
+    "a su entera disposición",
+    "quedamos a su disposición",
+    "best",
+    "best regards",
+    "kind regards",
+    "warm regards",
+    "regards",
+    "thanks",
+    "thank you",
+    "many thanks",
+    "sincerely",
+    "cheers",
+    "salutacions",
+    "cordialment",
+    "una abraçada",
+    "gràcies",
+    "moltes gràcies",
+    "cordiali saluti",
+    "distinti saluti",
+    "grazie",
+    "mit freundlichen grüßen",
+    "viele grüße",
+    "freundliche grüße",
+    "cordialement",
+    "bien cordialement",
+    "merci",
+    "cordiais cumprimentos",
+    "obrigado",
+];
+
+fn is_closing_line(line: &str) -> bool {
+    let t = squash(line);
+    let t = t.trim_end_matches([',', '.', ';', ':', '!']).trim();
+    t.chars().count() <= 40 && CLOSINGS.contains(&t)
+}
+
+/// Línea comparable de una firma: espacios compactados y las cifras como `#`, de modo que un
+/// teléfono distinto en cada respuesta no impida reconocer la misma firma.
+fn signature_key(line: &str) -> String {
+    examined(line)
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .chars()
+        .map(|c| if c.is_ascii_digit() { '#' } else { c })
+        .collect()
+}
+
+fn text_lines(text: &str) -> Vec<String> {
     let mut lines: Vec<String> = text
         .replace("\r\n", "\n")
         .split('\n')
-        .map(|l| l.split_whitespace().collect::<Vec<_>>().join(" "))
+        .map(str::to_owned)
         .collect();
-    while lines.last().is_some_and(String::is_empty) {
+    while lines.last().is_some_and(|l| l.trim().is_empty()) {
         lines.pop();
     }
     lines
 }
 
-/// Líneas de firma como mucho.
-const SIGNATURE_MAX_LINES: usize = 12;
+fn key_lines(lines: &[String]) -> Vec<String> {
+    lines.iter().map(|l| signature_key(l)).collect()
+}
 
-/// Firma como sufijo común (por líneas, tras normalizar espacios) de 2 o más respuestas. Entre
-/// los sufijos compartidos gana el que comparten más respuestas y, a igualdad, el más largo.
-/// Una firma que aparece en una sola respuesta no se detecta. Cada respuesta conserva al menos
-/// una línea propia. Devuelve las líneas normalizadas unidas por `\n`.
-pub fn detect_signature(replies: &[String]) -> Option<String> {
-    let all: Vec<Vec<String>> = replies.iter().map(|r| normalized_lines(r)).collect();
-    let longest = all.iter().map(Vec::len).max().unwrap_or(0);
-    let mut best: Option<(usize, usize, Vec<String>)> = None;
-    for k in 1..=longest.min(SIGNATURE_MAX_LINES) {
-        let mut groups: Vec<(Vec<String>, usize)> = Vec::new();
-        for lines in all.iter().filter(|l| l.len() > k) {
-            let suffix = &lines[lines.len() - k..];
+/// Sufijos de líneas (con las cifras como `#`) compartidos por dos o más respuestas.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SignatureSet {
+    shared: HashSet<Vec<String>>,
+}
+
+impl SignatureSet {
+    pub fn is_empty(&self) -> bool {
+        self.shared.is_empty()
+    }
+}
+
+/// Todos los sufijos compartidos (por líneas, con las cifras como `#`) de dos o más respuestas,
+/// de una a [`SIGNATURE_MAX_LINES`] líneas. Cada respuesta conserva al menos una línea propia. Un
+/// sufijo que aparece en una sola respuesta no se detecta aquí (lo cubre la heurística de
+/// [`strip_signature`]).
+pub fn detect_signatures(replies: &[String]) -> SignatureSet {
+    let mut counts: HashMap<Vec<String>, usize> = HashMap::new();
+    for reply in replies {
+        let keys = key_lines(&text_lines(reply));
+        for k in 1..=SIGNATURE_MAX_LINES.min(keys.len().saturating_sub(1)) {
+            let suffix = &keys[keys.len() - k..];
             if suffix[0].is_empty() || suffix.iter().map(|l| l.chars().count()).sum::<usize>() < 3 {
                 continue;
             }
-            match groups.iter_mut().find(|(s, _)| s.as_slice() == suffix) {
-                Some((_, n)) => *n += 1,
-                None => groups.push((suffix.to_vec(), 1)),
-            }
-        }
-        for (suffix, members) in groups.into_iter().filter(|(_, n)| *n >= 2) {
-            if best
-                .as_ref()
-                .is_none_or(|(m, bk, _)| (members, k) > (*m, *bk))
-            {
-                best = Some((members, k, suffix));
-            }
+            *counts.entry(suffix.to_vec()).or_default() += 1;
         }
     }
-    best.map(|(_, _, lines)| lines.join("\n"))
+    SignatureSet {
+        shared: counts
+            .into_iter()
+            .filter(|(_, n)| *n >= 2)
+            .map(|(suffix, _)| suffix)
+            .collect(),
+    }
 }
 
-/// Quita `signature` (de [`detect_signature`]) del final de la respuesta, con su separador `--`.
-/// Una respuesta que no termina en ella se devuelve igual (recortada).
-pub fn strip_signature(reply: &str, signature: &str) -> String {
-    let sig: Vec<&str> = signature.split('\n').collect();
-    let mut lines: Vec<&str> = reply.split('\n').collect();
+/// ¿Parece la línea parte de una firma (nombre propio solo, cargo, web, correo, teléfono)?
+fn looks_like_signature(line: &str) -> bool {
+    let t = line.trim();
+    let chars = t.chars().count();
+    if t.is_empty() || chars > 70 || is_closing_line(t) {
+        return false;
+    }
+    let lower = t.to_lowercase();
+    if lower.contains("www.") || lower.contains("http") || lower.contains("linkedin") {
+        return true;
+    }
+    if t.contains('@') {
+        return true;
+    }
+    if chars <= 40 && t.chars().filter(char::is_ascii_digit).count() >= 7 {
+        return true;
+    }
+    let words: Vec<&str> = t.split_whitespace().collect();
+    // Dominio suelto («empresa.test»).
+    if words.iter().any(|w| {
+        let w = w.trim_matches(|c: char| !c.is_alphanumeric());
+        w.contains('.')
+            && !w.ends_with('.')
+            && w.rsplit('.').next().is_some_and(|tld| {
+                (2..=6).contains(&tld.chars().count()) && tld.chars().all(char::is_alphabetic)
+            })
+    }) && words.len() <= 3
+    {
+        return true;
+    }
+    // Cargo o departamento, en una línea corta y sin frase.
+    const TITLES: [&str; 16] = [
+        "director",
+        "directora",
+        "gerente",
+        "responsable",
+        "administrador",
+        "administradora",
+        "administración",
+        "departamento",
+        "manager",
+        "ceo",
+        "coordinador",
+        "coordinadora",
+        "comercial",
+        "jefe",
+        "jefa",
+        "gestor",
+    ];
+    if words.len() <= 6
+        && !t.ends_with(['.', '!', '?'])
+        && words.iter().any(|w| {
+            let w = w
+                .trim_matches(|c: char| !c.is_alphanumeric())
+                .to_lowercase();
+            TITLES.contains(&w.as_str())
+        })
+    {
+        return true;
+    }
+    // Nombre propio solo: dos a cuatro palabras con inicial mayúscula, sin cifras ni puntuación
+    // de frase.
+    const NOT_NAMES: [&str; 12] = [
+        "hola", "buenos", "buenas", "días", "tardes", "noches", "gracias", "saludos", "estimado",
+        "estimada", "querido", "querida",
+    ];
+    (2..=4).contains(&words.len())
+        && chars <= 40
+        && words.iter().all(|w| {
+            let mut cs = w.chars();
+            cs.next().is_some_and(char::is_uppercase)
+                && w.chars()
+                    .all(|c| c.is_alphabetic() || matches!(c, '\'' | '-' | '.'))
+                && !NOT_NAMES.contains(&w.to_lowercase().as_str())
+        })
+}
+
+/// Quita la firma de una respuesta (ya sin cita):
+///
+/// 1. todo lo que sigue a una línea `--` o `-- `;
+/// 2. el sufijo compartido más largo de `signatures` que termine en ella (las cifras no cuentan);
+///    la despedida inicial («Un saludo,») se conserva, pues es estilo y no identifica a nadie;
+/// 3. sin firma reconocida, las líneas finales cortas (60 caracteres o menos) que siguen a la
+///    última despedida («Saludos», «Un saludo», «Atentamente», «Gracias», «Best», «Regards»…).
+///
+/// Devuelve `None` (par descartado) si aun así la última línea tiene aspecto de firma: nombre
+/// propio solo, cargo, web, correo o teléfono. Una respuesta que queda vacía devuelve `Some("")`.
+pub fn strip_signature(reply: &str, signatures: &SignatureSet) -> Option<String> {
+    let mut lines = text_lines(reply);
+    if let Some(pos) = lines.iter().position(|l| l.trim_end() == "--") {
+        lines.truncate(pos);
+        while lines.last().is_some_and(|l| l.trim().is_empty()) {
+            lines.pop();
+        }
+    }
+    let keys = key_lines(&lines);
+    for k in (1..=SIGNATURE_MAX_LINES.min(lines.len().saturating_sub(1))).rev() {
+        if signatures.shared.contains(&keys[keys.len() - k..]) {
+            let first = lines.len() - k;
+            let keep_closing = is_closing_line(&lines[first]);
+            lines.truncate(first + usize::from(keep_closing));
+            break;
+        }
+    }
     while lines.last().is_some_and(|l| l.trim().is_empty()) {
         lines.pop();
     }
-    let k = sig.len();
-    if lines.len() >= k {
-        let tail = &lines[lines.len() - k..];
-        let same = tail
-            .iter()
-            .zip(&sig)
-            .all(|(a, b)| a.split_whitespace().collect::<Vec<_>>().join(" ") == *b);
-        if same {
-            lines.truncate(lines.len() - k);
-            while lines
-                .last()
-                .is_some_and(|l| l.trim().is_empty() || l.trim() == "--")
-            {
-                lines.pop();
-            }
+    // Sin firma común: líneas cortas tras la última despedida, que debe estar entre las últimas.
+    let from = lines.len().saturating_sub(SIGNATURE_MAX_LINES + 1);
+    if let Some(d) = lines
+        .iter()
+        .enumerate()
+        .skip(from)
+        .rev()
+        .find(|(_, l)| is_closing_line(l))
+        .map(|(i, _)| i)
+    {
+        let after = &lines[d + 1..];
+        // Una frase entera (cuatro palabras o más y punto final) es contenido, no firma.
+        let sentence = |l: &String| {
+            let t = l.trim();
+            t.split_whitespace().count() >= 4 && t.ends_with(['.', '!', '?'])
+        };
+        if after.iter().filter(|l| !l.trim().is_empty()).count() <= SIGNATURE_MAX_LINES
+            && after
+                .iter()
+                .all(|l| l.trim().chars().count() <= SIGNATURE_LINE_MAX_CHARS && !sentence(l))
+        {
+            lines.truncate(d + 1);
         }
     }
-    lines.join("\n").trim().to_owned()
+    while lines.last().is_some_and(|l| l.trim().is_empty()) {
+        lines.pop();
+    }
+    if lines.last().is_some_and(|l| looks_like_signature(l)) {
+        return None;
+    }
+    Some(lines.join("\n").trim().to_owned())
 }
 
 // ---- Enmascarado ----
@@ -427,6 +837,82 @@ fn mask_emails(text: &str) -> String {
     out
 }
 
+/// ¿Es el trozo un dominio suelto («empresa.test»)? El criterio de `draft_flags` (`url`): al menos
+/// una etiqueta con letras, terminación alfabética de 2 a 24 letras y que no sea un nombre de
+/// archivo corriente.
+fn is_domain_token(token: &str) -> bool {
+    const FILE_EXTENSIONS: [&str; 11] = [
+        "pdf", "doc", "docx", "xls", "xlsx", "txt", "csv", "png", "jpg", "jpeg", "xml",
+    ];
+    let lower = token.to_lowercase();
+    let parts: Vec<&str> = lower.trim_matches(['.', '-']).split('.').collect();
+    let Some((last, labels)) = parts.split_last() else {
+        return false;
+    };
+    !labels.is_empty()
+        && labels.iter().all(|l| !l.is_empty())
+        && labels.iter().any(|l| l.chars().any(char::is_alphabetic))
+        && (2..=24).contains(&last.chars().count())
+        && last.chars().all(char::is_alphabetic)
+        && !FILE_EXTENSIONS.contains(last)
+}
+
+/// URL: con esquema (`http://`, `https://`, `ftp://`, cualquier `esquema://`), `www.` o un dominio
+/// suelto. Se cambian por `[URL]` (los correos ya son `[CORREO]`).
+fn mask_urls(text: &str) -> String {
+    // 1) Bloques sin espacios que son una URL con esquema o empiezan por «www.».
+    let mut staged = String::new();
+    let mut rest = text;
+    while !rest.is_empty() {
+        let end = rest.find(char::is_whitespace).unwrap_or(rest.len());
+        if end == 0 {
+            let c = rest.chars().next().unwrap_or(' ');
+            staged.push(c);
+            rest = &rest[c.len_utf8()..];
+            continue;
+        }
+        let (block, tail) = rest.split_at(end);
+        let lead = block.len() - block.trim_start_matches(['(', '[', '<', '"', '\'']).len();
+        let core_end = block
+            .trim_end_matches([')', ']', '>', '"', '\'', '.', ',', ';', ':', '!', '?'])
+            .len()
+            .max(lead);
+        let core = &block[lead..core_end];
+        let lower = core.to_lowercase();
+        if lower.contains("://") || lower.starts_with("www.") {
+            staged.push_str(&block[..lead]);
+            staged.push_str("[URL]");
+            staged.push_str(&block[core_end..]);
+        } else {
+            staged.push_str(block);
+        }
+        rest = tail;
+    }
+    // 2) Dominios sueltos: trozos de letras, cifras, puntos y guiones.
+    let chars: Vec<char> = staged.chars().collect();
+    let (mut out, mut i) = (String::new(), 0);
+    while i < chars.len() {
+        if chars[i].is_alphanumeric() {
+            let start = i;
+            while i < chars.len() && (chars[i].is_alphanumeric() || matches!(chars[i], '.' | '-')) {
+                i += 1;
+            }
+            let token: String = chars[start..i].iter().collect();
+            let core = token.trim_end_matches(['.', '-']);
+            if is_domain_token(core) {
+                out.push_str("[URL]");
+                out.push_str(&token[core.len()..]);
+            } else {
+                out.push_str(&token);
+            }
+        } else {
+            out.push(chars[i]);
+            i += 1;
+        }
+    }
+    out
+}
+
 /// IBAN: dos letras, dos cifras y bloques de hasta cuatro hasta sumar quince caracteres (el
 /// criterio de `draft_flags`), con o sin separadores.
 fn mask_ibans(text: &str) -> String {
@@ -481,6 +967,61 @@ fn mask_ibans(text: &str) -> String {
     }
     out.extend(&chars[copied..]);
     out
+}
+
+/// ¿Es el trozo (letras y cifras) un DNI (`\d{8}[A-Z]`), un NIE (`[XYZ]\d{7}[A-Z]`) o un CIF
+/// (`[A-HJ-NP-SUVW]\d{7}[0-9A-J]`)? Sin distinguir mayúsculas.
+fn is_id_token(token: &[char]) -> bool {
+    if token.len() != 9 {
+        return false;
+    }
+    let up: Vec<char> = token.iter().map(char::to_ascii_uppercase).collect();
+    let digits = |s: &[char]| s.iter().all(char::is_ascii_digit);
+    let letter = up[8].is_ascii_alphabetic();
+    (digits(&up[..8]) && letter)
+        || (matches!(up[0], 'X' | 'Y' | 'Z') && digits(&up[1..8]) && letter)
+        || ("ABCDEFGHJNPQRSUVW".contains(up[0])
+            && digits(&up[1..8])
+            && (up[8].is_ascii_digit() || ('A'..='J').contains(&up[8])))
+}
+
+/// Recorre los trozos alfanuméricos de un texto y devuelve su posición si son un identificador
+/// fiscal.
+fn id_spans(chars: &[char]) -> Vec<(usize, usize)> {
+    let mut spans = Vec::new();
+    let mut i = 0;
+    while i < chars.len() {
+        if chars[i].is_alphanumeric() || chars[i] == '_' {
+            let start = i;
+            while i < chars.len() && (chars[i].is_alphanumeric() || chars[i] == '_') {
+                i += 1;
+            }
+            if is_id_token(&chars[start..i]) {
+                spans.push((start, i));
+            }
+        } else {
+            i += 1;
+        }
+    }
+    spans
+}
+
+/// DNI, NIE y CIF.
+fn mask_ids(text: &str) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    let (mut out, mut copied) = (String::new(), 0);
+    for (s, e) in id_spans(&chars) {
+        out.extend(&chars[copied..s]);
+        out.push_str("[ID]");
+        copied = e;
+    }
+    out.extend(&chars[copied..]);
+    out
+}
+
+fn has_id(text: &str) -> bool {
+    let chars: Vec<char> = text.chars().collect();
+    !id_spans(&chars).is_empty()
 }
 
 /// Tarjetas y teléfonos: rachas de nueve o más cifras con separadores (la de `draft_flags`);
@@ -602,30 +1143,205 @@ fn mask_secrets(text: &str) -> String {
         .join("\n")
 }
 
-/// Enmascara IBAN, tarjetas, claves o tokens, teléfonos y correos con marcadores fijos
-/// (`[IBAN]`, `[TARJETA]`, `[CLAVE]`, `[TELÉFONO]`, `[CORREO]`) usando los detectores de
-/// `profile` y `tasks::draft_flags`. Quita antes los caracteres invisibles de formato.
+/// Enmascara correos, URL, IBAN, DNI/NIE/CIF, claves o tokens, teléfonos y tarjetas con marcadores
+/// fijos (`[CORREO]`, `[URL]`, `[IBAN]`, `[ID]`, `[CLAVE]`, `[TELÉFONO]`, `[TARJETA]`) usando los
+/// detectores de `profile` y `tasks::draft_flags`. Quita antes los caracteres invisibles de
+/// formato.
 pub fn mask(text: &str) -> String {
     let text = examined(text);
     let text = mask_emails(&text);
+    let text = mask_urls(&text);
     let text = mask_ibans(&text);
+    let text = mask_ids(&text);
     let text = mask_secrets(&text);
     mask_numbers(&text)
 }
 
-/// ¿Queda en el texto algún dato que los detectores marcarían (correo, IBAN, teléfono, tarjeta o
-/// clave)? Es la comprobación final: un par con restos no sale.
+/// ¿Queda en el texto algún dato que los detectores marcarían (correo, IBAN, teléfono, URL,
+/// DNI/NIE/CIF, tarjeta o clave)? Es la comprobación final: un par con restos no sale.
 pub fn is_masked(text: &str) -> bool {
     let text = examined(text);
     let flags = draft_flags(&text);
     !(flags.contains(&"email")
         || flags.contains(&"iban")
         || flags.contains(&"phone")
+        || flags.contains(&"url")
+        || has_id(&text)
         // El control módulo 97 de `has_compact_iban` se aplica por líneas: sobre un texto largo,
         // la mezcla de letras y cifras sin separadores acaba cumpliéndolo por azar.
         || text.lines().any(has_compact_iban)
         || has_card_number(&text)
         || looks_like_secret(&text))
+}
+
+// ---- Identidad del remitente ----
+
+/// Palabras de un nombre que no se sustituyen solas (partículas).
+const NAME_STOPWORDS: [&str; 14] = [
+    "del", "las", "los", "van", "von", "der", "den", "dos", "das", "and", "the", "para", "por",
+    "con",
+];
+/// Partes locales genéricas de un buzón: no son nadie y sustituirlas rompería el texto.
+const GENERIC_LOCALS: [&str; 22] = [
+    "info",
+    "admin",
+    "administracion",
+    "administración",
+    "ventas",
+    "contacto",
+    "hola",
+    "soporte",
+    "support",
+    "sales",
+    "contact",
+    "office",
+    "oficina",
+    "correo",
+    "mail",
+    "email",
+    "pedidos",
+    "facturas",
+    "compras",
+    "gerencia",
+    "cliente",
+    "clientes",
+];
+
+/// Nombre visible de un `From` con la forma `Nombre <dirección>`.
+fn display_name_of(from: &str) -> Option<String> {
+    let name = from[..from.find('<')?].trim().trim_matches('"').trim();
+    (!name.is_empty() && !name.contains(['@', '<', '>', ';'])).then(|| name.to_owned())
+}
+
+/// Cadenas que identifican al remitente en el texto: su nombre visible completo y cada palabra de
+/// él, la parte local de su dirección y, si lleva separadores, cada uno de sus trozos. De mayor a
+/// menor longitud, para sustituir primero lo más específico.
+fn identity_needles(name: Option<&str>, address: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut add = |text: &str| {
+        let text = text.trim();
+        if text.chars().count() >= 3 && !out.iter().any(|o| o.to_lowercase() == text.to_lowercase())
+        {
+            out.push(text.to_owned());
+        }
+    };
+    if let Some(name) = name {
+        add(&name.split_whitespace().collect::<Vec<_>>().join(" "));
+        for word in name.split(|c: char| !(c.is_alphanumeric() || c == '\'')) {
+            let lower = word.to_lowercase();
+            if !NAME_STOPWORDS.contains(&lower.as_str()) {
+                add(word);
+            }
+        }
+    }
+    let local = address.split('@').next().unwrap_or_default();
+    if !GENERIC_LOCALS.contains(&local.to_lowercase().as_str()) {
+        add(local);
+    }
+    if local.contains(['.', '_', '-', '+']) {
+        for part in local.split(['.', '_', '-', '+']) {
+            if part.chars().all(char::is_alphabetic)
+                && !GENERIC_LOCALS.contains(&part.to_lowercase().as_str())
+            {
+                add(part);
+            }
+        }
+    }
+    out.sort_by_key(|s| std::cmp::Reverse(s.chars().count()));
+    out
+}
+
+fn fold(c: char) -> char {
+    c.to_lowercase().next().unwrap_or(c)
+}
+
+fn is_word_char(c: char) -> bool {
+    c.is_alphanumeric() || c == '_'
+}
+
+/// Sustituye `needle` por `with` como palabra entera y sin distinguir mayúsculas.
+fn replace_word(text: &str, needle: &str, with: &str) -> String {
+    let hay: Vec<char> = text.chars().collect();
+    let low: Vec<char> = hay.iter().map(|c| fold(*c)).collect();
+    let n: Vec<char> = needle.chars().map(fold).collect();
+    if n.is_empty() {
+        return text.to_owned();
+    }
+    let mut out = String::new();
+    let mut i = 0;
+    while i < hay.len() {
+        let end = i + n.len();
+        if end <= hay.len()
+            && low[i..end] == n[..]
+            && (i == 0 || !is_word_char(hay[i - 1]))
+            && (end == hay.len() || !is_word_char(hay[end]))
+        {
+            out.push_str(with);
+            i = end;
+        } else {
+            out.push(hay[i]);
+            i += 1;
+        }
+    }
+    out
+}
+
+/// Pseudonimiza: cambia por el alias el nombre y la parte local de la dirección del remitente
+/// allí donde aparezcan, también en un saludo («Hola Ana,»).
+fn hide_identity(text: &str, needles: &[String], alias: &str) -> String {
+    needles
+        .iter()
+        .fold(text.to_owned(), |t, needle| replace_word(&t, needle, alias))
+}
+
+// ---- Estilo ----
+
+/// Clave comparable de una línea para confirmar el saludo o la despedida: sin mayúsculas, sin
+/// puntuación, sin alias (`R1`) ni marcadores. Vacía si no queda nada.
+pub fn style_line_key(text: &str) -> String {
+    examined(text)
+        .to_lowercase()
+        .chars()
+        .map(|c| {
+            if c.is_alphanumeric() || c.is_whitespace() {
+                c
+            } else {
+                ' '
+            }
+        })
+        .collect::<String>()
+        .split_whitespace()
+        .filter(|w| {
+            !(w.starts_with('r') && w.len() > 1 && w[1..].chars().all(|c| c.is_ascii_digit()))
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Líneas (con su clave) presentes en dos o más respuestas distintas.
+fn confirmed_lines(replies: &[&str]) -> HashSet<String> {
+    let mut counts: HashMap<String, usize> = HashMap::new();
+    for reply in replies {
+        let keys: HashSet<String> = reply
+            .lines()
+            .map(style_line_key)
+            .filter(|k| !k.is_empty() && k.chars().count() <= 80)
+            .collect();
+        for key in keys {
+            *counts.entry(key).or_default() += 1;
+        }
+    }
+    counts
+        .into_iter()
+        .filter(|(_, n)| *n >= 2)
+        .map(|(k, _)| k)
+        .collect()
+}
+
+/// ¿Coincide el saludo o la despedida con una línea presente en 2 o más respuestas propias?
+pub fn style_line_confirmed(text: &str, lines: &HashSet<String>) -> bool {
+    let key = style_line_key(text);
+    !key.is_empty() && lines.contains(&key)
 }
 
 // ---- Pares ----
@@ -676,165 +1392,378 @@ pub fn input_fp(payload: &str) -> String {
 struct Staged {
     message_id: String,
     address: String,
+    /// Nombre visible del remitente, si se conoce.
+    name: Option<String>,
     subject: String,
     received: String,
     reply: String,
+}
+
+/// ¿Incluye `to` la dirección del remitente (sin distinguir mayúsculas ni nombre visible)?
+fn replies_to(to: &[String], address: &str) -> bool {
+    to.iter().any(|entry| {
+        sender_parts(entry).is_some_and(|(a, _)| a == address.to_lowercase())
+            || entry.trim().eq_ignore_ascii_case(address)
+    })
+}
+
+/// Empareja los candidatos uno a uno y, al terminar, prepara lo que saldría. Es el núcleo común
+/// de [`build_pairs`] y de la recogida por pasos ([`Collector`]).
+struct Pairing {
+    counts: LearnCounts,
+    first_error: Option<String>,
+    staged: Vec<Staged>,
+}
+
+impl Pairing {
+    fn new(counts: LearnCounts) -> Self {
+        Self {
+            counts,
+            first_error: None,
+            staged: Vec::new(),
+        }
+    }
+
+    fn fetch_failed(&mut self, e: ConnectorError) {
+        self.counts.fetch_errors += 1;
+        self.first_error.get_or_insert(e.code);
+    }
+
+    /// Empareja un candidato. `extra` pide el cuerpo sin cita y el nombre visible; `fetch` busca
+    /// la primera respuesta propia posterior (D168). Cada descarte se cuenta en [`LearnCounts`];
+    /// un fallo de una consulta no detiene a los demás.
+    fn add<E, F>(&mut self, message: &Message, extra: E, fetch: F)
+    where
+        E: FnOnce() -> Result<ReceivedExtra, ConnectorError>,
+        F: FnOnce() -> Result<Option<OwnReply>, ConnectorError>,
+    {
+        let (Some(address), Some(_)) = (
+            message
+                .from
+                .as_deref()
+                .and_then(sender_parts)
+                .map(|(address, _)| address),
+            message.thread_key.as_deref(),
+        ) else {
+            return;
+        };
+        let subject = message.subject.clone().unwrap_or_default();
+        let Some(received_raw) = message.body.as_deref().filter(|b| !b.trim().is_empty()) else {
+            self.counts.empty_text += 1;
+            return;
+        };
+        let extra = match extra() {
+            Ok(extra) => extra,
+            Err(e) => return self.fetch_failed(e),
+        };
+        // Con el cuerpo sin cita (Graph) la cita no depende de que se reconozca su cabecera.
+        let received_raw = extra
+            .unique_body
+            .as_deref()
+            .filter(|b| !b.trim().is_empty())
+            .unwrap_or(received_raw);
+        let name = extra
+            .sender_name
+            .or_else(|| message.from.as_deref().and_then(display_name_of));
+        // La cita del recibido (el historial de terceros) tampoco sale.
+        let Some(received) = strip_quote(received_raw) else {
+            self.counts.quote_dropped += 1;
+            return;
+        };
+        match fetch() {
+            Err(e) => self.fetch_failed(e),
+            Ok(None) => self.counts.no_own_reply += 1,
+            Ok(Some(own)) => {
+                // Una respuesta que no va al remitente (un reenvío interno) no es una respuesta.
+                if !replies_to(&own.to, &address) {
+                    self.counts.not_reply_to_sender += 1;
+                    return;
+                }
+                let Some(body) = own.body.as_deref().filter(|b| !b.trim().is_empty()) else {
+                    self.counts.empty_text += 1;
+                    return;
+                };
+                match strip_quote(body) {
+                    Some(reply) if !repeats_received(&reply, &subject, &received) => {
+                        self.staged.push(Staged {
+                            message_id: message.id.clone(),
+                            address,
+                            name,
+                            subject,
+                            received,
+                            reply,
+                        });
+                    }
+                    _ => self.counts.quote_dropped += 1,
+                }
+            }
+        }
+    }
+
+    /// Firma, red de seguridad entre pares, identidad, enmascarado y topes.
+    fn finish(self) -> Collected {
+        let Pairing {
+            mut counts,
+            first_error,
+            staged,
+        } = self;
+
+        // La firma se detecta con todas las respuestas ya sin cita y no sale nunca.
+        let replies: Vec<String> = staged.iter().map(|s| s.reply.clone()).collect();
+        let signatures = detect_signatures(&replies);
+        let mut cleaned: Vec<Staged> = Vec::new();
+        for mut s in staged {
+            match strip_signature(&s.reply, &signatures) {
+                None => counts.signature_dropped += 1,
+                Some(reply) if reply.is_empty() => counts.empty_text += 1,
+                Some(reply) => {
+                    s.reply = reply;
+                    cleaned.push(s);
+                }
+            }
+        }
+
+        // Red de seguridad del recibido (análoga a `repeats_received`): si trae una línea larga
+        // idéntica a una de la respuesta propia o a la de otro par, es historial de la
+        // conversación sin marcar; se descarta.
+        let reply_lines: Vec<HashSet<String>> =
+            cleaned.iter().map(|s| long_lines(&s.reply)).collect();
+        let mut kept: Vec<Staged> = Vec::new();
+        for s in cleaned {
+            let received_lines = long_lines(&s.received);
+            if reply_lines.iter().any(|r| !r.is_disjoint(&received_lines)) {
+                counts.quote_dropped += 1;
+            } else {
+                kept.push(s);
+            }
+        }
+
+        // Alias, identidad, enmascarado y comprobación final. Un alias nuevo solo se anota si el
+        // par sale: así la numeración no tiene huecos.
+        let mut aliases: Vec<AliasEntry> = Vec::new();
+        let mut ready: Vec<LearnPair> = Vec::new();
+        for s in kept {
+            let known = aliases
+                .iter()
+                .find(|a| a.address == s.address)
+                .map(|a| a.alias.clone());
+            let alias = known
+                .clone()
+                .unwrap_or_else(|| format!("R{}", aliases.len() + 1));
+            let needles = identity_needles(s.name.as_deref(), &s.address);
+            let hide = |text: &str| mask(&hide_identity(text, &needles, &alias));
+            let subject = truncate_chars(&one_line(&hide(&s.subject)), SUBJECT_MAX_CHARS);
+            let received = truncate_chars(&hide(&s.received), RECEIVED_MAX_CHARS);
+            let reply = truncate_chars(&hide(&s.reply), REPLY_MAX_CHARS);
+            if !(is_masked(&subject) && is_masked(&received) && is_masked(&reply)) {
+                counts.unmasked += 1;
+                continue;
+            }
+            if known.is_none() {
+                aliases.push(AliasEntry {
+                    alias: alias.clone(),
+                    address: s.address,
+                });
+            }
+            ready.push(LearnPair {
+                pair_id: String::new(),
+                alias,
+                message_id: s.message_id,
+                subject,
+                received_body: received,
+                reply,
+            });
+        }
+
+        // Topes por pares completos, en orden.
+        let total = ready.len();
+        let mut pairs: Vec<LearnPair> = Vec::new();
+        let mut used = 0usize; // caracteres de los pares y un salto de línea tras cada uno
+        for mut pair in ready {
+            pair.pair_id = format!("p{}", pairs.len() + 1);
+            let size = render_pair(&pair).chars().count() + 1;
+            if pairs.len() >= PAIRS_MAX || used + size > TOTAL_MAX_CHARS + 1 {
+                break;
+            }
+            used += size;
+            pairs.push(pair);
+        }
+        aliases.retain(|a| pairs.iter().any(|p| p.alias == a.alias));
+        counts.over_limit = total - pairs.len();
+        counts.pairs = pairs.len();
+        let style_lines =
+            confirmed_lines(&pairs.iter().map(|p| p.reply.as_str()).collect::<Vec<_>>());
+        let payload = payload(&pairs);
+        let input_fp = input_fp(&payload);
+        Collected {
+            pairs,
+            aliases,
+            counts,
+            payload,
+            input_fp,
+            first_error,
+            style_lines,
+        }
+    }
 }
 
 /// Empareja los candidatos con su respuesta propia y prepara lo que saldría.
 ///
 /// `fetch(thread_key, id_del_recibido)` busca la primera respuesta propia posterior (D168); con
 /// `supports_sent == false` no se llama nunca y todos cuentan como `no_sent_folder`. Cada
-/// descarte se cuenta en [`LearnCounts`]; un fallo de la consulta no detiene a los demás.
+/// descarte se cuenta en [`LearnCounts`]; un fallo de la consulta no detiene a los demás. Aquí no
+/// se pide el cuerpo sin cita ni el nombre visible: usa los del propio mensaje.
 pub fn build_pairs<F>(selection: Selection, supports_sent: bool, mut fetch: F) -> Collected
 where
     F: FnMut(&str, &str) -> Result<Option<OwnReply>, ConnectorError>,
 {
-    let Selection {
-        candidates,
-        mut counts,
-    } = selection;
-    let mut first_error = None;
-    let mut staged: Vec<Staged> = Vec::new();
-
+    let Selection { candidates, counts } = selection;
+    let mut pairing = Pairing::new(counts);
     if !supports_sent {
-        counts.no_sent_folder = candidates.len();
+        pairing.counts.no_sent_folder = candidates.len();
     } else {
         for message in &candidates {
-            let (Some(address), Some(thread)) = (
-                message
-                    .from
-                    .as_deref()
-                    .and_then(sender_parts)
-                    .map(|(address, _)| address),
-                message.thread_key.as_deref(),
-            ) else {
-                continue;
-            };
-            let subject = message.subject.clone().unwrap_or_default();
-            let Some(received_raw) = message.body.as_deref().filter(|b| !b.trim().is_empty())
-            else {
-                counts.empty_text += 1;
-                continue;
-            };
-            // La cita del recibido (el historial de terceros) tampoco sale.
-            let Some(received) = strip_quote(received_raw) else {
-                counts.quote_dropped += 1;
-                continue;
-            };
-            match fetch(thread, &message.id) {
-                Err(e) => {
-                    counts.fetch_errors += 1;
-                    first_error.get_or_insert(e.code);
-                }
-                Ok(None) => counts.no_own_reply += 1,
-                Ok(Some(own)) => {
-                    let Some(body) = own.body.as_deref().filter(|b| !b.trim().is_empty()) else {
-                        counts.empty_text += 1;
-                        continue;
-                    };
-                    match strip_quote(body) {
-                        Some(reply) if !repeats_received(&reply, &subject, &received) => {
-                            staged.push(Staged {
-                                message_id: message.id.clone(),
-                                address,
-                                subject,
-                                received,
-                                reply,
-                            });
-                        }
-                        _ => counts.quote_dropped += 1,
-                    }
-                }
-            }
+            let thread = message.thread_key.clone().unwrap_or_default();
+            pairing.add(
+                message,
+                || Ok(ReceivedExtra::default()),
+                || fetch(&thread, &message.id),
+            );
         }
     }
+    pairing.finish()
+}
 
-    // La firma se detecta con todas las respuestas ya sin cita y no sale nunca.
-    let replies: Vec<String> = staged.iter().map(|s| s.reply.clone()).collect();
-    let signature = detect_signature(&replies);
+// ---- Recogida por pasos ----
 
-    let mut ready: Vec<Staged> = Vec::new();
-    for s in staged {
-        let reply = match &signature {
-            Some(sig) => strip_signature(&s.reply, sig),
-            None => s.reply,
-        };
-        if reply.is_empty() {
-            counts.empty_text += 1;
-            continue;
-        }
-        let subject = truncate_chars(&one_line(&mask(&s.subject)), SUBJECT_MAX_CHARS);
-        let received = truncate_chars(&mask(&s.received), RECEIVED_MAX_CHARS);
-        let reply = truncate_chars(&mask(&reply), REPLY_MAX_CHARS);
-        if !(is_masked(&subject) && is_masked(&received) && is_masked(&reply)) {
-            counts.unmasked += 1;
-            continue;
-        }
-        ready.push(Staged {
-            message_id: s.message_id,
-            address: s.address,
-            subject,
-            received,
-            reply,
-        });
-    }
+/// Etapa de un [`Collector`].
+enum Stage {
+    /// Leyendo el buzón, una página por paso.
+    Scan,
+    /// Emparejando candidatos con Enviados, uno por paso.
+    Pair,
+    /// Todo recogido: falta preparar lo que saldría.
+    Finish,
+}
 
-    // Topes por pares completos, en orden; los alias solo se asignan a los que salen.
-    let mut aliases: Vec<AliasEntry> = Vec::new();
-    let mut pairs: Vec<LearnPair> = Vec::new();
-    let mut used = 0usize; // caracteres de los pares y un salto de línea tras cada uno
-    let total = ready.len();
-    for s in ready {
-        let known = aliases.iter().find(|a| a.address == s.address);
-        let alias = known
-            .map(|a| a.alias.clone())
-            .unwrap_or_else(|| format!("R{}", aliases.len() + 1));
-        let pair = LearnPair {
-            pair_id: format!("p{}", pairs.len() + 1),
-            alias,
-            message_id: s.message_id,
-            subject: s.subject,
-            received_body: s.received,
-            reply: s.reply,
-        };
-        let size = render_pair(&pair).chars().count() + 1;
-        if pairs.len() >= PAIRS_MAX || used + size > TOTAL_MAX_CHARS + 1 {
-            break;
-        }
-        used += size;
-        if known.is_none() {
-            aliases.push(AliasEntry {
-                alias: pair.alias.clone(),
-                address: s.address,
-            });
-        }
-        pairs.push(pair);
-    }
-    counts.over_limit = total - pairs.len();
-    counts.pairs = pairs.len();
-    let payload = payload(&pairs);
-    let input_fp = input_fp(&payload);
-    Collected {
-        pairs,
-        aliases,
-        counts,
-        payload,
-        input_fp,
-        first_error,
+/// Qué hizo un paso de [`Collector::step`].
+pub(crate) enum CollectStep {
+    /// Queda trabajo.
+    Continue,
+    /// Terminó.
+    Done(Box<Collected>),
+}
+
+/// Recogida de los pares de una cuenta **por pasos** (una página del buzón o un candidato por
+/// paso, solo lectura): quien la lleva puede soltar el cerrojo de la aplicación entre paso y
+/// paso. El progreso vive solo en memoria; ante un corte se vuelve a empezar. El resultado es
+/// idéntico al de recoger de una vez ([`collect`]). Su `Debug` solo muestra cifras.
+pub(crate) struct Collector {
+    account: String,
+    stage: Stage,
+    selector: Option<Selector>,
+    cursor: Option<String>,
+    pages: usize,
+    supports_sent: bool,
+    candidates: Vec<Message>,
+    next: usize,
+    pairing: Option<Pairing>,
+}
+
+impl std::fmt::Debug for Collector {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Collector")
+            .field("account", &self.account)
+            .field("pages", &self.pages)
+            .field("candidates", &self.candidates.len())
+            .field("paired", &self.next)
+            .finish()
     }
 }
 
-/// Recoge los pares de una cuenta: lee hasta [`SCAN_MAX`] recibidos recientes, aplica el filtro
-/// local y busca cada respuesta propia en Enviados (solo lectura). Un buzón sin nada que aprender
-/// no es un error: devuelve cero pares con recuentos. Falla solo si no se puede leer la bandeja.
+impl Collector {
+    pub(crate) fn new(account: &str) -> Self {
+        Self {
+            account: account.to_owned(),
+            stage: Stage::Scan,
+            selector: Some(Selector::default()),
+            cursor: None,
+            pages: 0,
+            supports_sent: false,
+            candidates: Vec::new(),
+            next: 0,
+            pairing: None,
+        }
+    }
+
+    /// Un paso: una página del buzón, un candidato o el cierre. Falla solo si no se puede leer
+    /// la bandeja o si el conector no existe.
+    pub(crate) fn step(&mut self, accounts: &Accounts) -> Result<CollectStep, ConnectorError> {
+        match self.stage {
+            Stage::Scan => {
+                let (messages, next) = accounts.list_page(&self.account, self.cursor.as_deref())?;
+                self.pages += 1;
+                let selector = self.selector.as_mut().expect("selector");
+                let empty = messages.is_empty();
+                for message in messages {
+                    if !selector.push(message) {
+                        break;
+                    }
+                }
+                if selector.full() || next.is_none() || empty {
+                    self.supports_sent = accounts.supports_sent(&self.account)?;
+                    let selection = self.selector.take().expect("selector").finish();
+                    self.candidates = selection.candidates;
+                    self.pairing = Some(Pairing::new(selection.counts));
+                    self.stage = Stage::Pair;
+                } else {
+                    self.cursor = next;
+                }
+                Ok(CollectStep::Continue)
+            }
+            Stage::Pair => {
+                let pairing = self.pairing.as_mut().expect("pairing");
+                if !self.supports_sent {
+                    pairing.counts.no_sent_folder = self.candidates.len();
+                    self.stage = Stage::Finish;
+                    return Ok(CollectStep::Continue);
+                }
+                match self.candidates.get(self.next) {
+                    None => self.stage = Stage::Finish,
+                    Some(message) => {
+                        let inner = split_id(&message.id).1.to_owned();
+                        let thread = message.thread_key.clone().unwrap_or_default();
+                        let account = self.account.as_str();
+                        pairing.add(
+                            message,
+                            || accounts.received_extra(account, &inner),
+                            || accounts.own_reply_in_thread(account, &thread, &inner),
+                        );
+                        self.next += 1;
+                    }
+                }
+                Ok(CollectStep::Continue)
+            }
+            Stage::Finish => {
+                let pairing = self.pairing.take().expect("pairing");
+                Ok(CollectStep::Done(Box::new(pairing.finish())))
+            }
+        }
+    }
+}
+
+/// Recoge los pares de una cuenta de una vez: lleva un [`Collector`] hasta el final. Un buzón sin
+/// nada que aprender no es un error: devuelve cero pares con recuentos. Falla solo si no se puede
+/// leer la bandeja. La aplicación usa el [`Collector`] paso a paso; esto es para pruebas y para
+/// quien no necesita soltar el cerrojo.
+#[cfg(test)]
 pub(crate) fn collect(accounts: &Accounts, account: &str) -> Result<Collected, ConnectorError> {
-    let messages = accounts.recent_limited(account, SCAN_MAX)?;
-    let selection = select_candidates(messages);
-    let supports_sent = accounts.supports_sent(account)?;
-    Ok(build_pairs(selection, supports_sent, |thread, id| {
-        accounts.own_reply_in_thread(account, thread, split_id(id).1)
-    }))
+    let mut collector = Collector::new(account);
+    loop {
+        if let CollectStep::Done(collected) = collector.step(accounts)? {
+            return Ok(*collected);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -867,7 +1796,38 @@ mod tests {
             id: "s".into(),
             date: Some("2026-11-01T12:00:00Z".into()),
             body: Some(body.into()),
+            to: Vec::new(),
         }
+    }
+
+    fn own_to(to: &[&str], body: &str) -> OwnReply {
+        OwnReply {
+            to: to.iter().map(|a| (*a).to_owned()).collect(),
+            ..own(body)
+        }
+    }
+
+    /// Como `super::build_pairs`, pero una respuesta sin destinatarios va al remitente del
+    /// recibido (las pruebas que no tratan de ese filtro no tienen que repetirlo).
+    fn build_pairs<F>(selection: Selection, supports_sent: bool, mut fetch: F) -> Collected
+    where
+        F: FnMut(&str, &str) -> Result<Option<OwnReply>, ConnectorError>,
+    {
+        let addresses: HashMap<String, String> = selection
+            .candidates
+            .iter()
+            .filter_map(|m| Some((m.id.clone(), m.from.as_deref().and_then(sender_parts)?.0)))
+            .collect();
+        super::build_pairs(selection, supports_sent, move |thread, id| {
+            fetch(thread, id).map(|found| {
+                found.map(|mut reply| {
+                    if reply.to.is_empty() {
+                        reply.to = addresses.get(id).cloned().into_iter().collect();
+                    }
+                    reply
+                })
+            })
+        })
     }
 
     /// `n` candidatos válidos con remitentes distintos.
@@ -1017,6 +1977,97 @@ mod tests {
     }
 
     #[test]
+    fn quote_headers_in_other_languages() {
+        // Catalán.
+        let ca = "Gràcies, confirmat.\n\nEl dl., 3 de nov. de 2026 a les 10:00, Ana <ana@cliente.test> va escriure:\n> text";
+        assert_eq!(strip_quote(ca).as_deref(), Some("Gràcies, confirmat."));
+        // Portugués, italiano, alemán y francés, sin marcas `>` (como tras convertir HTML).
+        for (header, kept) in [
+            (
+                "Em seg., 3 de nov. de 2026, Ana <ana@cliente.test> escreveu:",
+                "Combinado.",
+            ),
+            (
+                "Il giorno lun 3 nov 2026, Ana <ana@cliente.test> ha scritto:",
+                "D'accordo.",
+            ),
+            (
+                "Am 03.11.2026 um 10:00 schrieb Ana <ana@cliente.test>:",
+                "Einverstanden.",
+            ),
+            (
+                "Le 3 nov. 2026 à 10:00, Ana <ana@cliente.test> a écrit :",
+                "D'accord.",
+            ),
+        ] {
+            let body = format!("{kept}\n\n{header}\nTexto del historial\nmás historial");
+            assert_eq!(strip_quote(&body).as_deref(), Some(kept), "{header}");
+        }
+    }
+
+    #[test]
+    fn outlook_blocks_in_other_languages_and_with_a_space_before_the_colon() {
+        let fr = "Confirmé.\n\nDe : Ana <ana@cliente.test>\nEnvoyé : lundi 3 novembre 2026 10:00\nÀ : Admin\nObjet : Rendez-vous\n\nTexte";
+        assert_eq!(strip_quote(fr).as_deref(), Some("Confirmé."));
+        let ca = "Fet.\n\nDe: Ana <ana@cliente.test>\nEnviat: dilluns 3 de novembre\nPer a: Admin\nAssumpte: Cita\n\nText";
+        assert_eq!(strip_quote(ca).as_deref(), Some("Fet."));
+        let it = "Fatto.\n\nDa: Ana <ana@cliente.test>\nInviato: lunedì 3 novembre 2026\nA: Admin\nOggetto: Appuntamento\n\nTesto";
+        assert_eq!(strip_quote(it).as_deref(), Some("Fatto."));
+        let de = "Erledigt.\n\nVon: Ana <ana@cliente.test>\nGesendet: Montag, 3. November 2026\nAn: Admin\nBetreff: Termin\n\nText";
+        assert_eq!(strip_quote(de).as_deref(), Some("Erledigt."));
+    }
+
+    #[test]
+    fn non_breaking_spaces_and_invisible_characters_do_not_hide_a_header() {
+        let nbsp = "Vale.\n\nDe:\u{a0}Ana <ana@cliente.test>\nEnviado:\u{a0}lunes, 3 de noviembre\nPara:\u{a0}Admin\n\nTexto";
+        assert_eq!(strip_quote(nbsp).as_deref(), Some("Vale."));
+        let wrote = "D'accord.\n\nLe 3 nov. 2026, Ana <ana@cliente.test> a écrit\u{a0}:\nTexte";
+        assert_eq!(strip_quote(wrote).as_deref(), Some("D'accord."));
+        let hidden = "Vale.\n\nOn Mon, Nov 3, 2026 Ana <ana@cliente.test> wr\u{200B}ote:\nText";
+        assert_eq!(strip_quote(hidden).as_deref(), Some("Vale."));
+    }
+
+    /// Graph convierte el HTML y quita las `>` del `<blockquote>`: la cita llega sin marcas.
+    #[test]
+    fn a_quote_without_markers_is_cut_at_its_header() {
+        let body = "Hola, gracias.\n\nOn Mon, Nov 3, 2026 at 10:00 AM Ana <ana@cliente.test> wrote:\nTexto original de Ana\nmás texto de Ana\nIBAN ES91 2100 0418 4502 0005 1332";
+        assert_eq!(strip_quote(body).as_deref(), Some("Hola, gracias."));
+    }
+
+    #[test]
+    fn forwards_are_dropped_in_every_style() {
+        for marker in [
+            "Begin forwarded message:",
+            "Mensaje reenviado",
+            "---------- Mensaje reenviado ---------",
+            "Inicio del mensaje reenviado:",
+            "---------- Forwarded message ---------",
+        ] {
+            let body = format!("Mira esto\n{marker}\nDe: Ana\nTexto");
+            assert_eq!(strip_quote(&body), None, "{marker}");
+        }
+    }
+
+    /// Una sola cabecera reconocida con una dirección cerca es el principio de una cita cuyo
+    /// resto no se reconoció: el par se descarta.
+    #[test]
+    fn a_lone_recognised_header_with_an_address_nearby_drops_the_pair() {
+        assert_eq!(
+            strip_quote("Gracias.\n\nDe: Ana Pérez\nana@cliente.test\nTexto del correo original"),
+            None
+        );
+        assert_eq!(
+            strip_quote("Gracias.\nPara: Luis\nLlame a luis@empresa.test"),
+            None
+        );
+        // Sin dirección cerca no hay nada que sospechar de una sola cabecera.
+        assert_eq!(
+            strip_quote("Gracias.\nFecha: el martes\nHasta entonces").as_deref(),
+            Some("Gracias.\nFecha: el martes\nHasta entonces")
+        );
+    }
+
+    #[test]
     fn doubtful_quote_is_dropped() {
         // Respuesta en línea: texto propio intercalado con líneas citadas.
         assert_eq!(strip_quote("Hola\n> q1\nresp1\n> q2\nresp2"), None);
@@ -1073,6 +2124,82 @@ mod tests {
         assert_eq!((c.pairs.len(), c.counts.quote_dropped), (0, 1));
     }
 
+    /// El recibido trae una línea larga idéntica a una respuesta propia (la de su par o la de
+    /// otro): es el historial de la conversación sin marcar, y el par se descarta.
+    #[test]
+    fn a_received_text_repeating_an_own_reply_is_dropped() {
+        let mut ms = candidates(2);
+        ms[1].body = Some(
+            "Hola de nuevo.\nLe confirmamos la entrega para el viernes por la mañana.\nGracias"
+                .into(),
+        );
+        let replies = [
+            "Le confirmamos la entrega para el viernes por la mañana.",
+            "Perfecto, quedamos así.",
+        ];
+        let c = build_pairs(select_candidates(ms), true, |thread, _| {
+            Ok(Some(own(replies[usize::from(thread == "t1")])))
+        });
+        assert_eq!(
+            (c.pairs.len(), c.counts.quote_dropped),
+            (1, 1),
+            "{:?}",
+            c.counts
+        );
+        assert_eq!(c.pairs[0].message_id, "m0");
+        // El texto del historial tampoco sale como parte de otro par.
+        assert!(c.payload.matches("Le confirmamos la entrega").count() == 1);
+    }
+
+    #[test]
+    fn a_received_text_with_a_from_header_and_an_address_is_dropped() {
+        let mut ms = candidates(1);
+        ms[0].body = Some("Le reenvío lo de antes:\nDe: Pepe <pepe@otro.test>\nTexto".into());
+        let c = build_pairs(select_candidates(ms), true, |_, _| {
+            Ok(Some(own("Recibido.")))
+        });
+        assert_eq!((c.pairs.len(), c.counts.quote_dropped), (0, 1));
+    }
+
+    /// M2: una respuesta que no va al remitente (un reenvío interno) no es una respuesta.
+    #[test]
+    fn a_reply_not_addressed_to_the_sender_is_dropped() {
+        let ms = |n| candidates(n);
+        // Reenvío interno: solo va a otra persona de la empresa.
+        let c = build_pairs(select_candidates(ms(1)), true, |_, _| {
+            Ok(Some(own_to(
+                &["jefe@empresa.test"],
+                "Te paso esta consulta.",
+            )))
+        });
+        assert_eq!(
+            (c.pairs.len(), c.counts.not_reply_to_sender),
+            (0, 1),
+            "{:?}",
+            c.counts
+        );
+        // Sin destinatarios conocidos tampoco se sabe a quién iba.
+        let c = super::build_pairs(select_candidates(ms(1)), true, |_, _| {
+            Ok(Some(own("Te paso esta consulta.")))
+        });
+        assert_eq!((c.pairs.len(), c.counts.not_reply_to_sender), (0, 1));
+        // Va al remitente, sin distinguir mayúsculas, solo o con copia y con nombre visible.
+        for to in [
+            vec!["CLIENTE0@Empresa.Test"],
+            vec!["jefe@empresa.test", "cliente0@empresa.test"],
+            vec!["Cliente Cero <cliente0@empresa.test>"],
+        ] {
+            let c = super::build_pairs(select_candidates(ms(1)), true, |_, _| {
+                Ok(Some(own_to(&to, "Recibido, gracias.")))
+            });
+            assert_eq!(
+                (c.pairs.len(), c.counts.not_reply_to_sender),
+                (1, 0),
+                "{to:?}"
+            );
+        }
+    }
+
     // ---- Firma ----
 
     fn sig_replies() -> Vec<String> {
@@ -1084,40 +2211,161 @@ mod tests {
     }
 
     #[test]
-    fn common_signature_is_detected_and_removed() {
+    fn common_signature_is_detected_and_removed_keeping_the_closing() {
         let replies = sig_replies();
-        let sig = detect_signature(&replies).expect("firma");
-        assert_eq!(sig, "Un saludo,\nMaría Ejemplo\nAdministración");
+        let set = detect_signatures(&replies);
+        assert!(!set.is_empty());
+        // La despedida es estilo y se conserva; el nombre y el cargo se van.
         assert_eq!(
-            strip_signature(&replies[0], &sig),
-            "Confirmado para el martes."
+            strip_signature(&replies[0], &set).as_deref(),
+            Some("Confirmado para el martes.\n\nUn saludo,")
         );
-        assert_eq!(strip_signature(&replies[1], &sig), "Le envío la factura.");
+        assert_eq!(
+            strip_signature(&replies[1], &set).as_deref(),
+            Some("Le envío la factura.\n\nUn  saludo,")
+        );
         // Sin esa firma, queda igual.
         assert_eq!(
-            strip_signature(&replies[2], &sig),
-            "Sin firma común.\nGracias"
+            strip_signature(&replies[2], &set).as_deref(),
+            Some("Sin firma común.\nGracias")
         );
-        // El separador estándar también se va.
+        // El separador estándar corta todo lo que sigue.
         assert_eq!(
             strip_signature(
                 "Hola.\n-- \nUn saludo,\nMaría Ejemplo\nAdministración",
-                &sig
-            ),
-            "Hola."
+                &set
+            )
+            .as_deref(),
+            Some("Hola.")
+        );
+        assert_eq!(
+            strip_signature("Hola.\n--\nlo que sea\ny más", &set).as_deref(),
+            Some("Hola.")
         );
     }
 
     #[test]
-    fn unique_signature_is_not_detected() {
+    fn a_signature_with_a_changing_phone_is_still_recognised() {
         let replies = vec![
+            "Confirmado.\n\nUn saludo,\nMaría Ejemplo\nTel. 600 111 222".to_owned(),
+            "Le envío la factura.\n\nUn saludo,\nMaría Ejemplo\nTel. 911 333 444".to_owned(),
+        ];
+        let set = detect_signatures(&replies);
+        assert_eq!(
+            strip_signature(&replies[0], &set).as_deref(),
+            Some("Confirmado.\n\nUn saludo,")
+        );
+        assert_eq!(
+            strip_signature(&replies[1], &set).as_deref(),
+            Some("Le envío la factura.\n\nUn saludo,")
+        );
+        // Y en los pares: ni el nombre ni ningún teléfono salen.
+        let c = build_pairs(select_candidates(candidates(2)), true, |thread, _| {
+            Ok(Some(own(&replies[usize::from(thread == "t1")])))
+        });
+        assert_eq!(c.pairs.len(), 2, "{:?}", c.counts);
+        for leaked in ["María", "Tel.", "600", "911", "TELÉFONO"] {
+            assert!(!c.payload.contains(leaked), "sale {leaked}");
+        }
+    }
+
+    #[test]
+    fn every_shared_signature_group_is_removed_not_just_the_most_frequent() {
+        let replies = vec![
+            "Uno.\n\nUn saludo,\nMaría Ejemplo\nAdministración".to_owned(),
+            "Dos.\n\nUn saludo,\nMaría Ejemplo\nAdministración".to_owned(),
+            "Tres.\n\nUn saludo,\nMaría Ejemplo\nAdministración".to_owned(),
+            "Four.\n\nBest regards,\nJohn Example\nSales Dept".to_owned(),
+            "Five.\n\nBest regards,\nJohn Example\nSales Dept".to_owned(),
+        ];
+        let set = detect_signatures(&replies);
+        let stripped: Vec<String> = replies
+            .iter()
+            .map(|r| strip_signature(r, &set).expect("sin firma"))
+            .collect();
+        assert_eq!(stripped[0], "Uno.\n\nUn saludo,");
+        assert_eq!(stripped[3], "Four.\n\nBest regards,");
+        assert_eq!(stripped[4], "Five.\n\nBest regards,");
+        assert!(stripped
+            .iter()
+            .all(|r| !r.contains("Ejemplo") && !r.contains("Example")));
+    }
+
+    /// Una firma que aparece en un solo par se quita con la heurística de la despedida.
+    #[test]
+    fn a_signature_in_a_single_reply_is_removed_after_the_closing() {
+        let replies = vec![
+            "Confirmado el martes.\n\nUn saludo,\nMaría Ejemplo\nDirectora\nTel. 600 123 456"
+                .to_owned(),
+        ];
+        assert!(detect_signatures(&replies).is_empty());
+        let set = detect_signatures(&replies);
+        assert_eq!(
+            strip_signature(&replies[0], &set).as_deref(),
+            Some("Confirmado el martes.\n\nUn saludo,")
+        );
+        let c = build_pairs(select_candidates(candidates(1)), true, |_, _| {
+            Ok(Some(own(&replies[0])))
+        });
+        assert_eq!(c.pairs.len(), 1, "{:?}", c.counts);
+        assert!(!c.payload.contains("María") && !c.payload.contains("Directora"));
+        assert!(c.payload.contains("Un saludo,"));
+        // Una frase entera tras la despedida es contenido y no se quita.
+        let sentence = "Gracias,\nLe confirmo la cita del martes a las diez.\nNos vemos";
+        assert_eq!(
+            strip_signature(sentence, &SignatureSet::default()).as_deref(),
+            Some(sentence)
+        );
+    }
+
+    /// Si aun así queda una línea final con aspecto de firma, el par no sale.
+    #[test]
+    fn a_reply_that_still_ends_like_a_signature_is_dropped() {
+        for tail in [
+            "María Ejemplo",
+            "Directora comercial",
+            "www.empresa.test",
+            "Tel: 600 123 456",
+            "Empresa Ejemplo S.L.",
+        ] {
+            let reply = format!("Confirmado el martes.\n{tail}");
+            assert_eq!(
+                strip_signature(&reply, &SignatureSet::default()),
+                None,
+                "{tail}"
+            );
+            let c = build_pairs(select_candidates(candidates(1)), true, |_, _| {
+                Ok(Some(own(&reply)))
+            });
+            assert_eq!(
+                (c.pairs.len(), c.counts.signature_dropped),
+                (0, 1),
+                "{tail}"
+            );
+        }
+        // Una última línea normal no es firma.
+        for tail in ["Quedamos así.", "Gracias", "Hecho."] {
+            let reply = format!("Confirmado el martes.\n{tail}");
+            assert_eq!(
+                strip_signature(&reply, &SignatureSet::default()).as_deref(),
+                Some(reply.as_str()),
+                "{tail}"
+            );
+        }
+    }
+
+    #[test]
+    fn signature_detection_needs_two_replies_and_keeps_one_own_line() {
+        assert!(detect_signatures(&[]).is_empty());
+        let unique = [
             "Confirmado.\n\nMaría Ejemplo\nAdministración".to_owned(),
             "Le envío la factura.\nGracias".to_owned(),
             "De acuerdo.".to_owned(),
         ];
-        assert_eq!(detect_signature(&replies), None);
-        assert_eq!(detect_signature(&replies[..1]), None);
-        assert_eq!(detect_signature(&[]), None);
+        assert!(detect_signatures(&unique[..1]).is_empty());
+        // Dos respuestas idénticas de una sola línea: no queda línea propia que conservar.
+        let same = vec!["Gracias por avisar.".to_owned(); 2];
+        assert!(detect_signatures(&same).is_empty());
     }
 
     #[test]
@@ -1181,6 +2429,32 @@ mod tests {
         assert_eq!(mask(plain), plain);
     }
 
+    /// M1: DNI, NIE, CIF y URL se enmascaran.
+    #[test]
+    fn masks_fiscal_ids_and_urls() {
+        let text = "DNI 12345678Z, NIE X1234567L, CIF B12345678 y A8765432J; mire https://tienda.test/pedido?x=1, (www.ejemplo.test) y ftp://archivo.test/a.";
+        let masked = mask(text);
+        assert_eq!(masked.matches("[ID]").count(), 4, "{masked}");
+        assert_eq!(masked.matches("[URL]").count(), 3, "{masked}");
+        for leaked in [
+            "12345678",
+            "1234567L",
+            "B12345678",
+            "tienda",
+            "ejemplo",
+            "archivo",
+        ] {
+            assert!(!masked.contains(leaked), "queda {leaked} en {masked}");
+        }
+        assert!(is_masked(&masked));
+        assert!(!is_masked(text));
+        assert!(!is_masked("DNI 12345678z"));
+        assert!(!is_masked("visite www.ejemplo.test"));
+        // Texto corriente, fechas, importes y archivos no se tocan.
+        let plain = "Pedido FS-2026-014, factura.pdf, 2026-11-05 y 120,50 euros; ref 4455.";
+        assert_eq!(mask(plain), plain);
+    }
+
     #[test]
     fn pair_with_unmaskable_leftovers_is_dropped() {
         // «arroba» escrito en letra: los detectores lo marcan y no hay marcador que lo cubra.
@@ -1239,6 +2513,67 @@ mod tests {
         let ids: Vec<&str> = c.pairs.iter().map(|p| p.pair_id.as_str()).collect();
         assert_eq!(ids, ["p1", "p2", "p3", "p4"]);
         assert!(!c.payload.contains("empresa.test"));
+    }
+
+    /// M1: el alias seudonimiza: el nombre visible y la parte local de la dirección se sustituyen
+    /// donde aparezcan, sin distinguir mayúsculas, también en el saludo.
+    #[test]
+    fn the_alias_replaces_the_senders_name_and_address_part() {
+        let mut m = message(
+            "m1",
+            "Ana Pérez <ana.perez@cliente.test>",
+            "Consulta de ANA",
+            "Hola, soy Ana. Escríbame a ana.perez o llame. Un saludo, ANA PÉREZ.",
+            Some("t1"),
+        );
+        m.date = Some("2026-11-01T10:00:00Z".into());
+        let c = build_pairs(select_candidates(vec![m]), true, |_, _| {
+            Ok(Some(own(
+                "Hola Ana,\nConfirmado, gracias. Ana Pérez ya lo sabe; anabel también.",
+            )))
+        });
+        assert_eq!(c.pairs.len(), 1, "{:?}", c.counts);
+        let payload = c.payload.to_lowercase();
+        for leaked in ["ana ", "ana.", "ana,", "pérez", "perez"] {
+            assert!(!payload.contains(leaked), "queda {leaked} en {payload}");
+        }
+        assert!(c.payload.contains("Hola R1,"), "{}", c.payload);
+        assert!(c.payload.contains("asunto: Consulta de R1"));
+        // Palabras enteras: «anabel» no es «Ana».
+        assert!(c.payload.contains("anabel"));
+        // El estilo se confirma con el saludo ya con alias.
+        assert!(c.pairs[0].reply.starts_with("Hola R1,"));
+    }
+
+    /// Los nombres de la fuente (`sender_name`) se usan cuando el `From` solo trae la dirección,
+    /// como en Gmail y Graph.
+    #[test]
+    fn a_connector_given_sender_name_is_replaced_too() {
+        let dir = tempfile::tempdir().unwrap();
+        let sim = MailSimulator::with_messages(vec![message(
+            "m1",
+            "luis@proveedor.test",
+            "Cita",
+            "Buenas, soy Luis Gómez. ¿Confirma la cita?",
+            Some("t1"),
+        )]);
+        sim.add_sent_message(sent(
+            "s1",
+            "t1",
+            "luis@proveedor.test",
+            "Hola Luis,\nConfirmada.",
+        ))
+        .unwrap();
+        let mut accounts = open(dir.path(), MailSimulator::with_messages(Vec::new()));
+        accounts.insert_test_connector("con-nombre", Box::new(WithExtra(sim)));
+        let c = collect(&accounts, "con-nombre").expect("recogida");
+        assert_eq!(c.pairs.len(), 1, "{:?}", c.counts);
+        assert!(
+            !c.payload.contains("Luis") && !c.payload.contains("Gómez"),
+            "{}",
+            c.payload
+        );
+        assert!(c.payload.contains("Hola R1,"));
     }
 
     #[test]
@@ -1320,12 +2655,13 @@ mod tests {
         Accounts::open(dir, sim, MailEnv::simulator_only()).expect("cuentas")
     }
 
-    fn sent(id: &str, thread: &str, body: &str) -> SentMessage {
+    fn sent(id: &str, thread: &str, to: &str, body: &str) -> SentMessage {
         SentMessage {
             id: id.into(),
             thread_key: thread.into(),
             date: Some("2026-11-01T12:00:00Z".into()),
             body: Some(body.into()),
+            to: vec![to.into()],
         }
     }
 
@@ -1360,13 +2696,10 @@ mod tests {
                 Some("t4"),
             ),
         ]);
-        sim.add_sent_message(sent(
-            "s1",
-            "t1",
-            "Confirmada.\n\nEl lun, 3 nov 2026, Ana <ana@cliente.test> escribió:\n> ¿Confirma la cita del martes?",
+        sim.add_sent_message(sent("s1", "t1", "ana@cliente.test", "Confirmada.\n\nEl lun, 3 nov 2026, Ana <ana@cliente.test> escribió:\n> ¿Confirma la cita del martes?",
         ))
         .unwrap();
-        sim.add_sent_message(sent("s2", "t2", "Se la reenvío hoy."))
+        sim.add_sent_message(sent("s2", "t2", "ana@cliente.test", "Se la reenvío hoy."))
             .unwrap();
         sim
     }
@@ -1428,6 +2761,216 @@ mod tests {
         fn fetch_attachment(&self, m: &str, a: &str) -> Result<Vec<u8>, ConnectorError> {
             self.0.fetch_attachment(m, a)
         }
+    }
+
+    /// Conector que da el cuerpo sin cita y el nombre visible (como Graph).
+    struct WithExtra(MailSimulator);
+
+    impl Connector for WithExtra {
+        fn lookup(&self, key: &str) -> Result<Option<Value>, ConnectorError> {
+            self.0.lookup(key)
+        }
+        fn execute(&self, key: &str, payload: &Value) -> Result<Value, ConnectorError> {
+            self.0.execute(key, payload)
+        }
+    }
+
+    impl MailConnector for WithExtra {
+        fn list_messages(&self, cursor: Option<&str>) -> Result<MessagePage, ConnectorError> {
+            self.0.list_messages(cursor)
+        }
+        fn create_draft(
+            &self,
+            message_id: &str,
+            draft: &NewDraft,
+            key: &str,
+        ) -> Result<String, ConnectorError> {
+            self.0.create_draft(message_id, draft, key)
+        }
+        fn send_draft(&self, draft_id: &str, key: &str) -> Result<SendReceipt, ConnectorError> {
+            self.0.send_draft(draft_id, key)
+        }
+        fn fetch_attachment(&self, m: &str, a: &str) -> Result<Vec<u8>, ConnectorError> {
+            self.0.fetch_attachment(m, a)
+        }
+        fn supports_sent(&self) -> bool {
+            true
+        }
+        fn own_reply_in_thread(
+            &self,
+            thread_key: &str,
+            after_id: &str,
+        ) -> Result<Option<OwnReply>, ConnectorError> {
+            self.0.own_reply_in_thread(thread_key, after_id)
+        }
+        fn received_extra(&self, message_id: &str) -> Result<ReceivedExtra, ConnectorError> {
+            Ok(ReceivedExtra {
+                unique_body: (message_id == "m9")
+                    .then(|| "Pregunta nueva sobre la cita.".to_owned()),
+                sender_name: Some("Luis Gómez".into()),
+            })
+        }
+    }
+
+    /// A1: con el cuerpo sin cita del conector (`uniqueBody`), el historial de terceros no sale
+    /// aunque su cabecera no se reconozca.
+    #[test]
+    fn the_unique_body_replaces_a_body_with_an_unrecognised_quote() {
+        let dir = tempfile::tempdir().unwrap();
+        let history = "Pregunta nueva sobre la cita.\n\nEl historial sigue aquí sin cabecera conocida:\nOtra persona <otra@tercero.test> dijo algo privado sobre el IBAN de la empresa.";
+        let sim = MailSimulator::with_messages(vec![message(
+            "m9",
+            "luis@proveedor.test",
+            "Cita",
+            history,
+            Some("t9"),
+        )]);
+        sim.add_sent_message(sent("s9", "t9", "luis@proveedor.test", "Confirmada."))
+            .unwrap();
+        let mut accounts = open(dir.path(), MailSimulator::with_messages(Vec::new()));
+        accounts.insert_test_connector("unico", Box::new(WithExtra(sim)));
+        let c = collect(&accounts, "unico").expect("recogida");
+        assert_eq!(c.pairs.len(), 1, "{:?}", c.counts);
+        assert!(c.payload.contains("Pregunta nueva sobre la cita."));
+        assert!(!c.payload.contains("tercero") && !c.payload.contains("historial"));
+    }
+
+    /// Un fallo al pedir los datos extra no se confunde con «no hay»: el candidato se cuenta
+    /// como error de lectura.
+    #[test]
+    fn a_failing_extra_lookup_is_counted_and_skips_the_candidate() {
+        let mut pairing = Pairing::new(LearnCounts::default());
+        let m = candidates(1).remove(0);
+        pairing.add(
+            &m,
+            || {
+                Err(ConnectorError {
+                    code: "unavailable".into(),
+                    message: "sin red".into(),
+                })
+            },
+            || panic!("no se busca la respuesta sin los datos del recibido"),
+        );
+        assert_eq!(pairing.counts.fetch_errors, 1);
+        assert_eq!(pairing.first_error.as_deref(), Some("unavailable"));
+    }
+
+    /// El resultado de recoger por pasos es idéntico al de recoger de una vez, y cada paso es
+    /// una página o un candidato.
+    #[test]
+    fn step_by_step_collection_equals_collecting_at_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let ms: Vec<Message> = (0..45)
+            .map(|i| {
+                let mut m = if i % 5 == 4 {
+                    message(
+                        &format!("m{i}"),
+                        "noreply@tienda.test",
+                        "Aviso",
+                        "x",
+                        Some(&format!("t{i}")),
+                    )
+                } else {
+                    message(
+                        &format!("m{i}"),
+                        &format!("cliente{}@empresa.test", i % 7),
+                        &format!("Consulta {i}"),
+                        &format!("Necesito información número {}.", letters(i)),
+                        Some(&format!("t{i}")),
+                    )
+                };
+                m.date = Some("2026-11-01T10:00:00Z".into());
+                m
+            })
+            .collect();
+        let sim = MailSimulator::with_messages(ms);
+        for i in (0..45).filter(|i| i % 3 != 0 && i % 5 != 4) {
+            sim.add_sent_message(sent(
+                &format!("s{i}"),
+                &format!("t{i}"),
+                &format!("cliente{}@empresa.test", i % 7),
+                &format!("Respuesta número {}.", letters(i)),
+            ))
+            .unwrap();
+        }
+        let accounts = open(dir.path(), sim);
+
+        // Una vez: el camino de antes (lista completa, filtro, emparejado).
+        let messages = accounts.recent_limited(SIMULATOR, SCAN_MAX).unwrap();
+        let once = super::build_pairs(select_candidates(messages), true, |thread, id| {
+            accounts.own_reply_in_thread(SIMULATOR, thread, split_id(id).1)
+        });
+        // Por pasos.
+        let mut collector = Collector::new(SIMULATOR);
+        let mut steps = 0;
+        let stepped = loop {
+            steps += 1;
+            if let CollectStep::Done(c) = collector.step(&accounts).unwrap() {
+                break *c;
+            }
+        };
+        assert!(
+            steps > 10,
+            "{steps} pasos: una página o un candidato cada vez"
+        );
+        assert_eq!(stepped.counts, once.counts);
+        assert_eq!(stepped.payload, once.payload);
+        assert_eq!(stepped.input_fp, once.input_fp);
+        assert_eq!(stepped.aliases, once.aliases);
+        assert_eq!(stepped.pairs, once.pairs);
+        assert!(stepped.counts.pairs > 5, "{:?}", stepped.counts);
+        // `collect` hace lo mismo.
+        let all = collect(&accounts, SIMULATOR).unwrap();
+        assert_eq!(all.input_fp, once.input_fp);
+    }
+
+    /// B4: el `Debug` de lo recogido no muestra texto ni direcciones.
+    #[test]
+    fn debug_output_never_shows_content_or_addresses() {
+        let c = build_pairs(select_candidates(candidates(2)), true, |_, _| {
+            Ok(Some(own("Confirmado el martes, gracias.")))
+        });
+        assert_eq!(c.pairs.len(), 2);
+        let selection = select_candidates(candidates(2));
+        let shown = [
+            format!("{c:?}"),
+            format!("{:?}", c.pairs),
+            format!("{:?}", c.aliases),
+            format!("{selection:?}"),
+            format!("{:?}", Collector::new("cuenta")),
+        ]
+        .join("\n");
+        for secret in [
+            "Confirmado el martes",
+            "Necesito información",
+            "cliente0@empresa.test",
+            "empresa.test",
+            "Consulta",
+        ] {
+            assert!(
+                !shown.contains(secret),
+                "el Debug muestra {secret}: {shown}"
+            );
+        }
+        assert!(shown.contains("p1") && shown.contains("R1"));
+        assert!(shown.contains(&c.input_fp));
+    }
+
+    #[test]
+    fn style_lines_are_the_lines_shared_by_two_replies() {
+        let replies = [
+            "Hola R1,\nConfirmado.\nUn saludo,",
+            "Hola R2,\nLe envío la factura.\nUn saludo,",
+            "Buenas,\nOtra cosa.",
+        ];
+        let lines = confirmed_lines(&replies);
+        assert!(style_line_confirmed("Hola,", &lines));
+        assert!(style_line_confirmed("Hola R7", &lines));
+        assert!(style_line_confirmed("un saludo", &lines));
+        // Presente en una sola respuesta, o inventada: no vale.
+        assert!(!style_line_confirmed("Buenas,", &lines));
+        assert!(!style_line_confirmed("Estimado cliente,", &lines));
+        assert!(!style_line_confirmed("", &lines));
     }
 
     #[test]
@@ -1501,6 +3044,7 @@ mod tests {
                 id: "s".into(),
                 date: None,
                 body: (i == 1).then(String::new),
+                to: Vec::new(),
             }))
         });
         assert_eq!((c.counts.empty_text, c.counts.pairs), (2, 0));

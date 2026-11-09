@@ -1189,7 +1189,8 @@ fn learning_overview(shared: State<'_, SharedState>) -> CmdResult<LearningOvervi
 /// Vuelve a recoger los pares de una cuenta y devuelve la vista previa vigente: el texto literal
 /// que saldría, el destino y la huella. Si cambió algo, sustituye a la anterior y el
 /// consentimiento anterior deja de valer. No llama a la IA. La lectura del buzón se hace en un
-/// hilo aparte.
+/// hilo aparte y **por pasos** (una página o un candidato cada vez): el cerrojo de la aplicación se
+/// suelta entre un paso y el siguiente.
 #[tauri::command]
 async fn learning_preview<R: Runtime>(
     shared: State<'_, SharedState>,
@@ -1198,9 +1199,22 @@ async fn learning_preview<R: Runtime>(
 ) -> CmdResult<AccountLearningPreview> {
     let shared = Arc::clone(shared.inner());
     let view = tauri::async_runtime::spawn_blocking(move || {
+        let started = shared
+            .app()?
+            .start_account_learning_preview(&account)
+            .map_err(text)?;
+        while started && !shared.stopping.load(Ordering::SeqCst) {
+            let more = shared
+                .app()?
+                .step_account_learning_preview(&account)
+                .map_err(text)?;
+            if !more {
+                break;
+            }
+        }
         shared
             .app()?
-            .account_learning_preview(&account)
+            .account_learning_preview_view(&account)
             .map_err(text)
     })
     .await
@@ -1268,7 +1282,17 @@ async fn retry_learning<R: Runtime>(
 ) -> CmdResult<LearningStatus> {
     let shared = Arc::clone(shared.inner());
     let status = tauri::async_runtime::spawn_blocking(move || {
-        shared.app()?.retry_learning(&account).map_err(text)
+        shared.app()?.start_retry_learning(&account).map_err(text)?;
+        while !shared.stopping.load(Ordering::SeqCst) {
+            let more = shared
+                .app()?
+                .step_account_learning_preview(&account)
+                .map_err(text)?;
+            if !more {
+                break;
+            }
+        }
+        shared.app()?.learning_status(&account).map_err(text)
     })
     .await
     .map_err(text)??;
@@ -1577,6 +1601,9 @@ fn refresh_provider(shared: &Shared) -> CmdResult<()> {
         app.select_provider(provider);
         app.set_ai_wait(wait);
         app.set_local_fallback(fallback);
+        // «Usar IA local» en aprender es una elección explícita, no un respaldo: no depende del
+        // interruptor `local_fallback`.
+        app.set_local_ai(Some(local_fallback(shared)));
     }
     shared.wake();
     Ok(())
