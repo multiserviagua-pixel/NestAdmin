@@ -121,7 +121,7 @@ En `tests/mail_accounts.rs`, la prueba de respuesta perdida en Graph termina aho
 
 ## Pendiente para completar T13
 
-- Microsoft 365 real: inicio de sesión, lectura y borradores hechos el 2026-11-07 (ver al final); falta un envío aprobado.
+- Microsoft 365 real: inicio de sesión, lectura y borradores hechos el 2026-11-07; envío aprobado hecho el 2026-11-09, una respuesta en Enviados (ver al final). Falta comprobar su recepción en el destino.
 - Gmail: provocar con la cuenta real un corte entre el envío y el recibo y comprobar que la reconciliación por `Message-ID` propio (D41) lo confirma; en particular, que Gmail mantiene esa cabecera al enviar. La parte simulada está hecha.
 - Recorrido con una cuenta real desde la ventana: añadir la cuenta, consultar, aprobar un envío y desconectar. Requiere `correo-oauth.json` con los clientes del editor (D43).
 - Calidad de clasificación y borradores con correo real: sin medir.
@@ -153,3 +153,20 @@ Equipo de desarrollo (Windows 11), `scripts\dev-pruebas.ps1` con datos aparte y 
 | Consulta | 3 mensajes leídos, 3 tareas encoladas con ID `microsoft-1:…`; una segunda consulta no encola nada (0 nuevos). En la misma consulta se leyeron también el simulador y una cuenta de Gmail. |
 | Borradores | Con la IA local (`qwen3:8b`, límite de 180 s) las 3 tareas fallaron primero por `timeout` mientras el equipo compilaba; reintentadas desde «Tareas», terminaron en 21–100 s y quedaron en revisión con borrador. Los 3 remitentes eran automáticos (aviso de seguridad y publicidad) y la IA propuso responder igualmente: dato para la calidad de borradores. |
 | Envío | No ejecutado: responder a esos remitentes escribiría a terceros. Pendiente con un mensaje enviado desde una dirección propia. |
+
+## 2026-11-09 — Envío real por Microsoft desde la ventana
+
+Mismo equipo y carpeta de datos, `main` en `577a4a1`, versión de desarrollo. Mensaje sintético enviado desde una cuenta propia de Gmail a la cuenta de Outlook de prueba, con la aprobación del responsable. Aquí no constan direcciones ni contenido. Ollama cloud (`gemma4:31b`), confirmado en la carpeta de pruebas.
+
+| Paso | Resultado |
+|---|---|
+| Consulta | El mensaje entra en la bandeja y crea una tarea con ID `microsoft-1:…` (4 leídos, 1 nuevo). Las consultas siguientes dan 0 nuevos y no crean otra tarea. |
+| Borrador | Clasificado como `solicitud_factura` en 1,0 s, con el remitente como único destinatario. No afirma haber enviado la factura. |
+| Aprobación | Una aprobación en la ventana. La pantalla muestra «Respuesta enviada» con la cuenta de origen. |
+| Registro local | Una sola clave, `microsoft-1/task-N/send_draft/v1`, con recibo. En el historial, la misma acción con `pending` y `confirmed`. |
+| Salida | El responsable comprueba en Outlook una sola respuesta dentro del hilo, con el mensaje original marcado como respondido. |
+| Recepción | **Sin acreditar.** Unos minutos después, no aparece al buscar en Gmail por remitente, ni en spam según el responsable, y la cuenta de Google en NestAdmin da 0 nuevos. El hilo de Gmail cuenta 2 mensajes pero la API solo devuelve el enviado; no se ha averiguado por qué. |
+
+**Hallazgo:** en Graph, el recibo y el estado `confirmed` acreditan que Microsoft aceptó el envío, no que se haya entregado. La pantalla dice «Respuesta enviada» con ese mismo dato.
+
+No se ha provocado un corte real entre el envío y el recibo con esta cuenta.
