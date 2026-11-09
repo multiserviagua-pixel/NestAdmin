@@ -30,3 +30,16 @@ Comprobado sin problemas: compuerta de reglas cerrada en todos los casos, perfil
 - Pantallas de Informativos, Archivar, Redactar, preferencias y perfil recorridas en la vista previa con datos simulados, no en la ventana de `tauri dev`.
 - Cabeceras de Graph con una cuenta real (la de Microsoft está desconectada) y `last_message_is_ours` en Graph, que devuelve desconocido.
 - Calidad con correo de negocio real (E7).
+
+## 2026-11-09 — Cabeceras de Outlook con la cuenta real
+
+Se volvió a conectar la cuenta personal de Outlook en `tauri dev` (sin pedir inicio de sesión: Microsoft usó la sesión abierta del navegador), se envió un correo sintético desde la cuenta de Gmail de pruebas y se pulsó «Consultar correo».
+
+| Comprobación | Resultado |
+|---|---|
+| Señales del mensaje de Outlook | `signals` = `[]`: comprobadas y sin señales. El listado de Graph devuelve `internetMessageHeaders` con `$select`, así que estos correos ya no quedan como «sin comprobar». |
+| Identificador del hilo | `thread_key` presente (`conversationId`) |
+| Triaje | en revisión, `needs_reply` falso, sin borrador (el correo decía que no requería respuesta) |
+| Desconectar al terminar | sin credenciales de la cuenta |
+
+**Sin cubrir:** un correo real de Outlook con señales (`Auto-Submitted`, `List-*`) para ver los códigos; `last_message_is_ours` en Graph sigue devolviendo desconocido.
