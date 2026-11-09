@@ -4,7 +4,7 @@ Textos en inglés para la consola de Google Cloud («Verification Center» / pan
 
 ## Justificación del ámbito `gmail.modify`
 
-Llamadas que hace hoy el conector (`crates/mail/src/gmail.rs`): `users.getProfile` (dirección del buzón, D48), `users.messages.list` (bandeja de entrada y, como último recurso para reconciliar un envío cortado, búsqueda `rfc822msgid:` en enviados), `users.messages.get`, `users.messages.attachments.get` (adjuntos de los tipos que se importan, D66–D67), `users.threads.get` (para reconciliar un envío cortado, solo las etiquetas y la cabecera `X-NestAdmin-Id`), `users.drafts.create` (respuesta en el hilo), `users.drafts.send` y `users.drafts.get` (D33, D41, D156). Ninguna borra, archiva ni cambia etiquetas.
+Llamadas que hace hoy el conector (`crates/mail/src/gmail.rs`): `users.getProfile` (dirección del buzón, D48), `users.messages.list` (bandeja de entrada y, como último recurso para reconciliar un envío cortado, búsqueda `rfc822msgid:` en enviados), `users.messages.get`, `users.messages.attachments.get` (adjuntos de los tipos que se importan, D66–D67), `users.threads.get` (solo metadatos: identificadores, etiquetas y fechas de los mensajes del hilo y la cabecera `X-NestAdmin-Id`, para no redactar si el último mensaje ya es propio, D162, y para reconciliar un envío cortado), `users.drafts.create` (respuesta en el hilo), `users.drafts.send` y `users.drafts.get` (D33, D41, D156). Ninguna borra, archiva ni cambia etiquetas.
 
 Texto para pegar (≈ 1.400 caracteres; si la consola pide menos, recortar la frase de la IA sin quitar el destino ni el consentimiento):
 

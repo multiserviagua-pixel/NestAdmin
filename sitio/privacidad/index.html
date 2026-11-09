@@ -47,13 +47,16 @@
   <li>los <strong>archivos adjuntos</strong> de los tipos que procesa (texto, PDF e imágenes JPG, PNG, TIFF, BMP y WebP), que descarga para importarlos como documentos y extraer los datos de las facturas. Los adjuntos de otros tipos y las imágenes incrustadas en el cuerpo no se descargan;</li>
   <li>las cabeceras del mensaje, que se examinan en memoria para reconocer correos automáticos (por ejemplo, <code>Auto-Submitted</code> o <code>List-Id</code>). Solo se guarda el resultado de esa comprobación, no las cabeceras;</li>
   <li>la dirección de correo de la cuenta, al iniciar sesión, para indicar de qué buzón viene cada mensaje;</li>
-  <li>en Gmail, las etiquetas y una cabecera propia de NestAdmin de los mensajes del hilo de una respuesta, solo para confirmar si un envío interrumpido llegó a salir y no enviarlo dos veces;</li>
+  <li>del hilo de cada mensaje, solo metadatos y nunca el texto de los mensajes anteriores: en Gmail, los identificadores, las etiquetas y las fechas de sus mensajes y una cabecera propia de NestAdmin, para saber si el último mensaje del hilo es tuyo (y entonces no preparar respuesta) y para confirmar si un envío interrumpido llegó a salir y no enviarlo dos veces; en Microsoft 365 se lee el identificador de la conversación, que por ahora no se usa;</li>
   <li>los borradores de respuesta que la propia aplicación crea, y su estado de envío.</li>
 </ul>
 <p>NestAdmin no borra, archiva ni reetiqueta mensajes.</p>
 
 <h3>Documentos que importas o que llegan como adjuntos</h3>
 <p>Los archivos de texto, PDF (incluidos los escaneados) e imágenes, como fotos de facturas, que añades a la aplicación o que llegan como adjuntos, y los datos que se extraen de ellos, como proveedor, fechas, importes e impuestos.</p>
+
+<h3>Perfil del negocio y preferencias por remitente</h3>
+<p>Si lo rellenas, el <strong>perfil del negocio</strong>: el nombre que quieres mostrar, el horario, el tono, la firma y las políticas que escribes tú (hasta 2.000 caracteres), para que los borradores respondan con tus datos. Al guardarlo, NestAdmin bloquea lo que parezca un IBAN, una tarjeta o una clave y te avisa si incluye teléfonos o correos. Escribe solo lo que podría leer cualquier remitente. También las <strong>preferencias por remitente</strong> que fijas tú con un clic («Siempre a Pendientes» o «Siempre a Informativos», por dirección o por dominio); NestAdmin no las deduce por su cuenta.</p>
 
 <h3>Credenciales</h3>
 <p>Los tokens de acceso y renovación que Google o Microsoft entregan al iniciar sesión con OAuth 2.0 y la clave de API del proveedor de IA que elijas (por defecto, Ollama cloud). NestAdmin nunca ve ni guarda la contraseña de tu cuenta de correo: la escribes en la página del proveedor.</p>
@@ -79,8 +82,10 @@
 <p>NestAdmin usa estos datos solo para darte las funciones que ves en la aplicación:</p>
 <ul>
   <li>mostrar tus mensajes y documentos y clasificarlos;</li>
+  <li>reconocer en tu equipo, sin IA, los correos automáticos (por ejemplo, los que llegan de una dirección «no-reply») y llevarlos a <strong>Informativos</strong>, donde siguen visibles y no se borran; los avisos de entrega fallida quedan en revisión;</li>
+  <li>aplicar las preferencias por remitente que hayas fijado;</li>
   <li>importar como documentos los adjuntos y extraer y comprobar los datos de las facturas;</li>
-  <li>preparar borradores de respuesta para que los revises;</li>
+  <li>preparar borradores de respuesta para que los revises, salvo cuando, en Gmail, el último mensaje del hilo ya es tuyo (entonces el correo va a Informativos, sin IA) o cuando la IA indica que probablemente no requiere respuesta (entonces sigue en revisión, con un aviso);</li>
   <li>enviar un borrador cuando lo apruebas, o cuando lo cubre una regla concreta que tú has creado y activado;</li>
   <li>proponerte reglas a partir de las decisiones que ya has tomado, que solo se activan si tú lo haces;</li>
   <li>mostrarte el historial de decisiones y acciones.</li>
@@ -105,7 +110,7 @@
 <h2 id="almacenamiento">6. Dónde se guardan</h2>
 <p>Todo se guarda en tu equipo, no en servidores del editor:</p>
 <ul>
-  <li><strong>Datos de trabajo</strong> (tareas, mensajes y documentos procesados, datos extraídos, borradores, reglas e historial): en una base de datos local dentro de la carpeta <code>%LOCALAPPDATA%\NestAdmin</code> de tu usuario de Windows, junto con un archivo por cuenta de correo que anota qué borradores creó la aplicación y si ya se enviaron, para no enviar nada dos veces, y la lista de cuentas conectadas con el nombre que les das y la dirección de cada buzón (para indicar de dónde viene cada correo). Los documentos que importas se copian a esa carpeta con su nombre, la ruta de la que los importaste y una huella SHA-256, para que puedas abrir el original y comprobar los datos.</li>
+  <li><strong>Datos de trabajo</strong> (tareas, mensajes y documentos procesados, datos extraídos, borradores, reglas, preferencias por remitente, perfil del negocio e historial): en una base de datos local dentro de la carpeta <code>%LOCALAPPDATA%\NestAdmin</code> de tu usuario de Windows, junto con un archivo por cuenta de correo que anota qué borradores creó la aplicación y si ya se enviaron, para no enviar nada dos veces, y la lista de cuentas conectadas con el nombre que les das y la dirección de cada buzón (para indicar de dónde viene cada correo). Los documentos que importas se copian a esa carpeta con su nombre, la ruta de la que los importaste y una huella SHA-256, para que puedas abrir el original y comprobar los datos.</li>
   <li><strong>Credenciales</strong> (tokens de Google y Microsoft, claves de los proveedores de IA): en el Administrador de credenciales de Windows. No se escriben en la base de datos ni en los registros. Las credenciales largas (como los tokens de Microsoft) se reparten en varias entradas del Administrador de credenciales, porque cada entrada admite una longitud limitada; siguen allí y nunca en archivos.</li>
 </ul>
 <p>Los mensajes originales siguen en tu cuenta de Gmail o Microsoft 365; NestAdmin no los mueve ni los elimina.</p>
@@ -119,7 +124,9 @@
 </ul>
 <h3>Qué texto se envía al proveedor de IA externo</h3>
 <ul>
-  <li><strong>Se envía</strong> únicamente lo que cada tarea necesita: las instrucciones y el esquema de la respuesta; el texto de un documento o adjunto que NestAdmin ya ha extraído en tu equipo; y, de un correo, su asunto, remitente, destinatarios, fecha y cuerpo en texto.</li>
+  <li><strong>Se envía</strong> únicamente lo que cada tarea necesita: las instrucciones y el esquema de la respuesta; el texto de un documento o adjunto que NestAdmin ya ha extraído en tu equipo; y, de un correo, su asunto, remitente, destinatarios, fecha y cuerpo en texto. Cada correo que llega a la IA se procesa en dos pasos: primero se clasifica y se decide si requiere respuesta, y solo si la requiere se redacta el borrador. Si pides «Redactar respuesta» para un correo, solo se hace el segundo paso. No se envía ningún mensaje anterior del hilo.</li>
+  <li><strong>Correos que no se envían.</strong> No se envían al proveedor de IA los correos que NestAdmin cierra en tu equipo como informativos (por ejemplo, los de una dirección «no-reply» o con la cabecera <code>Auto-Submitted</code>), los avisos de entrega fallida, los de remitentes que fijaste como «Siempre a Informativos» y, en Gmail, aquellos cuyo último mensaje del hilo es tuyo. Las cabeceras de listas de correo por sí solas no lo impiden, y con «Siempre a Pendientes» el correo sí se envía. Los adjuntos de todos ellos se importan y procesan como los demás documentos.</li>
+  <li><strong>Perfil del negocio.</strong> Solo sale en el paso que redacta la respuesta, nunca al clasificar ni al extraer datos, y solo si has dado un consentimiento aparte después de ver una vista previa literal. Ese consentimiento va ligado al proveedor, al modelo, al servidor y al contenido del perfil: si cambia cualquiera de ellos, el perfil deja de salir hasta que vuelvas a consentir. Puedes retirarlo cuando quieras, y sin él los borradores se preparan sin perfil. Con la IA local, el perfil no sale de tu equipo. Los datos de empresa que NestAdmin ya tenga solo sirven para rellenar el formulario y no se envían, y las preferencias por remitente tampoco.</li>
   <li><strong>Primera lectura.</strong> Al conectar una cuenta, y después de mostrarte un resumen, NestAdmin lee una sola vez hasta 100 correos de más de 7 días para aprender de tus facturas. Descarga sus adjuntos y envía al proveedor solo el texto de los documentos que, según una comprobación hecha en tu equipo, parecen una factura. Los correos de esa lectura no se envían ni se responden.</li>
   <li><strong>Sugerencias de reglas.</strong> Si pides afinar las sugerencias con el botón, o activas el afinado automático (desactivado por defecto), se envía un resumen de tus decisiones: recuentos, la categoría, el nombre del proveedor tal como figura en sus facturas o el dominio del remitente, y el importe menor y mayor. Con pocas facturas, esos importes son los de facturas concretas, y el nombre de un autónomo identifica a una persona. Antes de cada envío con el botón, y antes de activar el automático, ves una vista previa literal de lo que saldría. Los nombres que parecen contener un correo, un NIF, un IBAN, un teléfono o una dirección no se envían.</li>
   <li><strong>No se envía</strong> el archivo original del documento, imágenes, su huella, la base de datos, los tokens ni las credenciales de correo, otras claves, las direcciones de tus buzones (salvo que aparezcan en el propio correo), los nombres de tus cuentas, las rutas de tu equipo ni el historial. La lectura de PDF y el OCR se hacen siempre en tu equipo. Cada clave viaja solo a su proveedor.</li>
@@ -134,6 +141,7 @@
   <li>Las credenciales se guardan en el almacén protegido de Windows y no aparecen en registros.</li>
   <li>Las comunicaciones con Google, Microsoft y el proveedor de IA externo usan HTTPS. La aplicación rechaza enviar tu token a un servidor distinto del proveedor y no usa proxies implícitos.</li>
   <li>La aplicación no abre puertos de red para recibir conexiones; durante el inicio de sesión escucha un momento solo en el propio equipo (<code>127.0.0.1</code>) para recibir la respuesta del proveedor.</li>
+  <li>Las instrucciones piden a la IA que trate el contenido de los correos y documentos como datos, no como órdenes. Como eso no es infalible, un borrador que incluya enlaces, direcciones de correo, IBAN o teléfonos que no figuren en tu perfil se marca y ninguna regla puede enviarlo: necesita tu revisión.</li>
   <li>La protección de los datos guardados depende también de tu equipo. Te recomendamos proteger tu usuario de Windows con contraseña y cifrar el disco (por ejemplo, con BitLocker).</li>
 </ul>
 

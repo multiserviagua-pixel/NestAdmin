@@ -47,13 +47,16 @@
   <li>the <strong>file attachments</strong> of the types it processes (text, PDF, and JPG, PNG, TIFF, BMP and WebP images), which it downloads to import them as documents and extract invoice data. Attachments of other types and images embedded in the body are not downloaded;</li>
   <li>the message headers, which are examined in memory to recognize automated email (for example, <code>Auto-Submitted</code> or <code>List-Id</code>). Only the result of that check is stored, not the headers;</li>
   <li>the account's email address, at sign-in, to show which mailbox each message comes from;</li>
-  <li>in Gmail, the labels and a NestAdmin header of the messages in a reply's thread, only to confirm whether an interrupted send actually went out, so nothing is sent twice;</li>
+  <li>from each message's thread, metadata only and never the text of earlier messages: in Gmail, the identifiers, labels and dates of its messages and a NestAdmin header, to know whether the last message in the thread is yours (in which case no reply is prepared) and to confirm whether an interrupted send actually went out, so nothing is sent twice; in Microsoft 365, the conversation identifier is read but not used for now;</li>
   <li>the reply drafts that the app itself creates, and their sending status.</li>
 </ul>
 <p>NestAdmin does not delete, archive or relabel messages.</p>
 
 <h3>Documents you import or that arrive as attachments</h3>
 <p>The text, PDF (including scanned ones) and image files, such as photos of invoices, that you add to the app or that arrive as attachments, and the data extracted from them, such as supplier, dates, amounts and taxes.</p>
+
+<h3>Business profile and sender preferences</h3>
+<p>If you fill it in, the <strong>business profile</strong>: the display name, hours, tone, signature and policies that you write yourself (up to 2,000 characters), so drafts can answer with your details. When you save it, NestAdmin blocks anything that looks like an IBAN, a card number or a key, and warns you if it contains phone numbers or email addresses. Write only what any sender could read. Also the <strong>sender preferences</strong> you set yourself with a click («Always to Pending» or «Always to Informational», by address or by domain); NestAdmin does not infer them on its own.</p>
 
 <h3>Credentials</h3>
 <p>The access and refresh tokens that Google or Microsoft issue when you sign in with OAuth 2.0 and the API key of the AI provider you choose (by default, Ollama cloud). NestAdmin never sees or stores your email account password: you type it on the provider's own page.</p>
@@ -79,8 +82,10 @@
 <p>NestAdmin uses this data only to provide the features you see in the app:</p>
 <ul>
   <li>showing and classifying your messages and documents;</li>
+  <li>recognizing automated email on your computer, without AI (for example, messages from a «no-reply» address), and moving it to <strong>Informational</strong>, where it stays visible and is not deleted; delivery failure notices stay in review;</li>
+  <li>applying the sender preferences you have set;</li>
   <li>importing attachments as documents and extracting and checking invoice data;</li>
-  <li>preparing reply drafts for you to review;</li>
+  <li>preparing reply drafts for you to review, except when, in Gmail, the last message in the thread is already yours (the email then goes to Informational, without AI) or when the AI indicates that it probably needs no reply (it then stays in review, with a notice);</li>
   <li>sending a draft when you approve it, or when a specific rule you created and enabled covers it;</li>
   <li>suggesting rules based on decisions you have already made, which only take effect if you enable them;</li>
   <li>showing you the history of decisions and actions.</li>
@@ -105,7 +110,7 @@
 <h2 id="storage">6. Where data is stored</h2>
 <p>Everything is stored on your computer, not on the publisher's servers:</p>
 <ul>
-  <li><strong>Working data</strong> (tasks, processed messages and documents, extracted data, drafts, rules and history): in a local database inside the <code>%LOCALAPPDATA%\NestAdmin</code> folder of your Windows user, together with one file per email account that records which drafts the app created and whether they were sent, so nothing is sent twice, and the list of connected accounts with the name you give them and each mailbox address (to show where each message came from). Documents you import are copied to that folder with their name, the path you imported them from and a SHA-256 fingerprint, so you can open the original and check the data.</li>
+  <li><strong>Working data</strong> (tasks, processed messages and documents, extracted data, drafts, rules, sender preferences, business profile and history): in a local database inside the <code>%LOCALAPPDATA%\NestAdmin</code> folder of your Windows user, together with one file per email account that records which drafts the app created and whether they were sent, so nothing is sent twice, and the list of connected accounts with the name you give them and each mailbox address (to show where each message came from). Documents you import are copied to that folder with their name, the path you imported them from and a SHA-256 fingerprint, so you can open the original and check the data.</li>
   <li><strong>Credentials</strong> (Google and Microsoft tokens, AI provider keys): in Windows Credential Manager. They are never written to the database or to logs. Long credentials (such as Microsoft tokens) are split across several Credential Manager entries, because each entry accepts a limited length; they remain there and never in files.</li>
 </ul>
 <p>The original messages remain in your Gmail or Microsoft 365 account; NestAdmin does not move or delete them.</p>
@@ -119,7 +124,9 @@
 </ul>
 <h3>What text is sent to the external AI provider</h3>
 <ul>
-  <li><strong>Sent</strong>: only what each task needs: the instructions and the response schema; the text of a document or attachment that NestAdmin has already extracted on your computer; and, for an email, its subject, sender, recipients, date and body as text.</li>
+  <li><strong>Sent</strong>: only what each task needs: the instructions and the response schema; the text of a document or attachment that NestAdmin has already extracted on your computer; and, for an email, its subject, sender, recipients, date and body as text. Each email that reaches the AI is processed in two steps: first it is classified and the AI decides whether it needs a reply, and only if it does is the draft written. If you ask to «Write reply» for an email, only the second step runs. No earlier message in the thread is sent.</li>
+  <li><strong>Email that is not sent.</strong> The following are not sent to the AI provider: emails that NestAdmin closes on your computer as informational (for example, those from a «no-reply» address or with the <code>Auto-Submitted</code> header), delivery failure notices, those from senders you set to «Always to Informational» and, in Gmail, those whose last thread message is yours. Mailing-list headers alone do not prevent sending, and with «Always to Pending» the email is sent. Attachments of all of them are imported and processed like any other document.</li>
+  <li><strong>Business profile.</strong> It is sent only in the step that writes the reply, never when classifying or extracting data, and only if you have given a separate consent after seeing a literal preview. That consent is tied to the provider, the model, the server and the profile's content: if any of them changes, the profile stops being sent until you consent again. You can withdraw it at any time, and without it drafts are prepared without the profile. With local AI, the profile does not leave your computer. Company data NestAdmin already has is used only to pre-fill the form and is not sent, and neither are sender preferences.</li>
   <li><strong>Initial read.</strong> When you connect an account, and after showing you a summary, NestAdmin reads once up to 100 emails older than 7 days to learn from your invoices. It downloads their attachments and sends the provider only the text of documents that, according to a check made on your computer, look like an invoice. The emails in that read are not sent or answered.</li>
   <li><strong>Rule suggestions.</strong> If you ask to refine suggestions with the button, or enable automatic refinement (off by default), a summary of your decisions is sent: counts, the category, the supplier name as written on its invoices or the sender's domain, and the lowest and highest amount. With few invoices, those amounts belong to specific invoices, and a sole trader's name identifies a person. Before each send with the button, and before enabling automatic refinement, you see a literal preview of what would be sent. Names that appear to contain an email address, a tax ID, an IBAN, a phone number or a postal address are not sent.</li>
   <li><strong>Not sent</strong>: the original document file, images, its fingerprint, the database, tokens or email credentials, other keys, your mailbox addresses (unless they appear in the email itself), your account names, the paths on your computer or the history. PDF reading and OCR are always done on your computer. Each key goes only to its own provider.</li>
@@ -134,6 +141,7 @@
   <li>Credentials are kept in the protected Windows store and never appear in logs.</li>
   <li>Communications with Google, Microsoft and the external AI provider use HTTPS. The app refuses to send your token to any server other than the provider's and uses no implicit proxies.</li>
   <li>The app opens no network ports for incoming connections; during sign-in it briefly listens only on the computer itself (<code>127.0.0.1</code>) to receive the provider's response.</li>
+  <li>The instructions ask the AI to treat the content of emails and documents as data, not as commands. Because that is not foolproof, a draft that includes links, email addresses, IBANs or phone numbers not listed in your profile is flagged and no rule can send it: it needs your review.</li>
   <li>Protection of stored data also depends on your computer. We recommend protecting your Windows user with a password and encrypting the disk (for example, with BitLocker).</li>
 </ul>
 
