@@ -123,7 +123,7 @@ En `tests/mail_accounts.rs`, la prueba de respuesta perdida en Graph termina aho
 
 - Microsoft 365 real: inicio de sesión, lectura y borradores hechos el 2026-11-07; envío aprobado hecho el 2026-11-09, recibido una vez en el destino, en su carpeta de spam (ver al final).
 - Gmail: corte real provocado el 2026-11-09 desde la terminal. D41 no funcionaba, porque Gmail sustituye el `Message-ID` al enviar; corregido con D156 y comprobado con otro corte real (ver al final). Falta provocarlo desde la ventana de la aplicación.
-- Recorrido con una cuenta real desde la ventana: añadir la cuenta, consultar, aprobar un envío y desconectar. Requiere `correo-oauth.json` con los clientes del editor (D43).
+- Recorrido con una cuenta real desde la ventana (Microsoft): hecho el 2026-11-09 en la versión de desarrollo, con los límites que se anotan al final. Sin hacer con Gmail ni en una instalación.
 - Calidad de clasificación y borradores con correo real: sin medir.
 
 ## 2026-11-06 — Adjuntos (D66)
@@ -205,3 +205,23 @@ Mismo procedimiento, con otro mensaje sintético enviado a sí misma y con el ca
 Las pruebas simuladas pasaban antes con un comportamiento que Gmail no tiene: los simuladores de `crates/mail` y `crates/app` conservaban la cabecera. Ahora cambian el ID y el `Message-ID` al enviar, como se ha observado en Gmail real, y las pruebas de reproceso (D50) pasan por el hilo.
 
 **Sin cubrir:** el corte es un `process::exit` justo después de la llamada a `drafts.send` en la herramienta de terminal, no un corte durante la petición ni en la ventana de la aplicación. El registro del primer corte, anterior a D156, sigue sin recibo; es el límite que anota D156.
+
+## 2026-11-09 — Recorrido con una cuenta real de Microsoft desde la ventana
+
+Versión de desarrollo (`scripts/dev-pruebas.ps1`), cuenta personal de Outlook, IA en Ollama cloud, sin reglas. Los botones se pulsaron por UI Automation. El correo de la prueba es sintético y la respuesta fue a una dirección propia del usuario.
+
+| Paso | Resultado |
+|---|---|
+| Desconectar | Aviso de cuenta desconectada, sin pedir confirmación. Se borran las 4 entradas de credenciales de la cuenta y su registro local; la cuenta de Google no cambia. Las tareas siguen en la base de datos. |
+| Volver a conectar | La cuenta queda conectada con la dirección correcta y 4 entradas de credenciales. El usuario no vio ninguna ventana del navegador ni introdujo datos. |
+| Consultar | 5 leídos y 1 nuevo: solo el correo sintético. El identificador `microsoft-1` se reutiliza y los 4 mensajes anteriores no se duplican. Ningún `message_id` repetido entre todas las tareas. |
+| Revisar y aprobar | `Para` correcto. La tarea se completa en 1 intento, el historial registra `pending` y `confirmed`, y el hilo del remitente tiene el original y una respuesta. |
+| Desconectar otra vez | Sin credenciales de la cuenta ni registro local. Las tareas siguen en la base de datos: 3 en revisión y 2 completadas. |
+
+**Hallazgos sin corregir:**
+
+- La petición de autorización de Microsoft no lleva `prompt` (`crates/mail/src/oauth.rs`), y el inicio de sesión terminó sin intervención del usuario. Lo más probable es que Microsoft aprovechara una sesión abierta en el navegador, aunque no se observó la petición. Si esa sesión fuera de otra cuenta, se conectaría esa otra.
+- «Desconectar» actúa con un clic. El guion de `sitio/verificacion-google.md` dice «click Disconnect on the account and confirm».
+- El borrador de esta prueba anuncia que informa del horario pero no lo da: no inventa el dato, aunque tampoco sirve como respuesta sin editarla.
+
+**Sin cubrir:** aprobar una tarea en revisión de una cuenta ya desconectada, porque las que quedan son de correo real; dónde se archivó la respuesta en el destino, porque el conector usado para comprobarlo solo da el recuento del hilo; el mismo recorrido con Gmail y en una instalación.
