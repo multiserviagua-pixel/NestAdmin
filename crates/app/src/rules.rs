@@ -1354,8 +1354,9 @@ pub struct SimTask {
 /// Id con el que la regla nueva aparece en `automated_after_by`.
 pub const MERGED_RULE: &str = MERGED;
 
-/// Qué cambiaría en las tareas guardadas, evaluadas con `evaluate_result` como en producción,
-/// si la regla nueva estuviera activa y las originales archivadas.
+/// Qué cambiaría en las tareas guardadas, evaluadas con `evaluate_result_in_run` (una respuesta con
+/// un paso omitido nunca se automatiza, D150, igual que en `finish_task` y en `simulate_rule`), si
+/// la regla nueva estuviera activa y las originales archivadas.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct MergeSimulation {
     pub considered: usize,
@@ -1579,7 +1580,7 @@ fn sim_task(
 }
 
 /// Propone la regla resultante de unificar `ids` (reglas `Equal` o `Contains` del mismo tipo)
-/// y simula con `evaluate_result` qué cambiaría en `tasks`. Es de solo lectura. Si las
+/// y simula con `evaluate_result_in_run` qué cambiaría en `tasks`. Es de solo lectura. Si las
 /// condiciones difieren, `chosen` debe ser la clave de una de las opciones (`merge_options`);
 /// sin elección es un error claro (`ChoiceRequired`, con las opciones). Rechaza mezclar tipos,
 /// proveedores solo parecidos y reglas archivadas.
@@ -1589,6 +1590,19 @@ pub fn merge_plan(
     ids: &[String],
     chosen: Option<&str>,
     tasks: &[Task],
+) -> Result<MergePlan, MergeError> {
+    merge_plan_in_runs(rules, marks, ids, chosen, tasks, &HashSet::new())
+}
+
+/// Como `merge_plan`, sabiendo qué tareas tienen un paso anterior omitido (`step_waived`, D150):
+/// su respuesta siempre va a revisión, así que no cuenta como automatizable ni antes ni después.
+pub fn merge_plan_in_runs(
+    rules: &[Rule],
+    marks: &Marks,
+    ids: &[String],
+    chosen: Option<&str>,
+    tasks: &[Task],
+    step_waived: &HashSet<i64>,
 ) -> Result<MergePlan, MergeError> {
     let members = merge_members(rules, marks, ids)?;
     let options = options_of(&members);
@@ -1651,13 +1665,12 @@ pub fn merge_plan(
     let of_kind: Vec<&Task> = tasks.iter().filter(|t| t.kind == task_kind).collect();
     let simulate = |future_marks: &HashSet<String>| {
         simulate_merge(
-            &current,
-            &future,
-            &marks.any_sender,
-            future_marks,
+            (&current, &marks.any_sender),
+            (&future, future_marks),
             &originals,
             &action_kind,
             &of_kind,
+            step_waived,
         )
     };
     let simulation = simulate(&future_marks);
@@ -1684,17 +1697,17 @@ pub fn merge_plan(
     })
 }
 
-/// Evalúa las tareas con las reglas de hoy y con las de después, con `evaluate_result` como
-/// en producción. Cada grupo lleva la regla que automatiza, para que el texto no deduzca
+/// Evalúa las tareas con las reglas de hoy y con las de después, con `evaluate_result_in_run`:
+/// una tarea de `step_waived` (con un paso anterior omitido) nunca se automatiza, como en
+/// `finish_task` (D150). Cada grupo lleva la regla que automatiza, para que el texto no deduzca
 /// tramos que los datos no sostienen.
 fn simulate_merge(
-    current: &[Rule],
-    future: &[Rule],
-    current_marks: &HashSet<String>,
-    future_marks: &HashSet<String>,
+    (current, current_marks): (&[Rule], &HashSet<String>),
+    (future, future_marks): (&[Rule], &HashSet<String>),
     originals: &HashSet<&str>,
     action_kind: &str,
     tasks: &[&Task],
+    step_waived: &HashSet<i64>,
 ) -> MergeSimulation {
     let invoice = action_kind == REGISTER_INVOICE;
     let mut simulation = MergeSimulation {
@@ -1714,8 +1727,9 @@ fn simulate_merge(
             continue;
         };
         simulation.considered += 1;
-        let before = evaluate_result(current, current_marks, action_kind, result);
-        let after = evaluate_result(future, future_marks, action_kind, result);
+        let waived = step_waived.contains(&task.id);
+        let before = evaluate_result_in_run(current, current_marks, action_kind, result, waived);
+        let after = evaluate_result_in_run(future, future_marks, action_kind, result, waived);
         let covered = before
             .explanation
             .candidates

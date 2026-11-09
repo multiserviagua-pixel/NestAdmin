@@ -10,8 +10,8 @@ use serde_json::{json, Value};
 
 use crate::rules::{
     analyze, evaluate_result_in_run, evaluate_with, merge_before, merge_options, merge_plan,
-    rules_fingerprint, Evaluation, FindingKind, Marks, MergeError, MergeOption, MergePlan,
-    PlanRule, ReasonCode, RuleDecision, RuleFinding,
+    merge_plan_in_runs, rules_fingerprint, Evaluation, FindingKind, Marks, MergeError, MergeOption,
+    MergePlan, PlanRule, ReasonCode, RuleDecision, RuleFinding,
 };
 use crate::{
     action_kind, check_rule, check_rule_id, App, AppError, AppResult, EMAIL, INVOICE,
@@ -771,7 +771,15 @@ impl App {
             // Lo que solo se leyó (D133) no es una tarea que la persona vea: no entra en el plan.
             .filter(|t| !crate::task_is_initial_read(t))
             .collect();
-        let plan = match merge_plan(&rules, &marks, ids, chosen, &tasks) {
+        // Una respuesta con un paso omitido siempre se revisa (D150). Ante un fallo al consultarlo
+        // se supone omitida (cierra en falso), como en `finish_task`.
+        let step_waived: HashSet<i64> = tasks
+            .iter()
+            .filter(|t| t.kind == EMAIL)
+            .filter(|t| self.store.has_waived_prerequisite(t.id).unwrap_or(true))
+            .map(|t| t.id)
+            .collect();
+        let plan = match merge_plan_in_runs(&rules, &marks, ids, chosen, &tasks, &step_waived) {
             Ok(plan) => Some(plan),
             Err(MergeError::ChoiceRequired(_)) => None,
             Err(e) => return Err(invalid(e)),

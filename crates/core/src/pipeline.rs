@@ -305,6 +305,28 @@ impl Store {
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
+    /// Pasos cuyo adjunto se enlazó **después** de omitirlos (D150): los que tienen el evento
+    /// `pipeline_step` / `linked_after_waive` en el historial, que `enqueue_for_step` escribe en la
+    /// misma transacción que el vínculo. Un paso que ya tenía tarea al omitirse (fallida o
+    /// cancelada) no figura aquí.
+    pub fn linked_after_waive_steps(&self) -> Result<std::collections::HashSet<i64>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT detail FROM audit_log WHERE action = 'pipeline_step' AND status = 'linked_after_waive'",
+        )?;
+        let rows = stmt.query_map([], |r| r.get::<_, Option<String>>(0))?;
+        let mut out = std::collections::HashSet::new();
+        for detail in rows {
+            let Some(detail) = detail? else { continue };
+            if let Some(id) = serde_json::from_str::<serde_json::Value>(&detail)
+                .ok()
+                .and_then(|v| v.get("step_id").and_then(serde_json::Value::as_i64))
+            {
+                out.insert(id);
+            }
+        }
+        Ok(out)
+    }
+
     /// Anota el código corto del último fallo de un paso sin tarea (nunca contenido). Un paso
     /// que ya tiene tarea no cambia.
     pub fn record_step_error(&mut self, step_id: i64, code: &str) -> Result<()> {

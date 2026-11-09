@@ -1826,16 +1826,20 @@ h2 + .section {
 /* ---- Tareas: lista y tablero (D147) ---- */
 
 /* Acciones siempre visibles: la última columna se queda fija a la derecha dentro de la tabla. */
-.tasks-grid .grid th:last-child,
-.tasks-grid .grid td:last-child {
-  position: sticky;
-  right: 0;
-  background: var(--surface);
-  box-shadow: inset 1px 0 0 var(--line);
+/* Cuatro columnas que caben desde 860 px sin desplazamiento: el motivo se ve entero y las acciones no lo tapan. */
+.tasks-grid .cell-title {
+  min-width: 150px;
 }
 
-.tasks-grid .grid tbody tr:hover td:last-child {
-  background: var(--hover);
+.tasks-grid .cell-meta,
+.tasks-grid .cell-context {
+  margin: var(--s1) 0 0;
+}
+
+.tasks-grid .grid td:last-child,
+.tasks-grid .grid th:last-child {
+  width: 1%;
+  white-space: nowrap;
 }
 
 .tasks-grid .grid th,
@@ -1845,9 +1849,14 @@ h2 + .section {
 
 .tasks-grid .detail-cell {
   min-width: 160px;
+  max-width: none;
+  overflow-wrap: anywhere;
 }
 
+/* Con «Continuar sin ese paso» y «Cancelar respuesta» las acciones se apilan, sin ensanchar la tabla. */
 .tasks-grid .row-actions {
+  flex-direction: column;
+  align-items: flex-end;
   flex-wrap: nowrap;
 }
 
@@ -2029,4 +2038,187 @@ h2 + .section {
   .tasks-page.is-board {
     padding: var(--s4);
   }
+}
+
+/* ---- Plantillas de pipeline: indicador, pasos de una ejecución y editor (D149-D151) ---- */
+
+.task-card-context,
+.cell-context {
+  color: var(--muted);
+  font-size: var(--fs-small);
+  line-height: 18px;
+}
+
+.cell-context {
+  display: block;
+  margin: 0 0 var(--s2);
+}
+
+.task-card .row-actions button {
+  white-space: normal;
+}
+
+/* «Ver pasos»: botón con aspecto de enlace tras la línea de contexto. */
+.steps-toggle {
+  text-align: left;
+  min-height: 24px;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: var(--brand);
+  font: inherit;
+  text-decoration: underline;
+}
+
+/* Fila de «Ver pasos» bajo la tarea, a todo el ancho de la tabla. */
+.run-row > td {
+  background: var(--surface-2);
+  padding: var(--s3) var(--s4);
+}
+
+.run-steps {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s2);
+  margin-top: var(--s2);
+  min-width: 0;
+}
+
+.run-steps p {
+  margin: 0;
+}
+
+.stage-list,
+.step-tasks {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: var(--s2);
+}
+
+.stage {
+  border-left: 3px solid var(--line-strong);
+  padding-left: var(--s3);
+}
+
+.stage-title {
+  font-weight: 600;
+}
+
+.step-tasks {
+  margin-top: var(--s1);
+}
+
+.step-line {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s2);
+  overflow-wrap: anywhere;
+}
+
+.step-label {
+  font-weight: 600;
+}
+
+.run-steps .link {
+  min-height: 24px;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: var(--brand);
+  text-decoration: underline;
+}
+
+.tpl-pane,
+.tpl-editor {
+  max-width: 760px;
+}
+
+.tpl-list {
+  margin: var(--s3) 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: var(--s2);
+}
+
+.tpl-item {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s3);
+  padding: var(--s3) var(--s4);
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+}
+
+.tpl-main {
+  flex: 1 1 240px;
+  min-width: 0;
+}
+
+.tpl-main p {
+  margin: 0;
+}
+
+.tpl-name {
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.tpl-archived > summary {
+  cursor: pointer;
+  font-weight: 600;
+}
+
+.tpl-form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s3);
+}
+
+.tpl-form .choice {
+  margin: var(--s1) 0;
+  font-weight: 400;
+}
+
+.tpl-toolbar {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.tpl-steps h4 {
+  margin: 0 0 var(--s2);
+  font-size: var(--fs-title);
+}
+
+.tpl-step-list {
+  margin: 0 0 var(--s2);
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: var(--s1);
+}
+
+.tpl-step-list li {
+  padding: var(--s2) var(--s3);
+  background: var(--surface-2);
+  border-radius: var(--radius-sm);
+}
+
+/* «Quitar filtro»: el ancho de su texto y alineado por abajo con el selector. */
+.filters .field.field-action {
+  min-width: 0;
+  justify-content: flex-end;
+}
+
+.field-action button {
+  align-self: flex-start;
 }

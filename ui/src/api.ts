@@ -123,6 +123,8 @@ export const api = {
   ) => invoke<TaskTemplate>("save_task_template", { id, name, conditions, steps }),
   setTaskTemplateActive: (id: string, active: boolean) =>
     invoke<TaskTemplate>("set_task_template_active", { id, active }),
+  /** Archivar no borra: la plantilla queda inactiva y se puede restaurar (D151). */
+  archiveTaskTemplate: (id: string, archived: boolean) => invoke<TaskTemplate>("archive_task_template", { id, archived }),
   /** Ejecuciones de pipeline con sus pasos y, por tarea retenida, qué la retiene (D148). */
   pipelineOverview: () => invoke<PipelineOverview>("pipeline_overview"),
   /** «Continuar sin ese paso» (D150): la respuesta irá siempre a revisión. */

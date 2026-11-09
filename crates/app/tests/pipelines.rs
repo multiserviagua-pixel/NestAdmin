@@ -1606,7 +1606,8 @@ fn a_template_applies_only_from_its_activation_day_and_never_to_old_or_undated_m
             "{id}: su factura se importa como siempre"
         );
     }
-    // Hoy y futuro (la fecha la declara el remitente): sí.
+    // Hoy y futuro (la fecha que entrega el proveedor, `internalDate` en Gmail y `receivedDateTime` en
+    // Microsoft, no la cabecera `Date`; el día se compara en UTC): sí.
     mail_dated(
         &app,
         "N-1",
@@ -1944,4 +1945,136 @@ fn the_rule_simulation_does_not_count_a_reply_with_a_waived_step_as_automatable(
         .unwrap();
     assert_eq!(normal.outcome, SimulationOutcome::Automate);
     assert_eq!(simulation.would_automate, 1);
+}
+
+#[test]
+fn linked_after_waive_is_true_only_when_the_attachment_arrived_after_waiving() {
+    let dir = tempfile::tempdir().unwrap();
+    let ai = Rec::new();
+    let mut app = open(dir.path(), &ai);
+    drain_samples(&mut app);
+    template(&mut app, "zeta", json!({ "sender_domain": ZETA }));
+    mail(&app, "Z-1", Some(SENDER), &[("a.txt", doc("Zeta SL", 1))]);
+    mail(&app, "Z-2", Some(SENDER), &[("b.txt", doc("Zeta SL", 2))]);
+    let step_of_mail = |app: &App, id: &str| {
+        let e = email_task(app, id);
+        step_of(&run_of(app, e.id), "attachment_invoices").clone()
+    };
+    app.fetch_mail().unwrap();
+    let (i1, i2) = (
+        invoice_tasks(&app, "Z-1").remove(0),
+        invoice_tasks(&app, "Z-2").remove(0),
+    );
+
+    // Z-1: factura fallida y omitida. Ya tenía tarea al omitirse: no «llegó después».
+    ai.fail_always(Some(AiError::Unavailable("sin conexión".into())));
+    app.process_next().unwrap();
+    ai.fail_always(None);
+    assert_eq!(task(&app, i1.id).state, TaskState::Failed);
+    let waived = app
+        .waive_pipeline_step(step_of_mail(&app, "Z-1").id, "")
+        .unwrap();
+    let step = step_of(&waived, "attachment_invoices");
+    assert!(step.waived && step.task_id.is_some());
+    assert!(!step.linked_after_waive, "fallida y omitida");
+
+    // Z-2: factura cancelada y omitida: tampoco.
+    assert_eq!(app.reject(i2.id).unwrap().state, TaskState::Cancelled);
+    let waived = app
+        .waive_pipeline_step(step_of_mail(&app, "Z-2").id, "")
+        .unwrap();
+    let step = step_of(&waived, "attachment_invoices");
+    assert!(step.waived && step.task_id.is_some());
+    assert!(!step.linked_after_waive, "cancelada y omitida");
+    assert_eq!(
+        count(
+            dir.path(),
+            "SELECT COUNT(*) FROM audit_log WHERE status = 'linked_after_waive'"
+        ),
+        0
+    );
+}
+
+#[test]
+fn a_late_attachment_after_waiving_is_linked_after_waive_and_before_arriving_it_is_not() {
+    let dir = tempfile::tempdir().unwrap();
+    let ai = Rec::new();
+    let mut app = open(dir.path(), &ai);
+    drain_samples(&mut app);
+    template(&mut app, "zeta", json!({ "sender_domain": ZETA }));
+    mail(&app, "Z-1", Some(SENDER), &[("a.txt", doc("Zeta SL", 1))]);
+    app.simulators()
+        .0
+        .set_attachment_failure(Some(FailureMode::Unavailable));
+    app.fetch_mail().unwrap();
+    let e = email_task(&app, "Z-1");
+    let step = step_of(&run_of(&app, e.id), "attachment_invoices").id;
+    let waived = app.waive_pipeline_step(step, "").unwrap();
+    let attachment = step_of(&waived, "attachment_invoices");
+    assert!(attachment.waived && attachment.task_id.is_none());
+    assert!(!attachment.linked_after_waive, "aún no ha llegado");
+    app.simulators().0.set_attachment_failure(None);
+    app.fetch_mail().unwrap();
+    let run = run_of(&app, e.id);
+    let attachment = step_of(&run, "attachment_invoices");
+    assert!(attachment.task_id.is_some() && attachment.linked_after_waive);
+}
+
+#[test]
+fn the_merge_simulation_does_not_count_a_reply_with_a_waived_step_as_automatable() {
+    let dir = tempfile::tempdir().unwrap();
+    let ai = Rec::new();
+    let mut app = open(dir.path(), &ai);
+    drain_samples(&mut app);
+    template(&mut app, "zeta", json!({ "sender_domain": ZETA }));
+    // Z-1: su adjunto está vacío (nunca se importará) y se continúa sin él. Z-2: normal.
+    mail(&app, "Z-1", Some(SENDER), &[("a.txt", String::new())]);
+    mail(&app, "Z-2", Some(SENDER), &[("b.txt", doc("Zeta SL", 2))]);
+    app.fetch_mail().unwrap();
+    let e1 = email_task(&app, "Z-1");
+    let step = step_of(&run_of(&app, e1.id), "attachment_invoices").id;
+    app.waive_pipeline_step(step, "").unwrap();
+    process_all(&mut app);
+    let invoice = invoice_tasks(&app, "Z-2").remove(0);
+    approve(&mut app, invoice.id);
+    process_all(&mut app);
+    let e2 = email_task(&app, "Z-2");
+    assert_eq!(task(&app, e1.id).state, TaskState::AwaitingReview);
+    assert_eq!(task(&app, e2.id).state, TaskState::AwaitingReview);
+
+    app.create_rule(
+        "zeta-dominio",
+        "send_draft",
+        &json!({ "category": "solicitud_factura", "sender_domain": ZETA }),
+    )
+    .unwrap();
+    app.create_rule(
+        "zeta-direccion",
+        "send_draft",
+        &json!({ "category": "solicitud_factura", "sender": SENDER }),
+    )
+    .unwrap();
+    let both = vec!["zeta-dominio".to_owned(), "zeta-direccion".to_owned()];
+    let preview = app
+        .preview_merge(&both, Some(&format!("domain:{ZETA}")))
+        .unwrap();
+    let simulation = preview.plan.unwrap().simulation;
+    assert!(
+        simulation
+            .start_automating
+            .iter()
+            .any(|t| t.task_id == e2.id),
+        "la respuesta normal sí se automatizaría: {simulation:?}"
+    );
+    assert!(
+        !simulation
+            .start_automating
+            .iter()
+            .any(|t| t.task_id == e1.id)
+            && !simulation
+                .stop_automating
+                .iter()
+                .any(|t| t.task_id == e1.id),
+        "la que tiene un paso omitido siempre va a revisión: {simulation:?}"
+    );
 }

@@ -33,7 +33,9 @@ import type {
   SetupEvent,
   SetupStep,
   Startup,
+  PipelineRunView,
   Task,
+  TaskTemplate,
   ThresholdSettings,
 } from "./types";
 import {
@@ -157,16 +159,47 @@ import { actionBar, dataTable, emptyState, h, helpTip, icon, sectionHeader, stat
 import {
   BOARD_COLUMNS,
   BOARD_PAGE,
+  CANCEL_ALSO_CONFIRM,
+  CANCEL_ALSO_DONE,
+  BLOCKED_FILTER,
+  actionLabel,
+  attemptsText,
+  downloadFailureText,
+  CANCEL_ALSO_LABEL,
+  CONTINUE_LABEL,
+  DISCARD_HELD_CONFIRM,
   TASKS_VIEW_KEY,
+  TEMPLATES_EMPTY_TEXT,
+  TEMPLATE_AUTHORITY_NOTE,
+  TEMPLATE_NAME_MAX,
+  TEMPLATE_SCOPE_NOTE,
+  ACTIVATE_WITHOUT_CONDITION_CONFIRM,
+  archiveConfirm,
   breakSegments,
-  filterByState,
+  continueConfirm,
+  describeCondition,
+  filterTasks,
   groupForBoard,
+  holdsReply,
+  indexPipeline,
   limitColumn,
   parseTasksView,
+  pipelineChip,
+  pipelineContext,
+  pipelineReason,
+  reasonWithPipeline,
+  runStageText,
+  scopeOf,
   showStateChip,
+  stepText,
   taskReason,
   taskTitle,
+  validateTemplateForm,
+  waivedNote,
+  waivableBlocker,
   type BoardColumn,
+  type PipelineEntry,
+  type SenderScope,
   type TaskReason,
   type TasksView,
 } from "./tasks-text";
@@ -294,6 +327,18 @@ const state = {
   // Tareas (D147): vista elegida, filtro por estado de la lista, tarjetas mostradas en cada columna
   // del tablero y tarjetas con el motivo completo desplegado.
   tasksView: readTasksView(),
+  // Plantillas (D149-D151): la pestaña «Plantillas» vive solo en memoria (nunca es preferencia).
+  tasksPane: "view" as "view" | "templates",
+  // Ejecuciones y plantillas, leídas solo con la vista Tareas abierta; `null` si no se pudieron leer.
+  pipeline: [] as PipelineRunView[],
+  pipelineIndex: new Map<number, PipelineEntry>(),
+  pipelineError: null as string | null,
+  templates: [] as TaskTemplate[],
+  // «Ver pasos» desplegado por tarea y «Archivadas» desplegado.
+  stepsOpen: new Set<number>(),
+  archivedOpen: false,
+  // Editor de plantilla: `id` nulo es una nueva; el borrador se conserva entre repintados.
+  tplEditor: null as null | { id: string | null; name: string; scope: SenderScope; domain: string; sender: string; active: boolean; wasActive: boolean; wasAny: boolean; errors: { name?: string; domain?: string; sender?: string }; problem: string | null; busy: boolean },
   taskFilter: "",
   boardShown: {} as Partial<Record<BoardColumn, number>>,
   reasonsOpen: new Set<number>(),
@@ -355,6 +400,33 @@ function notify(kind: "ok" | "error", text: unknown) {
 const resolving = new Set<number>();
 const ACTION_LOCK_MS = 600;
 let actionLockUntil = 0;
+
+const discarding = new Set<number>();
+
+/**
+ * Descartar en Pendientes. Una factura que retiene la respuesta a un correo (pipeline) avisa antes:
+ * la respuesta quedará bloqueada hasta que la persona decida. El resto, sin cambios (D151).
+ */
+function discardTask(task: Task) {
+  if (resolving.has(task.id) || discarding.has(task.id)) return;
+  discarding.add(task.id);
+  void (async () => {
+    try {
+      let holds = false;
+      if (task.kind === "invoice") {
+        try {
+          holds = holdsReply((await api.pipelineOverview()).runs, task.id);
+        } catch {
+          // Sin poder leer las ejecuciones no se bloquea el descarte: es la acción de siempre.
+        }
+      }
+      if (holds && !confirm(DISCARD_HELD_CONFIRM)) return;
+      resolveTask(task, () => api.reject(task.id), "Tarea descartada");
+    } finally {
+      discarding.delete(task.id);
+    }
+  })();
+}
 
 function resolveTask(task: Task, work: () => Promise<unknown>, success?: string) {
   if (resolving.has(task.id)) return;
@@ -459,6 +531,8 @@ async function refresh(background = false) {
     let suggestionsError: string | null = null;
     let refineError: string | null = null;
     let readError: string | null = null;
+    // Solo con la vista Tareas abierta: los demás refrescos no piden las ejecuciones (D151).
+    const pipelineLoad = state.view === "tasks" ? loadPipeline() : null;
     const [tasks, rules, findings, suggestions, refinement, refinePreview, audit, settings, mail, read] = await Promise.all([
       api.tasks(),
       api.ruleViews(),
@@ -486,6 +560,7 @@ async function refresh(background = false) {
         return null;
       }),
     ]);
+    await pipelineLoad;
     Object.assign(state, { tasks, rules, findings, findingsError, suggestions, suggestionsError, refinement, refinePreview, refineError, audit, settings, mail, read, readError });
     // La oferta de la IA local necesita saber si está preparada: se comprueba al aparecer la espera.
     if (isProviderWait(settings?.ai_wait)) {
@@ -499,6 +574,24 @@ async function refresh(background = false) {
     state.notice = { kind: "error", text: String(error) };
   }
   render(background);
+}
+
+/**
+ * Lee las ejecuciones de pipeline y las plantillas. Nunca lanza: un fallo se guarda en
+ * `pipelineError` y la vista lo dice, sin tumbar la lista de tareas.
+ */
+async function loadPipeline() {
+  try {
+    const [overview, templates] = await Promise.all([api.pipelineOverview(), api.taskTemplates()]);
+    state.pipeline = overview.runs;
+    state.pipelineIndex = indexPipeline(overview.runs);
+    state.templates = templates;
+    state.pipelineError = null;
+  } catch (error) {
+    state.pipeline = [];
+    state.pipelineIndex = new Map();
+    state.pipelineError = String(error);
+  }
 }
 
 /** Título de una tarea (ver `tasks-text.ts`): el id de mensaje nunca lo es. */
@@ -655,6 +748,7 @@ function nav() {
               state.notice = null;
               if (view === "settings") resetBlocks();
               render();
+              if (view === "tasks") void loadPipeline().then(() => render(true));
             },
           },
           icon(iconName),
@@ -1045,7 +1139,7 @@ function invoiceDetail(task: Task) {
       ),
       openOriginal(task),
       createRuleButton(task),
-      h("button", { class: "danger", onclick: () => resolveTask(task, () => api.reject(task.id), "Tarea descartada") }, "Descartar"),
+      h("button", { class: "danger", onclick: () => discardTask(task) }, "Descartar"),
     ),
   );
 }
@@ -1188,14 +1282,125 @@ function reasonSpan(reason: TaskReason): HTMLElement {
 
 /** Motivo corto de una tarea, igual en la fila y en la tarjeta (el aviso largo de espera va solo arriba). */
 function reasonOf(t: Task): TaskReason | null {
-  return taskReason(t, Boolean(state.settings?.ai_wait_message), (i) => ISSUE_LABEL[i] ?? i);
+  // El motivo del pipeline (Esperando, Bloqueada) tiene prioridad sobre la espera de la IA (D151).
+  return reasonWithPipeline(taskReason(t, Boolean(state.settings?.ai_wait_message), (i) => ISSUE_LABEL[i] ?? i), entryOf(t));
+}
+
+/** El paso de pipeline de una tarea; `undefined` si no tiene ejecución (no cambia nada). */
+const entryOf = (t: Task): PipelineEntry | undefined => state.pipelineIndex.get(t.id);
+
+/** «Paso 2 de 2 · Plantilla», para las tareas que forman parte de una ejecución. */
+function contextLine(t: Task, className: string): HTMLElement | null {
+  const text = pipelineContext(entryOf(t));
+  if (!text) return null;
+  const open = state.stepsOpen.has(t.id);
+  return h(
+    "p",
+    { class: className },
+    text,
+    " ",
+    h(
+      "button",
+      { class: "steps-toggle", type: "button", "aria-label": actionLabel(open ? "Ocultar pasos" : "Ver pasos", title(t)), "aria-expanded": open ? "true" : "false", "aria-controls": `steps-${t.id}`, "data-focus-key": `task:steps:${t.id}`, onclick: () => toggleSteps(t) },
+      open ? "Ocultar pasos" : "Ver pasos",
+    ),
+  );
+}
+
+function continueWithout(t: Task, step: { id: number; label: string }, code: string) {
+  if (!confirm(continueConfirm(step.label, code))) return;
+  // El botón desaparece al omitir: el foco pasa a «Ver pasos» de la misma tarea.
+  state.focusAfterRender = `task:steps:${t.id}`;
+  // Si el paso ya estaba omitido, la respuesta es la misma y solo se refresca (D150).
+  void act(() => api.waivePipelineStep(step.id, ""), `Se continúa sin “${step.label}”. La respuesta irá siempre a revisión.`);
+}
+
+function cancelAlso(t: Task) {
+  if (!confirm(CANCEL_ALSO_CONFIRM)) return;
+  state.focusAfterRender = `task:steps:${t.id}`;
+  resolveTask(t, () => api.reject(t.id), CANCEL_ALSO_DONE);
+}
+
+function toggleSteps(t: Task) {
+  if (state.stepsOpen.has(t.id)) state.stepsOpen.delete(t.id);
+  else state.stepsOpen.add(t.id);
+  state.focusAfterRender = `task:steps:${t.id}`;
+  render();
+}
+
+/** Ejecución de la tarea: pasos por etapas con su estado (D148, D150). Solo texto. */
+function stepsPanel(t: Task): HTMLElement | null {
+  const entry = entryOf(t);
+  if (!entry) return null;
+  const { run } = entry;
+  const stages = [...new Set(run.steps.map((s) => s.stage))].sort((a, b) => a - b);
+  const taskOf = (id: number | null) => (id === null ? undefined : state.tasks.find((x) => x.id === id));
+  return h(
+    "div",
+    { class: "run-steps", id: `steps-${t.id}` },
+    h("p", { class: "meta" }, `Plantilla “${run.template_name ?? run.template_id}”, versión ${run.template_version}`),
+    h(
+      "ol",
+      { class: "stage-list", "aria-label": "Etapas de la ejecución" },
+      ...stages.map((stage) => {
+        const steps = run.steps.filter((s) => s.stage === stage);
+        const text = runStageText(steps[0]!.kind);
+        return h(
+          "li",
+          { class: "stage" },
+          h("p", { class: "stage-title" }, `Etapa ${stages.indexOf(stage) + 1}: ${text.title}`),
+          text.phases ? h("p", { class: "meta" }, text.phases) : null,
+          h(
+            "ul",
+            { class: "step-tasks" },
+            ...steps.map((step) => {
+              const task = taskOf(step.task_id);
+              const why = pipelineReason({ run, step });
+              const blocker = run.steps.flatMap((x) => x.blocked?.by ?? []).find((b) => b.step_id === step.id);
+              return h(
+                "li",
+                { class: "step-task" },
+                h(
+                  "span",
+                  { class: "step-line" },
+                  h("span", { class: "step-label" }, ...breakable(step.label)),
+                  step.task_id !== null
+                    ? h("span", { class: "meta" }, `tarea ${step.task_id}`)
+                    : statusChip(blocker?.code === "attachment_rejected" ? "Adjunto no importable" : "Adjunto sin importar", "warn"),
+                  step.task_state !== null ? stateChip(step.task_state, pipelineChip({ run, step })) : null,
+                  step.waived ? statusChip("Omitido", "neutral") : null,
+                  task && task.state === "awaiting_review"
+                    ? h("button", { class: "link", type: "button", "data-focus-key": `run:${t.id}:review:${task.id}`, onclick: () => openInReview(task) }, "Revisar")
+                    : null,
+                ),
+                waivedNote(step) ? h("p", { class: "meta" }, waivedNote(step)) : null,
+                why ? h("p", { class: "meta" }, reasonSpan(why)) : null,
+                step.task_id === null && step.error_code ? h("p", { class: "meta" }, downloadFailureText(step.error_code)) : null,
+              );
+            }),
+          ),
+        );
+      }),
+    ),
+  );
 }
 
 /** Acciones de una tarea: las mismas en la fila y en la tarjeta. Aprobar y enviar solo existen en Pendientes (R07). */
 function taskActions(t: Task): HTMLElement {
+  const entry = entryOf(t);
+  const blocked = entry?.step.blocked?.reason === "blocked";
+  const waive = waivableBlocker(entry);
   return h(
     "div",
     { class: "row-actions" },
+    waive
+      ? h(
+          "button",
+          { type: "button", "aria-label": actionLabel(CONTINUE_LABEL, title(t)), "data-focus-key": `task:waive:${t.id}`, onclick: () => continueWithout(t, waive.step, waive.code) },
+          CONTINUE_LABEL,
+        )
+      : null,
+    blocked ? h("button", { type: "button", "aria-label": actionLabel(CANCEL_ALSO_LABEL, title(t)), "data-focus-key": `task:cancel-also:${t.id}`, onclick: () => cancelAlso(t) }, CANCEL_ALSO_LABEL) : null,
     t.state === "failed"
       ? h("button", { "data-focus-key": `task:retry:${t.id}`, onclick: () => void act(() => api.retry(t.id), "Tarea reencolada") }, "Reintentar")
       : null,
@@ -1203,7 +1408,12 @@ function taskActions(t: Task): HTMLElement {
   );
 }
 
-const taskChip = (t: Task) => statusChip(STATE_LABEL[t.state] ?? t.state, TASK_TONE[t.state] ?? "neutral");
+/** Chip de estado; una tarea retenida por su pipeline dice «Bloqueada» o «Esperando» aunque siga en cola en los datos. */
+function stateChip(state: string, held: { text: string; tone: "warn" | "neutral" } | null) {
+  return held ? statusChip(held.text, held.tone) : statusChip(STATE_LABEL[state] ?? state, TASK_TONE[state] ?? "neutral");
+}
+
+const taskChip = (t: Task) => stateChip(t.state, pipelineChip(entryOf(t)));
 
 // Más de esto no cabe en las dos líneas de la tarjeta: se ofrece desplegarlo.
 const CARD_REASON_CHARS = 60;
@@ -1217,7 +1427,8 @@ function taskCard(t: Task): HTMLElement {
     "li",
     { class: "task-card" },
     h("p", { class: "task-card-title" }, ...breakable(title(t))),
-    h("p", { class: "task-card-meta" }, h("span", {}, `${kindLabel(t.kind)} ${t.id}`), showStateChip(t) ? taskChip(t) : null),
+    h("p", { class: "task-card-meta" }, h("span", {}, `${kindLabel(t.kind)} ${t.id}`), showStateChip(t) || pipelineChip(entryOf(t)) ? taskChip(t) : null),
+    contextLine(t, "task-card-context"),
     reason
       ? h(
           "p",
@@ -1245,6 +1456,7 @@ function taskCard(t: Task): HTMLElement {
         )
       : null,
     taskActions(t),
+    state.stepsOpen.has(t.id) ? stepsPanel(t) : null,
   );
 }
 
@@ -1314,38 +1526,41 @@ function tasksBoard(): HTMLElement {
 
 function tasksList(): HTMLElement {
   const filter = state.taskFilter;
-  const rows = filterByState(state.tasks, filter);
+  const rows = filterTasks(state.tasks, filter, state.pipelineIndex);
   const select = h(
     "select",
     { "data-focus-key": "tasks:filter", onchange: () => ((state.taskFilter = select.value), render()) },
     h("option", { value: "" }, "Todos los estados"),
     ...Object.entries(STATE_LABEL).map(([value, label]) => h("option", { value }, label)),
+    h("option", { value: BLOCKED_FILTER }, "Bloqueadas"),
   ) as HTMLSelectElement;
   select.value = filter;
   const table = dataTable(
-    [
-      { label: "#", numeric: true },
-      { label: "Tipo" },
-      { label: "Elemento" },
-      { label: "Estado" },
-      { label: "Intentos", numeric: true },
-      { label: "Motivo o detalle" },
-      { label: "Acciones" },
-    ],
+    // Cuatro columnas: el tipo, el número y los intentos van bajo el elemento, para que el motivo quepa entero.
+    [{ label: "Elemento" }, { label: "Estado" }, { label: "Motivo o detalle" }, { label: "Acciones" }],
     rows.map((t) => {
       const reason = reasonOf(t);
       return [
-        t.id,
-        kindLabel(t.kind),
-        h("span", { class: "cell-title" }, ...breakable(title(t))),
+        h(
+          "div",
+          { class: "cell-title" },
+          h("span", { class: "cell-name" }, ...breakable(title(t))),
+          h("p", { class: "meta cell-meta" }, `${kindLabel(t.kind)} ${t.id} \u00b7 ${attemptsText(t.attempts)}`),
+          contextLine(t, "meta cell-context"),
+        ),
         taskChip(t),
-        t.attempts,
         h("div", { class: "detail-cell" }, reason ? reasonSpan(reason) : null, t.result?.fallback ? h("span", { class: "meta" }, ` ${fallbackText(t.result.fallback)}`) : null),
         taskActions(t),
       ];
     }),
   );
   table.classList.add("tasks-grid");
+  // «Ver pasos»: una fila más bajo la tarea, a todo el ancho de la tabla.
+  const bodyRows = [...table.querySelectorAll("tbody > tr")];
+  rows.forEach((t, i) => {
+    const panel = state.stepsOpen.has(t.id) ? stepsPanel(t) : null;
+    if (panel) bodyRows[i]?.after(h("tr", { class: "run-row" }, h("td", { colspan: "4" }, panel)));
+  });
   return h(
     "div",
     {},
@@ -1353,36 +1568,286 @@ function tasksList(): HTMLElement {
       "div",
       { class: "filters", role: "search" },
       h("div", { class: "field" }, h("div", { class: "field-head" }, h("label", {}, "Mostrar", select))),
-      filter ? h("div", { class: "field" }, h("button", { "data-focus-key": "tasks:clear", onclick: () => ((state.taskFilter = ""), render()) }, "Quitar filtro")) : null,
+      filter ? h("div", { class: "field field-action" }, h("button", { "data-focus-key": "tasks:clear", onclick: () => ((state.taskFilter = ""), render()) }, "Quitar filtro")) : null,
     ),
     rows.length ? table : emptyState("Ninguna tarea está en ese estado", "Pruebe con otro estado o quite el filtro."),
   );
 }
 
+// ---- Plantillas de pipeline (D149-D151): lista, editor y estado vacío ----
+
+function openTemplateEditor(t: TaskTemplate | null) {
+  const scope = t ? scopeOf(t.conditions) : "any";
+  state.tplEditor = {
+    id: t?.id ?? null,
+    name: t?.name ?? "",
+    scope,
+    domain: t?.conditions.sender_domain ?? "",
+    sender: t?.conditions.sender ?? "",
+    active: t?.active ?? false,
+    wasActive: t?.active ?? false,
+    wasAny: scope === "any",
+    errors: {},
+    problem: null,
+    busy: false,
+  };
+  state.focusAfterRender = "tpl:editor:name";
+  render();
+}
+
+function closeTemplateEditor(focus: string) {
+  state.tplEditor = null;
+  state.focusAfterRender = focus;
+  render();
+}
+
+async function saveTemplate() {
+  const ed = state.tplEditor;
+  if (!ed || ed.busy) return;
+  const { errors, conditions } = validateTemplateForm(ed);
+  ed.errors = errors;
+  ed.problem = null;
+  if (errors.name || errors.domain || errors.sender) {
+    state.focusAfterRender = errors.name ? "tpl:editor:name" : errors.domain ? "tpl:editor:domain" : "tpl:editor:sender";
+    render();
+    return;
+  }
+  // Activar sin condición, o ampliar a «cualquier remitente» una ya activa, abarca todos los correos con adjunto.
+  if (ed.active && ed.scope === "any" && (!ed.wasActive || !ed.wasAny) && !confirm(ACTIVATE_WITHOUT_CONDITION_CONFIRM)) return;
+  ed.busy = true;
+  render();
+  let saved = false;
+  const name = ed.name.trim();
+  try {
+    const template = await api.saveTaskTemplate(ed.id, name, conditions, [{ kind: "attachment_invoices" }, { kind: "reply" }]);
+    saved = true;
+    ed.id = template.id;
+    if (template.active !== ed.active) await api.setTaskTemplateActive(template.id, ed.active);
+    state.tplEditor = null;
+    state.notice = { kind: "ok", text: ed.active ? `Plantilla “${name}” guardada y activa.` : `Plantilla “${name}” guardada.` };
+    state.focusAfterRender = `tpl:${template.id}:edit`;
+    await refresh();
+  } catch (error) {
+    ed.busy = false;
+    ed.problem = saved ? `La plantilla se guardó, pero no se pudo cambiar su estado: ${String(error)}` : String(error);
+    state.focusAfterRender = "tpl:editor:problem";
+    render();
+  }
+}
+
+function toggleTemplate(t: TaskTemplate) {
+  if (!t.active && scopeOf(t.conditions) === "any" && !confirm(ACTIVATE_WITHOUT_CONDITION_CONFIRM)) return;
+  void act(
+    () => api.setTaskTemplateActive(t.id, !t.active),
+    t.active ? `Plantilla “${t.name}” desactivada.` : `Plantilla “${t.name}” activa. ${TEMPLATE_SCOPE_NOTE}`,
+  );
+}
+
+function archiveTemplate(t: TaskTemplate) {
+  if (!confirm(archiveConfirm(t.name))) return;
+  void act(() => api.archiveTaskTemplate(t.id, true), `Plantilla “${t.name}” archivada.`);
+}
+
+function templateRow(t: TaskTemplate): HTMLElement {
+  const label = (verb: string) => `${verb} la plantilla ${t.name}`;
+  return h(
+    "li",
+    { class: "tpl-item" },
+    h(
+      "div",
+      { class: "tpl-main" },
+      h("p", { class: "tpl-name" }, t.name, " ", t.archived ? statusChip("Archivada", "neutral") : statusChip(t.active ? "Activa" : "Inactiva", t.active ? "ok" : "neutral")),
+      h("p", { class: "meta" }, describeCondition(t.conditions)),
+    ),
+    h(
+      "div",
+      { class: "row-actions" },
+      ...(t.archived
+        ? [
+            h(
+              "button",
+              { type: "button", "aria-label": label("Restaurar"), "data-focus-key": `tpl:${t.id}:restore`, onclick: () => void act(() => api.archiveTaskTemplate(t.id, false), `Plantilla “${t.name}” restaurada, inactiva.`) },
+              "Restaurar",
+            ),
+          ]
+        : [
+            h("button", { type: "button", "aria-label": label("Editar"), "data-focus-key": `tpl:${t.id}:edit`, onclick: () => openTemplateEditor(t) }, "Editar"),
+            h("button", { type: "button", "aria-label": label(t.active ? "Desactivar" : "Activar"), "data-focus-key": `tpl:${t.id}:toggle`, onclick: () => toggleTemplate(t) }, t.active ? "Desactivar" : "Activar"),
+            h("button", { type: "button", "aria-label": label("Archivar"), "data-focus-key": `tpl:${t.id}:archive`, onclick: () => archiveTemplate(t) }, "Archivar"),
+          ]),
+    ),
+  );
+}
+
+function templateEditor(): HTMLElement {
+  const ed = state.tplEditor!;
+  const radio = (scope: SenderScope, label: string) => {
+    const input = h("input", { type: "radio", name: "tpl-scope", value: scope, "data-focus-key": `tpl:editor:scope:${scope}`, disabled: ed.busy }) as HTMLInputElement;
+    input.checked = ed.scope === scope;
+    input.addEventListener("change", () => {
+      ed.scope = scope;
+      ed.errors = {};
+      state.focusAfterRender = `tpl:editor:scope:${scope}`;
+      render();
+    });
+    return h("label", { class: "choice" }, input, ` ${label}`);
+  };
+  const text = (key: "name" | "domain" | "sender", label: string, placeholder: string, extra: Record<string, string> = {}) => {
+    const error = ed.errors[key];
+    const input = h("input", {
+      id: `tpl-${key}`,
+      name: key,
+      "data-focus-key": `tpl:editor:${key}`,
+      placeholder,
+      autocomplete: "off",
+      spellcheck: "false",
+      disabled: ed.busy,
+      "aria-invalid": error ? "true" : undefined,
+      "aria-describedby": error ? `tpl-${key}-error` : undefined,
+      ...extra,
+    }) as HTMLInputElement;
+    input.value = ed[key];
+    input.addEventListener("input", () => {
+      ed[key] = input.value;
+    });
+    return h(
+      "div",
+      { class: "field" },
+      h("div", { class: "field-head" }, h("label", { for: `tpl-${key}` }, label)),
+      input,
+      error ? h("p", { class: "rule-problem", id: `tpl-${key}-error` }, error) : null,
+    );
+  };
+  const active = h("input", { type: "checkbox", id: "tpl-active", "data-focus-key": "tpl:editor:active", disabled: ed.busy }) as HTMLInputElement;
+  active.checked = ed.active;
+  active.addEventListener("change", () => {
+    ed.active = active.checked;
+  });
+  const form = h(
+    "form",
+    {
+      class: "tpl-form",
+      novalidate: true,
+      onsubmit: (event) => {
+        event.preventDefault();
+        void saveTemplate();
+      },
+    },
+    text("name", "Nombre de la plantilla", "p. ej. Facturas de Alfa", { maxlength: String(TEMPLATE_NAME_MAX) }),
+    h(
+      "fieldset",
+      { class: "from-group" },
+      h("legend", {}, "¿Para qué correos?"),
+      radio("any", "Cualquier remitente"),
+      radio("domain", "Este dominio"),
+      ed.scope === "domain" ? text("domain", "Dominio del remitente", "p. ej. cliente.test") : null,
+      radio("sender", "Esta dirección"),
+      ed.scope === "sender" ? text("sender", "Dirección del remitente", "p. ej. compras@cliente.test") : null,
+      h("p", { class: "hint" }, "Solo se aplica a correos con al menos un adjunto admitido. Si hay varias plantillas activas, gana la más concreta: dirección, luego dominio, luego cualquiera."),
+    ),
+    h("label", { class: "choice" }, active, " Activa"),
+    h(
+      "div",
+      { class: "tpl-steps" },
+      h("h4", {}, "Pasos"),
+      h(
+        "ol",
+        { class: "tpl-step-list", "aria-label": "Pasos de la plantilla (solo lectura)" },
+        h("li", {}, `1. ${stepText("attachment_invoices").title}`),
+        h("li", {}, `2. ${stepText("reply").title}`),
+      ),
+      h("p", { class: "meta" }, TEMPLATE_AUTHORITY_NOTE),
+      h("p", { class: "meta" }, TEMPLATE_SCOPE_NOTE),
+    ),
+    ed.problem ? h("p", { class: "rule-problem", role: "alert", tabindex: "-1", "data-focus-key": "tpl:editor:problem" }, ed.problem) : null,
+    h(
+      "div",
+      { class: "buttons" },
+      h("button", { class: "primary", type: "submit", disabled: ed.busy, "data-focus-key": "tpl:editor:save" }, ed.busy ? "Guardando…" : "Guardar plantilla"),
+      h("button", { type: "button", disabled: ed.busy, "data-focus-key": "tpl:editor:cancel", onclick: () => closeTemplateEditor(ed.id ? `tpl:${ed.id}:edit` : "tpl:new") }, "Cancelar"),
+    ),
+  );
+  return h("section", { class: "tpl-editor", "aria-labelledby": "tpl-editor-title" }, h("h3", { id: "tpl-editor-title" }, ed.id ? "Editar plantilla" : "Nueva plantilla"), form);
+}
+
+function templatesPane(): HTMLElement {
+  if (state.tplEditor) return templateEditor();
+  if (state.pipelineError)
+    return h(
+      "div",
+      { class: "empty-state" },
+      h("p", { class: "empty-title" }, "No se pudieron leer las plantillas"),
+      h("p", { class: "empty-hint" }, state.pipelineError),
+      h("button", { type: "button", "data-focus-key": "tpl:retry", onclick: () => void loadPipeline().then(() => render()) }, "Reintentar"),
+    );
+  const live = state.templates.filter((t) => !t.archived);
+  const archived = state.templates.filter((t) => t.archived);
+  const create = h("button", { class: "primary", type: "button", "data-focus-key": "tpl:new", onclick: () => openTemplateEditor(null) }, "Crear plantilla");
+  if (!state.templates.length) return h("div", { class: "empty-state" }, h("p", { class: "empty-hint" }, TEMPLATES_EMPTY_TEXT), create);
+  return h(
+    "div",
+    { class: "tpl-pane" },
+    h("div", { class: "tpl-toolbar" }, create),
+    live.length ? h("ul", { class: "tpl-list" }, ...live.map(templateRow)) : h("p", { class: "meta" }, "Todas las plantillas están archivadas."),
+    archived.length
+      ? h(
+          "details",
+          {
+            class: "tpl-archived",
+            open: state.archivedOpen,
+            ontoggle: (event) => {
+              state.archivedOpen = (event.target as HTMLDetailsElement).open;
+            },
+          },
+          h("summary", { "data-focus-key": "tpl:archived" }, `Archivadas (${archived.length})`),
+          h("ul", { class: "tpl-list" }, ...archived.map(templateRow)),
+        )
+      : null,
+  );
+}
+
 function tasksView() {
   const view = state.tasksView;
+  const templates = state.tasksPane === "templates";
+  const board = !templates && view === "board" && state.tasks.length > 0;
+  const shown: TasksView | "templates" = templates ? "templates" : view;
   return h(
     "section",
-    { class: view === "board" && state.tasks.length ? "page tasks-page is-board" : "page tasks-page" },
+    { class: board ? "page tasks-page is-board" : "page tasks-page" },
     h("h2", {}, "Tareas"),
     tabs({
       label: "Vista de tareas",
       items: [
-        { key: "list" as TasksView, label: "Lista" },
-        { key: "board" as TasksView, label: "Tablero" },
+        { key: "list" as TasksView | "templates", label: "Lista" },
+        { key: "board" as TasksView | "templates", label: "Tablero" },
+        { key: "templates" as TasksView | "templates", label: "Plantillas" },
       ],
-      active: view,
+      active: shown,
       panelId: "tasks-panel",
-      onSelect: setTasksView,
+      onSelect: (key) => {
+        // «Plantillas» nunca se guarda como preferencia: solo lista y tablero (D147).
+        if (key === "templates") {
+          state.tasksPane = "templates";
+          render();
+        } else {
+          state.tasksPane = "view";
+          setTasksView(key);
+        }
+      },
     }),
     h(
       "div",
-      { role: "tabpanel", id: "tasks-panel", class: "tabpanel", "aria-label": view === "board" ? "Tablero" : "Lista" },
-      state.tasks.length === 0
-        ? emptyState("Todavía no hay tareas", "Importe un documento o consulte el correo para crear la primera.")
-        : view === "board"
-          ? tasksBoard()
-          : tasksList(),
+      { role: "tabpanel", id: "tasks-panel", class: "tabpanel", "aria-label": templates ? "Plantillas" : view === "board" ? "Tablero" : "Lista" },
+      !templates && state.pipelineError
+        ? h("p", { class: "meta warn", role: "status" }, `No se pudo leer el estado de las plantillas (${state.pipelineError}). Las tareas se muestran sin su indicador de pipeline.`)
+        : null,
+      templates
+        ? templatesPane()
+        : state.tasks.length === 0
+          ? emptyState("Todavía no hay tareas", "Importe un documento o consulte el correo para crear la primera.")
+          : view === "board"
+            ? tasksBoard()
+            : tasksList(),
     ),
   );
 }
@@ -4885,7 +5350,7 @@ function render(background = false) {
       "div",
       { class: "body" },
       nav(),
-      h("main", { class: state.view === "review" || (state.view === "tasks" && state.tasksView === "board" && state.tasks.length > 0) ? "fill" : undefined, "data-scroll-key": `main:${state.view}` }, ocrBanner, notice, waitBanner, views[state.view]()),
+      h("main", { class: state.view === "review" || (state.view === "tasks" && state.tasksPane === "view" && state.tasksView === "board" && state.tasks.length > 0) ? "fill" : undefined, "data-scroll-key": `main:${state.view}` }, ocrBanner, notice, waitBanner, views[state.view]()),
     ),
   );
   restore();

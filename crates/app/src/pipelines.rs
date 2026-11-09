@@ -255,7 +255,9 @@ pub struct StepView {
     /// «Continuar sin ese paso» es válido ahora para este paso.
     pub waivable: bool,
     /// El adjunto llegó después de «Continuar sin ese paso»: se importó igual para no perder la
-    /// factura, y la revisión forzada de la respuesta se conserva (D150).
+    /// factura, y la revisión forzada de la respuesta se conserva (D150). Solo es verdadero si el
+    /// vínculo se hizo tras omitir (evento `linked_after_waive`); omitir un paso fallido o
+    /// cancelado, que ya tenía tarea, lo deja en falso.
     pub linked_after_waive: bool,
     /// Solo si la tarea del paso está en cola y algo la retiene.
     pub blocked: Option<BlockView>,
@@ -495,8 +497,8 @@ impl App {
         })
     }
 
-    /// Vistas de varias ejecuciones con tres consultas (ejecuciones, pasos con el estado de su
-    /// tarea y versiones de plantilla), sin leer ni deserializar la entrada ni el resultado de
+    /// Vistas de varias ejecuciones con cuatro consultas (ejecuciones, pasos con el estado de su
+    /// tarea, versiones de plantilla y pasos enlazados tras omitirse), sin leer ni deserializar la entrada ni el resultado de
     /// ninguna tarea. Los bloqueos se calculan en memoria con la misma condición que `READY_SQL`.
     fn run_views(&self, runs: Vec<PipelineRun>) -> AppResult<Vec<RunView>> {
         let names: HashMap<(String, i64), String> = self
@@ -505,6 +507,7 @@ impl App {
             .into_iter()
             .map(|t| ((t.id, t.version), t.name))
             .collect();
+        let linked_late = self.store.linked_after_waive_steps()?;
         let ids: Vec<i64> = runs.iter().map(|r| r.id).collect();
         let mut by_run: HashMap<i64, Vec<(PipelineStep, Option<TaskState>)>> = HashMap::new();
         for (step, state) in self.store.pipeline_steps_with_state(&ids)? {
@@ -523,7 +526,7 @@ impl App {
                     template_version: run.template_version,
                     subject_task_id: run.subject_task_id,
                     created_at: run.created_at,
-                    steps: step_views(&steps),
+                    steps: step_views(&steps, &linked_late),
                 }
             })
             .collect())
@@ -570,7 +573,10 @@ impl App {
 
 /// Vista de los pasos de una ejecución, en memoria: bloqueos, si se puede omitir cada paso y qué
 /// pasos llegaron tras omitirse.
-fn step_views(steps: &[(PipelineStep, Option<TaskState>)]) -> Vec<StepView> {
+fn step_views(
+    steps: &[(PipelineStep, Option<TaskState>)],
+    linked_late: &HashSet<i64>,
+) -> Vec<StepView> {
     steps
         .iter()
         .map(|(step, state)| {
@@ -625,7 +631,9 @@ fn step_views(steps: &[(PipelineStep, Option<TaskState>)]) -> Vec<StepView> {
                 waived_note: step.waived_by_note.clone(),
                 error_code: step.last_error.clone(),
                 waivable: step.waived_at.is_none() && stuck(*state) && retains,
-                linked_after_waive: step.waived_at.is_some() && step.task_id.is_some(),
+                linked_after_waive: step.waived_at.is_some()
+                    && step.task_id.is_some()
+                    && linked_late.contains(&step.id),
                 blocked,
             }
         })

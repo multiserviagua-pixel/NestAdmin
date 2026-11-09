@@ -601,6 +601,22 @@ fn set_task_template_active<R: Runtime>(
     Ok(template)
 }
 
+/// Archiva (o restaura) una plantilla: nunca se borra, y archivada queda inactiva (D151).
+#[tauri::command]
+fn archive_task_template<R: Runtime>(
+    shared: State<'_, SharedState>,
+    handle: AppHandle<R>,
+    id: String,
+    archived: bool,
+) -> CmdResult<TaskTemplate> {
+    let template = shared
+        .app()?
+        .archive_task_template(&id, archived)
+        .map_err(text)?;
+    changed(&handle);
+    Ok(template)
+}
+
 /// Ejecuciones de pipeline con sus pasos, la plantilla y, por tarea retenida, qué la retiene.
 ///
 /// Con muchas ejecuciones la consulta no es instantánea, así que se hace fuera del hilo de la
@@ -2139,6 +2155,7 @@ fn configure<R: Runtime>(builder: Builder<R>, prepare_only: bool) -> Builder<R> 
             task_templates,
             save_task_template,
             set_task_template_active,
+            archive_task_template,
             pipeline_overview,
             waive_pipeline_step,
             rules,

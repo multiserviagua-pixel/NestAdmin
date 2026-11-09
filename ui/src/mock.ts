@@ -796,18 +796,33 @@ setEvaluation("Duplicado de la factura FS-2026-020", "ninguna regla activa coinc
 // remitente, una sola plantilla activa por condición y «Continuar sin ese paso». Con `?pipelines`
 // hay una ejecución de muestra (una factura fallida, otra en revisión y la respuesta en cola).
 
-const templateStore: TaskTemplate[] = [
-  {
-    id: "facturas-zeta",
-    version: 2,
-    name: "Facturas de Zeta",
-    conditions: { sender_domain: "proveedor-zeta.test" },
-    steps: [{ kind: "attachment_invoices" }, { kind: "reply" }],
-    active: true,
-    archived: false,
-    created_at: now(),
-  },
-];
+const withPipelines = new URLSearchParams(location.search).has("pipelines");
+
+// Sin `?pipelines` no hay plantillas (estado vacío); con él, una activa y otra inactiva.
+const templateStore: TaskTemplate[] = withPipelines
+  ? [
+      {
+        id: "facturas-zeta",
+        version: 2,
+        name: "Facturas de Zeta",
+        conditions: { sender_domain: "proveedor-zeta.test" },
+        steps: [{ kind: "attachment_invoices" }, { kind: "reply" }],
+        active: true,
+        archived: false,
+        created_at: now(),
+      },
+      {
+        id: "todos-los-adjuntos",
+        version: 1,
+        name: "Todos los correos con adjunto",
+        conditions: {},
+        steps: [{ kind: "attachment_invoices" }, { kind: "reply" }],
+        active: false,
+        archived: false,
+        created_at: now(),
+      },
+    ]
+  : [];
 
 interface MockStep {
   id: number;
@@ -818,6 +833,8 @@ interface MockStep {
   waived: boolean;
   note: string | null;
   error: string | null;
+  /** El adjunto se enlazó después de omitir el paso (no si ya tenía tarea al omitirlo). */
+  late?: boolean;
 }
 interface MockRun {
   id: number;
@@ -875,7 +892,7 @@ function mockRunView(run: MockRun): PipelineRunView {
         .filter((p) => p.stage < s.stage && !p.waived && stateOf(p) !== "completed")
         .map((p) => {
           const ps = stateOf(p);
-          const code: BlockerCode = ps === null ? "attachment_missing" : ps === "failed" ? "failed" : ps === "cancelled" ? "cancelled" : "waiting";
+          const code: BlockerCode = ps === null ? (p.error === "attachment_rejected" ? "attachment_rejected" : "attachment_missing") : ps === "failed" ? "failed" : ps === "cancelled" ? "cancelled" : "waiting";
           return { step_id: p.id, task_id: p.task_id, task_state: ps, code, error_code: p.error };
         });
       if (by.length) blocked = { reason: by.some((b) => b.code !== "waiting") ? "blocked" : "waiting", by };
@@ -890,7 +907,7 @@ function mockRunView(run: MockRun): PipelineRunView {
       waived: s.waived,
       waived_note: s.note,
       error_code: s.error,
-      linked_after_waive: s.waived && s.task_id !== null,
+      linked_after_waive: s.waived && s.task_id !== null && s.late === true,
       waivable: !s.waived && (state === null || state === "failed" || state === "cancelled") && retains,
       blocked,
     };
@@ -919,23 +936,95 @@ function reviewable(id: number) {
   return t;
 }
 
-if (new URLSearchParams(location.search).has("pipelines")) {
-  const mail = { message_id: "simulador:Z-1", message: { id: "simulador:Z-1", from: "ventas@proveedor-zeta.test", subject: "Pedido 2231" } };
-  const failedInvoice = task("invoice", { document: "factura-0910.pdf", origin: { kind: "email", message_id: "simulador:Z-1", attachment: "factura-0910.pdf", from: "ventas@proveedor-zeta.test", subject: "Pedido 2231" } }, "failed", null, { code: "unavailable", message: "el servicio no respondió", recoverable: true });
-  const reviewInvoice = task("invoice", { document: "factura-1005.pdf", origin: { kind: "email", message_id: "simulador:Z-1", attachment: "factura-1005.pdf", from: "ventas@proveedor-zeta.test", subject: "Pedido 2231" } }, "awaiting_review", { type: "invoice", version: 1, document: "factura-1005.pdf", fields: { supplier: "Zeta Servicios SL", invoice_number: "Z-1005", date: "2026-10-05", total: "121.00" }, issues: [] });
-  const reply = task("email", mail, "queued", null);
-  mockRuns.push({
-    id: 1,
-    template_id: "facturas-zeta",
-    template_version: 2,
-    subject_task_id: reply.id,
-    created_at: now(),
-    steps: [
-      { id: nextStepId++, stage: 1, kind: "attachment_invoices", label: "factura-0910.pdf", task_id: failedInvoice.id, waived: false, note: null, error: null },
-      { id: nextStepId++, stage: 1, kind: "attachment_invoices", label: "factura-1005.pdf", task_id: reviewInvoice.id, waived: false, note: null, error: null },
-      { id: nextStepId++, stage: 2, kind: "reply", label: "Responder al correo", task_id: reply.id, waived: false, note: null, error: null },
-    ],
+if (withPipelines) {
+  const sender = "ventas@proveedor-zeta.test";
+  const mailOrigin = (n: string, document: string): DocumentOrigin => ({
+    kind: "email",
+    account: origin("simulador"),
+    message_id: `simulador:${n}`,
+    from: sender,
+    subject: null,
+    attachment: document,
+    imported_at: Math.floor(now() / 1000),
+    sha256: fakeSha(document),
+    size: 48_213,
   });
+  const replyTo = (n: string, subject: string, state: Task["state"] = "queued", result: Task["result"] = null) =>
+    task("email", { message_id: `simulador:${n}`, account: "simulador", message: { id: `simulador:${n}`, from: sender, subject } }, state, result);
+  const invoiceOf = (n: string, document: string, state: Task["state"], result: Task["result"] = null, error: Task["error"] = null) =>
+    task("invoice", { document, origin: mailOrigin(n, document) }, state, result, error);
+  const reviewResult = (n: string, document: string, number: string) => ({
+    ...invoiceResult(document, "121.00", [], mailOrigin(n, document)),
+    fields: { supplier: "Zeta Servicios SL", invoice_number: number, date: "2026-10-05", subtotal: "100.00", tax: "21.00", total: "121.00", currency: "EUR" },
+  });
+  const step = (stage: number, kind: string, label: string, task_id: number | null, extra: Partial<MockStep> = {}): MockStep => ({
+    id: nextStepId++,
+    stage,
+    kind,
+    label,
+    task_id,
+    waived: false,
+    note: null,
+    error: null,
+    ...extra,
+  });
+  const run = (subject: Task, steps: MockStep[]) =>
+    mockRuns.push({ id: mockRuns.length + 1, template_id: "facturas-zeta", template_version: 2, subject_task_id: subject.id, created_at: now(), steps });
+
+  // 1. Bloqueada: una factura falló y otra espera revisión.
+  const failed = invoiceOf("Z-1", "factura-0910.pdf", "failed", null, { code: "unavailable", message: "el servicio no respondió", recoverable: true });
+  const review = invoiceOf("Z-1", "factura-1005.pdf", "awaiting_review", reviewResult("Z-1", "factura-1005.pdf", "Z-1005"));
+  const reply1 = replyTo("Z-1", "Pedido 2231");
+  run(reply1, [step(1, "attachment_invoices", "factura-0910.pdf", failed.id), step(1, "attachment_invoices", "factura-1005.pdf", review.id), step(2, "reply", "Responder al correo", reply1.id)]);
+
+  // 2. Esperando: la factura avanza (está en revisión).
+  const waiting = invoiceOf("Z-2", "factura-1102.pdf", "awaiting_review", reviewResult("Z-2", "factura-1102.pdf", "Z-1102"));
+  const reply2 = replyTo("Z-2", "Pedido 2232");
+  run(reply2, [step(1, "attachment_invoices", "factura-1102.pdf", waiting.id), step(2, "reply", "Responder al correo", reply2.id)]);
+
+  // 3. Bloqueada: una factura se canceló.
+  const cancelled = invoiceOf("Z-3", "factura-1103.pdf", "cancelled");
+  const reply3 = replyTo("Z-3", "Pedido 2233");
+  run(reply3, [step(1, "attachment_invoices", "factura-1103.pdf", cancelled.id), step(2, "reply", "Responder al correo", reply3.id)]);
+
+  // 4. Bloqueada: el adjunto aún no se ha descargado.
+  const reply4 = replyTo("Z-4", "Pedido 2234");
+  run(reply4, [step(1, "attachment_invoices", "factura-1104.pdf", null), step(2, "reply", "Responder al correo", reply4.id)]);
+
+  // 5. Bloqueada: el adjunto no se puede importar y no se resolverá solo.
+  const reply5 = replyTo("Z-5", "Pedido 2235");
+  run(reply5, [step(1, "attachment_invoices", "factura-1105.pdf", null, { error: "attachment_rejected" }), step(2, "reply", "Responder al correo", reply5.id)]);
+
+  // 7. Se continuó sin una factura fallida: ya tenía tarea, así que no «llegó después».
+  const failedWaived = invoiceOf("Z-7", "factura-1107.pdf", "failed", null, { code: "unavailable", message: "el servicio no respondió", recoverable: true });
+  const reply7 = replyTo("Z-7", "Pedido 2237", "awaiting_review", {
+    type: "email",
+    version: 1,
+    origin: origin("simulador"),
+    message: { id: "simulador:Z-7", from: sender, subject: "Pedido 2237", to: ["administracion@nestadmin.test"], body: "Les envío la factura del pedido.", date: "2026-10-06" },
+    category: "solicitud_factura",
+    draft: { to: [sender], subject: "Re: Pedido 2237", body: "Adjuntamos la factura solicitada." },
+    review_reason: "se continuó sin un paso anterior del pipeline; revise antes de enviar",
+    evaluation: { code: "pipeline_step_waived", facts: {}, candidates: [] },
+    action: { kind: "send_draft" },
+  });
+  run(reply7, [step(1, "attachment_invoices", "factura-1107.pdf", failedWaived.id, { waived: true }), step(2, "reply", "Responder al correo", reply7.id)]);
+
+  // 6. Se continuó sin un paso, y su adjunto llegó después: la respuesta va a revisión.
+  const late = invoiceOf("Z-6", "factura-1106.pdf", "awaiting_review", reviewResult("Z-6", "factura-1106.pdf", "Z-1106"));
+  const message6 = { id: "simulador:Z-6", from: sender, subject: "Pedido 2236" };
+  const reply6 = replyTo("Z-6", "Pedido 2236", "awaiting_review", {
+    type: "email",
+    version: 1,
+    origin: origin("simulador"),
+    message: { ...message6, to: ["administracion@nestadmin.test"], body: "Les envío la factura del pedido.", date: "2026-10-06" },
+    category: "solicitud_factura",
+    draft: { to: [sender], subject: "Re: Pedido 2236", body: "Adjuntamos la factura solicitada." },
+    review_reason: "se continuó sin un paso anterior del pipeline; revise antes de enviar",
+    evaluation: { code: "pipeline_step_waived", facts: {}, candidates: [] },
+    action: { kind: "send_draft" },
+  });
+  run(reply6, [step(1, "attachment_invoices", "factura-1106.pdf", late.id, { waived: true, late: true }), step(2, "reply", "Responder al correo", reply6.id)]);
 }
 
 function latest(): Rule[] {
@@ -1907,7 +1996,12 @@ const handlers: Record<string, (a: any, options?: any) => unknown> = {
     t.result = { ...t.result, version: (t.result?.version ?? 1) + 1, draft: { ...t.result?.draft, body } };
     return t;
   },
-  reject: ({ id }) => Object.assign(reviewable(id), { state: "cancelled" }),
+  reject: ({ id }) => {
+    const t = find(id);
+    // Como la aplicación: se descarta lo pendiente de revisión, en cola o en curso.
+    if (t.state !== "awaiting_review" && t.state !== "queued" && t.state !== "running") throw `la tarea ${id} ya no se puede descartar`;
+    return Object.assign(t, { state: "cancelled" });
+  },
   retry: ({ id }) => {
     const t = find(id);
     if (t.state !== "failed") throw "solo se reintentan tareas fallidas";
@@ -1948,6 +2042,12 @@ const handlers: Record<string, (a: any, options?: any) => unknown> = {
     if (t.active !== Boolean(active)) Object.assign(t, { active: Boolean(active), version: t.version + 1 });
     return { ...t };
   },
+  archive_task_template: ({ id, archived }): TaskTemplate => {
+    const t = templateStore.find((x) => x.id === id);
+    if (!t) throw `la plantilla ${id} no existe`;
+    if (t.archived !== Boolean(archived)) Object.assign(t, { archived: Boolean(archived), active: false, version: t.version + 1 });
+    return { ...t };
+  },
   pipeline_overview: (): PipelineOverview => ({ runs: mockRuns.map(mockRunView).reverse() }),
   waive_pipeline_step: ({ stepId, note }): PipelineRunView => {
     const text = String(note ?? "").trim();
@@ -1972,7 +2072,8 @@ const handlers: Record<string, (a: any, options?: any) => unknown> = {
       reply.result = {
         type: "email",
         version: 1,
-        message,
+        origin: origin("simulador"),
+        message: { to: ["administracion@nestadmin.test"], body: "Les envío la factura del pedido.", date: "2026-10-06", ...message },
         category: "solicitud_factura",
         draft: { to: [message.from], subject: `Re: ${message.subject}`, body: "Adjuntamos la factura solicitada." },
         review_reason: "se continuó sin un paso anterior del pipeline; revise antes de enviar",
@@ -2481,6 +2582,7 @@ const mutating = new Set([
   "retry",
   "save_task_template",
   "set_task_template_active",
+  "archive_task_template",
   "waive_pipeline_step",
   "create_rule",
   "rename_rule",
