@@ -121,7 +121,7 @@ En `tests/mail_accounts.rs`, la prueba de respuesta perdida en Graph termina aho
 
 ## Pendiente para completar T13
 
-- Microsoft 365 real: inicio de sesión, lectura y borradores hechos el 2026-11-07; envío aprobado hecho el 2026-11-09, una respuesta en Enviados (ver al final). Falta comprobar su recepción en el destino.
+- Microsoft 365 real: inicio de sesión, lectura y borradores hechos el 2026-11-07; envío aprobado hecho el 2026-11-09, recibido una vez en el destino, en su carpeta de spam (ver al final).
 - Gmail: provocar con la cuenta real un corte entre el envío y el recibo y comprobar que la reconciliación por `Message-ID` propio (D41) lo confirma; en particular, que Gmail mantiene esa cabecera al enviar. La parte simulada está hecha.
 - Recorrido con una cuenta real desde la ventana: añadir la cuenta, consultar, aprobar un envío y desconectar. Requiere `correo-oauth.json` con los clientes del editor (D43).
 - Calidad de clasificación y borradores con correo real: sin medir.
@@ -165,8 +165,11 @@ Mismo equipo y carpeta de datos, `main` en `577a4a1`, versión de desarrollo. Me
 | Aprobación | Una aprobación en la ventana. La pantalla muestra «Respuesta enviada» con la cuenta de origen. |
 | Registro local | Una sola clave, `microsoft-1/task-N/send_draft/v1`, con recibo. En el historial, la misma acción con `pending` y `confirmed`. |
 | Salida | El responsable comprueba en Outlook una sola respuesta dentro del hilo, con el mensaje original marcado como respondido. |
-| Recepción | **Sin acreditar.** Unos minutos después, no aparece al buscar en Gmail por remitente, ni en spam según el responsable, y la cuenta de Google en NestAdmin da 0 nuevos. El hilo de Gmail cuenta 2 mensajes pero la API solo devuelve el enviado; no se ha averiguado por qué. |
+| Recepción | El responsable la ve en Gmail, abriendo el hilo: una sola respuesta, con el original citado, **en la carpeta de spam**. El hilo cuenta 2 mensajes (el original y la respuesta). No aparece en la búsqueda por remitente del conector de Gmail usado para comprobarlo, ni en la consulta de la cuenta de Google en NestAdmin (0 nuevos). |
 
-**Hallazgo:** en Graph, el recibo y el estado `confirmed` acreditan que Microsoft aceptó el envío, no que se haya entregado. La pantalla dice «Respuesta enviada» con ese mismo dato.
+**Hallazgos:**
+
+- En Graph, el recibo y el estado `confirmed` acreditan que Microsoft aceptó el envío, no que se haya entregado. La pantalla dice «Respuesta enviada» con ese mismo dato.
+- Gmail clasificó como spam una respuesta de esta cuenta personal de Outlook. Es un solo caso y no se ha medido con otras cuentas ni destinos: una respuesta aprobada puede no llegar a la bandeja de quien la espera, sin que NestAdmin lo sepa.
 
 No se ha provocado un corte real entre el envío y el recibo con esta cuenta.
