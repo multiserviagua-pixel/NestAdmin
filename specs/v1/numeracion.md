@@ -26,5 +26,6 @@ Cada decisión (`D<n>`) tiene un número definitivo desde que se escribe, para q
 | D146–D155 | `claude/tareas-pipelines`: errores del proveedor de IA, vistas de Tareas y plantillas de pipeline | Reservado |
 | D156–D156 | Reconciliación de Gmail por marca propia en el hilo, 2026-11-09 | Asignado |
 | D157–D166 | Triaje del correo, inyección, preferencias y perfil (D157–D164; D165–D166, hueco), 2026-11-09 | Asignado |
+| D167–D176 | Aprender a responder en la primera carga (D167–D175; D176, reserva), 2026-11-09 | Asignado |
 
-Siguiente número libre: **D167**.
+Siguiente número libre: **D177**.
