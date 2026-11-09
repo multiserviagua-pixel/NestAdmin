@@ -9,14 +9,18 @@
 //!   que se envía. Con la IA local no hace falta (`not_needed`). Se retira al cambiar de destino.
 //! - [`App::run_learning`]: una sola llamada con esquema cerrado. Con un destino externo, con
 //!   consentimiento vigente para esa huella y la elección «Enviar», va al proveedor elegido y,
-//!   si falla o la respuesta no es válida, **a la IA local** (D101, D170). Sin consentimiento, con
+//!   si falla **con `unavailable`, `timeout` o `rate_limited`**, a la IA local, solo en las
+//!   condiciones de D101 (preparada, `local_fallback`, periodo de 10 minutos). Una respuesta no
+//!   válida o cualquier otro fallo (`unauthorized`…) dejan el aprendizaje sin hacer, con el
+//!   código; la persona puede repetirlo con «Usar IA local» (elección suya, no respaldo). Sin consentimiento, con
 //!   «Usar IA local» o con la IA local como destino, solo a la local. Nunca de local a externa ni
 //!   a otro proveedor externo. Sin ninguna IA, el resultado es `Unavailable` con los recuentos.
 //!
 //! Estado de la fase, reanudación e interfaz son de E4 y E7: aquí no se escribe nada salvo el
 //! consentimiento (con constancia en el historial, sin contenido).
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 use nestadmin_ai::learn::{self as ai, Learned};
 use nestadmin_ai::{GenerateRequest, Provider, ProviderKind};
@@ -25,7 +29,9 @@ use serde_json::json;
 
 use crate::learn::{input_fp, is_masked, Collected, LearnCounts};
 use crate::refine::{now_ms, ConsentView, RefineExpectation};
-use crate::{AiWait, App, AppError, AppResult, LocalFallback, ProviderInfo};
+use crate::{
+    generate_with_fallback, AiWait, App, AppError, AppResult, LocalFallback, ProviderInfo,
+};
 
 /// Ajuste (`rule_settings`) con el consentimiento de la fase de aprendizaje.
 const CONSENT_KEY: &str = "first_learning_consent";
@@ -116,10 +122,19 @@ enum LocalSource {
     None,
 }
 
+/// Llamada al proveedor externo elegido, con el respaldo de D101.
+struct External {
+    provider: Arc<dyn Provider>,
+    fallback: Option<LocalFallback>,
+    /// Periodo de D101: tras un `unavailable` reciente, las llamadas van directas a la local.
+    until: Arc<Mutex<Option<Instant>>>,
+}
+
 /// Llamada preparada: no toca `App`, se puede ejecutar en otro hilo.
 pub struct LearnJob {
-    /// Proveedor externo al que se llamará primero; `None` si no hay que llamarlo.
-    external: Option<Arc<dyn Provider>>,
+    /// Proveedor externo al que se llamará; `None` si no hay que llamarlo.
+    external: Option<External>,
+    /// IA local para el camino sin externo («Usar IA local», sin consentimiento o destino local).
     local: LocalSource,
     request: GenerateRequest,
     pair_ids: Vec<String>,
@@ -128,8 +143,12 @@ pub struct LearnJob {
 }
 
 impl LearnJob {
-    /// Llama al externo (si procede) y, si falla o su respuesta no es válida, a la IA local; si
-    /// no, directamente a la local. Cada proveedor se llama como mucho una vez.
+    /// Con el externo: una llamada con el respaldo de D101 (`generate_with_fallback`): solo
+    /// `unavailable`, `timeout` o `rate_limited` repiten con la IA local si está preparada, y
+    /// durante el periodo de 10 minutos tras un `unavailable` va directa a ella. Cualquier otro
+    /// fallo (`unauthorized`, 402, 404, petición rechazada) o una respuesta no válida dejan el
+    /// aprendizaje sin hacer, con el código, sin llamar a la local. Sin externo: solo la local.
+    /// Nunca de la local a un externo.
     pub fn run(self) -> LearnRun {
         let LearnJob {
             external,
@@ -143,7 +162,7 @@ impl LearnJob {
         let validate = |value: &serde_json::Value| {
             ai::parse_learn_value_checked(value, &pair_ids, &|text| !is_masked(text))
         };
-        let done = |source, learned, external_failure| LearnRun {
+        let learned = |source, learned, external_failure| LearnRun {
             status: LearnStatus::Learned,
             source: Some(source),
             learned: Some(learned),
@@ -152,41 +171,54 @@ impl LearnJob {
             external_failure,
             local_failure: None,
         };
-        let mut external_failure = None;
-        if let Some(provider) = external {
-            match provider
-                .generate(&request)
-                .map_err(|e| e.code().to_owned())
-                .and_then(|r| validate(&r.output).map_err(|e| e.code().to_owned()))
-            {
-                Ok(learned) => return done(LearnSource::External, learned, None),
-                Err(code) => external_failure = Some(code),
-            }
+        let unavailable = |external_failure, local_failure| LearnRun {
+            status: LearnStatus::Unavailable,
+            source: None,
+            learned: None,
+            counts: counts.clone(),
+            external_skipped,
+            external_failure,
+            local_failure,
+        };
+        if let Some(external) = external {
+            let attempt = generate_with_fallback(
+                &*external.provider,
+                external.fallback.as_ref(),
+                &external.until,
+                &request,
+            );
+            let served_by_local = attempt.fallback.is_some();
+            let reason = attempt
+                .fallback
+                .as_ref()
+                .and_then(|f| f["reason"].as_str())
+                .map(str::to_owned);
+            let outcome = attempt
+                .result
+                .map_err(|e| e.code)
+                .and_then(|r| validate(&r.output).map_err(|e| e.code().to_owned()));
+            return match (outcome, served_by_local) {
+                (Ok(l), false) => learned(LearnSource::External, l, None),
+                (Ok(l), true) => learned(LearnSource::Local, l, reason),
+                (Err(code), false) => unavailable(Some(code), None),
+                (Err(code), true) => unavailable(reason, Some(code)),
+            };
         }
         let provider = match local {
             LocalSource::Active(p) => Some(p),
             LocalSource::Fallback(f) => f().filter(|p| p.kind() == ProviderKind::Ollama),
             LocalSource::None => None,
         };
-        let local_failure = match provider {
-            None => "no_local_ai".to_owned(),
-            Some(local) => match local
-                .generate(&request)
-                .map_err(|e| e.code().to_owned())
-                .and_then(|r| validate(&r.output).map_err(|e| e.code().to_owned()))
-            {
-                Ok(learned) => return done(LearnSource::Local, learned, external_failure),
-                Err(code) => code,
-            },
+        let Some(provider) = provider else {
+            return unavailable(None, Some("no_local_ai".to_owned()));
         };
-        LearnRun {
-            status: LearnStatus::Unavailable,
-            source: None,
-            learned: None,
-            counts,
-            external_skipped,
-            external_failure,
-            local_failure: Some(local_failure),
+        match provider
+            .generate(&request)
+            .map_err(|e| e.code().to_owned())
+            .and_then(|r| validate(&r.output).map_err(|e| e.code().to_owned()))
+        {
+            Ok(l) => learned(LearnSource::Local, l, None),
+            Err(code) => unavailable(None, Some(code)),
         }
     }
 }
@@ -390,7 +422,15 @@ impl App {
                                 .into(),
                         ));
                     } else {
-                        (Some(Arc::clone(&self.provider)), local, None)
+                        (
+                            Some(External {
+                                provider: Arc::clone(&self.provider),
+                                fallback: self.fallback.clone(),
+                                until: Arc::clone(&self.fallback_until),
+                            }),
+                            local,
+                            None,
+                        )
                     }
                 }
             }

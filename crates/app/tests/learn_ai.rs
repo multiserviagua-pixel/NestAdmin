@@ -519,28 +519,67 @@ fn consented(collected: &Collected) -> (World, Arc<Fake>, Arc<AtomicUsize>, Lear
 }
 
 #[test]
-fn external_failure_falls_back_to_the_local_ai_once() {
+fn only_unavailable_timeout_or_rate_limited_fall_back_to_the_local_ai() {
+    // D101: solo estos tres fallos del externo activan el respaldo, con una llamada a la local.
     let collected = collect_synthetic();
     for error in [
         AiError::Unavailable("sin red".into()),
         AiError::Timeout,
-        AiError::Unauthorized,
-        AiError::InvalidResponse("texto".into()),
+        AiError::RateLimited {
+            retry_after_ms: None,
+        },
     ] {
+        let code = error.code();
         let (w, local, _, choice) = consented(&collected);
         w.ext.answer(move |_| Err(error.clone()));
         let run = w.app.run_learning(&collected, &choice).unwrap();
-        assert_eq!((w.ext.calls(), local.calls()), (1, 1));
+        assert_eq!((w.ext.calls(), local.calls()), (1, 1), "{code}");
         assert_eq!(run.status, LearnStatus::Learned);
         assert_eq!(run.source, Some(LearnSource::Local));
-        assert!(run.external_failure.is_some());
+        assert_eq!(run.external_failure.as_deref(), Some(code));
         // Lo que recibió la IA local es lo mismo que vio la persona.
         assert_eq!(local.last_request().content, collected.payload);
     }
 }
 
 #[test]
-fn invalid_external_answer_falls_back_to_the_local_ai() {
+fn other_external_failures_never_fall_back_and_leave_the_code() {
+    let collected = collect_synthetic();
+    for error in [
+        AiError::Unauthorized,
+        AiError::InvalidResponse("texto".into()),
+        AiError::NoCredit,
+        AiError::ModelUnavailable {
+            cause: nestadmin_ai::ModelUnavailableCause::ModelNotFound,
+            status: 404,
+        },
+        AiError::RequestRejected {
+            status: 400,
+            kind: None,
+        },
+    ] {
+        let code = error.code();
+        let (w, local, asked, choice) = consented(&collected);
+        w.ext.answer(move |_| Err(error.clone()));
+        let run = w.app.run_learning(&collected, &choice).unwrap();
+        assert_eq!((w.ext.calls(), local.calls()), (1, 0), "{code}");
+        assert_eq!(asked.load(Ordering::SeqCst), 0, "{code}");
+        assert_eq!(run.status, LearnStatus::Unavailable);
+        assert!(run.learned.is_none() && run.source.is_none());
+        assert_eq!(run.external_failure.as_deref(), Some(code));
+        assert_eq!(run.counts.pairs, 3);
+        // La persona puede repetirlo eligiendo la IA local: es su elección, no un respaldo.
+        let again = w
+            .app
+            .run_learning(&collected, &LearnChoice::UseLocal)
+            .unwrap();
+        assert_eq!(again.source, Some(LearnSource::Local));
+        assert_eq!((w.ext.calls(), local.calls()), (1, 1));
+    }
+}
+
+#[test]
+fn invalid_external_answer_does_not_fall_back() {
     let collected = collect_synthetic();
     for bad in [
         json!("no es un objeto"),
@@ -553,10 +592,57 @@ fn invalid_external_answer_falls_back_to_the_local_ai() {
         let (w, local, _, choice) = consented(&collected);
         w.ext.answer(move |_| Ok(bad.clone()));
         let run = w.app.run_learning(&collected, &choice).unwrap();
-        assert_eq!((w.ext.calls(), local.calls()), (1, 1));
-        assert_eq!(run.source, Some(LearnSource::Local));
+        assert_eq!((w.ext.calls(), local.calls()), (1, 0));
+        assert_eq!(run.status, LearnStatus::Unavailable);
         assert_eq!(run.external_failure.as_deref(), Some("invalid_response"));
     }
+}
+
+#[test]
+fn after_an_unavailable_the_next_calls_go_straight_to_the_local_ai_for_ten_minutes() {
+    // Reutiliza el periodo de D101 (`fallback_until`) de las demás tareas.
+    let collected = collect_synthetic();
+    let (w, local, _, choice) = consented(&collected);
+    w.ext
+        .answer(|_| Err(AiError::Unavailable("sin red".into())));
+    w.app.run_learning(&collected, &choice).unwrap();
+    assert_eq!((w.ext.calls(), local.calls()), (1, 1));
+    assert!(w.app.fallback_period_active());
+    let run = w.app.run_learning(&collected, &choice).unwrap();
+    assert_eq!(run.source, Some(LearnSource::Local));
+    assert_eq!((w.ext.calls(), local.calls()), (1, 2));
+    // Pasado el periodo, vuelve a intentar con el externo.
+    w.app.expire_fallback_period();
+    w.ext.answer(|r| Ok(valid_answer(r)));
+    let run = w.app.run_learning(&collected, &choice).unwrap();
+    assert_eq!(run.source, Some(LearnSource::External));
+    assert_eq!((w.ext.calls(), local.calls()), (2, 2));
+}
+
+#[test]
+fn without_a_configured_or_ready_local_fallback_there_is_none() {
+    let collected = collect_synthetic();
+    let mut w = world(ProviderKind::OllamaCloud);
+    let e = expectation(&w.app, &collected);
+    w.app.grant_learning_consent(&collected, &e).unwrap();
+    w.ext
+        .answer(|_| Err(AiError::Unavailable("sin red".into())));
+    // `local_fallback` desactivado.
+    let run = w
+        .app
+        .run_learning(&collected, &LearnChoice::Send(e.clone()))
+        .unwrap();
+    assert_eq!(run.external_failure.as_deref(), Some("unavailable"));
+    assert!(run.learned.is_none());
+    // Activado pero la IA local no está preparada (el respaldo no devuelve proveedor).
+    let none: LocalFallback = Arc::new(|| None);
+    w.app.set_local_fallback(Some(none));
+    let run = w
+        .app
+        .run_learning(&collected, &LearnChoice::Send(e))
+        .unwrap();
+    assert_eq!(run.status, LearnStatus::Unavailable);
+    assert_eq!(run.external_failure.as_deref(), Some("unavailable"));
 }
 
 #[test]
@@ -595,7 +681,7 @@ fn a_local_failure_after_an_external_one_never_returns_to_the_external() {
     assert_eq!((w.ext.calls(), local.calls()), (1, 1));
     assert_eq!(run.status, LearnStatus::Unavailable);
     assert_eq!(run.external_failure.as_deref(), Some("unavailable"));
-    assert_eq!(run.local_failure.as_deref(), Some("timeout"));
+    assert!(run.learned.is_none());
 }
 
 #[test]
@@ -615,7 +701,7 @@ fn a_fallback_that_is_not_the_local_ai_is_ignored() {
         .unwrap();
     assert_eq!(other.calls(), 0);
     assert_eq!(run.status, LearnStatus::Unavailable);
-    assert_eq!(run.local_failure.as_deref(), Some("no_local_ai"));
+    assert_eq!(run.external_failure.as_deref(), Some("unavailable"));
 }
 
 #[test]
@@ -636,7 +722,7 @@ fn an_ai_wait_blocks_the_external_call() {
 // ---- T33h ----
 
 #[test]
-fn injected_text_never_reaches_the_model_and_a_hostile_answer_is_rejected() {
+fn injected_text_never_reaches_the_model_and_a_hostile_answer_is_invalid_response() {
     let collected = collect_synthetic();
     // La cita con la inyección ya la recortó la parte local: no sale.
     assert!(!collected
@@ -659,27 +745,28 @@ fn injected_text_never_reaches_the_model_and_a_hostile_answer_is_rejected() {
     ];
     for answer in hostile {
         w.ext.answer(move |_| Ok(answer.clone()));
+        let before = w.ext.calls();
         let run = w.app.run_learning(&collected, &choice).unwrap();
-        // Rechazada: nada de lo hostil llega a `learned`; responde la local con su respuesta válida.
-        assert_eq!(run.source, Some(LearnSource::Local));
-        let learned = run.learned.unwrap();
-        assert!(learned
-            .pairs
-            .iter()
-            .all(|p| p.category == "solicitud_factura"));
-        assert!(learned
-            .pairs
-            .iter()
-            .all(|p| ["p1", "p2", "p3"].contains(&p.pair_id.as_str())));
+        // `invalid_response`: sin respaldo automático, sin llamar a la local y sin aprender nada.
+        assert_eq!(w.ext.calls(), before + 1);
+        assert_eq!(local.calls(), 0);
+        assert_eq!(run.status, LearnStatus::Unavailable);
+        assert!(run.learned.is_none() && run.source.is_none());
+        assert_eq!(run.external_failure.as_deref(), Some("invalid_response"));
+        assert_eq!(run.local_failure, None);
     }
-    // Si las dos respuestas son hostiles, no se aprende nada.
+    // Con la IA local elegida por la persona, una respuesta hostil tampoco se aprovecha.
     local.answer(|_| {
         Ok(
             json!({ "pairs": [{ "pair_id": "p2", "category": "x", "needs_reply": true,
             "reply_kind": "other" }] }),
         )
     });
-    let run = w.app.run_learning(&collected, &choice).unwrap();
+    let run = w
+        .app
+        .run_learning(&collected, &LearnChoice::UseLocal)
+        .unwrap();
+    assert_eq!(local.calls(), 1);
     assert_eq!(run.status, LearnStatus::Unavailable);
     assert!(run.learned.is_none());
     assert_eq!(run.local_failure.as_deref(), Some("invalid_response"));
