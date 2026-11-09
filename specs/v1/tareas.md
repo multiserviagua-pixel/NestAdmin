@@ -28,6 +28,19 @@ Cada casilla se marca solo cuando todos sus requisitos están en `Cumplido` en l
   9. Hecho (2026-11-08; falta medir, paso 10): instrucciones de todas las tareas con el JSON, las claves y los valores admitidos explícitos; validación estricta de enumeraciones sin corrección por parecido; pruebas T03i con un servidor que ignora `format` (D105).
   10. Medición hecha (2026-11-08): 30 casos sin errores, 60/60 campos, 20/20 correos ([evidencia](../../evidence/t10-ollama-cloud.md)); instalador construido desde `f5d395d` sin instalar; falta T08e en un Windows limpio. Medir Ollama cloud `gemma4:31b` con el corpus en el equipo objetivo (T10, T12, D104, D105; hoy fallan los 20 correos) y, si no pasa el corpus completo, decidir otro modelo o proveedor por defecto; construir el instalador una sola vez al cerrar la etapa para T08e.
 
+## Triaje del correo (D157–D164)
+
+Plan por etapas; cada una acaba con pruebas, clippy, formato y `check.py`. La prueba manual es en `tauri dev`.
+
+1. **E0** Especificación y skills de desarrollo (`.claude/skills/`).
+2. **E1** Señales locales y conectores (T27).
+3. **E2** Corpus de triaje e inyección, e informe de base (T30).
+4. **E3** Cierre atómico, dos llamadas, compuerta de reglas, Archivar, Redactar y validación de salida (T28, T29, T30).
+5. **E4** Informativos en la interfaz.
+6. **E5** Preferencias e hilo (T31).
+7. **E6** Perfil del negocio (T32).
+8. **E7** Medida con correo de negocio real, solo recuentos en `evidence/`; requiere su autorización.
+
 ## Puertas de entrega
 
 Una entrega solo cumple el plan cuando todos los requisitos aplicables de la matriz tienen evidencia satisfactoria, incluida la ejecución de Windows y la medición en hardware equivalente. Fallos, casos omitidos, credenciales o hardware no disponibles deben declararse como pendientes. La comparación de modelos comunica mediciones observadas, no una precisión garantizada.

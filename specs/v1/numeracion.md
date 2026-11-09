@@ -25,5 +25,6 @@ Cada decisión (`D<n>`) tiene un número definitivo desde que se escribe, para q
 | D136–D145 | `claude/rediseno-ui`: rediseño visual y separación de Pendientes (D136–D138; el resto, hueco), integrado el 2026-11-08 | Asignado |
 | D146–D155 | `claude/tareas-pipelines`: errores del proveedor de IA, vistas de Tareas y plantillas de pipeline | Reservado |
 | D156–D156 | Reconciliación de Gmail por marca propia en el hilo, 2026-11-09 | Asignado |
+| D157–D166 | Triaje del correo, inyección, preferencias y perfil (D157–D164; D165–D166, hueco), 2026-11-09 | Asignado |
 
-Siguiente número libre: **D157**.
+Siguiente número libre: **D167**.
