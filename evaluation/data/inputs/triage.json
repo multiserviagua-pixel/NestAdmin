@@ -4,6 +4,10 @@
     "kind": "triage",
     "input": {
       "from": "Marta Quiroga <marta@tallerlaprueba.test>",
+      "to": [
+        "administracion@nestadmin.test"
+      ],
+      "date": "2026-10-01T08:00:00Z",
       "subject": "Factura de marzo",
       "body": "Buenos días, ¿podéis enviarme la factura F-2031 de los trabajos de marzo? La necesita mi gestor.",
       "headers": [
@@ -19,6 +23,10 @@
     "kind": "triage",
     "input": {
       "from": "Iván Salcedo <ivan@clinicasol.example>",
+      "to": [
+        "administracion@nestadmin.test"
+      ],
+      "date": "2026-10-02T09:07:00Z",
       "subject": "Copia de factura",
       "body": "Hola, perdí el PDF de la factura F-2044. ¿Me la mandáis otra vez, por favor?",
       "headers": [
@@ -34,6 +42,10 @@
     "kind": "triage",
     "input": {
       "from": "Lucía Barrantes <lucia@mueblesnorte.test>",
+      "to": [
+        "administracion@nestadmin.test"
+      ],
+      "date": "2026-10-03T10:14:00Z",
       "subject": "Necesito factura",
       "body": "Hola, no me llegó la factura del pedido P-880. Agradecería que me la enviarais hoy si es posible.",
       "headers": [
@@ -49,6 +61,10 @@
     "kind": "triage",
     "input": {
       "from": "Óscar Meléndez <oscar@papeleriamar.example>",
+      "to": [
+        "administracion@nestadmin.test"
+      ],
+      "date": "2026-10-04T11:21:00Z",
       "subject": "Duplicado F-2050",
       "body": "Buenas tardes. Solicito un duplicado de la factura F-2050 con los datos fiscales de mi empresa.",
       "headers": [
@@ -64,6 +80,10 @@
     "kind": "triage",
     "input": {
       "from": "Paula Iriarte <paula@gestoriaplaza.test>",
+      "to": [
+        "administracion@nestadmin.test"
+      ],
+      "date": "2026-10-05T12:28:00Z",
       "subject": "Factura a nombre de la sociedad",
       "body": "Hola, hice el encargo como particular pero necesito la factura a nombre de Construcciones Alameda S.L. ¿Es posible emitirla?",
       "headers": [
@@ -79,6 +99,10 @@
     "kind": "triage",
     "input": {
       "from": "Rubén Cazorla <ruben@viveroverde.example>",
+      "to": [
+        "administracion@nestadmin.test"
+      ],
+      "date": "2026-10-06T13:35:00Z",
       "subject": "Factura pendiente",
       "body": "Todavía no tengo la factura del servicio de la semana pasada. ¿Cuándo me la podéis pasar?",
       "headers": [
@@ -94,6 +118,10 @@
     "kind": "triage",
     "input": {
       "from": "Elena Ugarte <elena@asesoriaeste.test>",
+      "to": [
+        "administracion@nestadmin.test"
+      ],
+      "date": "2026-10-07T14:42:00Z",
       "subject": "Re: presupuesto aceptado",
       "body": "Gracias por el presupuesto, lo acepto. Cuando esté hecho el trabajo, ¿me enviaréis la factura por correo electrónico?",
       "headers": [
@@ -109,6 +137,10 @@
     "kind": "triage",
     "input": {
       "from": "Hugo Sandoval <hugo@ferreteriaoeste.example>",
+      "to": [
+        "administracion@nestadmin.test"
+      ],
+      "date": "2026-10-08T15:49:00Z",
       "subject": "Factura trimestral",
       "body": "Hola, necesito las facturas del último trimestre para la declaración. ¿Podéis enviármelas juntas?",
       "headers": [
@@ -124,6 +156,10 @@
     "kind": "triage",
     "input": {
       "from": "Nerea Collado <nerea@tallerlaprueba.test>",
+      "to": [
+        "administracion@nestadmin.test"
+      ],
+      "date": "2026-10-09T16:56:00Z",
       "subject": "pdf factura",
       "body": "hola mandame el pdf de la F-2077 q no lo encuentro, gracias",
       "headers": [
@@ -139,6 +175,10 @@
     "kind": "triage",
     "input": {
       "from": "Tomás Villalba <tomas@clinicasol.example>",
+      "to": [
+        "administracion@nestadmin.test"
+      ],
+      "date": "2026-10-10T17:03:00Z",
       "subject": "Solicitud de factura con IVA desglosado",
       "body": "Buenos días: les ruego una factura con el IVA desglosado correspondiente a la compra del día 12.",
       "headers": [
@@ -154,6 +194,10 @@
     "kind": "triage",
     "input": {
       "from": "Carla Mendizábal <carla@mueblesnorte.test>",
+      "to": [
+        "administracion@nestadmin.test"
+      ],
+      "date": "2026-10-11T08:10:00Z",
       "subject": "Factura rectificativa",
       "body": "Buenas, ¿pueden emitirme una copia de la factura F-2091? Mi contable la reclama para cerrar el mes.",
       "headers": [
@@ -169,6 +213,10 @@
     "kind": "triage",
     "input": {
       "from": "Julián Pardo <julian@papeleriamar.example>",
+      "to": [
+        "administracion@nestadmin.test"
+      ],
+      "date": "2026-10-12T09:17:00Z",
       "subject": "Factura de reparación",
       "body": "Hola, el coche ya está recogido. ¿Me pasáis la factura de la reparación por correo? Un saludo.",
       "headers": [
@@ -184,6 +232,10 @@
     "kind": "triage",
     "input": {
       "from": "Irene Casal <irene@gestoriaplaza.test>",
+      "to": [
+        "administracion@nestadmin.test"
+      ],
+      "date": "2026-10-13T10:24:00Z",
       "subject": "¿Recibido el pago?",
       "body": "Buenas tardes, hice la transferencia de la factura F-2102 el lunes. ¿Podéis confirmarme que ya la habéis recibido?",
       "headers": [
@@ -199,6 +251,10 @@
     "kind": "triage",
     "input": {
       "from": "Sergio Valdés <sergio@viveroverde.example>",
+      "to": [
+        "administracion@nestadmin.test"
+      ],
+      "date": "2026-10-14T11:31:00Z",
       "subject": "Estado del pago F-2110",
       "body": "Hola, quería saber si consta como pagada la factura F-2110. Me reclaman el justificante.",
       "headers": [
@@ -214,6 +270,10 @@
     "kind": "triage",
     "input": {
       "from": "Alba Cifuentes <alba@asesoriaeste.test>",
+      "to": [
+        "administracion@nestadmin.test"
+      ],
+      "date": "2026-10-15T12:38:00Z",
       "subject": "Pago pendiente",
       "body": "Buenos días, ¿tenéis pendiente algún pago mío? Quisiera ponerme al día esta semana.",
       "headers": [
@@ -229,6 +289,10 @@
     "kind": "triage",
     "input": {
       "from": "Gael Montero <gael@ferreteriaoeste.example>",
+      "to": [
+        "administracion@nestadmin.test"
+      ],
+      "date": "2026-10-16T13:45:00Z",
       "subject": "Transferencia realizada",
       "body": "Les confirmo que he realizado el pago de la factura F-2118. ¿Me avisáis cuando lo veáis en la cuenta?",
       "headers": [
@@ -244,6 +308,10 @@
     "kind": "triage",
     "input": {
       "from": "Noelia Arriaga <noelia@tallerlaprueba.test>",
+      "to": [
+        "administracion@nestadmin.test"
+      ],
+      "date": "2026-10-17T14:52:00Z",
       "subject": "¿Cuánto debo?",
       "body": "Hola, ¿me podéis decir qué importe tengo pendiente de pago? Prefiero liquidarlo de una vez.",
       "headers": [
@@ -259,6 +327,10 @@
     "kind": "triage",
     "input": {
       "from": "Pablo Ledesma <pablo@clinicasol.example>",
+      "to": [
+        "administracion@nestadmin.test"
+      ],
+      "date": "2026-10-18T15:59:00Z",
       "subject": "Cobro duplicado",
       "body": "Veo en el banco dos cargos por la misma factura F-2125. ¿Podéis confirmar cuál es el correcto?",
       "headers": [
@@ -274,6 +346,10 @@
     "kind": "triage",
     "input": {
       "from": "Rocío Elizalde <rocio@mueblesnorte.test>",
+      "to": [
+        "administracion@nestadmin.test"
+      ],
+      "date": "2026-10-19T16:06:00Z",
       "subject": "Fecha de vencimiento",
       "body": "Buenas, ¿hasta qué día puedo pagar la factura F-2131 sin recargo?",
       "headers": [
@@ -289,6 +365,10 @@
     "kind": "triage",
     "input": {
       "from": "Daniel Orrantia <daniel@papeleriamar.example>",
+      "to": [
+        "administracion@nestadmin.test"
+      ],
+      "date": "2026-10-20T17:13:00Z",
       "subject": "Justificante de pago",
       "body": "Hola, ¿me enviáis un justificante del pago que hice el día 3? Lo necesito para mi contabilidad.",
       "headers": [
@@ -304,6 +384,10 @@
     "kind": "triage",
     "input": {
       "from": "Marta Quiroga <marta@gestoriaplaza.test>",
+      "to": [
+        "administracion@nestadmin.test"
+      ],
+      "date": "2026-10-21T08:20:00Z",
       "subject": "Pagado o no",
       "body": "Mi mujer dice que ya pagamos la F-2140 y yo creo que no. ¿Lo podéis comprobar?",
       "headers": [
@@ -319,6 +403,10 @@
     "kind": "triage",
     "input": {
       "from": "Iván Salcedo <ivan@viveroverde.example>",
+      "to": [
+        "administracion@nestadmin.test"
+      ],
+      "date": "2026-10-22T09:27:00Z",
       "subject": "Forma de pago",
       "body": "Buenos días. ¿Puedo pagar la factura F-2145 en dos plazos? Dime qué opciones tengo.",
       "headers": [
@@ -334,6 +422,10 @@
     "kind": "triage",
     "input": {
       "from": "Lucía Barrantes <lucia@asesoriaeste.test>",
+      "to": [
+        "administracion@nestadmin.test"
+      ],
+      "date": "2026-10-23T10:34:00Z",
       "subject": "Recordatorio de pago",
       "body": "Recibí un aviso de pago pendiente pero creo que ya lo abonamos. ¿Podéis mirarlo, por favor?",
       "headers": [
@@ -349,6 +441,10 @@
     "kind": "triage",
     "input": {
       "from": "Óscar Meléndez <oscar@ferreteriaoeste.example>",
+      "to": [
+        "administracion@nestadmin.test"
+      ],
+      "date": "2026-10-24T11:41:00Z",
       "subject": "Domiciliación",
       "body": "Hola, ¿se ha pasado ya el recibo de este mes? No veo el cargo en mi cuenta.",
       "headers": [
@@ -364,6 +460,10 @@
     "kind": "triage",
     "input": {
       "from": "Paula Iriarte <paula@tallerlaprueba.test>",
+      "to": [
+        "administracion@nestadmin.test"
+      ],
+      "date": "2026-10-25T12:48:00Z",
       "subject": "Error en la factura F-2201",
       "body": "Hola, la factura F-2201 lleva un importe distinto del presupuesto. Por favor, revisadla.",
       "headers": [
@@ -379,6 +479,10 @@
     "kind": "triage",
     "input": {
       "from": "Rubén Cazorla <ruben@clinicasol.example>",
+      "to": [
+        "administracion@nestadmin.test"
+      ],
+      "date": "2026-10-26T13:55:00Z",
       "subject": "Datos fiscales incorrectos",
       "body": "Buenas tardes, mi NIF está mal en la factura F-2208. Necesito que la corrijáis y me la reenviéis.",
       "headers": [
@@ -394,6 +498,10 @@
     "kind": "triage",
     "input": {
       "from": "Elena Ugarte <elena@mueblesnorte.test>",
+      "to": [
+        "administracion@nestadmin.test"
+      ],
+      "date": "2026-10-27T14:02:00Z",
       "subject": "IVA mal aplicado",
       "body": "Creo que habéis aplicado el 21 % de IVA donde correspondía el 10 %. ¿Podéis revisar la factura F-2215?",
       "headers": [
@@ -409,6 +517,10 @@
     "kind": "triage",
     "input": {
       "from": "Hugo Sandoval <hugo@papeleriamar.example>",
+      "to": [
+        "administracion@nestadmin.test"
+      ],
+      "date": "2026-10-28T15:09:00Z",
       "subject": "Factura duplicada",
       "body": "Me han llegado dos facturas iguales, la F-2220 y la F-2221. Una sobra, ¿no?",
       "headers": [
@@ -424,6 +536,10 @@
     "kind": "triage",
     "input": {
       "from": "Nerea Collado <nerea@gestoriaplaza.test>",
+      "to": [
+        "administracion@nestadmin.test"
+      ],
+      "date": "2026-10-01T16:16:00Z",
       "subject": "Concepto erróneo",
       "body": "El concepto de la factura F-2227 no corresponde al trabajo que hicisteis. Revisadlo, por favor.",
       "headers": [
@@ -439,6 +555,10 @@
     "kind": "triage",
     "input": {
       "from": "Tomás Villalba <tomas@viveroverde.example>",
+      "to": [
+        "administracion@nestadmin.test"
+      ],
+      "date": "2026-10-02T17:23:00Z",
       "subject": "Fecha equivocada",
       "body": "La factura F-2233 está fechada en el mes anterior al servicio. Necesito que la corrijáis.",
       "headers": [
@@ -454,6 +574,10 @@
     "kind": "triage",
     "input": {
       "from": "Carla Mendizábal <carla@asesoriaeste.test>",
+      "to": [
+        "administracion@nestadmin.test"
+      ],
+      "date": "2026-10-03T08:30:00Z",
       "subject": "Cantidad incorrecta",
       "body": "En la F-2240 cobráis diez unidades y yo solo recibí ocho. Pido que se revise.",
       "headers": [
@@ -469,6 +593,10 @@
     "kind": "triage",
     "input": {
       "from": "Julián Pardo <julian@ferreteriaoeste.example>",
+      "to": [
+        "administracion@nestadmin.test"
+      ],
+      "date": "2026-10-04T09:37:00Z",
       "subject": "Nombre mal escrito",
       "body": "Mi apellido aparece mal en la factura F-2246, falta una letra. ¿Pueden emitir una corrección?",
       "headers": [
@@ -484,6 +612,10 @@
     "kind": "triage",
     "input": {
       "from": "Irene Casal <irene@tallerlaprueba.test>",
+      "to": [
+        "administracion@nestadmin.test"
+      ],
+      "date": "2026-10-05T10:44:00Z",
       "subject": "Importe no cuadra",
       "body": "El total de la factura F-2252 no coincide con la suma de las líneas. Os agradeceré que lo reviséis.",
       "headers": [
@@ -499,6 +631,10 @@
     "kind": "triage",
     "input": {
       "from": "Sergio Valdés <sergio@clinicasol.example>",
+      "to": [
+        "administracion@nestadmin.test"
+      ],
+      "date": "2026-10-06T11:51:00Z",
       "subject": "Descuento no aplicado",
       "body": "Acordamos un descuento del 5 % y no aparece en la factura F-2259. ¿Podéis revisarla?",
       "headers": [
@@ -514,6 +650,10 @@
     "kind": "triage",
     "input": {
       "from": "Alba Cifuentes <alba@mueblesnorte.test>",
+      "to": [
+        "administracion@nestadmin.test"
+      ],
+      "date": "2026-10-07T12:58:00Z",
       "subject": "Reclamación factura",
       "body": "Quiero reclamar la factura F-2265: cobráis un desplazamiento que no hubo.",
       "headers": [
@@ -529,6 +669,10 @@
     "kind": "triage",
     "input": {
       "from": "Gael Montero <gael@papeleriamar.example>",
+      "to": [
+        "administracion@nestadmin.test"
+      ],
+      "date": "2026-10-08T13:05:00Z",
       "subject": "Dirección de facturación",
       "body": "La dirección de facturación de la F-2270 es la antigua. Por favor, corregid y reenviad.",
       "headers": [
@@ -544,6 +688,10 @@
     "kind": "triage",
     "input": {
       "from": "Noelia Arriaga <noelia@gestoriaplaza.test>",
+      "to": [
+        "administracion@nestadmin.test"
+      ],
+      "date": "2026-10-09T14:12:00Z",
       "subject": "Documentación adjunta",
       "body": "Hola, os envío la documentación que me pedisteis para dar de alta mi cuenta. Confirmad que os llega bien.",
       "headers": [
@@ -559,6 +707,10 @@
     "kind": "triage",
     "input": {
       "from": "Pablo Ledesma <pablo@viveroverde.example>",
+      "to": [
+        "administracion@nestadmin.test"
+      ],
+      "date": "2026-10-10T15:19:00Z",
       "subject": "Certificado de estar al corriente",
       "body": "Buenos días, necesito un certificado de estar al corriente de pago para presentarlo en un concurso.",
       "headers": [
@@ -574,6 +726,10 @@
     "kind": "triage",
     "input": {
       "from": "Rocío Elizalde <rocio@asesoriaeste.test>",
+      "to": [
+        "administracion@nestadmin.test"
+      ],
+      "date": "2026-10-11T16:26:00Z",
       "subject": "Contrato firmado",
       "body": "Adjunto el contrato firmado. ¿Falta algún documento más por mi parte?",
       "headers": [
@@ -589,6 +745,10 @@
     "kind": "triage",
     "input": {
       "from": "Daniel Orrantia <daniel@ferreteriaoeste.example>",
+      "to": [
+        "administracion@nestadmin.test"
+      ],
+      "date": "2026-10-12T17:33:00Z",
       "subject": "Certificado de retenciones",
       "body": "¿Me podéis facilitar el certificado de retenciones del año pasado? Lo necesito para la renta.",
       "headers": [
@@ -604,6 +764,10 @@
     "kind": "triage",
     "input": {
       "from": "Marta Quiroga <marta@tallerlaprueba.test>",
+      "to": [
+        "administracion@nestadmin.test"
+      ],
+      "date": "2026-10-13T08:40:00Z",
       "subject": "Papeles de la garantía",
       "body": "Hola, ¿qué documentos hacen falta para tramitar la garantía del equipo? Los tengo a mano.",
       "headers": [
@@ -619,6 +783,10 @@
     "kind": "triage",
     "input": {
       "from": "Iván Salcedo <ivan@clinicasol.example>",
+      "to": [
+        "administracion@nestadmin.test"
+      ],
+      "date": "2026-10-14T09:47:00Z",
       "subject": "Escrituras",
       "body": "Os mando copia de las escrituras de la sociedad, como acordamos. Decidme si es suficiente.",
       "headers": [
@@ -634,6 +802,10 @@
     "kind": "triage",
     "input": {
       "from": "Lucía Barrantes <lucia@mueblesnorte.test>",
+      "to": [
+        "administracion@nestadmin.test"
+      ],
+      "date": "2026-10-15T10:54:00Z",
       "subject": "Ficha técnica",
       "body": "Buenas tardes, ¿me podéis enviar la ficha técnica y el certificado de conformidad del producto?",
       "headers": [
@@ -649,6 +821,10 @@
     "kind": "triage",
     "input": {
       "from": "Óscar Meléndez <oscar@papeleriamar.example>",
+      "to": [
+        "administracion@nestadmin.test"
+      ],
+      "date": "2026-10-16T11:01:00Z",
       "subject": "Alta de proveedor",
       "body": "Adjunto el formulario de alta de proveedor relleno. ¿Podéis confirmar la recepción de los documentos?",
       "headers": [
@@ -664,6 +840,10 @@
     "kind": "triage",
     "input": {
       "from": "Paula Iriarte <paula@gestoriaplaza.test>",
+      "to": [
+        "administracion@nestadmin.test"
+      ],
+      "date": "2026-10-17T12:08:00Z",
       "subject": "Justificante de domicilio",
       "body": "Me piden un justificante de que soy cliente vuestro con dirección. ¿Podéis darme un documento?",
       "headers": [
@@ -679,6 +859,10 @@
     "kind": "triage",
     "input": {
       "from": "Rubén Cazorla <ruben@viveroverde.example>",
+      "to": [
+        "administracion@nestadmin.test"
+      ],
+      "date": "2026-10-18T13:15:00Z",
       "subject": "Documento de identidad",
       "body": "Os reenvío el documento que faltaba, ya escaneado correctamente. Gracias por la paciencia.",
       "headers": [
@@ -694,6 +878,10 @@
     "kind": "triage",
     "input": {
       "from": "Elena Ugarte <elena@asesoriaeste.test>",
+      "to": [
+        "administracion@nestadmin.test"
+      ],
+      "date": "2026-10-19T14:22:00Z",
       "subject": "Certificado de calidad",
       "body": "Necesitamos el certificado de calidad del lote entregado. ¿Os lo podéis pedir al fabricante?",
       "headers": [
@@ -709,6 +897,10 @@
     "kind": "triage",
     "input": {
       "from": "Hugo Sandoval <hugo@ferreteriaoeste.example>",
+      "to": [
+        "administracion@nestadmin.test"
+      ],
+      "date": "2026-10-20T15:29:00Z",
       "subject": "Autorización firmada",
       "body": "Adjunto la autorización firmada para gestionar mis trámites. ¿Me confirmáis que es válida?",
       "headers": [
@@ -724,6 +916,10 @@
     "kind": "triage",
     "input": {
       "from": "Nerea Collado <nerea@tallerlaprueba.test>",
+      "to": [
+        "administracion@nestadmin.test"
+      ],
+      "date": "2026-10-21T16:36:00Z",
       "subject": "Consulta de horario",
       "body": "Hola, ¿a qué hora cerráis los sábados? Quisiera pasarme esta semana.",
       "headers": [
@@ -739,6 +935,10 @@
     "kind": "triage",
     "input": {
       "from": "Tomás Villalba <tomas@clinicasol.example>",
+      "to": [
+        "administracion@nestadmin.test"
+      ],
+      "date": "2026-10-22T17:43:00Z",
       "subject": "Presupuesto para reforma",
       "body": "Buenas, me gustaría pedir presupuesto para una reforma pequeña. ¿Cuándo podríais venir a verlo?",
       "headers": [
@@ -754,6 +954,10 @@
     "kind": "triage",
     "input": {
       "from": "Carla Mendizábal <carla@mueblesnorte.test>",
+      "to": [
+        "administracion@nestadmin.test"
+      ],
+      "date": "2026-10-23T08:50:00Z",
       "subject": "Cita",
       "body": "Hola, ¿tenéis hueco el jueves por la tarde? Necesito que me atendáis sobre mi encargo.",
       "headers": [
@@ -769,6 +973,10 @@
     "kind": "triage",
     "input": {
       "from": "Julián Pardo <julian@papeleriamar.example>",
+      "to": [
+        "administracion@nestadmin.test"
+      ],
+      "date": "2026-10-24T09:57:00Z",
       "subject": "Sugerencia",
       "body": "Quería comentaros que el servicio fue excelente. Una cosa: ¿podríais ofrecer también entrega a domicilio?",
       "headers": [
@@ -784,6 +992,10 @@
     "kind": "triage",
     "input": {
       "from": "Irene Casal <irene@gestoriaplaza.test>",
+      "to": [
+        "administracion@nestadmin.test"
+      ],
+      "date": "2026-10-25T10:04:00Z",
       "subject": "Pregunta sobre un producto",
       "body": "Buenas tardes, ¿tenéis en stock el modelo grande? Me interesaría si el precio es razonable.",
       "headers": [
@@ -799,6 +1011,10 @@
     "kind": "triage",
     "input": {
       "from": "Sergio Valdés <sergio@viveroverde.example>",
+      "to": [
+        "administracion@nestadmin.test"
+      ],
+      "date": "2026-10-26T11:11:00Z",
       "subject": "Cambio de dirección",
       "body": "Hola, me he mudado. ¿Cómo puedo actualizar mi dirección en vuestros registros?",
       "headers": [
@@ -814,6 +1030,10 @@
     "kind": "triage",
     "input": {
       "from": "Alba Cifuentes <alba@asesoriaeste.test>",
+      "to": [
+        "administracion@nestadmin.test"
+      ],
+      "date": "2026-10-27T12:18:00Z",
       "subject": "Colaboración",
       "body": "Somos una asociación de comerciantes del barrio y nos gustaría hablar con vosotros sobre una colaboración.",
       "headers": [
@@ -829,6 +1049,10 @@
     "kind": "triage",
     "input": {
       "from": "Gael Montero <gael@ferreteriaoeste.example>",
+      "to": [
+        "administracion@nestadmin.test"
+      ],
+      "date": "2026-10-28T13:25:00Z",
       "subject": "¿Hacéis envíos?",
       "body": "Hola, ¿hacéis envíos a otra provincia? Y si es así, ¿cuánto tardan?",
       "headers": [
@@ -844,6 +1068,10 @@
     "kind": "triage",
     "input": {
       "from": "Noelia Arriaga <noelia@tallerlaprueba.test>",
+      "to": [
+        "administracion@nestadmin.test"
+      ],
+      "date": "2026-10-01T14:32:00Z",
       "subject": "Baja del servicio",
       "body": "Buenos días, quiero darme de baja del servicio a final de mes. ¿Qué tengo que hacer?",
       "headers": [
@@ -859,6 +1087,10 @@
     "kind": "triage",
     "input": {
       "from": "Pablo Ledesma <pablo@clinicasol.example>",
+      "to": [
+        "administracion@nestadmin.test"
+      ],
+      "date": "2026-10-02T15:39:00Z",
       "subject": "Queja por retraso",
       "body": "Llevamos tres semanas esperando el pedido y nadie responde al teléfono. Exijo una respuesta.",
       "headers": [
@@ -874,6 +1106,10 @@
     "kind": "triage",
     "input": {
       "from": "Rocío Elizalde <rocio@mueblesnorte.test>",
+      "to": [
+        "administracion@nestadmin.test"
+      ],
+      "date": "2026-10-03T16:46:00Z",
       "subject": "Pregunta de plazos",
       "body": "¿Cuánto tarda normalmente un encargo como el que hablamos? Tengo que planificar la obra.",
       "headers": [
@@ -889,6 +1125,10 @@
     "kind": "triage",
     "input": {
       "from": "Daniel Orrantia <daniel@papeleriamar.example>",
+      "to": [
+        "administracion@nestadmin.test"
+      ],
+      "date": "2026-10-04T17:53:00Z",
       "subject": "Mensaje personal",
       "body": "Hola, soy Carlos, el sobrino de Pilar. Me dijo que os escribiera para preguntar por su pedido.",
       "headers": [
@@ -904,6 +1144,10 @@
     "kind": "triage",
     "input": {
       "from": "Ventas Taller Ruiz <ventas@tallerruiz.example>",
+      "to": [
+        "administracion@nestadmin.test"
+      ],
+      "date": "2026-10-05T08:00:00Z",
       "subject": "Factura de la reparación",
       "body": "Hola, desde nuestro CRM os escribo: ¿podéis enviarnos la factura F-3001? Es de la reparación del 4.",
       "headers": [
@@ -919,6 +1163,10 @@
     "kind": "triage",
     "input": {
       "from": "Administración Bar Ancla <admin@baranclax.test>",
+      "to": [
+        "administracion@nestadmin.test"
+      ],
+      "date": "2026-10-06T09:07:00Z",
       "subject": "Pago de la F-3010",
       "body": "Buenos días, hemos pagado la factura F-3010 por transferencia. ¿Podéis confirmar que ya está recibida?",
       "headers": [
@@ -938,6 +1186,10 @@
     "kind": "triage",
     "input": {
       "from": "Compras Hostal Olmo <compras@hostalolmo.example>",
+      "to": [
+        "administracion@nestadmin.test"
+      ],
+      "date": "2026-10-07T10:14:00Z",
       "subject": "Error en importe",
       "body": "La factura F-3022 muestra 480,00 € y el albarán decía 408,00 €. Por favor, revisadlo.",
       "headers": [
@@ -957,6 +1209,10 @@
     "kind": "triage",
     "input": {
       "from": "Lola Peñalver <lola@pelucacasa.test>",
+      "to": [
+        "administracion@nestadmin.test"
+      ],
+      "date": "2026-10-08T11:21:00Z",
       "subject": "Certificado",
       "body": "Hola, necesito un certificado de que soy clienta desde 2019. ¿Podéis hacerlo?",
       "headers": [
@@ -972,6 +1228,10 @@
     "kind": "triage",
     "input": {
       "from": "Gestión Cooperativa Vega <gestion@coopvega.test>",
+      "to": [
+        "administracion@nestadmin.test"
+      ],
+      "date": "2026-10-09T12:28:00Z",
       "subject": "Consulta de condiciones",
       "body": "Somos una cooperativa y escribimos desde el buzón compartido del grupo. ¿Podéis enviarnos vuestras condiciones de servicio?",
       "headers": [
@@ -991,6 +1251,10 @@
     "kind": "triage",
     "input": {
       "from": "Contabilidad Óptica Dalmau <conta@opticadalmau.example>",
+      "to": [
+        "administracion@nestadmin.test"
+      ],
+      "date": "2026-10-10T13:35:00Z",
       "subject": "Factura F-3040",
       "body": "Hola, enviadnos la factura F-3040 con la referencia del pedido, por favor.",
       "headers": [
@@ -1010,6 +1274,10 @@
     "kind": "triage",
     "input": {
       "from": "Rafael Prieto <rafael@prietoreformas.test>",
+      "to": [
+        "administracion@nestadmin.test"
+      ],
+      "date": "2026-10-11T14:42:00Z",
       "subject": "¿Está pagada la F-3055?",
       "body": "Rafa aquí. Mi software de contabilidad me manda copias; ¿está pagada la F-3055? Dímelo cuando puedas.",
       "headers": [
@@ -1025,6 +1293,10 @@
     "kind": "triage",
     "input": {
       "from": "Soporte Imprenta Lara <soporte@imprentalara.example>",
+      "to": [
+        "administracion@nestadmin.test"
+      ],
+      "date": "2026-10-12T15:49:00Z",
       "subject": "Documento fiscal",
       "body": "Buenos días, os enviamos el certificado de residencia fiscal que pedisteis y necesitamos el vuestro. ¿Me lo mandáis?",
       "headers": [
@@ -1040,6 +1312,10 @@
     "kind": "triage",
     "input": {
       "from": "Silvia Nogal <silvia@nogalinteriores.test>",
+      "to": [
+        "administracion@nestadmin.test"
+      ],
+      "date": "2026-10-13T16:56:00Z",
       "subject": "Mensaje desde formulario",
       "body": "Hola, os escribo desde el formulario de mi web de empresa. Quiero que me llaméis para hablar de un proyecto.",
       "headers": [
@@ -1055,6 +1331,10 @@
     "kind": "triage",
     "input": {
       "from": "Dirección Colegio San Telmo <direccion@sanTelmo.example>",
+      "to": [
+        "administracion@nestadmin.test"
+      ],
+      "date": "2026-10-14T17:03:00Z",
       "subject": "Factura del curso",
       "body": "Solicitamos copia de la factura del curso de formación, referencia F-3071, para justificar la subvención.",
       "headers": [
@@ -1078,6 +1358,10 @@
     "kind": "triage",
     "input": {
       "from": "Inc. Noreplyinc <noreplyinc@empresa.test>",
+      "to": [
+        "administracion@nestadmin.test"
+      ],
+      "date": "2026-10-15T08:10:00Z",
       "subject": "Pago de la F-3080",
       "body": "Nuestra dirección contiene una palabra parecida a un buzón automático, pero somos personas. ¿Habéis recibido el pago de la F-3080?",
       "headers": [
@@ -1093,6 +1377,10 @@
     "kind": "triage",
     "input": {
       "from": "Arnold Pons <arnold@pons.test>",
+      "to": [
+        "administracion@nestadmin.test"
+      ],
+      "date": "2026-10-16T09:17:00Z",
       "subject": "Factura de enero",
       "body": "Hola, ¿podéis enviarme la factura de enero? Gracias.",
       "headers": [
@@ -1108,6 +1396,10 @@
     "kind": "triage",
     "input": {
       "from": "Honor Reply <honoreply@honor.test>",
+      "to": [
+        "administracion@nestadmin.test"
+      ],
+      "date": "2026-10-17T10:24:00Z",
       "subject": "Incidencia con factura",
       "body": "La factura F-3092 tiene el nombre mal escrito. ¿La revisáis?",
       "headers": [
@@ -1123,6 +1415,10 @@
     "kind": "triage",
     "input": {
       "from": "Mario Soto <mario@sotoyhijos.test>",
+      "to": [
+        "administracion@nestadmin.test"
+      ],
+      "date": "2026-10-18T11:31:00Z",
       "subject": "Documento pendiente",
       "body": "Cuando podáis, ¿me decís qué documentos faltan para el alta? Gracias.",
       "headers": [
@@ -1138,6 +1434,10 @@
     "kind": "triage",
     "input": {
       "from": "Teresa Bellido <teresa@bellidoyasociados.example>",
+      "to": [
+        "administracion@nestadmin.test"
+      ],
+      "date": "2026-10-19T12:38:00Z",
       "subject": "Pago de la F-3101",
       "body": "Hola, os confirmo que pagué la F-3101. ¿Me contestáis cuando lo veáis?",
       "headers": [
@@ -1153,6 +1453,10 @@
     "kind": "triage",
     "input": {
       "from": "Joaquín Ferrer <joaquin@ferrerobras.test>",
+      "to": [
+        "administracion@nestadmin.test"
+      ],
+      "date": "2026-10-20T13:45:00Z",
       "subject": "Presupuesto",
       "body": "Necesito presupuesto para una instalación. Llamadme si queréis aclarar cualquier cosa.",
       "headers": [
@@ -1168,6 +1472,10 @@
     "kind": "triage",
     "input": {
       "from": "Ana Belén Cortés <ab@cortesyasoc.example>",
+      "to": [
+        "administracion@nestadmin.test"
+      ],
+      "date": "2026-10-21T14:52:00Z",
       "subject": "Reclamación de factura",
       "body": "Veo en la factura F-3115 un recargo que no esperaba. Os pido que lo revisemos.",
       "headers": [
@@ -1183,6 +1491,10 @@
     "kind": "triage",
     "input": {
       "from": "Hermanos Ibáñez <info@hermanosibanez.test>",
+      "to": [
+        "administracion@nestadmin.test"
+      ],
+      "date": "2026-10-22T15:59:00Z",
       "subject": "Copia de factura",
       "body": "Buenas, nos podéis reenviar la factura F-3120? Muchas gracias.",
       "headers": [
@@ -1202,6 +1514,10 @@
     "kind": "triage",
     "input": {
       "from": "Ángela Rojas <angela@rojaslogistica.test>",
+      "to": [
+        "administracion@nestadmin.test"
+      ],
+      "date": "2026-10-23T16:06:00Z",
       "subject": "Autorización",
       "body": "Os mando la autorización firmada por el administrador. Confirmad que la documentación es correcta.",
       "headers": [
@@ -1217,6 +1533,10 @@
     "kind": "triage",
     "input": {
       "from": "Federico Alonso <fede@alonsoyfaus.example>",
+      "to": [
+        "administracion@nestadmin.test"
+      ],
+      "date": "2026-10-24T17:13:00Z",
       "subject": "Retraso",
       "body": "Mi pedido lleva retraso y necesito saber la fecha prevista de entrega.",
       "headers": [
@@ -1232,6 +1552,10 @@
     "kind": "triage",
     "input": {
       "from": "Facturación Servicios Luz <no-reply@serviciosluz.example>",
+      "to": [
+        "administracion@nestadmin.test"
+      ],
+      "date": "2026-10-25T08:20:00Z",
       "subject": "Su factura F-4001 está disponible",
       "body": "Su factura F-4001 ya está disponible en su área de cliente. Este mensaje es automático; no responda a este correo.",
       "headers": [
@@ -1247,6 +1571,10 @@
     "kind": "triage",
     "input": {
       "from": "Pagos Fácil <noreply@pagosfacil.test>",
+      "to": [
+        "administracion@nestadmin.test"
+      ],
+      "date": "2026-10-26T09:27:00Z",
       "subject": "Hemos recibido su pago",
       "body": "Hemos recibido su pago de 120,00 € correspondiente al recibo R-77. Gracias por usar nuestro servicio.",
       "headers": [
@@ -1262,6 +1590,10 @@
     "kind": "triage",
     "input": {
       "from": "Tienda Rápida <no_reply@tiendarapida.example>",
+      "to": [
+        "administracion@nestadmin.test"
+      ],
+      "date": "2026-10-27T10:34:00Z",
       "subject": "Pedido enviado",
       "body": "Su pedido PD-5532 ha salido de nuestro almacén. Seguimiento disponible en su cuenta.",
       "headers": []
@@ -1272,6 +1604,10 @@
     "kind": "triage",
     "input": {
       "from": "Gestor Documental <donotreply@gestordoc.test>",
+      "to": [
+        "administracion@nestadmin.test"
+      ],
+      "date": "2026-10-28T11:41:00Z",
       "subject": "Documento firmado",
       "body": "El documento 'Contrato de servicios' ha sido firmado por todas las partes. Puede descargarlo desde la plataforma.",
       "headers": []
@@ -1282,6 +1618,10 @@
     "kind": "triage",
     "input": {
       "from": "Soporte Nube <no.reply@soportenube.example>",
+      "to": [
+        "administracion@nestadmin.test"
+      ],
+      "date": "2026-10-01T12:48:00Z",
       "subject": "Ticket 4482 actualizado",
       "body": "Su ticket 4482 ha cambiado de estado a 'en curso'. Responda desde el portal, no por correo.",
       "headers": [
@@ -1297,6 +1637,10 @@
     "kind": "triage",
     "input": {
       "from": "Agenda Online <noresponder@agendaonline.test>",
+      "to": [
+        "administracion@nestadmin.test"
+      ],
+      "date": "2026-10-02T13:55:00Z",
       "subject": "Recordatorio de cita",
       "body": "Le recordamos su cita de mañana a las 10:00. Si desea cambiarla, use el enlace de su cuenta.",
       "headers": []
@@ -1307,6 +1651,10 @@
     "kind": "triage",
     "input": {
       "from": "Banco Ficticio Notificaciones <no-reply@bancoficticio.example>",
+      "to": [
+        "administracion@nestadmin.test"
+      ],
+      "date": "2026-10-03T14:02:00Z",
       "subject": "Cargo en su cuenta",
       "body": "Se ha realizado un cargo de 45,30 € en su cuenta terminada en 0000. Mensaje informativo.",
       "headers": [
@@ -1322,6 +1670,10 @@
     "kind": "triage",
     "input": {
       "from": "Mensajería Veloz <do-not-reply@mensajeriaveloz.test>",
+      "to": [
+        "administracion@nestadmin.test"
+      ],
+      "date": "2026-10-04T15:09:00Z",
       "subject": "Entrega prevista hoy",
       "body": "Su paquete se entregará hoy entre las 14:00 y las 18:00. No es necesario que responda.",
       "headers": []
@@ -1332,6 +1684,10 @@
     "kind": "triage",
     "input": {
       "from": "Alertas Calendario <calendario-noreply@alertas.example>",
+      "to": [
+        "administracion@nestadmin.test"
+      ],
+      "date": "2026-10-05T16:16:00Z",
       "subject": "Invitación: reunión de equipo",
       "body": "Reunión de equipo, viernes a las 9:00. Mensaje generado automáticamente.",
       "headers": [
@@ -1347,6 +1703,10 @@
     "kind": "triage",
     "input": {
       "from": "Sistema de Contabilidad <system@contabilidadpro.test>",
+      "to": [
+        "administracion@nestadmin.test"
+      ],
+      "date": "2026-10-06T17:23:00Z",
       "subject": "Informe mensual generado",
       "body": "Su informe mensual de contabilidad se ha generado automáticamente y está disponible para descarga.",
       "headers": [
@@ -1362,6 +1722,10 @@
     "kind": "triage",
     "input": {
       "from": "Respuesta automática <laura@asesoriaeste.test>",
+      "to": [
+        "administracion@nestadmin.test"
+      ],
+      "date": "2026-10-07T08:30:00Z",
       "subject": "Respuesta automática: estoy fuera de la oficina",
       "body": "Estaré fuera de la oficina hasta el día 20. Para asuntos urgentes, contacte con recepción.",
       "headers": [
@@ -1377,6 +1741,10 @@
     "kind": "triage",
     "input": {
       "from": "Cobros Recurrentes <accounts.noreply@cobrosrec.example>",
+      "to": [
+        "administracion@nestadmin.test"
+      ],
+      "date": "2026-10-08T09:37:00Z",
       "subject": "Cobro de suscripción realizado",
       "body": "Se ha cobrado su suscripción mensual. Puede consultar el recibo en su cuenta.",
       "headers": []
@@ -1387,6 +1755,10 @@
     "kind": "triage",
     "input": {
       "from": "Seguridad Cuenta <security-noreply@cuentasegura.example>",
+      "to": [
+        "administracion@nestadmin.test"
+      ],
+      "date": "2026-10-09T10:44:00Z",
       "subject": "Nuevo inicio de sesión en su cuenta",
       "body": "Se ha iniciado sesión desde un dispositivo nuevo en Madrid. Si no fue usted, cambie su contraseña.",
       "headers": [
@@ -1402,6 +1774,10 @@
     "kind": "triage",
     "input": {
       "from": "Verificación <no-reply@verificacion.test>",
+      "to": [
+        "administracion@nestadmin.test"
+      ],
+      "date": "2026-10-10T11:51:00Z",
       "subject": "Su código de verificación",
       "body": "Su código de verificación es 000000 y caduca en 10 minutos. No lo comparta con nadie.",
       "headers": [
@@ -1417,6 +1793,10 @@
     "kind": "triage",
     "input": {
       "from": "Acceso Seguro <noreply@accesoseguro.example>",
+      "to": [
+        "administracion@nestadmin.test"
+      ],
+      "date": "2026-10-11T12:58:00Z",
       "subject": "Cambio de contraseña",
       "body": "La contraseña de su cuenta se ha cambiado hace unos minutos. Si no fue usted, contacte con soporte.",
       "headers": [
@@ -1432,6 +1812,10 @@
     "kind": "triage",
     "input": {
       "from": "Banco Ficticio Seguridad <no-reply@bancoficticio.example>",
+      "to": [
+        "administracion@nestadmin.test"
+      ],
+      "date": "2026-10-12T13:05:00Z",
       "subject": "Alerta de seguridad",
       "body": "Hemos detectado un intento de acceso inusual. Nunca le pediremos su clave por correo.",
       "headers": [
@@ -1447,6 +1831,10 @@
     "kind": "triage",
     "input": {
       "from": "Protección Cuenta <no-reply@proteccioncuenta.test>",
+      "to": [
+        "administracion@nestadmin.test"
+      ],
+      "date": "2026-10-13T14:12:00Z",
       "subject": "Confirme su dirección de correo",
       "body": "Haga clic en el enlace para confirmar su dirección de correo. El enlace caduca en 24 horas.",
       "headers": [
@@ -1462,6 +1850,10 @@
     "kind": "triage",
     "input": {
       "from": "Autenticación <donotreply@autenticacion.example>",
+      "to": [
+        "administracion@nestadmin.test"
+      ],
+      "date": "2026-10-14T15:19:00Z",
       "subject": "Autenticación en dos pasos activada",
       "body": "Ha activado la verificación en dos pasos. Guarde sus códigos de recuperación en un lugar seguro.",
       "headers": [
@@ -1477,6 +1869,10 @@
     "kind": "triage",
     "input": {
       "from": "Seguridad Nube <noreply@seguridadnube.test>",
+      "to": [
+        "administracion@nestadmin.test"
+      ],
+      "date": "2026-10-15T16:26:00Z",
       "subject": "Dispositivo nuevo conectado",
       "body": "Un nuevo dispositivo se ha conectado a su cuenta. Revise su actividad reciente.",
       "headers": [
@@ -1492,6 +1888,10 @@
     "kind": "triage",
     "input": {
       "from": "Alertas Seguridad <alerts-no-reply@alertas.example>",
+      "to": [
+        "administracion@nestadmin.test"
+      ],
+      "date": "2026-10-16T17:33:00Z",
       "subject": "Contraseña a punto de caducar",
       "body": "Su contraseña caducará en 3 días. Cámbiela desde la configuración de su cuenta.",
       "headers": [
@@ -1507,6 +1907,10 @@
     "kind": "triage",
     "input": {
       "from": "Novedades Papel <no-reply@novedadespapel.example>",
+      "to": [
+        "administracion@nestadmin.test"
+      ],
+      "date": "2026-10-17T08:40:00Z",
       "subject": "Las novedades de otoño",
       "body": "Descubra nuestra nueva colección de otoño. Para darse de baja, use el enlace del pie.",
       "headers": [
@@ -1530,6 +1934,10 @@
     "kind": "triage",
     "input": {
       "from": "Boletín Asesores <noreply@boletinasesores.test>",
+      "to": [
+        "administracion@nestadmin.test"
+      ],
+      "date": "2026-10-18T09:47:00Z",
       "subject": "Resumen fiscal del trimestre",
       "body": "Resumen de las novedades fiscales del trimestre. Gracias por leernos.",
       "headers": [
@@ -1553,6 +1961,10 @@
     "kind": "triage",
     "input": {
       "from": "Club Cliente <no-reply@clubcliente.example>",
+      "to": [
+        "administracion@nestadmin.test"
+      ],
+      "date": "2026-10-19T10:54:00Z",
       "subject": "Ofertas de la semana",
       "body": "Hasta un 30 % en artículos seleccionados. Oferta válida hasta fin de mes.",
       "headers": [
@@ -1576,6 +1988,10 @@
     "kind": "triage",
     "input": {
       "from": "Tecnología Hoy <noreply@tecnologiahoy.test>",
+      "to": [
+        "administracion@nestadmin.test"
+      ],
+      "date": "2026-10-20T11:01:00Z",
       "subject": "Las 5 noticias de la semana",
       "body": "Cinco historias sobre tecnología para empezar la semana.",
       "headers": [
@@ -1599,6 +2015,10 @@
     "kind": "triage",
     "input": {
       "from": "Cursos Online <donotreply@cursosonline.example>",
+      "to": [
+        "administracion@nestadmin.test"
+      ],
+      "date": "2026-10-21T12:08:00Z",
       "subject": "Nuevo curso disponible",
       "body": "Ya puede matricularse en el nuevo curso de contabilidad básica.",
       "headers": [
@@ -1622,6 +2042,10 @@
     "kind": "triage",
     "input": {
       "from": "Plataforma Facturas <no-reply@plataformafacturas.example>",
+      "to": [
+        "administracion@nestadmin.test"
+      ],
+      "date": "2026-10-22T13:15:00Z",
       "subject": "Bienvenido a Plataforma Facturas",
       "body": "Gracias por registrarse. Su cuenta ya está activa; empiece configurando su empresa.",
       "headers": [
@@ -1637,6 +2061,10 @@
     "kind": "triage",
     "input": {
       "from": "Almacén en la Nube <noreply@almacennube.test>",
+      "to": [
+        "administracion@nestadmin.test"
+      ],
+      "date": "2026-10-23T14:22:00Z",
       "subject": "Su cuenta ha sido creada",
       "body": "Bienvenido. Hemos creado su cuenta con el correo que nos indicó.",
       "headers": [
@@ -1652,6 +2080,10 @@
     "kind": "triage",
     "input": {
       "from": "Comunidad de Clientes <no-reply@comunidadclientes.example>",
+      "to": [
+        "administracion@nestadmin.test"
+      ],
+      "date": "2026-10-24T15:29:00Z",
       "subject": "Bienvenida a la comunidad",
       "body": "Nos alegra que se una a nuestra comunidad. Explore los recursos disponibles.",
       "headers": [
@@ -1667,6 +2099,10 @@
     "kind": "triage",
     "input": {
       "from": "Mail Delivery Subsystem <mailer-daemon@googlemail.test>",
+      "to": [
+        "administracion@nestadmin.test"
+      ],
+      "date": "2026-10-25T16:36:00Z",
       "subject": "Delivery Status Notification (Failure)",
       "body": "No se ha podido entregar su mensaje a clienta@dominioinexistente.test. La dirección no existe.",
       "headers": [
@@ -1686,6 +2122,10 @@
     "kind": "triage",
     "input": {
       "from": "MAILER-DAEMON <MAILER-DAEMON@correo-saliente.example>",
+      "to": [
+        "administracion@nestadmin.test"
+      ],
+      "date": "2026-10-26T17:43:00Z",
       "subject": "Undelivered Mail Returned to Sender",
       "body": "Su mensaje no pudo ser entregado: buzón lleno. Se intentó durante 3 días.",
       "headers": [
@@ -1701,6 +2141,10 @@
     "kind": "triage",
     "input": {
       "from": "Mail Delivery System <mailer-daemon@outlook-ficticio.test>",
+      "to": [
+        "administracion@nestadmin.test"
+      ],
+      "date": "2026-10-27T08:50:00Z",
       "subject": "No se pudo entregar: buzón no disponible",
       "body": "El destinatario no puede recibir mensajes en este momento. Error 550.",
       "headers": [
@@ -1716,6 +2160,10 @@
     "kind": "triage",
     "input": {
       "from": "Mail Delivery Subsystem <mailer-daemon@googlemail.test>",
+      "to": [
+        "administracion@nestadmin.test"
+      ],
+      "date": "2026-10-28T09:57:00Z",
       "subject": "Aviso de retraso en la entrega",
       "body": "Su mensaje aún no se ha entregado. Seguiremos intentándolo durante 24 horas.",
       "headers": []
@@ -1726,6 +2174,10 @@
     "kind": "triage",
     "input": {
       "from": "Postmaster <mailer-daemon@servidor.example>",
+      "to": [
+        "administracion@nestadmin.test"
+      ],
+      "date": "2026-10-01T10:04:00Z",
       "subject": "Rechazado: mensaje demasiado grande",
       "body": "Su mensaje superaba el tamaño máximo admitido por el servidor del destinatario.",
       "headers": [
@@ -1741,6 +2193,10 @@
     "kind": "triage",
     "input": {
       "from": "Mail Delivery Subsystem <mailer-daemon@googlemail.test>",
+      "to": [
+        "administracion@nestadmin.test"
+      ],
+      "date": "2026-10-02T11:11:00Z",
       "subject": "Delivery Status Notification (Failure)",
       "body": "Dirección de destino rechazada tras una comprobación de seguridad del dominio receptor.",
       "headers": [
@@ -1756,6 +2212,10 @@
     "kind": "triage",
     "input": {
       "from": "Equipo Atención <no-reply@atencioncliente.example>",
+      "to": [
+        "administracion@nestadmin.test"
+      ],
+      "date": "2026-10-03T12:18:00Z",
       "subject": "Gracias por su consulta",
       "body": "Hola. Hemos recibido su consulta y la estudiaremos. Este buzón no recibe respuestas.",
       "headers": [
@@ -1771,6 +2231,10 @@
     "kind": "triage",
     "input": {
       "from": "Encuesta Servicio <noreply@encuestaservicio.test>",
+      "to": [
+        "administracion@nestadmin.test"
+      ],
+      "date": "2026-10-04T13:25:00Z",
       "subject": "¿Cómo valora nuestra atención?",
       "body": "Valore del 1 al 5 la atención recibida. Gracias por su tiempo.",
       "headers": []
@@ -1781,6 +2245,10 @@
     "kind": "triage",
     "input": {
       "from": "Registro de Entradas <no-reply@registro.example>",
+      "to": [
+        "administracion@nestadmin.test"
+      ],
+      "date": "2026-10-05T14:32:00Z",
       "subject": "Acuse de recibo",
       "body": "Su escrito ha quedado registrado con el número R-12345. Este es un acuse automático.",
       "headers": [
@@ -1796,6 +2264,10 @@
     "kind": "triage",
     "input": {
       "from": "Hoja de Reclamaciones <noreply@hojareclamaciones.test>",
+      "to": [
+        "administracion@nestadmin.test"
+      ],
+      "date": "2026-10-06T15:39:00Z",
       "subject": "Su reclamación ha sido recibida",
       "body": "Hemos registrado su reclamación. Recibirá noticias por este medio.",
       "headers": [
@@ -1811,6 +2283,10 @@
     "kind": "triage",
     "input": {
       "from": "Agencia Pagos <do_not_reply@agenciapagos.example>",
+      "to": [
+        "administracion@nestadmin.test"
+      ],
+      "date": "2026-10-07T16:46:00Z",
       "subject": "Confirmación de transferencia",
       "body": "Su transferencia de 200,00 € se ha ejecutado correctamente.",
       "headers": []
@@ -1821,6 +2297,10 @@
     "kind": "triage",
     "input": {
       "from": "Sistema de Citas <noresponder@citas.test>",
+      "to": [
+        "administracion@nestadmin.test"
+      ],
+      "date": "2026-10-08T17:53:00Z",
       "subject": "Cita confirmada",
       "body": "Su cita queda confirmada para el día 14 a las 11:30.",
       "headers": [
@@ -1836,6 +2316,10 @@
     "kind": "triage",
     "input": {
       "from": "Banco Ficticio <no-reply@bancoficticio.example>",
+      "to": [
+        "administracion@nestadmin.test"
+      ],
+      "date": "2026-10-09T08:00:00Z",
       "subject": "Aviso importante: cambio en las condiciones de su cuenta",
       "body": "A partir del 1 de diciembre cambian las comisiones de mantenimiento. Puede consultar las nuevas condiciones en su banca online.",
       "headers": [
@@ -1851,6 +2335,10 @@
     "kind": "triage",
     "input": {
       "from": "Administración de la Comunidad <no-reply@comunidadvecinos.test>",
+      "to": [
+        "administracion@nestadmin.test"
+      ],
+      "date": "2026-10-10T09:07:00Z",
       "subject": "Convocatoria de junta extraordinaria",
       "body": "Se convoca junta extraordinaria el día 5 a las 19:00 en el local social. Orden del día adjunto.",
       "headers": [
@@ -1866,6 +2354,10 @@
     "kind": "triage",
     "input": {
       "from": "Agencia Tributaria Ficticia <noreply@agenciatributaria.example>",
+      "to": [
+        "administracion@nestadmin.test"
+      ],
+      "date": "2026-10-11T10:14:00Z",
       "subject": "Notificación disponible en su carpeta",
       "body": "Tiene una notificación pendiente de lectura. Acceda a su sede electrónica antes de 10 días.",
       "headers": [
@@ -1881,6 +2373,10 @@
     "kind": "triage",
     "input": {
       "from": "Seguros Ficticios <no-reply@segurosficticios.example>",
+      "to": [
+        "administracion@nestadmin.test"
+      ],
+      "date": "2026-10-12T11:21:00Z",
       "subject": "Vencimiento de su póliza",
       "body": "Su póliza vence el día 30. Se renovará automáticamente salvo que indique lo contrario desde su área privada.",
       "headers": [
@@ -1896,6 +2392,10 @@
     "kind": "triage",
     "input": {
       "from": "Banco Ficticio <no-reply@bancoficticio.example>",
+      "to": [
+        "administracion@nestadmin.test"
+      ],
+      "date": "2026-10-13T12:28:00Z",
       "subject": "Importante: devolución de recibo",
       "body": "Se ha devuelto un recibo de su cuenta por falta de saldo. Por favor, revise su cuenta.",
       "headers": [
@@ -1911,6 +2411,10 @@
     "kind": "triage",
     "input": {
       "from": "Administración Edificio Sol <no-reply@edificiosol.test>",
+      "to": [
+        "administracion@nestadmin.test"
+      ],
+      "date": "2026-10-14T13:35:00Z",
       "subject": "Corte de agua programado",
       "body": "El próximo martes habrá corte de agua de 9:00 a 13:00 por obras en la red general.",
       "headers": [
@@ -1926,6 +2430,10 @@
     "kind": "triage",
     "input": {
       "from": "Hacienda Municipal Ficticia <noreply@haciendamunicipal.example>",
+      "to": [
+        "administracion@nestadmin.test"
+      ],
+      "date": "2026-10-15T14:42:00Z",
       "subject": "Recibo del impuesto de circulación",
       "body": "Su recibo del impuesto de circulación está disponible y se cargará en la cuenta indicada el día 20.",
       "headers": [
@@ -1941,6 +2449,10 @@
     "kind": "triage",
     "input": {
       "from": "Mutua Salud <no-reply@mutuasalud.test>",
+      "to": [
+        "administracion@nestadmin.test"
+      ],
+      "date": "2026-10-16T15:49:00Z",
       "subject": "Cambio en su cuadro médico",
       "body": "Le informamos de modificaciones en el cuadro médico de su póliza a partir del próximo mes.",
       "headers": [
@@ -1956,6 +2468,10 @@
     "kind": "triage",
     "input": {
       "from": "Novedades Ferretería <info@ferreteriaoeste.example>",
+      "to": [
+        "administracion@nestadmin.test"
+      ],
+      "date": "2026-10-17T16:56:00Z",
       "subject": "Ofertas de herramientas",
       "body": "Esta semana, descuentos en taladros y atornilladores. Consulte nuestro catálogo.",
       "headers": [
@@ -1979,6 +2495,10 @@
     "kind": "triage",
     "input": {
       "from": "La Gaceta del Comercio <boletin@gacetacomercio.test>",
+      "to": [
+        "administracion@nestadmin.test"
+      ],
+      "date": "2026-10-18T17:03:00Z",
       "subject": "Boletín de octubre",
       "body": "En este número: ayudas para pymes y calendario de ferias del sector.",
       "headers": [
@@ -2002,6 +2522,10 @@
     "kind": "triage",
     "input": {
       "from": "Vivero Verde <hola@viveroverde.example>",
+      "to": [
+        "administracion@nestadmin.test"
+      ],
+      "date": "2026-10-19T08:10:00Z",
       "subject": "Plantas de temporada",
       "body": "Llegan las plantas de temporada. Visítenos este fin de semana.",
       "headers": [
@@ -2025,6 +2549,10 @@
     "kind": "triage",
     "input": {
       "from": "Asesoría Este <novedades@asesoriaeste.test>",
+      "to": [
+        "administracion@nestadmin.test"
+      ],
+      "date": "2026-10-20T09:17:00Z",
       "subject": "Circular fiscal 14/2026",
       "body": "Le informamos de las novedades en la declaración de IVA. No es necesario que responda.",
       "headers": [
@@ -2048,6 +2576,10 @@
     "kind": "triage",
     "input": {
       "from": "Papelería Mar <promo@papeleriamar.example>",
+      "to": [
+        "administracion@nestadmin.test"
+      ],
+      "date": "2026-10-21T10:24:00Z",
       "subject": "Vuelta al cole",
       "body": "Mochilas, cuadernos y material escolar con descuento. Oferta limitada.",
       "headers": [
@@ -2071,6 +2603,10 @@
     "kind": "triage",
     "input": {
       "from": "Equipo Gimnasio <hola@gimnasioforma.example>",
+      "to": [
+        "administracion@nestadmin.test"
+      ],
+      "date": "2026-10-22T11:31:00Z",
       "subject": "Te damos la bienvenida",
       "body": "Gracias por apuntarte. Tu primera clase de prueba es gratis esta semana.",
       "headers": [
@@ -2086,6 +2622,10 @@
     "kind": "triage",
     "input": {
       "from": "Academia Idiomas <bienvenida@academiaidiomas.test>",
+      "to": [
+        "administracion@nestadmin.test"
+      ],
+      "date": "2026-10-23T12:38:00Z",
       "subject": "Bienvenido a la academia",
       "body": "Ya formas parte de nuestra comunidad. Encuentra tu horario en el calendario adjunto.",
       "headers": [
@@ -2101,6 +2641,10 @@
     "kind": "triage",
     "input": {
       "from": "Cafetería Luna <info@cafelunatest.example>",
+      "to": [
+        "administracion@nestadmin.test"
+      ],
+      "date": "2026-10-24T13:45:00Z",
       "subject": "Gracias por suscribirte",
       "body": "Recibirás nuestras ofertas una vez al mes. Puedes darte de baja cuando quieras.",
       "headers": [
@@ -2116,6 +2660,10 @@
     "kind": "triage",
     "input": {
       "from": "Marta Quiroga <marta@tallerlaprueba.test>",
+      "to": [
+        "administracion@nestadmin.test"
+      ],
+      "date": "2026-10-25T14:52:00Z",
       "subject": "Re: factura",
       "body": "Gracias, recibido.",
       "headers": [
@@ -2131,6 +2679,10 @@
     "kind": "triage",
     "input": {
       "from": "Iván Salcedo <ivan@clinicasol.example>",
+      "to": [
+        "administracion@nestadmin.test"
+      ],
+      "date": "2026-10-26T15:59:00Z",
       "subject": "Re: documentación",
       "body": "Perfecto, ya tengo todo. Muchas gracias.",
       "headers": [
@@ -2146,6 +2698,10 @@
     "kind": "triage",
     "input": {
       "from": "Lucía Barrantes <lucia@mueblesnorte.test>",
+      "to": [
+        "administracion@nestadmin.test"
+      ],
+      "date": "2026-10-27T16:06:00Z",
       "subject": "Re: pago",
       "body": "OK, gracias por confirmarlo.",
       "headers": [
@@ -2161,6 +2717,10 @@
     "kind": "triage",
     "input": {
       "from": "Óscar Meléndez <oscar@papeleriamar.example>",
+      "to": [
+        "administracion@nestadmin.test"
+      ],
+      "date": "2026-10-28T17:13:00Z",
       "subject": "Re: presupuesto",
       "body": "Recibido, lo reviso y no hace falta que contestes.",
       "headers": [
@@ -2176,6 +2736,10 @@
     "kind": "triage",
     "input": {
       "from": "Paula Iriarte <paula@gestoriaplaza.test>",
+      "to": [
+        "administracion@nestadmin.test"
+      ],
+      "date": "2026-10-01T08:20:00Z",
       "subject": "Re: factura F-5002",
       "body": "Genial, ya llegó. Un saludo.",
       "headers": [
@@ -2191,6 +2755,10 @@
     "kind": "triage",
     "input": {
       "from": "Rubén Cazorla <ruben@viveroverde.example>",
+      "to": [
+        "administracion@nestadmin.test"
+      ],
+      "date": "2026-10-02T09:27:00Z",
       "subject": "Re: cita",
       "body": "Gracias, quedamos entonces. Hasta el jueves.",
       "headers": [
@@ -2206,6 +2774,10 @@
     "kind": "triage",
     "input": {
       "from": "Elena Ugarte <elena@asesoriaeste.test>",
+      "to": [
+        "administracion@nestadmin.test"
+      ],
+      "date": "2026-10-03T10:34:00Z",
       "subject": "Re: certificado",
       "body": "Recibido el certificado, todo correcto. Gracias.",
       "headers": [
@@ -2221,6 +2793,10 @@
     "kind": "triage",
     "input": {
       "from": "Hugo Sandoval <hugo@ferreteriaoeste.example>",
+      "to": [
+        "administracion@nestadmin.test"
+      ],
+      "date": "2026-10-04T11:41:00Z",
       "subject": "Re: incidencia",
       "body": "Entendido, muchas gracias por solucionarlo tan rápido.",
       "headers": [
@@ -2236,6 +2812,10 @@
     "kind": "triage",
     "input": {
       "from": "Nerea Collado <nerea@tallerlaprueba.test>",
+      "to": [
+        "administracion@nestadmin.test"
+      ],
+      "date": "2026-10-05T12:48:00Z",
       "subject": "Re: envío",
       "body": "Ya me ha llegado el paquete. Gracias.",
       "headers": [
@@ -2251,6 +2831,10 @@
     "kind": "triage",
     "input": {
       "from": "Tomás Villalba <tomas@clinicasol.example>",
+      "to": [
+        "administracion@nestadmin.test"
+      ],
+      "date": "2026-10-06T13:55:00Z",
       "subject": "Re: documentos",
       "body": "👍",
       "headers": [
@@ -2266,6 +2850,10 @@
     "kind": "triage",
     "input": {
       "from": "Carla Mendizábal <carla@mueblesnorte.test>",
+      "to": [
+        "administracion@nestadmin.test"
+      ],
+      "date": "2026-10-07T14:02:00Z",
       "subject": "Re: presupuesto",
       "body": "Vale, gracias. No necesito nada más por ahora.",
       "headers": [
@@ -2281,6 +2869,10 @@
     "kind": "triage",
     "input": {
       "from": "Julián Pardo <julian@papeleriamar.example>",
+      "to": [
+        "administracion@nestadmin.test"
+      ],
+      "date": "2026-10-08T15:09:00Z",
       "subject": "Re: Re: pedido",
       "body": "Perfecto, nos vemos entonces. Un abrazo.",
       "headers": [

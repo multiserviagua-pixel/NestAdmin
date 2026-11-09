@@ -142,6 +142,28 @@ fn credentials() -> Result<Box<dyn CredentialStore>, String> {
     }
 }
 
+/// Texto del correo con el mismo formato que envía la aplicación (D102): `from`, `to` (lista o
+/// cadena), `date` y `subject` del caso si existen, y el cuerpo.
+fn mail_header_text(input: &Value, body: &str) -> String {
+    let to: Option<Vec<String>> = match &input["to"] {
+        Value::Array(list) => Some(
+            list.iter()
+                .filter_map(Value::as_str)
+                .map(str::to_owned)
+                .collect(),
+        ),
+        Value::String(one) => Some(vec![one.clone()]),
+        _ => None,
+    };
+    nestadmin_ai::tasks::email_text(
+        input["subject"].as_str(),
+        input["from"].as_str(),
+        to.as_deref(),
+        input["date"].as_str(),
+        body,
+    )
+}
+
 fn load_inputs(dir: &Path, name: &str) -> Result<Vec<(String, String)>, String> {
     let text = fs::read_to_string(dir.join(name)).map_err(|e| format!("{name}: {e}"))?;
     let cases: Vec<Value> = serde_json::from_str(&text).map_err(|e| format!("{name}: {e}"))?;
@@ -153,10 +175,7 @@ fn load_inputs(dir: &Path, name: &str) -> Result<Vec<(String, String)>, String> 
             // Las facturas traen `text`; los correos, `subject` y `body`.
             let text = match (input["text"].as_str(), input["body"].as_str()) {
                 (Some(text), _) => text.to_owned(),
-                (None, Some(body)) => match input["subject"].as_str() {
-                    Some(subject) => format!("Asunto: {subject}\n\n{body}"),
-                    None => body.to_owned(),
-                },
+                (None, Some(body)) => mail_header_text(input, body),
                 (None, None) => return Err(format!("{name}: {id} sin texto")),
             };
             Ok((id.to_owned(), text))
@@ -244,14 +263,10 @@ fn run_refine(
 }
 
 /// Texto que recibe el modelo en los conjuntos de triaje e inyección: remitente, asunto, cuerpo
-/// y nombres de adjuntos. Las cabeceras y el perfil nunca forman parte de este texto.
+/// y nombres de adjuntos. Las cabeceras de señales (D157) y el perfil nunca forman parte de este texto.
 fn mail_text(input: &Value) -> Option<String> {
     let body = input["body"].as_str()?;
-    let mut text = format!(
-        "De: {}\nAsunto: {}\n\n{body}",
-        input["from"].as_str().unwrap_or(""),
-        input["subject"].as_str().unwrap_or("")
-    );
+    let mut text = mail_header_text(input, body);
     if let Some(names) = input["attachments"].as_array() {
         let names: Vec<&str> = names.iter().filter_map(Value::as_str).collect();
         if !names.is_empty() {

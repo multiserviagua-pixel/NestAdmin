@@ -3,8 +3,8 @@
 
 use nestadmin_ai::tasks::{
     document_text, draft_flags, draft_flags_allowing, draft_leaks_internals, draft_request,
-    extraction_request, parse_draft, parse_triage, profile_section, triage_request, CATEGORIES,
-    DOCUMENT_START, MAIL_END, MAIL_START,
+    email_text, extraction_request, parse_draft, parse_triage, profile_section, triage_request,
+    CATEGORIES, DOCUMENT_START, MAIL_END, MAIL_START,
 };
 use nestadmin_ai::{AiError, Task};
 use serde_json::json;
@@ -323,4 +323,86 @@ fn a_profile_phone_is_accepted_with_or_without_the_spanish_prefix() {
         draft_flags_allowing("Llame al +34 600 111 223", Some("Tel. 600 111 222")),
         vec!["phone"]
     );
+}
+
+// ---- Texto del correo (D102) ----
+
+#[test]
+fn email_text_has_from_to_date_subject_then_a_blank_line_and_the_body() {
+    let to = vec!["a@ejemplo.test".to_owned(), "b@ejemplo.test".to_owned()];
+    let text = email_text(
+        Some("Factura"),
+        Some("cliente@ejemplo.test"),
+        Some(&to),
+        Some("2026-10-01"),
+        "Hola\nadiós",
+    );
+    assert_eq!(
+        text,
+        "De: cliente@ejemplo.test\nPara: a@ejemplo.test, b@ejemplo.test\nFecha: 2026-10-01\nAsunto: Factura\n\nHola\nadiós"
+    );
+}
+
+#[test]
+fn email_text_omits_absent_and_blank_fields_and_invents_nothing() {
+    assert_eq!(
+        email_text(Some("Solo asunto"), None, None, None, "cuerpo"),
+        "Asunto: Solo asunto\n\ncuerpo"
+    );
+    let none: Vec<String> = Vec::new();
+    let blank = vec!["  ".to_owned(), "\n".to_owned()];
+    assert_eq!(
+        email_text(Some(" "), Some(""), Some(&none), Some("\t"), "cuerpo"),
+        "cuerpo"
+    );
+    assert_eq!(
+        email_text(None, Some("x@ejemplo.test"), Some(&blank), None, "c"),
+        "De: x@ejemplo.test\n\nc"
+    );
+    // Un destinatario en blanco entre otros se descarta sin dejar comas sueltas.
+    let mixed = vec![
+        "a@ejemplo.test".to_owned(),
+        " ".to_owned(),
+        "b@ejemplo.test".to_owned(),
+    ];
+    assert_eq!(
+        email_text(None, None, Some(&mixed), None, "c"),
+        "Para: a@ejemplo.test, b@ejemplo.test\n\nc"
+    );
+}
+
+#[test]
+fn email_text_without_headers_is_exactly_the_body() {
+    let body = "  Texto\n\nCon espacios \u{2028} y saltos\r\n";
+    assert_eq!(email_text(None, None, None, None, body), body);
+}
+
+#[test]
+fn email_text_sanitizes_header_values_so_they_cannot_forge_lines() {
+    let text = email_text(
+        Some("Hola\r\nDe: jefe@ejemplo.test\u{2028}Asunto: falso\u{2029}fin"),
+        Some("x@ejemplo.test\nPara: otro@ejemplo.test\u{0}"),
+        None,
+        Some("2026\n\n10"),
+        "cuerpo\nAsunto: del cuerpo",
+    );
+    let header: Vec<&str> = text.split("\n\n").next().unwrap().lines().collect();
+    assert_eq!(header.len(), 3, "{text}");
+    assert!(header[0].starts_with("De: x@ejemplo.test "));
+    assert!(header[1].starts_with("Fecha: "));
+    assert!(header[2].starts_with("Asunto: Hola  De: jefe@ejemplo.test"));
+    assert_eq!(text.lines().filter(|l| l.starts_with("De:")).count(), 1);
+    // El cuerpo no se toca.
+    assert!(text.ends_with("\n\ncuerpo\nAsunto: del cuerpo"));
+}
+
+#[test]
+fn the_whole_email_text_goes_inside_the_mail_markers() {
+    let text = email_text(Some("Asunto"), Some("a@ejemplo.test"), None, None, "cuerpo");
+    let request = triage_request("T", &text);
+    assert!(request.content.starts_with(MAIL_START));
+    assert!(request.content.ends_with(MAIL_END));
+    assert!(request
+        .content
+        .contains("De: a@ejemplo.test\nAsunto: Asunto\n\ncuerpo"));
 }
