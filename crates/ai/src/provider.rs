@@ -11,6 +11,8 @@ pub enum Task {
     Draft,
     /// Afinado de sugerencias de reglas con datos agregados (D134).
     RefineSuggestions,
+    /// Aprender a responder en la primera carga: estilo y tipo de respuesta por par (D170).
+    LearnReplies,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

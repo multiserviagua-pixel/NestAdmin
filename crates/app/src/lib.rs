@@ -10,6 +10,7 @@
 pub mod accounts;
 pub mod initial_read;
 pub mod learn;
+pub mod learn_consent;
 pub mod panel;
 pub mod pipelines;
 pub mod preferences;
@@ -1130,6 +1131,7 @@ impl App {
         // El consentimiento del afinado automático es de un destino concreto (D134).
         self.drop_consent_if_destination_changed();
         self.drop_profile_consent_if_destination_changed();
+        self.drop_learning_consent_if_destination_changed();
         self.expire_fallback_period();
     }
 

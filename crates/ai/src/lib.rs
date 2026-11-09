@@ -7,6 +7,7 @@
 pub mod anthropic;
 pub mod credentials;
 mod http;
+pub mod learn;
 pub mod models;
 pub mod ollama;
 pub mod ollama_cloud;
