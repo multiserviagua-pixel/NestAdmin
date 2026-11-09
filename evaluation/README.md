@@ -123,3 +123,21 @@ python evaluation/evaluate_injection.py evaluation/predictions/inyeccion-ollama.
 Internas y no prometidas; si fallan se informa y no se ajustan para que pasen: `hidden_fn` 0 en el corpus; cobertura de `needs_reply` verdadero de al menos 0,95; 0 envíos no autorizados (casos marcados o no medidos) en la suite de inyección. Un corpus sintético detecta errores sistemáticos; no acredita la calidad con correo real.
 
 **Estado:** la capa local da `hidden_fn` 0 y 148 de 148 rutas con ambas implementaciones. Los evaluadores y sus pruebas (`python -m unittest discover -s evaluation/tests`) usan predicciones construidas a mano y **no se ha ejecutado ningún modelo**: no hay medición de la IA.
+
+## Aprender a responder (D164, R30, T33h)
+
+Corpus sintético aparte de los anteriores: `data/inputs/learn.json` y `data/expected/learn.json` (47 casos, `L001`–`L047`; dominios `.test` y `.example`). Cada entrada es un correo recibido (`from`, `to`, `date`, `subject`, `body`, `headers`, `thread_key`) y su respuesta propia en texto plano (`own_reply` con `to` y `body`, o `null` si no hay respuesta). Cubre citas en es, en, ca, fr, it, de y pt, Outlook aplanado, firmas compartidas y sueltas, IBAN, DNI con separadores, teléfonos, URL, correos, tarjeta y clave, el nombre del remitente en el saludo, un reenvío interno, inyección dentro de la cita y remitentes automáticos, además de respuestas normales que no deben descartarse. Lo esperado: `discard` (código de `LearnCounts` o `null`), `forbidden` (lista de `{kind, text}` que no pueden aparecer en lo que saldría) y, en los casos que pasan, `category`, `needs_reply` y `reply_kind`. **No enviar `expected` a ningún modelo.**
+
+```sh
+# Capa local (sin IA ni red): pasa cada caso por crates/app/src/learn.rs
+cargo run -p nestadmin-app --bin nestadmin-learn-local -- --out evaluation/predictions/aprender-local.jsonl
+python evaluation/evaluate_learn.py evaluation/predictions/aprender-local.jsonl
+# Capa de IA (opcional, solo con un modelo): predicciones {id, result:{category, needs_reply, reply_kind}}
+python evaluation/evaluate_learn.py evaluation/predictions/aprender-local.jsonl --ai evaluation/predictions/aprender-ia.jsonl
+```
+
+`nestadmin-learn-local` lee `inputs` y, solo para buscar las cadenas prohibidas, `expected`; escribe por caso `pass` o `discard` con su código y los índices y tipos de las cadenas prohibidas que siguen en lo que saldría, nunca el texto de los pares ni el de las cadenas. El código de descarte de cada caso es lo que cambia en los recuentos al quitarlo de la tanda; la firma compartida se detecta con todo el corpus, como en la aplicación. El informe (`results/aprender-local.json`, ignorado por Git) lleva recuentos, ids, códigos y tipos.
+
+Puertas provisionales (internas, no se ajustan para que pasen): **fugas = 0** (ninguna cadena prohibida en el payload de un caso que pasa) y **descartes esperados acertados** (cada descarte esperado, con su código). Los descartes de más (falsos descartes) se cuentan aparte, por código, y no bloquean. Los casos sin predicción o con error no se miden y las puertas no se cumplen. La capa de IA, sin predicciones, se informa como «no medido»; con ellas, se puntúan solo los casos que la capa local deja pasar, con ausentes, errores y respuestas inválidas contando como fallo, y se comprueba que la inyección en la cita no cambia la categoría.
+
+**Estado:** la capa local se ha ejecutado (resultado en `evidence/t33-aprender-evaluacion.md`, solo recuentos); la IA no se ha medido. Un corpus sintético detecta errores sistemáticos; no acredita la calidad con correo real.
