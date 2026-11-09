@@ -13,10 +13,16 @@ import type {
   MailView,
   LaunchView,
   ProviderChoice,
+  PreferenceChange,
   ProviderInfo,
   ReadExpectation,
+  BusinessProfile,
   ConsentView,
   MergePreview,
+  ProfileConsentView,
+  ProfilePreview,
+  ProfileSaved,
+  ProfileView,
   RefinePreview,
   RefinementView,
   SeenInvoice,
@@ -28,6 +34,7 @@ import type {
   RuleStats,
   RuleView,
   TaskTemplate,
+  SenderPreference,
   SettingsView,
   Simulation,
   Suggestions,
@@ -110,6 +117,10 @@ export const api = {
   confirmNotSent: (id: number) => invoke<Task>("confirm_not_sent", { id }),
   editDraft: (id: number, body: string) => invoke<Task>("edit_draft", { id, body }),
   reject: (id: number) => invoke<Task>("reject", { id }),
+  /** Cierra un correo en revisión sin enviar nada ni contar como rechazo (D159). */
+  archive: (id: number) => invoke<Task>("archive", { id }),
+  /** Crea la tarea que solo redacta la respuesta a un informativo, un rebote o un correo sin respuesta necesaria (D159). */
+  redraft: (id: number) => invoke<Task>("redraft", { id }),
   retry: (id: number) => invoke<Task>("retry", { id }),
   /** Plantillas de pipeline (D149): versión vigente de cada una, archivadas incluidas. */
   taskTemplates: () => invoke<TaskTemplate[]>("task_templates"),
@@ -130,6 +141,12 @@ export const api = {
   /** «Continuar sin ese paso» (D150): la respuesta irá siempre a revisión. */
   waivePipelineStep: (stepId: number, note: string) =>
     invoke<PipelineRunView>("waive_pipeline_step", { stepId, note }),
+  /** Preferencias por remitente (D161). Solo lectura. */
+  senderPreferences: () => invoke<SenderPreference[]>("sender_preferences"),
+  /** «Siempre a Informativos» (`informative`) o «Siempre a Pendientes» (`review`) para una dirección o un dominio. El backend normaliza la clave, rechaza los dominios de correo público y avisa si contradice una regla activa. Solo afecta a los correos nuevos. */
+  setSenderPreference: (scope: SenderPreference["scope"], key: string, route: SenderPreference["route"]) =>
+    invoke<PreferenceChange>("set_sender_preference", { scope, key, route }),
+  removeSenderPreference: (scope: SenderPreference["scope"], key: string) => invoke<boolean>("remove_sender_preference", { scope, key }),
   rules: () => invoke<Rule[]>("rules"),
   ruleViews: () => invoke<RuleView[]>("rule_views"),
   /** `id` puede ser `null` (se genera del nombre). `acknowledgeAnySender` no tiene valor por
@@ -174,6 +191,19 @@ export const api = {
     invoke<RuleView>("accept_suggestion", { fingerprint, shown, name, modelLimit, userLimit }),
   /** Las facturas solo leídas de la serie de una sugerencia, con documento, fecha e importe. Solo lectura. */
   seenInvoices: (fingerprint: string) => invoke<SeenInvoice[]>("seen_invoices", { fingerprint }),
+  /** Perfil del negocio (D163). Solo lectura. */
+  businessProfile: () => invoke<ProfileView>("business_profile"),
+  /** Nombre y firma (dirección y correo) desde los datos de la empresa, sin NIF ni IBAN. Solo lectura: nada se guarda ni se envía. */
+  businessProfilePrefill: () => invoke<BusinessProfile>("business_profile_prefill"),
+  /** Guarda el perfil. Bloquea IBAN, tarjetas y claves; avisa de teléfono y correo; retira el consentimiento si cambia lo que saldría. */
+  saveBusinessProfile: (profile: BusinessProfile) => invoke<ProfileSaved>("save_business_profile", { profile }),
+  clearBusinessProfile: () => invoke<ProfileSaved>("clear_business_profile"),
+  /** El bloque literal que saldría en la redacción y a qué destino. Solo lectura. */
+  businessProfilePreview: () => invoke<ProfilePreview>("business_profile_preview"),
+  /** Consiente a lo que la persona vio: proveedor, modelo, servidor y huella del bloque. Se rechaza si algo cambió. */
+  grantProfileConsent: (seen: ProfilePreview) =>
+    invoke<ProfileConsentView>("grant_profile_consent", { provider: seen.provider.provider, model: seen.provider.model, host: seen.host ?? "", fp: seen.fp ?? "" }),
+  withdrawProfileConsent: () => invoke<ProfileConsentView>("withdraw_profile_consent"),
   /** Estado del afinado con IA (D134). Solo lectura: no llama al proveedor. */
   suggestionRefinement: () => invoke<RefinementView>("suggestion_refinement"),
   /** A qué proveedor y qué datos se enviarían al afinar. Solo lectura. */

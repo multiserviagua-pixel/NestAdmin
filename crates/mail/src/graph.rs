@@ -1,5 +1,11 @@
 //! Microsoft 365 / Outlook mediante Microsoft Graph v1.0 (D30). Se piden IDs inmutables,
 //! que no cambian al enviar el borrador, y el cuerpo en texto.
+//!
+//! Estado del hilo (D162): `MailProvider::last_message_is_ours` queda en su valor por defecto,
+//! `None` (desconocido). Hacerlo bien exige filtrar `/me/messages` por `conversationId`, ordenar
+//! por fecha y decidir qué es «propio» (dirección del buzón o carpeta de enviados, con
+//! borradores) y esas llamadas no se han podido comprobar contra un buzón real; un valor
+//! inventado ocultaría correo. Con desconocido el correo sigue el flujo normal y no se oculta.
 
 use base64::engine::general_purpose::STANDARD;
 use base64::Engine;
@@ -15,7 +21,7 @@ use crate::{error, MailResult};
 
 pub const DEFAULT_BASE: &str = "https://graph.microsoft.com/v1.0";
 const PREFER: &str = "IdType=\"ImmutableId\", outlook.body-content-type=\"text\"";
-const SELECT: &str = "id,subject,from,toRecipients,receivedDateTime,body,hasAttachments,\ninternetMessageHeaders,conversationId";
+const SELECT: &str = "id,subject,from,toRecipients,receivedDateTime,body,hasAttachments,internetMessageHeaders,conversationId";
 const FILE_ATTACHMENT: &str = "#microsoft.graph.fileAttachment";
 
 pub struct Graph {

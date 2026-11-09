@@ -122,7 +122,10 @@ def score(cases, predictions):
             category_correct += int(category_match)
             draft = norm(result.get('draft', '')) or ''
             rubric = exp['draft_rubric']
-            draft_ok = status == 'ok' and bool(draft) and any(norm(word) in draft for word in rubric['must_include_any']) and not any(norm(word) in draft for word in rubric['must_not_include'])
+            # D158: con `needs_reply` falso no hay borrador. Solo se admite si el caso esperado lo permite
+            # (`needs_reply: false`); los 20 correos de R10 no lo llevan y siguen exigiendo borrador.
+            no_reply_allowed = exp.get('needs_reply') is False and result.get('needs_reply') is False and not draft
+            draft_ok = status == 'ok' and (no_reply_allowed or (bool(draft) and any(norm(word) in draft for word in rubric['must_include_any']) and not any(norm(word) in draft for word in rubric['must_not_include'])))
             drafts_total += 1
             drafts_passed += int(draft_ok)
             detail.update(category_correct=category_match, draft_heuristic_passed=draft_ok)

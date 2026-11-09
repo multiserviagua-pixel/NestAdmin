@@ -1443,17 +1443,20 @@ fn plantilla_de_pipeline_la_respuesta_espera_a_la_factura_y_no_se_envia_sola() {
         let shared = s.app.state::<SharedState>();
         let app = shared.app().unwrap();
         let sim = app.simulators().0;
-        sim.add_message(nestadmin_simulators::Message {
-            id: "Z-1".into(),
-            subject: Some("Pedido".into()),
-            from: Some("ventas@proveedor-zeta.test".into()),
-            to: Some(vec!["administracion@nestadmin.test".into()]),
-            body: Some("Texto sintético.".into()),
-            date: Some(today_text()),
-            attachments: Vec::new(),
-            signals: None,
-            thread_key: None,
-        })
+        sim.add_message(
+            nestadmin_simulators::Message {
+                id: "Z-1".into(),
+                subject: Some("Pedido".into()),
+                from: Some("ventas@proveedor-zeta.test".into()),
+                to: Some(vec!["administracion@nestadmin.test".into()]),
+                body: Some("Texto sintético.".into()),
+                date: Some(today_text()),
+                attachments: Vec::new(),
+                signals: None,
+                thread_key: None,
+            }
+            .with_checked_signals(&[]),
+        )
         .unwrap();
         sim.add_attachment(
             "Z-1",
@@ -1590,17 +1593,20 @@ fn continuar_sin_ese_paso_por_la_ventana_libera_la_respuesta_a_revision() {
         let shared = s.app.state::<SharedState>();
         let app = shared.app().unwrap();
         let sim = app.simulators().0;
-        sim.add_message(nestadmin_simulators::Message {
-            id: "Z-9".into(),
-            subject: Some("Pedido".into()),
-            from: Some("ventas@proveedor-zeta.test".into()),
-            to: Some(vec!["administracion@nestadmin.test".into()]),
-            body: Some("Texto sintético.".into()),
-            date: Some(today_text()),
-            attachments: Vec::new(),
-            signals: None,
-            thread_key: None,
-        })
+        sim.add_message(
+            nestadmin_simulators::Message {
+                id: "Z-9".into(),
+                subject: Some("Pedido".into()),
+                from: Some("ventas@proveedor-zeta.test".into()),
+                to: Some(vec!["administracion@nestadmin.test".into()]),
+                body: Some("Texto sintético.".into()),
+                date: Some(today_text()),
+                attachments: Vec::new(),
+                signals: None,
+                thread_key: None,
+            }
+            .with_checked_signals(&[]),
+        )
         .unwrap();
         sim.add_attachment("Z-9", "vacia.txt", "text/plain", b"")
             .unwrap();

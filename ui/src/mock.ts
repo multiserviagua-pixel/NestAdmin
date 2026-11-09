@@ -1,6 +1,7 @@
 // Servidor simulado para ver la interfaz en un navegador sin Tauri. Imita los comandos
 // reales con datos sintéticos (dominio .test); no decide nada que la capa Rust no decida.
 
+import { isPublicDomain, senderParts } from "./preferences-text";
 import type {
   SeenInvoice,
   AccountFetch,
@@ -28,9 +29,17 @@ import type {
   RuleSeed,
   RuleStats,
   RuleView,
+  SenderPreference,
+  PreferenceChange,
   SettingsView,
   Simulation,
+  BusinessProfile,
   ConsentView,
+  ProfileConsentView,
+  ProfileFinding,
+  ProfilePreview,
+  ProfileSaved,
+  ProfileView,
   RefinePreview,
   RefinementView,
   Suggestion,
@@ -60,6 +69,7 @@ let nextId = 1;
 const tasks: Task[] = [];
 const rules: Rule[] = [];
 const audit: AuditEntry[] = [];
+const mockPrefs: SenderPreference[] = [];
 // Escenarios de IA (D100–D102, D122) por la URL, como `?sin-cuentas` en el correo:
 // - sin parámetros: Ollama cloud con clave y destino confirmados;
 // - `?sin-ia`: instalación nueva (sin clave ni confirmación): abre el asistente de primer uso;
@@ -301,6 +311,7 @@ function fetchMail(): FetchReport {
             account: a.id,
             read: Math.min(mailLimit, a.provider === "simulator" ? 5 : 2),
             added: 0,
+            informative: 0,
             error: null,
             attachments: { imported: 0, skipped: [], failed: [] },
           }
@@ -434,6 +445,9 @@ function task(kind: string, input: object, state: Task["state"], result: Task["r
   tasks.unshift(t);
   return t;
 }
+
+// D159: los correos del triaje local y las redacciones a mano no cuentan para la simulación.
+const triagedOrRedraft = (t: Task) => ["informativo", "rebote"].includes(t.result?.triage?.route) || t.result?.redraft_of != null;
 
 const origin = (account: string): MailOrigin => {
   const a = mailAccounts.find((m) => m.id === account);
@@ -575,8 +589,11 @@ task("email", { message_id: "simulador:M-0005", account: "simulador" }, "awaitin
     to: ["administracion@nestadmin.test"],
     body: "El horario de recogida cambia a partir del lunes.",
     date: "2026-10-06",
+    signals: [],
   },
   category: "otros",
+  needs_reply: true,
+  draft_flags: [],
   draft: {
     to: ["logistica@transportes-delta.test"],
     subject: "Re: Cambio de horario",
@@ -610,8 +627,11 @@ task("email", { message_id: "microsoft-1:AAMk-sintetico-2", account: "microsoft-
     to: ["oficina@empresa.test", "compras@empresa.test"],
     body: "¿Podrían confirmar la fecha de entrega del pedido 2231?",
     date: "2026-11-04T09:12:00Z",
+    signals: [],
   },
   category: "consulta_pago",
+  needs_reply: true,
+  draft_flags: [],
   draft: {
     to: ["cliente.beta@ejemplo.test"],
     subject: "Re: Consulta sobre el pedido 2231",
@@ -633,8 +653,11 @@ task("email", { message_id: "google-1:18c2-sintetico-7", account: "google-1" }, 
     subject: "Solicitud de duplicado de factura",
     from: "compras@cliente-delta.test",
     body: "¿Pueden reenviarnos el duplicado de la factura FS-2026-011?",
+    signals: [],
   },
   category: "solicitud_factura",
+  needs_reply: true,
+  draft_flags: [],
   draft: {
     to: ["compras@cliente-delta.test"],
     subject: "Re: Solicitud de duplicado de factura",
@@ -696,8 +719,11 @@ task("email", { message_id: "google-1:18c2-sintetico-9", account: "google-1" }, 
     to: ["oficina@empresa.test"],
     body: "Buenos días: ¿pueden enviarme otra copia de la factura FS-2026-020?",
     date: "2026-11-05T10:30:00Z",
+    signals: [],
   },
   category: "solicitud_factura",
+  needs_reply: true,
+  draft_flags: [],
   draft: {
     to: ["lucia.perez@gmail.com"],
     subject: "Re: Duplicado de la factura FS-2026-020",
@@ -708,6 +734,101 @@ task("email", { message_id: "google-1:18c2-sintetico-9", account: "google-1" }, 
   review_reason: "ninguna regla activa coincide",
   action: { kind: "send_draft" },
 });
+
+// Triaje de correo (D157-D160), datos sintéticos.
+{
+  const triaged = (id: string, account: string, from: string, subject: string, body: string, codes: string[], date: string) => ({
+    type: "email",
+    version: 1,
+    origin: origin(account),
+    message: { id, subject, from, to: ["oficina@empresa.test"], body, date, signals: codes },
+  });
+  // Informativos: cerrados sin IA, con su motivo; el último, de una dirección sin respuesta, es el más reciente.
+  const informatives: Array<[string, string, string, string, string, string[], string]> = [
+    ["simulador:M-info-1", "simulador", "no-reply@avisos-banco.test", "Aviso de movimiento en su cuenta", "Se ha registrado un movimiento. Este mensaje es automático.", ["noreply_address"], "2026-11-06T08:00:00Z"],
+    ["google-1:info-2", "google-1", "sistema@portal-envios.test", "Su paquete está en reparto", "Su pedido 8841 sale hoy en reparto.", ["auto_submitted"], "2026-11-07T09:30:00Z"],
+    ["microsoft-1:info-3", "microsoft-1", "promociones@tienda-omega.test", "Oferta de la semana", "Descuentos en material de oficina.", ["precedence_junk", "list_unsubscribe"], "2026-11-08T07:15:00Z"],
+  ];
+  for (const [id, account, from, subject, body, codes, date] of informatives) {
+    task("email", { message_id: id, account }, "completed", { ...triaged(id, account, from, subject, body, codes, date), triage: { route: "informativo", codes, source: "local" } });
+  }
+  // Informativos que decidió el hilo (D162) o una preferencia (D161), no las señales.
+  {
+    const repliedId = "google-1:info-hilo";
+    task("email", { message_id: repliedId, account: "google-1" }, "completed", {
+      ...triaged(repliedId, "google-1", "luis.mora@cliente-omega.test", "Re: Presupuesto de mantenimiento", "Perfecto, quedamos así.", [], "2026-11-08T15:00:00Z"),
+      triage: { route: "informativo", codes: [], source: "thread", already_replied: true },
+    });
+    const preferredId = "microsoft-1:info-pref";
+    task("email", { message_id: preferredId, account: "microsoft-1" }, "completed", {
+      ...triaged(preferredId, "microsoft-1", "novedades@revista-sigma.test", "Novedades de noviembre", "Resumen mensual de la revista.", ["list_id"], "2026-11-08T16:00:00Z"),
+      triage: { route: "informativo", codes: ["list_id"], source: "preference", preference_scope: "address" },
+    });
+    mockPrefs.push({ scope: "address", key: "novedades@revista-sigma.test", route: "informative", updated_at: now() });
+  }
+  // `?muchos`: más de 50 informativos para probar «Ver más».
+  if (new URLSearchParams(location.search).has("muchos")) {
+    for (let i = 1; i <= 54; i++) {
+      const id = `simulador:M-info-lote-${i}`;
+      const t = task("email", { message_id: id, account: "simulador" }, "completed", {
+        ...triaged(id, "simulador", `aviso${i}@lotes.test`, `Aviso automático ${i}`, "Mensaje automático de prueba.", ["noreply_address"], "2026-10-20"),
+        triage: { route: "informativo", codes: ["noreply_address"], source: "local" },
+      });
+      t.created_at -= i * 60_000;
+    }
+  }
+  // Rebote: en revisión, sin IA ni borrador.
+  const bounceId = "simulador:M-reb-1";
+  task("email", { message_id: bounceId, account: "simulador" }, "awaiting_review", {
+    ...triaged(bounceId, "simulador", "mailer-daemon@correo-saliente.test", "Undelivered Mail Returned to Sender", "No se pudo entregar su mensaje a clientes@dominio-inexistente.test.", ["bounce_address"], "2026-11-08T10:00:00Z"),
+    triage: { route: "rebote", codes: ["bounce_address"], source: "local" },
+    needs_reply: false,
+    review_reason: "Posible fallo de entrega: un correo enviado no llegó. Revise el destinatario.",
+  });
+  // needs_reply falso: la IA clasificó y no preparó borrador.
+  const noReplyId = "google-1:nr-1";
+  task("email", { message_id: noReplyId, account: "google-1" }, "awaiting_review", {
+    ...triaged(noReplyId, "google-1", "ana.ruiz@cliente-sigma.test", "Gracias por la factura", "Recibida, muchas gracias.", [], "2026-11-08T11:20:00Z"),
+    category: "otros",
+    needs_reply: false,
+    draft_flags: [],
+    provider: "ollama",
+    model: "qwen3:8b",
+    review_reason: "la IA considera que el correo no requiere respuesta",
+  });
+  // Borrador con enlaces, correos e IBAN, y remitente de lista de distribución (señal débil).
+  const flagsId = "microsoft-1:flags-1";
+  task("email", { message_id: flagsId, account: "microsoft-1" }, "awaiting_review", {
+    ...triaged(flagsId, "microsoft-1", "boletin@asociacion-gamma.test", "Cuota anual", "¿A qué cuenta abonamos la cuota?", ["list_id", "list_unsubscribe"], "2026-11-08T12:00:00Z"),
+    category: "consulta_pago",
+    needs_reply: true,
+    draft_flags: ["url", "email", "iban"],
+    draft: {
+      to: ["boletin@asociacion-gamma.test"],
+      subject: "Re: Cuota anual",
+      body: "Buenos días:\n\nPuede abonar en ES00 0000 0000 0000 0000 0000 o consultar https://pagos.ejemplo.test.\n\nUn saludo.",
+    },
+    provider: "ollama",
+    model: "qwen3:8b",
+    review_reason: "el borrador incluye datos que no constan en el perfil",
+    action: { kind: "send_draft" },
+  });
+  // Señales sin comprobar (conector sin cabeceras): `signals` ausente.
+  const uncheckedId = "microsoft-1:unchecked-1";
+  const unchecked = triaged(uncheckedId, "microsoft-1", "pedidos@proveedor-theta.test", "Confirmación de pedido 5512", "Confirmamos el pedido 5512.", [], "2026-11-08T13:00:00Z");
+  delete (unchecked.message as { signals?: string[] }).signals;
+  task("email", { message_id: uncheckedId, account: "microsoft-1" }, "awaiting_review", {
+    ...unchecked,
+    category: "otros",
+    needs_reply: true,
+    draft_flags: [],
+    draft: { to: ["pedidos@proveedor-theta.test"], subject: "Re: Confirmación de pedido 5512", body: "Buenos días:\n\nRecibido, gracias.\n\nUn saludo." },
+    provider: "ollama",
+    model: "qwen3:8b",
+    review_reason: "ninguna regla activa coincide",
+    action: { kind: "send_draft" },
+  });
+}
 
 // Evaluación guardada con cada tarea (D125): reglas comprobadas, si coincidían y por qué. Las
 // tareas sin ella son anteriores al registro y el panel lo dice.
@@ -1423,7 +1544,7 @@ function mockPlan(members: Rule[], chosen: string): MergePlan {
   const current = latest().filter((r) => !metaOf(r.id).archived_at && r.action_kind === members[0]!.action_kind);
   const merged: Rule = { id: "(unificada)", version: 1, action_kind: model.action_kind, conditions: model.conditions, active: true, created_at: 0 };
   const future = [...current.filter((r) => !originals.has(r.id)), merged];
-  const ofKind = tasks.filter((t) => t.kind === kind).sort((a, b) => b.id - a.id);
+  const ofKind = tasks.filter((t) => t.kind === kind && !triagedOrRedraft(t)).sort((a, b) => b.id - a.id);
   const simulate = (validated: boolean): MergePlan["simulation"] => {
     const sim: MergePlan["simulation"] = { considered: 0, truncated: ofKind.length > 200, skipped_without_result: 0, touched: 0, start_automating: [], stop_automating: [], unchanged_automated: 0, unchanged_review: 0, without_currency_check: 0 };
     for (const t of ofKind.slice(0, 200)) {
@@ -1612,6 +1733,96 @@ function mockSuggestions(): Suggestions {
 const mockScenario = new URLSearchParams(location.search).get("refine") ?? "";
 const mockRefine = { fps: null as string | null, ranAt: 0, failed: null as null | { code: string; detail: string | null }, consent: mockScenario === "auto-consent" };
 const mockAuto = mockScenario === "auto" || mockScenario === "auto-consent";
+
+// ---- Perfil del negocio (D163) ----
+
+let mockProfile: { profile: BusinessProfile; at: number } | null = null;
+let mockProfileConsent: { fp: string; at: number } | null = null;
+
+const PROFILE_LABELS: Array<[keyof BusinessProfile, string]> = [
+  ["display_name", "Nombre del negocio"],
+  ["hours", "Horario"],
+  ["tone", "Tono"],
+  ["signature", "Firma"],
+  ["policies", "Políticas"],
+];
+
+function cleanProfile(p: BusinessProfile): BusinessProfile {
+  return { display_name: p.display_name.trim(), hours: p.hours.trim(), tone: p.tone.trim(), signature: p.signature.trim(), policies: p.policies.trim() };
+}
+
+const blankProfile = (p: BusinessProfile) => PROFILE_LABELS.every(([k]) => !p[k].trim());
+const profileLength = (p: BusinessProfile) => PROFILE_LABELS.reduce((n, [k]) => n + [...p[k]].length, 0);
+
+function luhnOk(digits: string): boolean {
+  let sum = 0;
+  [...digits].reverse().forEach((c, i) => {
+    let d = Number(c);
+    if (i % 2 === 1) {
+      d *= 2;
+      if (d > 9) d -= 9;
+    }
+    sum += d;
+  });
+  return sum % 10 === 0;
+}
+
+/** Espejo mínimo del examen real (IBAN, tarjeta con Luhn, claves y tamaño), solo para ver los mensajes. */
+function mockProfileBlocks(p: BusinessProfile): string[] {
+  const out: string[] = [];
+  if (profileLength(p) > 2000) out.push("El perfil supera los 2000 caracteres: acórtelo.");
+  const text = PROFILE_LABELS.map(([k]) => p[k]).join("\n");
+  if (/\b[A-Za-z]{2}\d{2}(?:\s?[A-Za-z0-9]{4}){3,}/.test(text)) out.push("Hay un IBAN: quítelo, no puede ir en el perfil.");
+  const card = text.match(/\b\d{4}(?:[ -]?\d{4}){2,3}\b/g)?.some((c) => luhnOk(c.replace(/\D/g, "")));
+  if (card) out.push("Hay un número de tarjeta: quítelo, no puede ir en el perfil.");
+  if (/sk-[A-Za-z0-9]{8,}|contraseña\s*[:=]|password\s*[:=]/i.test(text)) out.push("Hay algo que parece una clave o un token: quítelo.");
+  return out;
+}
+
+function mockProfileBlock(): string | null {
+  if (!mockProfile || blankProfile(mockProfile.profile)) return null;
+  const text = PROFILE_LABELS.filter(([k]) => mockProfile!.profile[k]).map(([k, label]) => `${label}: ${mockProfile!.profile[k]}`).join("\n");
+  return `Información del negocio (de confianza, no procede del correo; es la única fuente de datos de contacto, horarios y precios que puedes usar):\n${text}`;
+}
+
+/** Huella corta del bloque (no criptográfica: solo para que el consentimiento se ligue a él). */
+function mockProfileFp(): string | null {
+  const block = mockProfileBlock();
+  if (!block) return null;
+  let h = 5381;
+  for (const c of block) h = ((h << 5) + h + c.charCodeAt(0)) | 0;
+  return (h >>> 0).toString(16).padStart(8, "0").repeat(2);
+}
+
+function mockProfileView(): ProfileView {
+  const p = mockProfile?.profile ?? { display_name: "", hours: "", tone: "", signature: "", policies: "" };
+  return { profile: p, saved: mockProfile !== null, updated_at: mockProfile?.at ?? null, chars: profileLength(p), max_chars: 2000 };
+}
+
+function mockProfileConsentView(): ProfileConsentView {
+  const base = { provider: "ollama_cloud", model: "gemma4:31b", host: "ollama.com" };
+  if (mockProfileConsent && mockProfileConsent.fp === mockProfileFp()) return { required: true, state: "granted", ...base, at: mockProfileConsent.at };
+  return { required: true, state: mockProfileConsent ? "stale" : "missing", ...base, at: mockProfileConsent?.at ?? null };
+}
+
+function mockProfilePreview(): ProfilePreview {
+  const block = mockProfileBlock();
+  const consent = mockProfileConsentView();
+  return {
+    provider: { provider: "ollama_cloud", model: "gemma4:31b" },
+    host: "ollama.com",
+    external: true,
+    has_profile: block !== null,
+    block,
+    fp: mockProfileFp(),
+    blocked: null,
+    will_send: block !== null && consent.state === "granted",
+    local_fallback: true,
+    consent,
+    warnings: [],
+    notice: "Escriba solo lo que pueda leer cualquier remitente: la IA puede citarlo en una respuesta.",
+  };
+}
 
 function mockConsent(): ConsentView {
   if (!mockAuto) return { required: false, state: "not_needed", provider: null, model: null, host: null, at: null };
@@ -1854,7 +2065,52 @@ function beginReadOnConnect(id: string, expect: ReadExpectation | null) {
   }
 }
 
+function preferenceWarnings(scope: string, key: string) {
+  const domain = scope === "domain" ? key : key.split("@")[1];
+  return latest()
+    .filter((r) => r.active && r.action_kind === "send_draft" && !metaOf(r.id).archived_at)
+    .filter((r) => {
+      const sender = senderParts(r.conditions.sender);
+      const ruleDomain = (r.conditions.sender_domain ?? "").trim().replace(/^@/, "").toLowerCase();
+      const byDomain = ruleDomain !== "" && ruleDomain === domain;
+      return scope === "domain" ? byDomain || sender?.domain === key : byDomain || sender?.address === key;
+    })
+    .map((r) => ({ rule_id: r.id, rule_name: metaOf(r.id).name ?? r.id }));
+}
+
 const handlers: Record<string, (a: any, options?: any) => unknown> = {
+  // Preferencias por remitente (D161): normaliza, rechaza dominios públicos y deja el evento del historial.
+  sender_preferences: () => [...mockPrefs].sort((a, b) => (a.scope + a.key < b.scope + b.key ? -1 : 1)),
+  set_sender_preference: ({ scope, key, route }): PreferenceChange => {
+    if (scope !== "address" && scope !== "domain") throw "ámbito desconocido: use «address» o «domain»";
+    if (route !== "review" && route !== "informative") throw "ruta desconocida: use «review» o «informative»";
+    const parts = senderParts(scope === "domain" && !String(key).includes("@") ? `x@${String(key).replace(/^@/, "")}` : key);
+    if (!parts) throw "la dirección o el dominio no es válido";
+    const normalized = scope === "address" ? parts.address : parts.domain;
+    if (scope === "domain" && isPublicDomain(normalized))
+      throw `${normalized} es un servicio de correo público: una preferencia por dominio abarcaría a cualquiera que lo use. Fíjela para una dirección concreta`;
+    const existing = mockPrefs.find((p) => p.scope === scope && p.key === normalized);
+    const changed = existing?.route !== route;
+    let preference: SenderPreference;
+    if (existing) {
+      preference = existing;
+      if (changed) Object.assign(existing, { route, updated_at: now() });
+    } else {
+      preference = { scope, key: normalized, route, updated_at: now() };
+      mockPrefs.push(preference);
+    }
+    if (changed) audit.push({ task_id: null, action: "sender_preference", status: "set", authorization: null, detail: JSON.stringify({ scope, key: normalized, route, previous: existing?.route ?? null }) });
+    return { preference, changed, warnings: route === "informative" ? preferenceWarnings(scope, normalized) : [] };
+  },
+  remove_sender_preference: ({ scope, key }) => {
+    const parts = senderParts(scope === "domain" && !String(key).includes("@") ? `x@${String(key).replace(/^@/, "")}` : key);
+    const normalized = parts ? (scope === "address" ? parts.address : parts.domain) : "";
+    const at = mockPrefs.findIndex((p) => p.scope === scope && p.key === normalized);
+    if (at < 0) return false;
+    const [removed] = mockPrefs.splice(at, 1);
+    audit.push({ task_id: null, action: "sender_preference", status: "removed", authorization: null, detail: JSON.stringify({ scope, key: normalized, previous: removed!.route }) });
+    return true;
+  },
   initial_read_overview: (): InitialReadOverview => {
     if (mockScenario === "broken") throw "no se pudo abrir la base de datos de ejemplo";
     return readOverview();
@@ -2001,6 +2257,40 @@ const handlers: Record<string, (a: any, options?: any) => unknown> = {
     // Como la aplicación: se descarta lo pendiente de revisión, en cola o en curso.
     if (t.state !== "awaiting_review" && t.state !== "queued" && t.state !== "running") throw `la tarea ${id} ya no se puede descartar`;
     return Object.assign(t, { state: "cancelled" });
+  },
+  // Archivar (D159): cierra un correo en revisión sin enviar nada y sin contar como rechazo.
+  archive: ({ id }) => {
+    const t = reviewable(id);
+    if (t.kind !== "email") throw "solo se archivan correos";
+    const { action: _action, ...rest } = t.result ?? {};
+    audit.push({ task_id: id, action: "archive", status: "archived", authorization: null, detail: "{}" });
+    return Object.assign(t, { state: "completed", result: { ...rest, archived: true } });
+  },
+  // Redactar respuesta (D159): una sola tarea nueva por correo de origen.
+  redraft: ({ id }) => {
+    const source = find(id);
+    const existing = tasks.find((t) => t.state !== "cancelled" && t.result?.redraft_of === id);
+    if (existing) return existing;
+    const r = source.result ?? {};
+    const noAnswer = r.triage?.route === "rebote" || r.needs_reply === false;
+    const ok = source.state === "completed" ? r.triage?.route === "informativo" || (r.archived === true && noAnswer) : source.state === "awaiting_review" && noAnswer;
+    if (source.kind !== "email" || !ok) throw "esta tarea no admite pedir una respuesta: solo un informativo, un rebote o un correo sin respuesta necesaria";
+    if (source.state === "awaiting_review") {
+      const { action: _action, ...rest } = r;
+      Object.assign(source, { state: "completed", result: { ...rest, archived: true } });
+    }
+    const from = String(r.message?.from ?? "");
+    return task("email", { message_id: r.message?.id, redraft_of: id }, "awaiting_review", {
+      type: "email",
+      version: 1,
+      origin: r.origin,
+      message: r.message,
+      needs_reply: true,
+      redraft_of: id,
+      draft: { to: from ? [from] : [], subject: r.message?.subject ? `Re: ${r.message.subject}` : null, body: "Buenos días:\n\nGracias por su mensaje; le responderemos en breve.\n\nUn saludo." },
+      draft_flags: [],
+      action: { kind: "send_draft" },
+    });
   },
   retry: ({ id }) => {
     const t = find(id);
@@ -2197,7 +2487,7 @@ const handlers: Record<string, (a: any, options?: any) => unknown> = {
     checkConditions(actionKind, conditions, true);
     const max = limit ?? 200;
     const kind = actionKind === "register_invoice" ? "invoice" : "email";
-    const ofKind = tasks.filter((t) => t.kind === kind).sort((a, b) => b.id - a.id);
+    const ofKind = tasks.filter((t) => t.kind === kind && !triagedOrRedraft(t)).sort((a, b) => b.id - a.id);
     const items: SimulationItem[] = [];
     const sim: Simulation = {
       action_kind: actionKind,
@@ -2206,6 +2496,7 @@ const handlers: Record<string, (a: any, options?: any) => unknown> = {
       truncated: ofKind.length > max,
       skipped_without_result: 0,
       without_currency_check: 0,
+      without_signal_check: 0,
       would_automate: 0,
       would_review: {},
       overlaps: 0,
@@ -2225,6 +2516,7 @@ const handlers: Record<string, (a: any, options?: any) => unknown> = {
       sim.considered++;
       const label = kind === "invoice" ? (r.document ?? null) : (r.message?.subject ?? null);
       if (kind === "invoice" && foreignOf(r) === null) sim.without_currency_check++;
+      if (kind === "email" && !Array.isArray(r.message?.signals)) sim.without_signal_check = (sim.without_signal_check ?? 0) + 1;
       const push = (outcome: SimulationItem["outcome"], reason_code: string | null, explanation: string, overlapping_rules: string[] = []) =>
         items.push({ task_id: t.id, label, outcome, reason_code, explanation, overlapping_rules });
       const review = (code: string, text: string) => {
@@ -2257,6 +2549,13 @@ const handlers: Record<string, (a: any, options?: any) => unknown> = {
       else if (kind === "invoice" && foreign && foreign.length) review("foreign_currency", `el documento menciona ${foreign.join(", ")}; hoy la aplicación solo registra facturas en euros`);
       else if (kind === "invoice" && r.currency_evidence?.euro !== true) review("currency_not_shown", "el documento no muestra la moneda; no se puede comprobar que sea en euros");
       else if (kind === "email" && !(r.draft?.to ?? []).length) review("no_recipient", "el borrador no tiene destinatario");
+      else if (kind === "email" && r.needs_reply === false) review("no_reply_needed", "la IA considera que el correo no requiere respuesta");
+      else if (kind === "email" && r.redraft_of != null) review("redraft", "la respuesta se pidió a mano; una persona debe revisarla siempre");
+      else if (kind === "email" && !String(r.draft?.body ?? "").trim()) review("empty_draft", "el borrador está vacío");
+      else if (kind === "email" && !Array.isArray(r.message?.signals)) review("signals_not_checked", "no consta la comprobación de correo automático; reprocese o revise");
+      else if (kind === "email" && r.message.signals.length) review("automatic_sender", "el correo parece automático; ninguna regla responde a un remitente automático");
+      else if (kind === "email" && !Array.isArray(r.draft_flags)) review("draft_not_checked", "no consta la comprobación del borrador; reprocese o revise");
+      else if (kind === "email" && r.draft_flags.length) review("draft_flagged", "el borrador contiene enlaces, direcciones, teléfonos o IBAN que no se pueden dar por buenos; compruébelos");
       else {
         const others = live
           .filter((o) => matchRule(kind, { conditions: o.conditions, ack: metaOf(o.id).any_sender_ack_at !== null }, r).matches)
@@ -2290,6 +2589,60 @@ const handlers: Record<string, (a: any, options?: any) => unknown> = {
   // Sugerencias (D132): datos sintéticos fijos; el cálculo real vive en la capa Rust.
   rule_suggestions: (): Suggestions => mockSuggestions(),
   suggestion_refinement: (): RefinementView => mockRefinementView(),
+  // Perfil del negocio (D163): datos sintéticos; la validación y el consentimiento reales viven en la capa Rust.
+  business_profile: (): ProfileView => mockProfileView(),
+  business_profile_prefill: (): BusinessProfile => ({
+    display_name: "Taller Ficticio SL",
+    hours: "",
+    tone: "",
+    signature: "Taller Ficticio SL\nCalle Falsa 1, Ciudad Ficticia\nhola@taller-ficticio.test",
+    policies: "",
+  }),
+  save_business_profile: ({ profile }): ProfileSaved => {
+    const p = cleanProfile(profile as BusinessProfile);
+    const blocked = mockProfileBlocks(p);
+    if (blocked.length) throw blocked.join(" ");
+    const before = mockProfileFp();
+    mockProfile = blankProfile(p) ? null : { profile: p, at: now() };
+    const after = mockProfileFp();
+    let withdrawn = false;
+    if (mockProfileConsent && before !== after) {
+      mockProfileConsent = null;
+      withdrawn = true;
+      audit.push({ task_id: null, action: "rule_setting", status: "removed", authorization: null, detail: "consentimiento del perfil del negocio retirado: cambió el perfil" });
+    }
+    audit.push({ task_id: null, action: "business_profile", status: "saved", authorization: null, detail: `perfil del negocio guardado (${profileLength(p)} caracteres)` });
+    const warnings: ProfileFinding[] = [];
+    for (const key of Object.keys(p) as Array<keyof BusinessProfile>) {
+      if (/\d{3}[\s.-]?\d{3}[\s.-]?\d{3}/.test(p[key])) warnings.push({ field: key, code: "phone" });
+      if (p[key].includes("@")) warnings.push({ field: key, code: "email" });
+    }
+    return { view: mockProfileView(), warnings, consent_withdrawn: withdrawn };
+  },
+  clear_business_profile: (): ProfileSaved => {
+    const had = mockProfile !== null;
+    mockProfile = null;
+    if (had && mockProfileConsent) mockProfileConsent = null;
+    if (had) audit.push({ task_id: null, action: "business_profile", status: "removed", authorization: null, detail: "perfil del negocio borrado" });
+    return { view: mockProfileView(), warnings: [], consent_withdrawn: false };
+  },
+  business_profile_preview: (): ProfilePreview => {
+    if (mockScenario === "broken") throw "no se pudo abrir la base de datos de ejemplo";
+    return mockProfilePreview();
+  },
+  grant_profile_consent: ({ provider, model, host, fp }): ProfileConsentView => {
+    const current = mockProfileFp();
+    if (provider !== "ollama_cloud" || model !== "gemma4:31b" || host !== "ollama.com" || !current || fp !== current)
+      throw "El proveedor, el modelo, el servidor o el perfil han cambiado desde que lo vio: revise la vista previa de nuevo antes de aceptar.";
+    mockProfileConsent = { fp: current, at: now() };
+    audit.push({ task_id: null, action: "rule_setting", status: "changed", authorization: null, detail: `consentimiento del perfil del negocio concedido: proveedor ${provider}, modelo ${model}, servidor ${host}` });
+    return mockProfileConsentView();
+  },
+  withdraw_profile_consent: (): ProfileConsentView => {
+    if (mockProfileConsent) audit.push({ task_id: null, action: "rule_setting", status: "removed", authorization: null, detail: "consentimiento del perfil del negocio retirado" });
+    mockProfileConsent = null;
+    return mockProfileConsentView();
+  },
   refinement_preview: (): RefinePreview => {
     if (mockScenario === "broken") throw "no se pudo abrir la base de datos de ejemplo";
     return {
@@ -2573,12 +2926,20 @@ function startup(): Startup {
 }
 
 const mutating = new Set([
+  "save_business_profile",
+  "clear_business_profile",
+  "grant_profile_consent",
+  "withdraw_profile_consent",
+  "set_sender_preference",
+  "remove_sender_preference",
   "import_file",
   "fetch_mail",
   "approve",
   "confirm_not_sent",
   "edit_draft",
   "reject",
+  "archive",
+  "redraft",
   "retry",
   "save_task_template",
   "set_task_template_active",

@@ -11,6 +11,8 @@ pub mod accounts;
 pub mod initial_read;
 pub mod panel;
 pub mod pipelines;
+pub mod preferences;
+pub mod profile;
 pub mod refine;
 pub mod rules;
 pub mod suggest;
@@ -22,11 +24,13 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use nestadmin_ai::tasks::{
-    email_request, extraction_request, parse_email, parse_extraction, parse_other_invoices,
+    draft_flags_allowing, draft_leaks_internals, draft_request, extraction_request, parse_draft,
+    parse_extraction, parse_other_invoices, parse_triage, triage_request,
 };
 use nestadmin_ai::{
     AiError, GenerateRequest, GenerateResult, ModelUnavailableCause, Provider, ProviderKind,
 };
+use nestadmin_core::mail_signals::{route_of_message, Route, Signal, TriageDecision};
 use nestadmin_core::{
     ActionRecord, ActionRequest, AuditEntry, Authorization, Connector, ConnectorError, CoreError,
     Rule, Store, Task, TaskError, TaskState,
@@ -331,17 +335,44 @@ pub struct UpdateReadiness {
 /// Trabajo de una tarea: una solicitud lista, un documento del que extraer el texto o, si ya
 /// se intentó ejecutar su acción, el resultado guardado entonces (D50), sin volver a la IA.
 enum Prepared {
-    Request(GenerateRequest),
     Document(PathBuf),
     /// Una factura más de un documento con varias (D68): sus campos ya los dio la IA al
     /// procesar la primera; solo se vuelve a leer el documento para localizar cada campo.
     Split(PathBuf, GenerateResult),
     Resume(Value),
+    /// Un correo nuevo (D158): primero se clasifica y, solo si hace falta respuesta, se redacta.
+    /// `text` es el asunto y el cuerpo; nada más sale del equipo.
+    Email {
+        id: String,
+        text: String,
+    },
+    /// «Redactar respuesta» (D159): solo la redacción, sin clasificar de nuevo.
+    Redraft {
+        id: String,
+        text: String,
+    },
+}
+
+/// Lo que dan las dos llamadas de un correo (D158).
+struct EmailGenerated {
+    /// Respuesta de la última llamada hecha (la redacción si la hubo): proveedor, modelo y latencia.
+    meta: GenerateResult,
+    /// Categoría de la clasificación; `None` en «Redactar», que no clasifica.
+    category: Option<String>,
+    needs_reply: bool,
+    /// Texto del borrador, ya leído; `None` si no hacía falta respuesta.
+    draft: Option<String>,
+    /// Huella del perfil del negocio que llevó la redacción (D163); `None` si no llevó ninguno.
+    profile_fp: Option<String>,
+    /// Texto de ese perfil, solo en memoria: sirve para no marcar sus contactos en el borrador y
+    /// nunca se guarda en el resultado.
+    profile_text: Option<String>,
 }
 
 /// Lo que devuelve el trabajo de una tarea.
 enum Outcome {
     Generated(GenerateResult),
+    Email(EmailGenerated),
     Resumed(Value),
     /// Primera lectura: el documento no parece una factura según la comprobación local y no se
     /// envía a ningún proveedor (E5, D133). Lleva el código del motivo.
@@ -398,6 +429,13 @@ fn split_preset_unreadable(input: &Value) -> bool {
     input.get("preset").is_some() && split_preset(input).is_none()
 }
 
+/// Motivo de revisión de un correo que la IA no cree que requiera respuesta (D158).
+const NO_REPLY_REASON: &str =
+    "probablemente no requiere respuesta; puede archivarlo o pedir una respuesta";
+/// Motivo de revisión de un rebote (D157).
+const BOUNCE_REASON: &str =
+    "posible fallo de entrega: avisa de que un correo no llegó; archívelo o pida una respuesta";
+
 /// Motivo de revisión de una tarea cuyo intento anterior no se confirmó.
 const RESUMED_REASON: &str =
     "el intento anterior no se confirmó; se conserva el contenido aprobado, sin pedir otro a la IA";
@@ -415,6 +453,8 @@ pub struct Job {
     fallback: Option<LocalFallback>,
     fallback_until: Arc<Mutex<Option<Instant>>>,
     extractor: Arc<Extractor>,
+    /// Perfil del negocio para la redacción de esta tarea, ya comprobado el consentimiento (D163).
+    profile: Option<profile::ProfileUse>,
     prepared: Result<Prepared, TaskError>,
 }
 
@@ -482,6 +522,19 @@ fn generate_with_fallback(
     until: &Mutex<Option<Instant>>,
     request: &GenerateRequest,
 ) -> Attempt {
+    generate_with_fallback_split(provider, fallback, until, request, request)
+}
+
+/// Como `generate_with_fallback`, con una petición para el proveedor elegido y otra para la IA
+/// local: la redacción lleva el perfil del negocio a la IA local sin consentimiento extra (no sale
+/// del equipo) y al externo solo con él (D163).
+fn generate_with_fallback_split(
+    provider: &dyn Provider,
+    fallback: Option<&LocalFallback>,
+    until: &Mutex<Option<Instant>>,
+    request: &GenerateRequest,
+    local_request: &GenerateRequest,
+) -> Attempt {
     let from = provider.kind();
     let fallback = fallback.filter(|_| from != ProviderKind::Ollama);
     // El respaldo es siempre la IA local: lo que no sea Ollama se descarta, de modo que ningún
@@ -496,7 +549,7 @@ fn generate_with_fallback(
             .unwrap_or(false);
         if active {
             if let Some(local) = local_provider(local) {
-                match local.generate(request) {
+                match local.generate(local_request) {
                     Ok(result) => {
                         return Attempt {
                             result: Ok(result),
@@ -526,7 +579,7 @@ fn generate_with_fallback(
             let outcome = match local_failure {
                 Some(previous) => Err(previous),
                 None => match local_provider(local) {
-                    Some(local) => local.generate(request),
+                    Some(local) => local.generate(local_request),
                     // Sin IA local preparada: el error del externo, como sin respaldo.
                     None => {
                         return Attempt {
@@ -564,6 +617,42 @@ fn generate_with_fallback(
     }
 }
 
+/// Pide al proveedor local una generación que no puede ir a ningún otro: la redacción de una
+/// tarea cuya clasificación ya usó el respaldo local (D101, D158). Nunca vuelve al proveedor
+/// externo ni pasa a otro; `note` es el aviso de respaldo de la clasificación.
+fn generate_local_only(
+    fallback: Option<&LocalFallback>,
+    note: &Value,
+    request: &GenerateRequest,
+) -> Attempt {
+    let local = fallback
+        .and_then(|local| local())
+        .filter(|p| p.kind() == ProviderKind::Ollama);
+    match local {
+        Some(local) => match local.generate(request) {
+            Ok(result) => Attempt {
+                result: Ok(result),
+                fallback: Some(note.clone()),
+                wait: None,
+            },
+            Err(error) => Attempt {
+                result: Err(failure(&*local, &error)),
+                fallback: None,
+                wait: None,
+            },
+        },
+        None => Attempt {
+            result: Err(task_error(
+                "unavailable",
+                "la IA local ya no está preparada y la redacción no se envía a ningún proveedor externo",
+                true,
+            )),
+            fallback: None,
+            wait: None,
+        },
+    }
+}
+
 impl Job {
     /// Extrae el texto si hace falta (PDF u OCR, localmente) y llama al proveedor elegido.
     /// Un error se devuelve tal cual: no hay otro proveedor ni extracción parcial.
@@ -576,6 +665,7 @@ impl Job {
             fallback,
             fallback_until,
             extractor,
+            profile,
             prepared,
         } = self;
         let read_source: Option<String> = serde_json::from_str::<Value>(&task.input_ref)
@@ -592,7 +682,89 @@ impl Job {
                     extracted = extractor.extract(&path).ok();
                     return Ok(Outcome::Generated(generated));
                 }
-                Prepared::Request(request) => request,
+                Prepared::Email { id, text } => {
+                    let first = generate_with_fallback(
+                        &*provider,
+                        fallback.as_ref(),
+                        &fallback_until,
+                        &triage_request(&id, &text),
+                    );
+                    wait = first.wait;
+                    used_fallback = first.fallback.clone();
+                    let triage = first.result?;
+                    let (category, needs_reply) = parse_triage(&triage.output)
+                        .map_err(|e| task_error(e.code(), e.to_string(), true))?;
+                    if !needs_reply {
+                        return Ok(Outcome::Email(EmailGenerated {
+                            meta: triage,
+                            category: Some(category),
+                            needs_reply,
+                            draft: None,
+                            profile_fp: None,
+                            profile_text: None,
+                        }));
+                    }
+                    let (request, local_request) =
+                        draft_requests(&format!("{id}/draft"), &text, profile.as_ref());
+                    // Si la clasificación la atendió el respaldo local (o el periodo de respaldo
+                    // sigue abierto), la redacción se queda en local: el mismo correo nunca vuelve
+                    // al proveedor externo (D101).
+                    let second = match &used_fallback {
+                        Some(note) => generate_local_only(fallback.as_ref(), note, &local_request),
+                        None => generate_with_fallback_split(
+                            &*provider,
+                            fallback.as_ref(),
+                            &fallback_until,
+                            &request,
+                            &local_request,
+                        ),
+                    };
+                    wait = second.wait;
+                    if used_fallback.is_none() {
+                        used_fallback = second.fallback;
+                    }
+                    let drafted = second.result?;
+                    let draft = parse_draft(&drafted.output)
+                        .map_err(|e| task_error(e.code(), e.to_string(), true))?;
+                    // La redacción salió por la IA local si hubo respaldo (en la clasificación o
+                    // en ella); si no, por el proveedor elegido.
+                    let (profile_fp, profile_text) =
+                        profile_sent(profile.as_ref(), used_fallback.is_some());
+                    return Ok(Outcome::Email(EmailGenerated {
+                        meta: drafted,
+                        category: Some(category),
+                        needs_reply,
+                        draft: Some(draft),
+                        profile_fp,
+                        profile_text,
+                    }));
+                }
+                Prepared::Redraft { id, text } => {
+                    let (request, local_request) =
+                        draft_requests(&format!("{id}/draft"), &text, profile.as_ref());
+                    let attempt = generate_with_fallback_split(
+                        &*provider,
+                        fallback.as_ref(),
+                        &fallback_until,
+                        &request,
+                        &local_request,
+                    );
+                    wait = attempt.wait;
+                    used_fallback = attempt.fallback;
+                    let drafted = attempt.result?;
+                    let draft = parse_draft(&drafted.output)
+                        .map_err(|e| task_error(e.code(), e.to_string(), true))?;
+                    let (profile_fp, profile_text) =
+                        profile_sent(profile.as_ref(), used_fallback.is_some());
+                    return Ok(Outcome::Email(EmailGenerated {
+                        meta: drafted,
+                        category: None,
+                        needs_reply: true,
+                        draft: Some(draft),
+                        profile_fp,
+                        profile_text,
+                    }));
+                }
                 Prepared::Document(path) => {
                     let extraction = extractor
                         .extract(&path)
@@ -640,6 +812,47 @@ impl Job {
             fallback: used_fallback,
             destination,
         }
+    }
+}
+
+/// Peticiones de redacción para el proveedor elegido y para la IA local (D163). El perfil va al
+/// elegido si es local o hay consentimiento (`primary_ok`), y a la IA local siempre: no sale del
+/// equipo. Sin perfil, ambas son iguales y no llevan nada.
+fn draft_requests(
+    id: &str,
+    text: &str,
+    profile: Option<&profile::ProfileUse>,
+) -> (GenerateRequest, GenerateRequest) {
+    let primary = profile.filter(|p| p.primary_ok).map(|p| p.text.as_str());
+    let local = profile.map(|p| p.text.as_str());
+    (
+        draft_request(id, text, primary),
+        draft_request(id, text, local),
+    )
+}
+
+/// Huella y texto del perfil que de verdad llevó la redacción: el de la IA local si ella la
+/// atendió, el del proveedor elegido si no (y solo si pudo recibirlo).
+fn profile_sent(
+    profile: Option<&profile::ProfileUse>,
+    served_locally: bool,
+) -> (Option<String>, Option<String>) {
+    match profile.filter(|p| served_locally || p.primary_ok) {
+        Some(p) => (Some(p.fp.clone()), Some(p.text.clone())),
+        None => (None, None),
+    }
+}
+
+/// Asunto de la respuesta: «Re: …» sin repetir el prefijo si ya lo trae.
+fn reply_subject(subject: &str) -> String {
+    let trimmed = subject.trim_start();
+    if trimmed
+        .get(..3)
+        .is_some_and(|p| p.eq_ignore_ascii_case("re:"))
+    {
+        trimmed.to_owned()
+    } else {
+        format!("Re: {subject}")
     }
 }
 
@@ -915,6 +1128,7 @@ impl App {
         self.refresh_read_gate();
         // El consentimiento del afinado automático es de un destino concreto (D134).
         self.drop_consent_if_destination_changed();
+        self.drop_profile_consent_if_destination_changed();
         self.expire_fallback_period();
     }
 
@@ -1181,6 +1395,9 @@ impl App {
         for task in self.store.all_tasks()? {
             let input: Value = serde_json::from_str(&task.input_ref).unwrap_or(Value::Null);
             match task.kind.as_str() {
+                // Una redacción pedida (D159) comparte el mensaje con su origen: no cuenta como
+                // «ya tiene tarea», para que el mensaje siga ligado a la tarea original.
+                EMAIL if input.get("redraft_of").is_some() => {}
                 EMAIL => {
                     if let Some(id) = input["message_id"].as_str() {
                         let (account, inner) = split_id(id);
@@ -1200,6 +1417,9 @@ impl App {
         }
         // Plantillas activas (D149): solo se miran al encolar un correo nuevo.
         let templates = self.active_task_templates()?;
+        // Preferencias por remitente (D161), leídas una vez por consulta.
+        let preference_index =
+            preferences::PreferenceIndex::from_rows(&self.store.sender_preferences()?);
         let mut report = FetchReport {
             added: 0,
             limit: self.mail.limit(),
@@ -1209,6 +1429,7 @@ impl App {
             let fetch = match outcome {
                 Ok(messages) => {
                     let mut added = 0;
+                    let mut informative = 0;
                     let mut attachments = AttachmentFetch::default();
                     for message in &messages {
                         let task_id = match known.get(&message.id) {
@@ -1220,10 +1441,59 @@ impl App {
                                     "origin": self.mail.origin(&account),
                                     "message": message,
                                 });
-                                let task =
-                                    self.enqueue_new_mail(&input.to_string(), message, &templates)?;
+                                let origin = input["origin"].clone();
+                                let (_, found) = route_of_message(
+                                    message.from.as_deref(),
+                                    message.signals.as_deref(),
+                                );
+                                // Precedencia de D161: rebote, hilo propio (solo metadatos,
+                                // D162), preferencia, señal fuerte, IA. Un fallo al mirar el
+                                // hilo es «no se sabe» y no oculta nada.
+                                let (decision, scope) = preferences::decide_new_mail(
+                                    &preference_index,
+                                    message.from.as_deref(),
+                                    &found,
+                                    || {
+                                        let key = message.thread_key.as_deref()?;
+                                        self.mail.last_message_is_ours(&account, key).ok().flatten()
+                                    },
+                                );
+                                let route = decision.route;
+                                let input = input.to_string();
+                                // La ruta local (D157) se decide aquí, sin IA y de una vez: el
+                                // informativo y el rebote nacen ya cerrados o en revisión, en una
+                                // sola transacción, así que un corte no puede dejarlos en la cola.
+                                let task = match route {
+                                    Route::Informativo => self.store.enqueue_closed(
+                                        EMAIL,
+                                        &input,
+                                        &triaged_result(
+                                            message, origin, &decision, scope, &found, false,
+                                        ),
+                                        "correo informativo",
+                                    )?,
+                                    Route::Rebote => self.store.enqueue_review(
+                                        EMAIL,
+                                        &input,
+                                        &triaged_result(
+                                            message, origin, &decision, scope, &found, true,
+                                        ),
+                                        "posible fallo de entrega",
+                                    )?,
+                                    // Solo un correo que va a la IA puede abrir una ejecución
+                                    // de plantilla (D149): el informativo y el rebote no tienen
+                                    // respuesta que retener y sus adjuntos siguen el flujo normal.
+                                    Route::Ia => {
+                                        self.enqueue_new_mail(&input, message, &templates)?
+                                    }
+                                };
+                                // Los contadores, solo con la tarea ya guardada.
+                                if route == Route::Informativo {
+                                    informative += 1;
+                                } else {
+                                    added += 1;
+                                }
                                 known.insert(message.id.clone(), task.id);
-                                added += 1;
                                 task.id
                             }
                         };
@@ -1244,6 +1514,7 @@ impl App {
                         account,
                         read: messages.len(),
                         added,
+                        informative,
                         error: None,
                         attachments,
                     }
@@ -1252,6 +1523,7 @@ impl App {
                     account,
                     read: 0,
                     added: 0,
+                    informative: 0,
                     error: Some(MailIssue::from(&error)),
                     attachments: AttachmentFetch::default(),
                 },
@@ -1425,6 +1697,7 @@ impl App {
                 fallback: self.fallback.clone(),
                 fallback_until: Arc::clone(&self.fallback_until),
                 extractor: Arc::clone(&self.extractor),
+                profile: None,
                 prepared: Ok(Prepared::Resume(result)),
             }));
         }
@@ -1465,8 +1738,14 @@ impl App {
                                 "la primera lectura no envía correos a ningún proveedor",
                                 false,
                             ))
+                        } else if input["redraft_of"].as_i64().is_some() {
+                            // «Redactar respuesta» (D159): solo la redacción; no se clasifica otra vez.
+                            Ok(Prepared::Redraft {
+                                id: id.clone(),
+                                text,
+                            })
                         } else {
-                            Ok(Prepared::Request(email_request(&id, &text)))
+                            Ok(Prepared::Email { id: id.clone(), text })
                         }
                     }
                     Some(_) => Err(task_error(
@@ -1491,6 +1770,12 @@ impl App {
             fallback: self.fallback.clone(),
             fallback_until: Arc::clone(&self.fallback_until),
             extractor: Arc::clone(&self.extractor),
+            // Solo la redacción de un correo lleva el perfil (D163); se decide al tomar la tarea,
+            // con el consentimiento de ese momento.
+            profile: match &prepared {
+                Ok(Prepared::Email { .. } | Prepared::Redraft { .. }) => self.profile_for_draft(),
+                _ => None,
+            },
             prepared,
         }))
     }
@@ -1522,8 +1807,9 @@ impl App {
             let reason = wait.describe(used.kind(), used.model(), used.configured_url().as_deref());
             return Ok(self.store.release(task.id, &reason)?);
         }
-        let generated = match completed.outcome {
-            Ok(Outcome::Generated(generated)) => generated,
+        let (generated, email) = match completed.outcome {
+            Ok(Outcome::Generated(generated)) => (Some(generated), None),
+            Ok(Outcome::Email(email)) => (None, Some(email)),
             Ok(Outcome::Resumed(mut result)) => {
                 if task_is_initial_read(&task) {
                     // Nunca se reanuda una acción en la primera lectura: se completa sin ella.
@@ -1551,9 +1837,16 @@ impl App {
             self.store
                 .record_event(task.id, "ai_fallback", "used", note)?;
         }
-        let built = match task.kind.as_str() {
-            INVOICE => self.invoice_result(&task, &generated, completed.extraction.as_ref()),
-            _ => self.email_result(&task, &generated),
+        let built = match (task.kind.as_str(), &generated, &email) {
+            (INVOICE, Some(generated), _) => {
+                self.invoice_result(&task, generated, completed.extraction.as_ref())
+            }
+            (_, _, Some(email)) => self.email_result(&task, email),
+            _ => Err(task_error(
+                "invalid_response",
+                "la respuesta del proveedor no corresponde a la tarea",
+                true,
+            )),
         };
         let mut result = match built {
             Ok(result) => result,
@@ -1562,8 +1855,8 @@ impl App {
         if let Some(note) = fallback {
             result["fallback"] = note;
         }
-        if task.kind == INVOICE {
-            if let Err(error) = self.enqueue_other_invoices(&task, &generated, &mut result) {
+        if let (INVOICE, Some(generated)) = (task.kind.as_str(), &generated) {
+            if let Err(error) = self.enqueue_other_invoices(&task, generated, &mut result) {
                 return Ok(self.store.fail(task.id, &error)?);
             }
         }
@@ -1588,11 +1881,14 @@ impl App {
         // Solo ids, códigos e importes o nombres que ya están en el resultado (D125).
         result["evaluation"] = json!(evaluation.explanation);
         // La evidencia (D129) no puede impedir ni duplicar la acción: si no se guarda, la
-        // acción sigue su curso y el fallo consta en el resultado de la tarea.
-        if let Err(error) =
-            self.record_evidence(&task, &result, kind, &rules, &any_sender, &evaluation)
-        {
-            result["evidence_error"] = json!(format!("no se guardó la evaluación: {error}"));
+        // acción sigue su curso y el fallo consta en el resultado de la tarea. Una redacción
+        // pedida a mano no es una decisión de las reglas y no cuenta en sus estadísticas.
+        if result.get("redraft_of").is_none() {
+            if let Err(error) =
+                self.record_evidence(&task, &result, kind, &rules, &any_sender, &evaluation)
+            {
+                result["evidence_error"] = json!(format!("no se guardó la evaluación: {error}"));
+            }
         }
         let decision = evaluation.decision;
         match decision {
@@ -1608,6 +1904,10 @@ impl App {
             }
             RuleDecision::Review(reason) => {
                 result["review_reason"] = json!(reason);
+                if result["needs_reply"].as_bool() == Some(false) {
+                    // La IA no oculta correos: queda en revisión con el aviso (D158).
+                    result["review_reason"] = json!(NO_REPLY_REASON);
+                }
                 Ok(self.store.await_review(task.id, &result)?)
             }
         }
@@ -1899,21 +2199,16 @@ impl App {
         }
     }
 
-    fn email_result(
-        &mut self,
-        task: &Task,
-        generated: &GenerateResult,
-    ) -> Result<Value, TaskError> {
-        let (category, body) = parse_email(&generated.output)
-            .map_err(|e| task_error(e.code(), e.to_string(), true))?;
+    /// Resultado de un correo a partir de las dos llamadas (D158). Sin respuesta necesaria no hay
+    /// borrador ni `action`; un borrador que filtra instrucciones o marcadores es respuesta
+    /// inválida (reintentable) y uno con enlaces, direcciones, teléfonos o IBAN lleva
+    /// `draft_flags` (D160).
+    fn email_result(&mut self, task: &Task, mail: &EmailGenerated) -> Result<Value, TaskError> {
         let input: Value = serde_json::from_str(&task.input_ref).unwrap_or(Value::Null);
         let message = self
             .task_message(&input)
             .map_err(|e| task_error(&e.code, e.message, true))?
             .ok_or_else(|| task_error("not_found", "el mensaje ya no existe", false))?;
-        // Sin remitente no hay a quién responder: el borrador se muestra, pero no se puede enviar.
-        let to: Vec<String> = message.from.iter().cloned().collect();
-        let subject = message.subject.as_ref().map(|s| format!("Re: {s}"));
         // Tareas anteriores a D48 no guardaron el origen: se toma el de la cuenta actual.
         let origin = match input.get("origin").filter(|o| !o.is_null()) {
             Some(origin) => origin.clone(),
@@ -1921,18 +2216,66 @@ impl App {
                 serde_json::to_value(self.mail.origin(split_id(&message.id).0)).unwrap_or_default()
             }
         };
-        Ok(json!({
+        // «Redactar» conserva la categoría con la que se clasificó el correo de origen.
+        let category = mail
+            .category
+            .clone()
+            .or_else(|| input["category"].as_str().map(str::to_owned));
+        let mut result = json!({
             "type": EMAIL,
             "version": 1,
             "origin": origin,
             "message": message,
-            "category": category,
-            "draft": { "to": to, "subject": subject, "body": body },
-            "provider": generated.provider,
-            "model": generated.model,
-            "latency_ms": generated.latency_ms,
-            "action": { "kind": SEND_DRAFT },
-        }))
+            "needs_reply": mail.needs_reply,
+            "provider": mail.meta.provider,
+            "model": mail.meta.model,
+            "latency_ms": mail.meta.latency_ms,
+        });
+        if let Some(category) = category {
+            result["category"] = json!(category);
+        }
+        if let Some(source) = input["redraft_of"].as_i64() {
+            result["redraft_of"] = json!(source);
+        }
+        let Some(body) = &mail.draft else {
+            return Ok(result);
+        };
+        if draft_leaks_internals(body) {
+            return Err(task_error(
+                "invalid_response",
+                "el borrador repite instrucciones, marcadores o nombres internos; se descarta",
+                true,
+            ));
+        }
+        // Sin remitente no hay a quién responder: el borrador se muestra, pero no se puede enviar.
+        let to: Vec<String> = message.from.iter().cloned().collect();
+        let subject = message.subject.as_ref().map(|s| reply_subject(s));
+        let automatic: Vec<&str> = to
+            .iter()
+            .flat_map(|address| nestadmin_core::mail_signals::address_signals(Some(address)))
+            .map(|s| s.code())
+            .collect();
+        result["draft"] = json!({ "to": to, "subject": subject, "body": body });
+        // Los contactos del perfil que llevó la redacción no se marcan (D160, D163); el resto sí.
+        // El asunto lo escribe el remitente y sale con la respuesta: se examina con el cuerpo.
+        let outgoing = match &subject {
+            Some(subject) => format!("{subject}\n{body}"),
+            None => body.to_owned(),
+        };
+        result["draft_flags"] = json!(draft_flags_allowing(
+            &outgoing,
+            mail.profile_text.as_deref()
+        ));
+        if let Some(fp) = &mail.profile_fp {
+            // Solo la huella: el texto del perfil no se guarda en ningún resultado.
+            result["profile_fp"] = json!(fp);
+        }
+        if !automatic.is_empty() {
+            // Aviso para la revisión: el destinatario parece una dirección automática.
+            result["recipient_signals"] = json!(automatic);
+        }
+        result["action"] = json!({ "kind": SEND_DRAFT });
+        Ok(result)
     }
 
     /// Ejecuta la acción de la tarea una sola vez y la completa; un fallo del conector deja
@@ -2094,6 +2437,16 @@ impl App {
                 current,
             });
         }
+        // Sin borrador no hay nada que enviar: se rechaza antes de anotar señal, intento o acción.
+        if task.kind == EMAIL
+            && result["draft"]["body"]
+                .as_str()
+                .is_none_or(|body| body.trim().is_empty())
+        {
+            return Err(AppError::Invalid(
+                "el correo no tiene un borrador que aprobar; archívelo o pida una respuesta".into(),
+            ));
+        }
         // La aprobación es la decisión de la persona: se anota antes de ejecutar para que un
         // fallo al anotarla conste en el resultado sin impedir ni repetir la acción.
         let mut result = result;
@@ -2128,6 +2481,11 @@ impl App {
         }
         if body.trim().is_empty() {
             return Err(AppError::Invalid("el borrador está vacío".into()));
+        }
+        if !result["draft"].is_object() {
+            return Err(AppError::Invalid(
+                "esta tarea no tiene borrador; pida una respuesta".into(),
+            ));
         }
         result["draft"]["body"] = json!(body);
         // Marca que una persona cambió el texto: la aprobación posterior ya no es «sin
@@ -2195,6 +2553,90 @@ impl App {
             fields.remove("recovery");
         }
         Ok(self.store.revise(task_id, &result)?)
+    }
+
+    /// Archivar (D159): cierra un correo pendiente de revisión sin enviar nada. No cuenta como
+    /// rechazo (no escribe la señal `rejected`, D129: no es una decisión sobre un borrador) y deja
+    /// un evento del historial sin contenido, en la misma transacción que el cierre. Una tarea que
+    /// ya intentó una acción no se archiva: se confirma o se descarta.
+    pub fn archive(&mut self, task_id: i64) -> AppResult<Task> {
+        let (task, mut result) = self.reviewable(task_id)?;
+        if task.kind != EMAIL {
+            return Err(AppError::Invalid("solo se archivan correos".into()));
+        }
+        if result.get("attempt").is_some() || !self.store.task_actions(task.id)?.is_empty() {
+            return Err(AppError::Invalid(
+                "la tarea ya intentó enviar una respuesta: confírmela o descártela".into(),
+            ));
+        }
+        archived_result(&mut result);
+        Ok(self.store.complete_noting(
+            task_id,
+            &result,
+            "archivada",
+            ("archive", "archived", &json!({})),
+        )?)
+    }
+
+    /// Redactar respuesta (D159): crea una tarea nueva que solo redacta (no clasifica otra vez y
+    /// conserva la categoría) a partir de un informativo, un rebote o un correo sin respuesta
+    /// necesaria. La de origen, si estaba en revisión, se archiva en la misma transacción. Pedirla
+    /// dos veces devuelve la misma tarea: un índice único impide el duplicado. La nueva siempre
+    /// acaba en revisión.
+    pub fn redraft(&mut self, task_id: i64) -> AppResult<Task> {
+        let source = self.store.task(task_id)?;
+        if source.kind != EMAIL {
+            return Err(AppError::Invalid(
+                "solo se redactan respuestas a correos".into(),
+            ));
+        }
+        if let Some(existing) = self.store.redraft_of(task_id)? {
+            return Ok(existing);
+        }
+        let result = source.result.clone().unwrap_or(Value::Null);
+        if result.get("redraft_of").is_some_and(|v| !v.is_null()) {
+            return Err(AppError::Invalid(
+                "esta tarea ya es una respuesta redactada a mano".into(),
+            ));
+        }
+        let route = result["triage"]["route"].as_str();
+        let no_answer = route == Some("rebote") || result["needs_reply"].as_bool() == Some(false);
+        let eligible = match source.state {
+            TaskState::Completed => {
+                route == Some("informativo") || (result["archived"] == json!(true) && no_answer)
+            }
+            TaskState::AwaitingReview => no_answer,
+            _ => false,
+        };
+        if !eligible {
+            return Err(AppError::Invalid(
+                "esta tarea no admite pedir una respuesta: solo un informativo, un rebote o un correo sin respuesta necesaria".into(),
+            ));
+        }
+        let mut input: Value = serde_json::from_str(&source.input_ref).unwrap_or(Value::Null);
+        let Some(fields) = input.as_object_mut() else {
+            return Err(AppError::Invalid(
+                "la entrada de la tarea no se puede leer".into(),
+            ));
+        };
+        fields.remove("initial_read");
+        fields.remove("read_source");
+        fields.insert("redraft_of".into(), json!(task_id));
+        if let Some(category) = result["category"].as_str() {
+            fields.insert("category".into(), json!(category));
+        }
+        if fields.get("message").is_none_or(Value::is_null) {
+            fields.insert("message".into(), result["message"].clone());
+        }
+        let archive = (source.state == TaskState::AwaitingReview).then(|| {
+            let mut archived = result.clone();
+            archived_result(&mut archived);
+            archived
+        });
+        let (task, _) =
+            self.store
+                .enqueue_redraft(task_id, &input.to_string(), archive.as_ref())?;
+        Ok(task)
     }
 
     /// Descarta la tarea sin ejecutar ninguna acción.
@@ -2361,6 +2803,66 @@ impl App {
         }
         Ok(())
     }
+}
+
+/// Marca un resultado como archivado (D159): sin `action` ni intento de recuperación.
+fn archived_result(result: &mut Value) {
+    if let Some(fields) = result.as_object_mut() {
+        fields.remove("action");
+        fields.remove("recovery");
+    }
+    result["archived"] = json!(true);
+}
+
+/// Resultado de un correo que la ruta local resolvió sin IA (D157): `triage` dice por qué y
+/// ninguna `action`. Un informativo no tiene borrador ni nada que revisar; un rebote queda en
+/// revisión con `review_reason` y `needs_reply = false`, para que la ventana lo muestre como
+/// posible fallo de entrega. Solo códigos de señal, nunca cabeceras.
+fn triaged_result(
+    message: &Message,
+    origin: Value,
+    decision: &TriageDecision,
+    preference_scope: Option<nestadmin_core::PreferenceScope>,
+    signals: &[Signal],
+    review: bool,
+) -> Value {
+    let mut triage = json!({
+        "route": decision.route.as_str(),
+        "codes": nestadmin_core::mail_signals::codes(signals),
+        "source": decision.source.as_str(),
+    });
+    if decision.already_replied {
+        triage["already_replied"] = json!(true);
+    }
+    if let Some(scope) = preference_scope {
+        triage["preference_scope"] = json!(scope.as_str());
+    }
+    let mut result = json!({
+        "type": EMAIL,
+        "version": 1,
+        "origin": origin,
+        "message": message,
+        "triage": triage,
+    });
+    if review {
+        result["needs_reply"] = json!(false);
+        result["review_reason"] = json!(BOUNCE_REASON);
+    }
+    result
+}
+
+/// Un correo resuelto por la ruta local (informativo o rebote) o una redacción pedida a mano:
+/// no cuentan como decisiones sobre borradores de la IA para la simulación, las sugerencias ni
+/// las estadísticas (D159).
+pub(crate) fn task_is_triaged_or_redraft(task: &Task) -> bool {
+    let Some(result) = task.result.as_ref() else {
+        return serde_json::from_str::<Value>(&task.input_ref)
+            .is_ok_and(|input| input.get("redraft_of").is_some());
+    };
+    matches!(
+        result["triage"]["route"].as_str(),
+        Some("informativo" | "rebote")
+    ) || result.get("redraft_of").is_some_and(|v| !v.is_null())
 }
 
 fn action_kind(task: &Task) -> &'static str {

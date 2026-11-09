@@ -215,7 +215,10 @@ fn route(req: &Req, w: &mut World) -> (u16, Value) {
             }
             // Devuelve como salida del modelo el JSON de factura del documento.
             let sent: Value = serde_json::from_str(&req.body).unwrap();
-            let content = sent["messages"][1]["content"].clone();
+            // El documento llega entre marcadores (D160): se devuelve sin ellos.
+            let content = json!(nestadmin_ai::tasks::document_text(
+                sent["messages"][1]["content"].as_str().unwrap_or("")
+            ));
             (
                 200,
                 json!({

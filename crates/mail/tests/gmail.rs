@@ -72,6 +72,7 @@ fn handler(req: &Req, w: &mut World) -> Resp {
                     .collect();
                 json!({
                     "id": m["id"], "threadId": m["threadId"], "labelIds": labels,
+                    "internalDate": m["internalDate"],
                     "payload": { "headers": headers },
                 })
             };
@@ -934,4 +935,93 @@ fn microsoft_uses_localhost_and_google_the_ip_literal() {
         nestadmin_mail::OAuthConfig::google("x", "y").redirect_host,
         "127.0.0.1"
     );
+}
+
+// ---- Estado del hilo (D162) ----
+
+fn thread_message(id: &str, labels: Value, date: Option<&str>) -> Value {
+    json!({
+        "id": id, "threadId": "t-9", "labelIds": labels, "internalDate": date,
+        // El cuerpo existe en el servicio, pero con `format=metadata` no debe salir ni leerse.
+        "payload": { "mimeType": "text/plain", "headers": [],
+                     "body": { "data": b64("SENTINELA-HILO texto privado del hilo") } },
+    })
+}
+
+#[test]
+fn the_last_message_of_a_thread_decides_whether_it_is_ours_from_metadata_only() {
+    let (mailbox, world) = mailbox();
+    let set = |messages: Vec<Value>| world.lock().unwrap().messages = messages;
+
+    // Último con SENT: propio, aunque la lista venga desordenada (manda `internalDate`).
+    set(vec![
+        thread_message("out-1", json!(["SENT"]), Some("2000")),
+        thread_message("in-1", json!(["INBOX"]), Some("1000")),
+    ]);
+    assert_eq!(mailbox.last_message_is_ours("t-9").unwrap(), Some(true));
+    // Si el último es de otra persona, no.
+    set(vec![
+        thread_message("in-1", json!(["INBOX"]), Some("1000")),
+        thread_message("out-1", json!(["SENT"]), Some("2000")),
+        thread_message("in-2", json!(["INBOX", "UNREAD"]), Some("3000")),
+    ]);
+    assert_eq!(mailbox.last_message_is_ours("t-9").unwrap(), Some(false));
+    // Un borrador o un mensaje de la papelera posterior no cuentan.
+    set(vec![
+        thread_message("in-1", json!(["INBOX"]), Some("1000")),
+        thread_message("out-1", json!(["SENT"]), Some("2000")),
+        thread_message("dr-1", json!(["DRAFT"]), Some("9000")),
+        thread_message("tr-1", json!(["INBOX", "TRASH"]), Some("9500")),
+    ]);
+    assert_eq!(mailbox.last_message_is_ours("t-9").unwrap(), Some(true));
+    // Sin fechas, manda el orden de la lista.
+    set(vec![
+        thread_message("in-1", json!(["INBOX"]), None),
+        thread_message("out-1", json!(["SENT"]), None),
+    ]);
+    assert_eq!(mailbox.last_message_is_ours("t-9").unwrap(), Some(true));
+    // Solo borradores: no se sabe.
+    set(vec![thread_message("dr-1", json!(["DRAFT"]), Some("1"))]);
+    assert_eq!(mailbox.last_message_is_ours("t-9").unwrap(), None);
+
+    // Solo se pide `threads.get` con metadatos y la cabecera propia: ni `format=full`, ni
+    // mensajes sueltos, ni búsquedas, ni escrituras.
+    let w = world.lock().unwrap();
+    assert!(!w.requests.is_empty());
+    for r in &w.requests {
+        assert_eq!(r.method, "GET");
+        assert!(r.url.path().ends_with("/threads/t-9"), "{}", r.url);
+        let query = |k: &str| {
+            r.url
+                .query_pairs()
+                .find(|(n, _)| n == k)
+                .map(|(_, v)| v.into_owned())
+        };
+        assert_eq!(query("format").as_deref(), Some("metadata"));
+        assert_eq!(query("metadataHeaders").as_deref(), Some("X-NestAdmin-Id"));
+        assert_ne!(query("format").as_deref(), Some("full"));
+    }
+}
+
+#[test]
+fn an_unknown_missing_or_failing_thread_is_unknown_or_an_error_never_a_guess() {
+    let (mailbox, world) = mailbox();
+    // Hilo inexistente (404) o 200 sin lista de mensajes: no se sabe.
+    assert_eq!(mailbox.last_message_is_ours("t-9").unwrap(), None);
+    world.lock().unwrap().messages = vec![thread_message("in-1", json!(["INBOX"]), Some("1"))];
+    world.lock().unwrap().thread_without_messages = true;
+    assert_eq!(mailbox.last_message_is_ours("t-9").unwrap(), None);
+    world.lock().unwrap().thread_without_messages = false;
+    // Un fallo del servicio es un error (quien llama lo trata como desconocido), no un valor.
+    world.lock().unwrap().force = Some(("/threads/".into(), 500));
+    assert_eq!(
+        mailbox.last_message_is_ours("t-9").unwrap_err().code,
+        "unavailable"
+    );
+    world.lock().unwrap().force = Some(("/threads/".into(), 401));
+    assert!(mailbox.last_message_is_ours("t-9").is_err());
+    // Una clave vacía no llama al servicio.
+    let before = world.lock().unwrap().requests.len();
+    assert_eq!(mailbox.last_message_is_ours("  ").unwrap(), None);
+    assert_eq!(world.lock().unwrap().requests.len(), before);
 }

@@ -24,13 +24,17 @@ use nestadmin_app::initial_read::{
 };
 use nestadmin_app::panel::{MergePreview, NewRule, RuleView, Simulation};
 use nestadmin_app::pipelines::{PipelineOverview, RunView};
+use nestadmin_app::preferences::PreferenceChange;
+use nestadmin_app::profile::{ProfileConsentView, ProfilePreview, ProfileSaved, ProfileView};
 use nestadmin_app::refine::{
     ConsentView, RefineExpectation, RefineMode, RefinePreview, RefineTrigger, RefinementView,
 };
 use nestadmin_app::rules::RuleFinding;
 use nestadmin_app::suggest::{RuleSeed, SeenInvoice, Suggestions, ThresholdSettings};
 use nestadmin_app::{AiWait, App, AppPaths, LocalFallback, ProviderInfo};
-use nestadmin_core::{AuditEntry, Rule, RuleStats, Task, TaskTemplate};
+use nestadmin_core::{
+    AuditEntry, BusinessProfile, Rule, RuleStats, SenderPreference, Task, TaskTemplate,
+};
 use nestadmin_extract::{Extractor, Tesseract};
 use nestadmin_mail::PendingAuthorization;
 use nestadmin_setup::{Cancel, Report, Setup, SetupError, Startup, Status, WindowsSystem};
@@ -549,6 +553,72 @@ fn reject<R: Runtime>(
     Ok(task)
 }
 
+/// Archivar (D159): cierra un correo en revisión sin enviar nada ni contar como rechazo.
+#[tauri::command]
+fn archive<R: Runtime>(
+    shared: State<'_, SharedState>,
+    handle: AppHandle<R>,
+    id: i64,
+) -> CmdResult<Task> {
+    let task = shared.app()?.archive(id).map_err(text)?;
+    changed(&handle);
+    Ok(task)
+}
+
+/// Preferencias por remitente (D161). Solo lectura.
+#[tauri::command]
+fn sender_preferences(shared: State<'_, SharedState>) -> CmdResult<Vec<SenderPreference>> {
+    shared.app()?.sender_preferences().map_err(text)
+}
+
+/// Fija «Siempre a Informativos» o «Siempre a Pendientes» para una dirección o un dominio
+/// (D161). El backend normaliza la clave, rechaza los dominios de correo público y deja el
+/// cambio en el historial; avisa si contradice una regla activa.
+#[tauri::command]
+fn set_sender_preference<R: Runtime>(
+    shared: State<'_, SharedState>,
+    handle: AppHandle<R>,
+    scope: String,
+    key: String,
+    route: String,
+) -> CmdResult<PreferenceChange> {
+    let change = shared
+        .app()?
+        .set_sender_preference(&scope, &key, &route)
+        .map_err(text)?;
+    changed(&handle);
+    Ok(change)
+}
+
+/// Quita una preferencia por remitente (D161).
+#[tauri::command]
+fn remove_sender_preference<R: Runtime>(
+    shared: State<'_, SharedState>,
+    handle: AppHandle<R>,
+    scope: String,
+    key: String,
+) -> CmdResult<bool> {
+    let removed = shared
+        .app()?
+        .remove_sender_preference(&scope, &key)
+        .map_err(text)?;
+    changed(&handle);
+    Ok(removed)
+}
+
+/// Redactar respuesta (D159): crea la tarea que solo redacta y la pone en marcha.
+#[tauri::command]
+fn redraft<R: Runtime>(
+    shared: State<'_, SharedState>,
+    handle: AppHandle<R>,
+    id: i64,
+) -> CmdResult<Task> {
+    let task = shared.app()?.redraft(id).map_err(text)?;
+    shared.wake();
+    changed(&handle);
+    Ok(task)
+}
+
 #[tauri::command]
 fn retry<R: Runtime>(
     shared: State<'_, SharedState>,
@@ -774,6 +844,79 @@ fn rule_findings(shared: State<'_, SharedState>) -> CmdResult<Vec<RuleFinding>> 
 #[tauri::command]
 fn rule_suggestions(shared: State<'_, SharedState>) -> CmdResult<Suggestions> {
     shared.app()?.rule_suggestions().map_err(text)
+}
+
+/// Perfil del negocio guardado (D163). Solo lectura.
+#[tauri::command]
+fn business_profile(shared: State<'_, SharedState>) -> CmdResult<ProfileView> {
+    shared.app()?.business_profile().map_err(text)
+}
+
+/// Datos de la empresa para precargar el formulario del perfil, sin NIF ni IBAN (D163). Solo
+/// lectura: nada se guarda ni se envía.
+#[tauri::command]
+fn business_profile_prefill(shared: State<'_, SharedState>) -> CmdResult<BusinessProfile> {
+    shared.app()?.business_profile_prefill().map_err(text)
+}
+
+/// Guarda el perfil del negocio (D163): bloquea IBAN, tarjetas y claves, y avisa de teléfono y
+/// correo. Si cambia lo que saldría, retira el consentimiento.
+#[tauri::command]
+fn save_business_profile<R: Runtime>(
+    shared: State<'_, SharedState>,
+    handle: AppHandle<R>,
+    profile: BusinessProfile,
+) -> CmdResult<ProfileSaved> {
+    let saved = shared.app()?.save_business_profile(profile).map_err(text)?;
+    changed(&handle);
+    Ok(saved)
+}
+
+/// Borra el perfil del negocio y retira el consentimiento (D163).
+#[tauri::command]
+fn clear_business_profile<R: Runtime>(
+    shared: State<'_, SharedState>,
+    handle: AppHandle<R>,
+) -> CmdResult<ProfileSaved> {
+    let saved = shared.app()?.clear_business_profile().map_err(text)?;
+    changed(&handle);
+    Ok(saved)
+}
+
+/// Bloque literal del perfil que saldría en la redacción y a qué destino (D163). Solo lectura.
+#[tauri::command]
+fn business_profile_preview(shared: State<'_, SharedState>) -> CmdResult<ProfilePreview> {
+    shared.app()?.profile_preview().map_err(text)
+}
+
+/// Consiente enviar el perfil al proveedor, modelo y servidor que la persona vio, con la huella del
+/// bloque que vio (D163). Si algo cambió, se rechaza.
+#[tauri::command]
+fn grant_profile_consent<R: Runtime>(
+    shared: State<'_, SharedState>,
+    handle: AppHandle<R>,
+    provider: String,
+    model: String,
+    host: String,
+    fp: String,
+) -> CmdResult<ProfileConsentView> {
+    let consent = shared
+        .app()?
+        .grant_profile_consent(&provider, &model, &host, &fp)
+        .map_err(text)?;
+    changed(&handle);
+    Ok(consent)
+}
+
+/// Retira el consentimiento del perfil (D163).
+#[tauri::command]
+fn withdraw_profile_consent<R: Runtime>(
+    shared: State<'_, SharedState>,
+    handle: AppHandle<R>,
+) -> CmdResult<ProfileConsentView> {
+    let consent = shared.app()?.withdraw_profile_consent().map_err(text)?;
+    changed(&handle);
+    Ok(consent)
 }
 
 /// Estado del afinado de las sugerencias con IA (D134). Solo lectura: no llama al proveedor.
@@ -2151,6 +2294,11 @@ fn configure<R: Runtime>(builder: Builder<R>, prepare_only: bool) -> Builder<R> 
             confirm_not_sent,
             edit_draft,
             reject,
+            archive,
+            sender_preferences,
+            set_sender_preference,
+            remove_sender_preference,
+            redraft,
             retry,
             task_templates,
             save_task_template,
@@ -2172,6 +2320,13 @@ fn configure<R: Runtime>(builder: Builder<R>, prepare_only: bool) -> Builder<R> 
             simulate_rule,
             rule_findings,
             rule_suggestions,
+            business_profile,
+            business_profile_prefill,
+            save_business_profile,
+            clear_business_profile,
+            business_profile_preview,
+            grant_profile_consent,
+            withdraw_profile_consent,
             suggestion_refinement,
             refinement_preview,
             refine_suggestions,

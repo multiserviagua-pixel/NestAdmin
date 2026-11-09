@@ -1,6 +1,9 @@
 // Lógica y textos de Pendientes (D137), sin DOM: se prueban con `node --test`.
 
-export type ReviewTab = "invoices" | "emails";
+/** Pestañas con cola de revisión. */
+export type QueueTab = "invoices" | "emails";
+/** Pestañas de Pendientes: las dos colas y los informativos (D157), que no suman al contador. */
+export type ReviewTab = QueueTab | "informative";
 export type FlagTone = "warn" | "error";
 
 export interface Flag {
@@ -20,7 +23,7 @@ export interface ReviewTask {
   result: Record<string, any> | null;
 }
 
-export function tabOf(kind: string): ReviewTab {
+export function tabOf(kind: string): QueueTab {
   return kind === "invoice" ? "invoices" : "emails";
 }
 
@@ -28,7 +31,7 @@ export function isKnownKind(kind: string): boolean {
   return kind === "invoice" || kind === "email";
 }
 
-export function splitByTab<T extends { kind: string }>(tasks: T[]): Record<ReviewTab, T[]> {
+export function splitByTab<T extends { kind: string }>(tasks: T[]): Record<QueueTab, T[]> {
   return {
     invoices: tasks.filter((t) => tabOf(t.kind) === "invoices"),
     emails: tasks.filter((t) => tabOf(t.kind) === "emails"),
@@ -36,7 +39,7 @@ export function splitByTab<T extends { kind: string }>(tasks: T[]): Record<Revie
 }
 
 /** La pestaña inicial es la primera con elementos; una ya elegida no cambia sola. */
-export function chooseTab(current: ReviewTab | null, counts: Record<ReviewTab, number>): ReviewTab {
+export function chooseTab(current: ReviewTab | null, counts: Record<QueueTab, number>): ReviewTab {
   if (current) return current;
   return counts.invoices === 0 && counts.emails > 0 ? "emails" : "invoices";
 }

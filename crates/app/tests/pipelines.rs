@@ -70,14 +70,23 @@ impl Provider for Rec {
             return Err(error);
         }
         let output = match request.task {
-            AiTask::Extraction => match request.content.find("#DATOS#") {
-                Some(at) => serde_json::from_str(&request.content[at + 7..]).unwrap(),
-                None => json!({
-                    "supplier": "Proveedor Alfa Suministros SL", "invoice_number": "FS-2026-014",
-                    "date": "2026-10-01", "subtotal": "120.00", "tax": "25.20", "total": "145.20",
-                    "moneda": "EUR",
-                }),
-            },
+            AiTask::Extraction => {
+                match nestadmin_ai::tasks::document_text(&request.content).find("#DATOS#") {
+                    Some(at) => serde_json::from_str(
+                        &nestadmin_ai::tasks::document_text(&request.content)[at + 7..],
+                    )
+                    .unwrap(),
+                    None => json!({
+                        "supplier": "Proveedor Alfa Suministros SL", "invoice_number": "FS-2026-014",
+                        "date": "2026-10-01", "subtotal": "120.00", "tax": "25.20", "total": "145.20",
+                        "moneda": "EUR",
+                    }),
+                }
+            }
+            // Triaje en dos llamadas (D158): clasificar con `needs_reply` y redactar aparte.
+            AiTask::Classification => {
+                json!({ "category": "solicitud_factura", "needs_reply": true })
+            }
             _ => json!({ "category": "solicitud_factura", "draft": "Adjuntamos la factura." }),
         };
         Ok(GenerateResult {
@@ -201,6 +210,7 @@ fn message(id: &str, from: Option<&str>, date: Option<String>) -> Message {
         signals: None,
         thread_key: None,
     }
+    .with_checked_signals(&[])
 }
 
 /// Deja un correo propio, con sus adjuntos, en el simulador.

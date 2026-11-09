@@ -454,6 +454,12 @@ h3 {
   flex: none;
 }
 
+/* Aviso con texto y una fila de botones debajo (confirmación de una preferencia). */
+.notice.stacked {
+  flex-direction: column;
+  align-items: stretch;
+}
+
 .notice > button:not(.close),
 .banner > button {
   flex: none;
@@ -2221,4 +2227,48 @@ h2 + .section {
 
 .field-action button {
   align-self: flex-start;
+}
+
+/* ---- Triaje de correo (D157-D160) ---- */
+
+.triage-notices {
+  margin: var(--s3) 0;
+}
+
+.triage-notices .notice {
+  margin-bottom: var(--s2);
+}
+
+.list-intro {
+  margin: 0 0 var(--s2);
+  padding: 0 var(--s3);
+}
+
+.list-more {
+  padding: var(--s2) var(--s3);
+}
+
+/* ---- Perfil del negocio (D163) ---- */
+
+.section .field + .field {
+  margin-top: var(--s2);
+}
+
+.sub-block {
+  margin-top: var(--s4);
+}
+
+.sub-block h4 {
+  margin: 0 0 var(--s2);
+}
+
+pre.block {
+  white-space: pre-wrap;
+  word-break: break-word;
+  padding: var(--s3);
+  border: 1px solid var(--line-strong);
+  background: var(--surface-2);
+  border-radius: 6px;
+  max-height: 260px;
+  overflow: auto;
 }

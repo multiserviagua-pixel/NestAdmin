@@ -28,9 +28,9 @@ const DROP_SALES: &str = "DROP TABLE received_delivery_notes; DROP TABLE payment
 
 /// Quita lo que añadió la migración 4 (panel de reglas), como si la base la hubiera creado
 /// la versión anterior.
-const DROP_PANEL: &str = "DROP TABLE rule_settings; DROP TABLE rule_suggestions; DROP TABLE rule_signals; DROP TABLE rule_evaluations; DROP TABLE rule_meta; ALTER TABLE actions DROP COLUMN rule_id; ALTER TABLE actions DROP COLUMN rule_version;";
+const DROP_PANEL: &str = "DROP TABLE rule_settings; DROP TABLE rule_suggestions; DROP TABLE rule_signals; DROP TABLE rule_evaluations; DROP TABLE rule_meta; ALTER TABLE actions DROP COLUMN rule_id; ALTER TABLE actions DROP COLUMN rule_version; DROP INDEX IF EXISTS tasks_redraft_of; DROP TABLE IF EXISTS sender_preferences; DROP TABLE IF EXISTS business_profile;";
 
-/// Quita lo que añadió la migración 5 (plantillas y ejecuciones de pipeline), como si la base
+/// Quita lo que añadió la migración 8 (plantillas y ejecuciones de pipeline), como si la base
 /// la hubiera creado la versión anterior. Va antes de los `DROP` anteriores.
 const DROP_PIPELINES: &str =
     "DROP TABLE pipeline_steps; DROP TABLE pipeline_runs; DROP TABLE task_templates;";
@@ -111,7 +111,7 @@ fn migrating_from_schema_2_adds_sales_tables_and_keeps_a_copy() {
 
     let store = Store::open(&path).unwrap();
     assert_eq!(store.schema_version().unwrap(), SCHEMA_VERSION);
-    assert_eq!(SCHEMA_VERSION, 5);
+    assert_eq!(SCHEMA_VERSION, 8);
     assert_eq!(
         store.audit_log().unwrap().len(),
         1,
@@ -172,7 +172,7 @@ fn migrating_from_schema_3_adds_the_rules_panel_and_keeps_old_actions() {
     drop(conn);
 
     let store = Store::open(&path).unwrap();
-    assert_eq!(store.schema_version().unwrap(), 5);
+    assert_eq!(store.schema_version().unwrap(), SCHEMA_VERSION);
     drop(store);
     for table in [
         "rule_meta",
@@ -307,15 +307,15 @@ fn migrating_from_schema_3_deactivates_old_rules_whose_conditions_now_apply() {
     assert!(migrated.iter().all(|e| e.status == "inactive"));
 }
 
-/// La migración 5 (D148) solo añade tablas: tareas, estados y acciones de una base del
-/// esquema 4 quedan como estaban, y las tareas siguen listas para ejecutarse.
+/// La migración 8 (D148) solo añade tablas: tareas, estados y acciones de una base del
+/// esquema 7 quedan como estaban, y las tareas siguen listas para ejecutarse.
 #[test]
-fn migrating_from_schema_4_adds_pipeline_tables_and_keeps_tasks() {
+fn migrating_from_schema_7_adds_pipeline_tables_and_keeps_tasks() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("nestadmin.db");
     drop(Store::open(&path).unwrap());
     let conn = rusqlite::Connection::open(&path).unwrap();
-    conn.execute_batch(&format!("{DROP_PIPELINES} PRAGMA user_version = 4;"))
+    conn.execute_batch(&format!("{DROP_PIPELINES} PRAGMA user_version = 7;"))
         .unwrap();
     for (id, state) in [
         (1, "queued"),
@@ -334,7 +334,7 @@ fn migrating_from_schema_4_adds_pipeline_tables_and_keeps_tasks() {
     drop(conn);
 
     let store = Store::open(&path).unwrap();
-    assert_eq!(store.schema_version().unwrap(), 5);
+    assert_eq!(store.schema_version().unwrap(), SCHEMA_VERSION);
     let states: Vec<_> = store
         .all_tasks()
         .unwrap()
@@ -358,9 +358,9 @@ fn migrating_from_schema_4_adds_pipeline_tables_and_keeps_tasks() {
     drop(store);
     for table in ["task_templates", "pipeline_runs", "pipeline_steps"] {
         assert!(has_table(&path, table), "{table} debe existir tras migrar");
-        assert!(!has_table(&backup_path(&path, 4), table));
+        assert!(!has_table(&backup_path(&path, 7), table));
     }
-    assert_eq!(user_version(&backup_path(&path, 4)), 4);
+    assert_eq!(user_version(&backup_path(&path, 7)), 7);
 }
 
 #[test]
@@ -381,4 +381,167 @@ fn newer_schema_error_points_to_the_backup() {
         .contains(&format!("nestadmin.esquema-{SCHEMA_VERSION}.db")));
     // Rechazarla no la modifica.
     assert_eq!(user_version(&path), SCHEMA_VERSION + 1);
+}
+
+/// La migración 5 añade el índice único de «Redactar respuesta» (D159), con copia previa del
+/// esquema 4, sin tocar las tareas que ya existen y sin romper entradas que no son JSON.
+#[test]
+fn migrating_from_schema_4_adds_the_redraft_index_and_keeps_a_copy() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("nestadmin.db");
+    drop(Store::open(&path).unwrap());
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    conn.execute_batch(&format!(
+        "{DROP_PIPELINES} DROP INDEX tasks_redraft_of; DROP TABLE sender_preferences; DROP TABLE business_profile; PRAGMA user_version = 4;"
+    ))
+    .unwrap();
+    for (id, input) in [(1, "{}"), (2, "no es json"), (3, r#"{"redraft_of": 1}"#)] {
+        conn.execute(
+            "INSERT INTO tasks (id, kind, input_ref, state, created_at, updated_at) VALUES (?1, 'email', ?2, 'queued', 1, 1)",
+            rusqlite::params![id, input],
+        )
+        .unwrap();
+    }
+    drop(conn);
+
+    let mut store = Store::open(&path).unwrap();
+    assert_eq!(store.schema_version().unwrap(), SCHEMA_VERSION);
+    let backup = backup_path(&path, 4);
+    assert_eq!(backup.file_name().unwrap(), "nestadmin.esquema-4.db");
+    assert_eq!(user_version(&backup), 4);
+    // Lo anterior sigue ahí.
+    assert_eq!(store.all_tasks().unwrap().len(), 3);
+    // Una entrada que no es JSON se acepta; un segundo `redraft_of` vivo, no.
+    store
+        .enqueue("email", "otra entrada que no es json")
+        .unwrap();
+    assert!(store.enqueue("email", r#"{"redraft_of": 1}"#).is_err());
+    // Cancelada la primera, deja el sitio libre.
+    store.cancel(3).unwrap();
+    store.enqueue("email", r#"{"redraft_of": 1}"#).unwrap();
+}
+
+/// La migración 6 añade las preferencias por remitente (D161), con copia previa del esquema 5,
+/// sin tocar nada de lo anterior, y la tabla rechaza claves sin normalizar y rutas desconocidas.
+#[test]
+fn migrating_from_schema_5_adds_sender_preferences_and_keeps_a_copy() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("nestadmin.db");
+    drop(Store::open(&path).unwrap());
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    conn.execute_batch(&format!(
+        "{DROP_PIPELINES} DROP TABLE sender_preferences; DROP TABLE business_profile; PRAGMA user_version = 5;"
+    ))
+    .unwrap();
+    conn.execute(
+        "INSERT INTO audit_log (at, action, status) VALUES (1, 'previa', 'ok')",
+        [],
+    )
+    .unwrap();
+    drop(conn);
+
+    let store = Store::open(&path).unwrap();
+    assert_eq!(store.schema_version().unwrap(), SCHEMA_VERSION);
+    assert_eq!(store.audit_log().unwrap().len(), 1);
+    assert!(store.sender_preferences().unwrap().is_empty());
+    drop(store);
+
+    let backup = backup_path(&path, 5);
+    assert_eq!(backup.file_name().unwrap(), "nestadmin.esquema-5.db");
+    assert_eq!(user_version(&backup), 5);
+    assert!(!has_table(&backup, "sender_preferences"));
+    assert!(has_table(&path, "sender_preferences"));
+
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    let insert = |scope: &str, key: &str, route: &str| {
+        conn.execute(
+            "INSERT INTO sender_preferences (scope, key, route, updated_at) VALUES (?1, ?2, ?3, 1)",
+            rusqlite::params![scope, key, route],
+        )
+    };
+    assert!(insert("address", "a@b.test", "review").is_ok());
+    assert!(
+        insert("address", "a@b.test", "informative").is_err(),
+        "clave única"
+    );
+    for (scope, key, route) in [
+        ("otro", "a@b.test", "review"),
+        ("address", "A@b.test", "review"),
+        ("address", " a@b.test", "review"),
+        ("address", "", "review"),
+        ("domain", "b.test", "siempre"),
+    ] {
+        assert!(
+            insert(scope, key, route).is_err(),
+            "{scope} {key:?} {route}"
+        );
+    }
+}
+
+/// La migración 7 añade el perfil del negocio (D163), con copia previa del esquema 6, sin tocar
+/// nada de lo anterior; la tabla es de fila única y rechaza más de 2.000 caracteres en total.
+#[test]
+fn migrating_from_schema_6_adds_the_business_profile_and_keeps_a_copy() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("nestadmin.db");
+    drop(Store::open(&path).unwrap());
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    conn.execute_batch(&format!(
+        "{DROP_PIPELINES} DROP TABLE business_profile; PRAGMA user_version = 6;"
+    ))
+    .unwrap();
+    conn.execute(
+        "INSERT INTO audit_log (at, action, status) VALUES (1, 'previa', 'ok')",
+        [],
+    )
+    .unwrap();
+    drop(conn);
+
+    let mut store = Store::open(&path).unwrap();
+    assert_eq!(store.schema_version().unwrap(), SCHEMA_VERSION);
+    assert_eq!(store.audit_log().unwrap().len(), 1);
+    assert!(store.business_profile().unwrap().is_none());
+
+    let backup = backup_path(&path, 6);
+    assert_eq!(backup.file_name().unwrap(), "nestadmin.esquema-6.db");
+    assert_eq!(user_version(&backup), 6);
+    assert!(!has_table(&backup, "business_profile"));
+    assert!(has_table(&path, "business_profile"));
+
+    // Guardar, sustituir y borrar: una sola fila y un evento por cambio, sin el texto.
+    let mut profile = nestadmin_core::BusinessProfile {
+        hours: "Lunes a viernes de 9 a 14".into(),
+        ..Default::default()
+    };
+    store.save_business_profile(&profile).unwrap();
+    profile.tone = "Cercano".into();
+    store.save_business_profile(&profile).unwrap();
+    assert_eq!(store.business_profile().unwrap().unwrap().0, profile);
+    assert!(store.clear_business_profile().unwrap());
+    assert!(!store.clear_business_profile().unwrap());
+    let log = store.audit_log().unwrap();
+    let events: Vec<_> = log
+        .iter()
+        .filter(|e| e.action == "business_profile")
+        .collect();
+    assert_eq!(events.len(), 3);
+    assert!(events
+        .iter()
+        .all(|e| !e.detail.as_deref().unwrap_or("").contains("Lunes")));
+
+    // La tabla misma impone la fila única y el tope.
+    drop(store);
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    let insert = |id: i64, hours: String| {
+        conn.execute(
+            "INSERT INTO business_profile (id, hours, updated_at) VALUES (?1, ?2, 1)",
+            rusqlite::params![id, hours],
+        )
+    };
+    assert!(insert(2, "x".into()).is_err(), "solo la fila 1");
+    assert!(
+        insert(1, "x".repeat(2001)).is_err(),
+        "más de 2.000 caracteres"
+    );
+    assert!(insert(1, "x".repeat(2000)).is_ok());
 }

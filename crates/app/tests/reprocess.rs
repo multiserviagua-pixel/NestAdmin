@@ -286,6 +286,9 @@ fn graph(req: &Req, path: &str, w: &mut World) -> Resp {
                 "id": "g1", "subject": "Solicitud de factura",
                 "from": { "emailAddress": { "address": "facturas@proveedor-g.test" } },
                 "body": { "contentType": "text", "content": "¿Pueden enviarnos la factura?" },
+                // Con cabeceras, Graph comprueba las señales de correo automático (D157); sin
+                // ellas ninguna regla enviaría (D158).
+                "internetMessageHeaders": [{ "name": "Content-Type", "value": "text/plain" }],
             }] }),
         ),
         ("POST", ["me", "messages", "g1", "createReply"]) => {
@@ -1163,17 +1166,20 @@ fn a_released_pipeline_reply_is_reviewed_and_survives_a_lost_send_without_resend
     .unwrap();
     app.set_rule_active("responder", true).unwrap();
     let sim = app.simulators().0;
-    sim.add_message(Message {
-        id: "Z-1".into(),
-        subject: Some("Pedido".into()),
-        from: Some("ventas@proveedor-zeta.test".into()),
-        to: Some(vec!["administracion@nestadmin.test".into()]),
-        body: Some("Texto sintético.".into()),
-        date: Some(today_text()),
-        attachments: Vec::new(),
-        signals: None,
-        thread_key: None,
-    })
+    sim.add_message(
+        Message {
+            id: "Z-1".into(),
+            subject: Some("Pedido".into()),
+            from: Some("ventas@proveedor-zeta.test".into()),
+            to: Some(vec!["administracion@nestadmin.test".into()]),
+            body: Some("Texto sintético.".into()),
+            date: Some(today_text()),
+            attachments: Vec::new(),
+            signals: None,
+            thread_key: None,
+        }
+        .with_checked_signals(&[]),
+    )
     .unwrap();
     sim.add_attachment("Z-1", "a.txt", "text/plain", b"factura sintetica")
         .unwrap();

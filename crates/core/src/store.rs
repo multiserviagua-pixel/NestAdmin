@@ -69,8 +69,14 @@ CREATE TABLE rules (
     include_str!("migrations/003_sales.sql"),
     // Panel de reglas: nombre, archivado, evaluaciones, señales y regla de cada acción.
     include_str!("migrations/004_rules_panel.sql"),
+    // Redactar respuesta: un solo borrador vivo por correo de origen (D159).
+    include_str!("migrations/005_redraft.sql"),
+    // Preferencias por remitente (D161).
+    include_str!("migrations/006_sender_preferences.sql"),
+    // Perfil del negocio para la redacción (D163).
+    include_str!("migrations/007_business_profile.sql"),
     // Plantillas de pipeline y sus ejecuciones (D148); ver pipeline.rs.
-    include_str!("migrations/005_pipelines.sql"),
+    include_str!("migrations/008_pipelines.sql"),
 ];
 
 /// Base de datos local. Cada operación pública se confirma en una transacción,

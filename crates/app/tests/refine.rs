@@ -87,7 +87,7 @@ impl Provider for Fake {
             }
             AiTask::Extraction => {
                 self.other_calls.fetch_add(1, Ordering::SeqCst);
-                serde_json::from_str(&request.content).unwrap()
+                serde_json::from_str(nestadmin_ai::tasks::document_text(&request.content)).unwrap()
             }
             _ => {
                 self.other_calls.fetch_add(1, Ordering::SeqCst);

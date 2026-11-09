@@ -380,7 +380,50 @@ impl Gmail {
     }
 }
 
+/// Si el último mensaje de un hilo (`threads.get`, solo metadatos) tiene la etiqueta `SENT`
+/// (D162). El último es el de mayor `internalDate`; sin fecha, el de la lista que va después.
+/// Se ignoran los borradores y los de la papelera: no son una palabra dicha. `None` si el hilo
+/// no trae mensajes: no se sabe.
+fn thread_last_is_ours(thread: &Value) -> Option<bool> {
+    let messages = thread.get("messages").and_then(Value::as_array)?;
+    let last = messages
+        .iter()
+        .filter(|m| {
+            let labels = labels(m);
+            !labels.contains(&"DRAFT") && !labels.contains(&"TRASH")
+        })
+        .enumerate()
+        .max_by_key(|(position, m)| {
+            let date = m
+                .get("internalDate")
+                .and_then(Value::as_str)
+                .and_then(|ms| ms.parse::<u64>().ok())
+                .unwrap_or(0);
+            (date, *position)
+        })
+        .map(|(_, m)| m)?;
+    Some(is_sent(last))
+}
+
 impl MailProvider for Gmail {
+    /// `threads.get` con `format=metadata` y solo la cabecera propia: nunca el cuerpo ni el texto
+    /// de los mensajes del hilo (D162). Un 404 o un hilo sin mensajes es «no se sabe».
+    fn last_message_is_ours(&self, thread_key: &str) -> MailResult<Option<bool>> {
+        let url = self.api.url(
+            &["threads", thread_key],
+            &[
+                ("format", "metadata"),
+                ("metadataHeaders", OWN_ID_HEADER),
+                ("fields", "messages(id,labelIds,internalDate)"),
+            ],
+        );
+        match self.api.call(Method::Get, &url, None) {
+            Ok(thread) => Ok(thread_last_is_ours(&thread)),
+            Err(e) if e.code == codes::NOT_FOUND => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
     fn attachment(&self, message_id: &str, attachment_id: &str) -> MailResult<Vec<u8>> {
         let data = if let Some(part_id) = attachment_id.strip_prefix(INLINE_PART) {
             let full = self.get_message(message_id, &[("format", "full")])?;

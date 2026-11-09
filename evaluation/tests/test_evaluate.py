@@ -48,6 +48,23 @@ class EvaluationTests(unittest.TestCase):
         self.assertEqual(metrics['draft_heuristic']['passed'], 19)
         self.assertEqual(metrics['extraction']['correct_fields'], 47)
 
+    def test_no_reply_without_a_draft_only_counts_when_the_expected_case_allows_it(self):
+        # D158: `needs_reply` falso sin borrador no se penaliza si el esperado lo permite.
+        predictions = self.perfect_predictions()
+        predictions['E01']['result'] = {'category': predictions['E01']['result']['category'], 'needs_reply': False}
+        # Los 20 correos de R10 exigen respuesta: sin borrador, el caso falla como antes.
+        metrics = evaluate.score(self.cases, predictions)
+        self.assertEqual(metrics['draft_heuristic']['passed'], 19)
+        allowed = []
+        for case in self.cases:
+            if case['id'] == 'E01':
+                case = {**case, 'expected': {**case['expected'], 'needs_reply': False}}
+            allowed.append(case)
+        self.assertEqual(evaluate.score(allowed, predictions)['draft_heuristic']['passed'], 20)
+        # Permitido, pero sin `needs_reply: false` en la salida, un borrador vacío sigue fallando.
+        del predictions['E01']['result']['needs_reply']
+        self.assertEqual(evaluate.score(allowed, predictions)['draft_heuristic']['passed'], 19)
+
     def test_missing_nullable_field_is_not_counted_correct(self):
         predictions = self.perfect_predictions()
         del predictions['D07']['result']['fields']['tax']

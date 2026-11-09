@@ -52,6 +52,24 @@ pub enum ReasonCode {
     CurrencyNotShown,
     /// Se continuó sin un paso del pipeline: la respuesta siempre se revisa (D150).
     PipelineStepWaived,
+    /// El mensaje lleva señales de correo automático (D157, D158): ninguna regla responde a un
+    /// remitente automático.
+    AutomaticSender,
+    /// El mensaje no lleva la comprobación de señales (tarea anterior, o proveedor sin
+    /// cabeceras): fallo cerrado.
+    SignalsNotChecked,
+    /// Un destinatario del borrador tiene una dirección automática (recalculada sobre `draft.to`).
+    RecipientAutomatic,
+    /// La IA considera que el correo no requiere respuesta.
+    NoReplyNeeded,
+    /// La respuesta la pidió una persona («Redactar»): siempre se revisa.
+    Redraft,
+    /// El borrador no existe o está vacío.
+    EmptyDraft,
+    /// La tarea no lleva la comprobación del borrador (tarea anterior): fallo cerrado.
+    DraftNotChecked,
+    /// El borrador contiene enlaces, direcciones, teléfonos o IBAN (D160).
+    DraftFlagged,
 }
 
 /// Resultado de comprobar una regla contra los datos de una tarea. El motivo de no
@@ -99,6 +117,24 @@ impl Explanation {
             ReasonCode::CurrencyNotChecked => CURRENCY_UNCHECKED.into(),
             ReasonCode::CurrencyNotShown => CURRENCY_NOT_SHOWN.into(),
             ReasonCode::PipelineStepWaived => PIPELINE_WAIVED.into(),
+            ReasonCode::AutomaticSender => format!(
+                "el correo parece automático (señales: {}); ninguna regla responde a un remitente automático",
+                join_ids(&self.facts["codes"])
+            ),
+            ReasonCode::SignalsNotChecked => SIGNALS_UNCHECKED.into(),
+            ReasonCode::RecipientAutomatic => {
+                "el destinatario del borrador parece una dirección automática".into()
+            }
+            ReasonCode::NoReplyNeeded => "la IA considera que el correo no requiere respuesta".into(),
+            ReasonCode::Redraft => {
+                "la respuesta se pidió a mano; una persona debe revisarla siempre".into()
+            }
+            ReasonCode::EmptyDraft => "el borrador está vacío".into(),
+            ReasonCode::DraftNotChecked => DRAFT_UNCHECKED.into(),
+            ReasonCode::DraftFlagged => format!(
+                "el borrador contiene datos de contacto que no se pueden dar por buenos ({}); compruébelos",
+                join_ids(&self.facts["flags"])
+            ),
             ReasonCode::SenderRequired => format!(
                 "la regla no indica remitente; añádalo o valide la opción avanzada (regla: {})",
                 self.facts["rule_ids"]
@@ -155,6 +191,13 @@ pub const PIPELINE_WAIVED: &str =
 
 /// Motivo cuando falta la comprobación local de moneda (D127).
 pub const CURRENCY_UNCHECKED: &str = "no consta la comprobación de moneda; reprocese o revise";
+
+/// Motivo cuando el mensaje no lleva la comprobación de correo automático (D157).
+pub const SIGNALS_UNCHECKED: &str =
+    "no consta la comprobación de correo automático; reprocese o revise";
+
+/// Motivo cuando la tarea no lleva la comprobación del borrador (D160).
+pub const DRAFT_UNCHECKED: &str = "no consta la comprobación del borrador; reprocese o revise";
 
 /// Motivo cuando el documento no muestra el euro (D127).
 pub const CURRENCY_NOT_SHOWN: &str =
@@ -322,14 +365,61 @@ fn blockers(action_kind: &str, result: &Value) -> Option<(ReasonCode, Value)> {
             Some(_) if !shows_euro(result) => Some((ReasonCode::CurrencyNotShown, json!({}))),
             Some(_) => None,
         },
-        SEND_DRAFT
-            if result["draft"]["to"]
-                .as_array()
-                .is_none_or(|a| a.is_empty()) =>
-        {
-            Some((ReasonCode::NoRecipient, json!({})))
-        }
+        SEND_DRAFT => send_draft_blocker(result),
         _ => None,
+    }
+}
+
+/// Bloqueos de un borrador de correo (D158, D160). Cada dato ausente, antiguo o sin comprobar
+/// bloquea (fallo cerrado), y ninguna preferencia ni dato del propio correo lo desbloquea. Los
+/// motivos no llevan contenido: solo códigos y recuentos.
+fn send_draft_blocker(result: &Value) -> Option<(ReasonCode, Value)> {
+    // `needs_reply` ausente equivale a verdadero; solo `false` bloquea. Va antes que el
+    // destinatario: un correo sin respuesta necesaria no tiene borrador.
+    if result["needs_reply"].as_bool() == Some(false) {
+        return Some((ReasonCode::NoReplyNeeded, json!({})));
+    }
+    if !result["redraft_of"].is_null() {
+        return Some((ReasonCode::Redraft, json!({})));
+    }
+    let recipients = result["draft"]["to"].as_array();
+    if recipients.is_none_or(|a| a.is_empty()) {
+        return Some((ReasonCode::NoRecipient, json!({})));
+    }
+    if result["draft"]["body"]
+        .as_str()
+        .is_none_or(|body| body.trim().is_empty())
+    {
+        return Some((ReasonCode::EmptyDraft, json!({})));
+    }
+    // Señales del mensaje: `None` (ausente o mal formado) es «sin comprobar».
+    let signals = result["message"]["signals"].as_array().and_then(|list| {
+        list.iter()
+            .map(|code| code.as_str().map(str::to_owned))
+            .collect::<Option<Vec<String>>>()
+    });
+    match signals {
+        None => return Some((ReasonCode::SignalsNotChecked, json!({}))),
+        Some(codes) if !codes.is_empty() => {
+            return Some((ReasonCode::AutomaticSender, json!({ "codes": codes })))
+        }
+        Some(_) => {}
+    }
+    // La dirección se recalcula siempre sobre los destinatarios: una tarea antigua no lleva esta
+    // comprobación y un destinatario no-reply no puede responderse sin una persona.
+    let automatic = recipients.into_iter().flatten().any(|to| {
+        to.as_str()
+            .is_none_or(|a| !nestadmin_core::mail_signals::address_signals(Some(a)).is_empty())
+    });
+    if automatic {
+        return Some((ReasonCode::RecipientAutomatic, json!({})));
+    }
+    match result["draft_flags"].as_array() {
+        None => Some((ReasonCode::DraftNotChecked, json!({}))),
+        Some(flags) if !flags.is_empty() => {
+            Some((ReasonCode::DraftFlagged, json!({ "flags": flags })))
+        }
+        Some(_) => None,
     }
 }
 
@@ -1827,8 +1917,9 @@ mod tests {
         assert!(!automates(r, &invoice(), REGISTER_INVOICE));
         let result = json!({
             "category": "solicitud_factura",
-            "message": { "from": "a@example.test" },
-            "draft": { "to": ["a@example.test"] },
+            "message": { "from": "a@example.test", "signals": [] },
+            "draft": { "to": ["a@example.test"], "body": "Hola." },
+            "draft_flags": [],
         });
         let ok = rule(
             SEND_DRAFT,
@@ -1859,8 +1950,9 @@ mod tests {
     fn draft(category: &str, to: Value) -> Value {
         json!({
             "category": category,
-            "message": { "from": "a@example.test" },
-            "draft": { "to": to },
+            "message": { "from": "a@example.test", "signals": [] },
+            "draft": { "to": to, "body": "Hola." },
+            "draft_flags": [],
         })
     }
 
@@ -2058,8 +2150,9 @@ mod tests {
     fn mail(from: Option<&str>) -> Value {
         let mut result = json!({
             "category": "solicitud_factura",
-            "message": {},
-            "draft": { "to": ["a@example.test"] },
+            "message": { "signals": [] },
+            "draft": { "to": ["a@example.test"], "body": "Hola." },
+            "draft_flags": [],
         });
         if let Some(from) = from {
             result["message"]["from"] = json!(from);
@@ -3348,8 +3441,9 @@ mod third_rule_tests {
             attempts: 1,
             result: Some(json!({
                 "category": "solicitud_factura",
-                "message": { "from": from, "subject": "Asunto" },
-                "draft": { "to": [from] },
+                "message": { "from": from, "subject": "Asunto", "signals": [] },
+                "draft": { "to": [from], "body": "Hola." },
+                "draft_flags": [],
             })),
             error: None,
             created_at: 0,

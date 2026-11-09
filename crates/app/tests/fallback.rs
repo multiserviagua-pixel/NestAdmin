@@ -51,7 +51,9 @@ impl Provider for Fake {
             return Err(error);
         }
         let output = match request.task {
-            AiTask::Extraction => serde_json::from_str(&request.content).unwrap(),
+            AiTask::Extraction => {
+                serde_json::from_str(nestadmin_ai::tasks::document_text(&request.content)).unwrap()
+            }
             _ => json!({ "category": "solicitud_factura", "draft": "Adjuntamos la factura." }),
         };
         Ok(GenerateResult {

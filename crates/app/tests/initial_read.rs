@@ -104,14 +104,19 @@ impl Provider for Rec {
             }
         }
         let output = match request.task {
-            AiTask::Extraction => match request.content.find("#DATOS#") {
-                Some(at) => serde_json::from_str(&request.content[at + 7..]).unwrap(),
-                None => json!({
-                    "supplier": "Proveedor Alfa Suministros SL", "invoice_number": "FS-2026-014",
-                    "date": "2026-10-01", "subtotal": "120.00", "tax": "25.20", "total": "145.20",
-                }),
-            },
-            AiTask::Classification => {
+            AiTask::Extraction => {
+                match nestadmin_ai::tasks::document_text(&request.content).find("#DATOS#") {
+                    Some(at) => serde_json::from_str(
+                        &nestadmin_ai::tasks::document_text(&request.content)[at + 7..],
+                    )
+                    .unwrap(),
+                    None => json!({
+                        "supplier": "Proveedor Alfa Suministros SL", "invoice_number": "FS-2026-014",
+                        "date": "2026-10-01", "subtotal": "120.00", "tax": "25.20", "total": "145.20",
+                    }),
+                }
+            }
+            AiTask::Classification | AiTask::Draft => {
                 json!({ "category": "solicitud_factura", "draft": "Adjuntamos la factura solicitada." })
             }
             _ => self.refine_answer.lock().unwrap().clone().unwrap_or_else(
@@ -542,7 +547,9 @@ fn no_email_is_ever_sent_and_their_bodies_are_not_kept() {
         }
     }
     // El texto del documento sale completo, sin recortes que rompan la extracción.
-    assert!(sent.iter().any(|r| r.content == invoice("Alfa SL", 1, 100)));
+    assert!(sent
+        .iter()
+        .any(|r| nestadmin_ai::tasks::document_text(&r.content) == invoice("Alfa SL", 1, 100)));
     // De los correos no se guarda el cuerpo; sí remitente y asunto (origen de sus adjuntos).
     for task in app
         .initial_read_tasks()
@@ -564,7 +571,8 @@ fn no_email_is_ever_sent_and_their_bodies_are_not_kept() {
     let mut normal = open(dir.path(), ai.clone(), RefineMode::OnDemand);
     normal.fetch_mail().unwrap();
     process_all(&mut normal);
-    let request = &ai.requests(AiTask::Classification)[0];
+    // Dos llamadas (D158): la clasificación no pide borrador y la redacción sí.
+    let request = &ai.requests(AiTask::Draft)[0];
     assert!(request.schema.as_ref().unwrap()["required"]
         .as_array()
         .unwrap()
@@ -2015,8 +2023,8 @@ fn a_later_mail_fetch_does_not_import_the_attachments_of_a_read_message() {
     process_all(&mut app);
     assert_eq!(
         ai.calls(),
-        25 + 1,
-        "25 documentos leídos y la clasificación normal de M-0003"
+        25 + 2,
+        "25 documentos leídos y la clasificación y la redacción normales de M-0003"
     );
     assert_eq!(
         app.initial_read_status(&source_of(&app, ACCOUNT))

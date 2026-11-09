@@ -34,6 +34,14 @@ pub trait MailConnector: Connector {
         attachment_id: &str,
     ) -> Result<Vec<u8>, ConnectorError>;
 
+    /// Si el último mensaje del hilo es propio (D162). Solo mira metadatos del hilo (quién y
+    /// cuándo), nunca su contenido, y no tiene efectos en el buzón. `Ok(None)` = no se sabe (el
+    /// proveedor no lo permite o el hilo no consta): quien llama sigue el flujo normal y no oculta
+    /// nada. Por defecto, desconocido.
+    fn last_message_is_ours(&self, _thread_key: &str) -> Result<Option<bool>, ConnectorError> {
+        Ok(None)
+    }
+
     /// Envía un borrador una sola vez; repetir la clave devuelve el recibo original.
     fn send_draft(
         &self,

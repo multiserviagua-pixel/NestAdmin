@@ -11,7 +11,10 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use nestadmin_ai::tasks::{email_request, extraction_request, parse_email, parse_extraction};
+use nestadmin_ai::tasks::{
+    draft_request, email_request, extraction_request, parse_draft, parse_email, parse_extraction,
+    parse_triage, triage_request,
+};
 use nestadmin_ai::{
     build_provider, AiError, CredentialStore, MemoryCredentialStore, ProviderChoice,
 };
@@ -21,12 +24,21 @@ use serde_json::{json, Value};
 const USAGE: &str =
     "uso: nestadmin-predict --provider ollama|ollama-cloud|openai-compatible|anthropic \
 --out ARCHIVO.jsonl [--model MODELO] [--url URL_OLLAMA] [--base-url URL_HTTPS] \
-[--inputs DIR] [--task completa|afinado] \
-[--timeout-secs N]";
+[--inputs DIR] [--set completa|afinado|triaje|inyeccion] \
+[--timeout-secs N] (--task es un alias de --set)";
+
+/// Conjunto de evaluación: `afinado` usa `refine_suggestions.json` (D134); `triaje` e `inyeccion`
+/// (D164) usan `triage.json` e `injection.json`.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Set {
+    Completa,
+    Afinado,
+    Triaje,
+    Inyeccion,
+}
 
 struct Args {
-    /// `afinado` evalúa solo `refine_suggestions` (D134) con `refine_suggestions.json`.
-    refine: bool,
+    set: Set,
     choice: ProviderChoice,
     out: PathBuf,
     inputs: PathBuf,
@@ -41,7 +53,7 @@ fn parse_args() -> Result<Args, String> {
     let mut out = None;
     let mut inputs = PathBuf::from("evaluation/data/inputs");
     let mut timeout = 300;
-    let mut refine = false;
+    let mut set = Set::Completa;
     let mut args = std::env::args().skip(1);
     while let Some(flag) = args.next() {
         let mut value = || {
@@ -55,11 +67,13 @@ fn parse_args() -> Result<Args, String> {
             "--base-url" => base_url = Some(value()?),
             "--out" => out = Some(PathBuf::from(value()?)),
             "--inputs" => inputs = PathBuf::from(value()?),
-            "--task" => {
-                refine = match value()?.as_str() {
-                    "completa" => false,
-                    "afinado" => true,
-                    _ => return Err("--task debe ser completa o afinado".into()),
+            "--set" | "--task" => {
+                set = match value()?.as_str() {
+                    "completa" => Set::Completa,
+                    "afinado" => Set::Afinado,
+                    "triaje" => Set::Triaje,
+                    "inyeccion" => Set::Inyeccion,
+                    _ => return Err("--set debe ser completa, afinado, triaje o inyeccion".into()),
                 }
             }
             "--timeout-secs" => timeout = value()?.parse().map_err(|_| "timeout inválido")?,
@@ -93,7 +107,7 @@ fn parse_args() -> Result<Args, String> {
         }
     };
     Ok(Args {
-        refine,
+        set,
         choice,
         out: out.ok_or("--out es obligatorio")?,
         inputs,
@@ -229,9 +243,118 @@ fn run_refine(
     Ok(())
 }
 
+/// Texto que recibe el modelo en los conjuntos de triaje e inyección: remitente, asunto, cuerpo
+/// y nombres de adjuntos. Las cabeceras y el perfil nunca forman parte de este texto.
+fn mail_text(input: &Value) -> Option<String> {
+    let body = input["body"].as_str()?;
+    let mut text = format!(
+        "De: {}\nAsunto: {}\n\n{body}",
+        input["from"].as_str().unwrap_or(""),
+        input["subject"].as_str().unwrap_or("")
+    );
+    if let Some(names) = input["attachments"].as_array() {
+        let names: Vec<&str> = names.iter().filter_map(Value::as_str).collect();
+        if !names.is_empty() {
+            text.push_str(&format!("\n\nAdjuntos: {}", names.join(", ")));
+        }
+    }
+    Some(text)
+}
+
+/// Triaje (D158) e inyección (D160, D164): clasifica con `triage_request` y, solo si
+/// `needs_reply`, redacta con `draft_request`. El triaje no lleva perfil; la inyección usa el
+/// `profile` sintético de cada caso. Cada llamada va al proveedor elegido y nunca se reintenta
+/// con otro. Un borrador que falla no oculta la clasificación: queda `draft_error`.
+fn run_triage(
+    args: &Args,
+    provider: &dyn nestadmin_ai::Provider,
+    mut out: fs::File,
+) -> Result<(), String> {
+    let (name, corpus, with_profile) = match args.set {
+        Set::Inyeccion => ("injection.json", "synthetic-injection-v1", true),
+        _ => ("triage.json", "synthetic-triage-v1", false),
+    };
+    let text = fs::read_to_string(args.inputs.join(name)).map_err(|e| format!("{name}: {e}"))?;
+    let cases: Vec<Value> = serde_json::from_str(&text).map_err(|e| format!("{name}: {e}"))?;
+    let started = Instant::now();
+    let (mut errors, mut draft_errors) = (0, 0);
+    let mut models = std::collections::BTreeSet::new();
+    for case in &cases {
+        let id = case["id"].as_str().ok_or(format!("{name}: caso sin id"))?;
+        let input = &case["input"];
+        let mail = mail_text(input).ok_or(format!("{name}: {id} sin cuerpo"))?;
+        let t0 = Instant::now();
+        let triage = provider
+            .generate(&triage_request(id, &mail))
+            .and_then(|r| parse_triage(&r.output).map(|parsed| (r, parsed)));
+        let line = match triage {
+            Err(error) => {
+                errors += 1;
+                error_line(id, &error, t0.elapsed().as_millis())
+            }
+            Ok((result, (category, needs_reply))) => {
+                models.insert(result.model.clone());
+                let mut latency = result.latency_ms;
+                let mut value = json!({ "category": category, "needs_reply": needs_reply });
+                if needs_reply {
+                    let profile = with_profile.then(|| input["profile"].as_str()).flatten();
+                    let draft_id = format!("{id}-draft");
+                    match provider
+                        .generate(&draft_request(&draft_id, &mail, profile))
+                        .and_then(|r| parse_draft(&r.output).map(|draft| (r, draft)))
+                    {
+                        Ok((r, draft)) => {
+                            latency += r.latency_ms;
+                            value["draft"] = Value::String(draft);
+                        }
+                        Err(error) => {
+                            draft_errors += 1;
+                            value["draft_error"] = Value::String(error.code().to_owned());
+                        }
+                    }
+                }
+                json!({ "id": id, "result": value, "latency_ms": latency })
+            }
+        };
+        writeln!(out, "{line}").map_err(|e| e.to_string())?;
+        eprintln!(
+            "{id}: {}",
+            if line.get("error").is_some() {
+                "error"
+            } else {
+                "ok"
+            }
+        );
+    }
+    let meta = json!({
+        "corpus": corpus,
+        "choice": args.choice,
+        "models_reported": models,
+        "cases": cases.len(),
+        "errors": errors,
+        "draft_errors": draft_errors,
+        "duration_ms": started.elapsed().as_millis() as u64,
+        "timeout_secs": args.timeout.as_secs(),
+        "concurrency": 1,
+        "memory": "no medida",
+    });
+    let meta_path = args.out.with_extension("meta.json");
+    fs::write(
+        &meta_path,
+        serde_json::to_string_pretty(&meta).unwrap() + "\n",
+    )
+    .map_err(|e| e.to_string())?;
+    eprintln!(
+        "Predicciones: {}\nMetadatos: {}",
+        args.out.display(),
+        meta_path.display()
+    );
+    Ok(())
+}
+
 fn run() -> Result<(), String> {
     let args = parse_args()?;
-    let (invoices, emails) = if args.refine {
+    let (invoices, emails) = if args.set != Set::Completa {
         (Vec::new(), Vec::new())
     } else {
         (
@@ -250,8 +373,10 @@ fn run() -> Result<(), String> {
         build_provider(&args.choice, store.as_ref(), args.timeout).map_err(|e| e.to_string())?;
     let mut out =
         fs::File::create(&args.out).map_err(|e| format!("{}: {e}", args.out.display()))?;
-    if args.refine {
-        return run_refine(&args, provider.as_ref(), out);
+    match args.set {
+        Set::Afinado => return run_refine(&args, provider.as_ref(), out),
+        Set::Triaje | Set::Inyeccion => return run_triage(&args, provider.as_ref(), out),
+        Set::Completa => {}
     }
     let started_unix = SystemTime::now()
         .duration_since(UNIX_EPOCH)

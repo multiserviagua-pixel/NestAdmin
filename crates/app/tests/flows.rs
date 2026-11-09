@@ -42,7 +42,10 @@ impl Provider for FakeProvider {
         }
         let output = match request.task {
             // Las facturas de las pruebas son JSON; la del adjunto sintético de M-0001 es texto.
-            AiTask::Extraction => serde_json::from_str(&request.content).unwrap_or_else(|_| {
+            AiTask::Extraction => serde_json::from_str(nestadmin_ai::tasks::document_text(
+                &request.content,
+            ))
+            .unwrap_or_else(|_| {
                 assert!(
                     request.content.contains("FS-2026-014"),
                     "{}",

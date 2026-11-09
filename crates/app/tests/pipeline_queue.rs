@@ -30,7 +30,10 @@ impl Provider for FakeProvider {
     fn generate(&self, request: &GenerateRequest) -> Result<GenerateResult, AiError> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         let output = match request.task {
-            AiTask::Extraction => serde_json::from_str(&request.content).unwrap_or_else(|_| {
+            AiTask::Extraction => serde_json::from_str(nestadmin_ai::tasks::document_text(
+                &request.content,
+            ))
+            .unwrap_or_else(|_| {
                 json!({
                     "supplier": "Proveedor Alfa Suministros SL", "invoice_number": "FS-2026-014",
                     "date": "2026-10-01", "subtotal": "120.00", "tax": "25.20", "total": "145.20",
