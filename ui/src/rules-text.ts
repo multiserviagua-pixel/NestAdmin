@@ -522,6 +522,7 @@ export const REASON_CODES = [
   "foreign_currency",
   "currency_not_checked",
   "currency_not_shown",
+  "pipeline_step_waived",
   "automatic_sender",
   "signals_not_checked",
   "recipient_automatic",
@@ -573,6 +574,8 @@ export function reasonText(code: string, facts?: Record<string, unknown> | null)
       return "no consta la comprobación de moneda; reprocese o revise";
     case "currency_not_shown":
       return "el documento no muestra la moneda; no se puede comprobar que sea en euros";
+    case "pipeline_step_waived":
+      return "se continuó sin un paso anterior de la plantilla; la respuesta se revisa antes de enviarla";
     case "automatic_sender":
       return "el correo parece automático; ninguna regla responde a un remitente automático";
     case "signals_not_checked":

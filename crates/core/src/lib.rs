@@ -5,12 +5,14 @@ pub mod actions;
 pub mod business_profile;
 pub mod error;
 pub mod mail_signals;
+pub mod pipeline;
 pub mod preferences;
 pub mod queue;
 pub mod rule_panel;
 pub mod rules;
 pub mod sales;
 pub mod store;
+pub mod templates;
 
 pub use actions::{
     ActionOutcome, ActionRecord, ActionRequest, AuditEntry, Authorization, Connector,
@@ -18,6 +20,7 @@ pub use actions::{
 };
 pub use business_profile::{BusinessProfile, MAX_PROFILE_CHARS};
 pub use error::{CoreError, Result};
+pub use pipeline::{BlockingStep, NewStep, PipelineRun, PipelineStep, ATTACHMENT_REJECTED};
 pub use preferences::{normalize_key, PreferenceScope, SenderPreference};
 pub use queue::{Task, TaskError, TaskState};
 pub use rule_panel::{
@@ -26,3 +29,4 @@ pub use rule_panel::{
 };
 pub use rules::Rule;
 pub use store::Store;
+pub use templates::{active_since, TaskTemplate};

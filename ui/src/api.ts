@@ -26,11 +26,14 @@ import type {
   RefinePreview,
   RefinementView,
   SeenInvoice,
+  PipelineOverview,
+  PipelineRunView,
   Rule,
   RuleFinding,
   RuleSeed,
   RuleStats,
   RuleView,
+  TaskTemplate,
   SenderPreference,
   SettingsView,
   Simulation,
@@ -119,6 +122,25 @@ export const api = {
   /** Crea la tarea que solo redacta la respuesta a un informativo, un rebote o un correo sin respuesta necesaria (D159). */
   redraft: (id: number) => invoke<Task>("redraft", { id }),
   retry: (id: number) => invoke<Task>("retry", { id }),
+  /** Plantillas de pipeline (D149): versión vigente de cada una, archivadas incluidas. */
+  taskTemplates: () => invoke<TaskTemplate[]>("task_templates"),
+  /** Una plantilla nueva nace inactiva; guardar una existente crea una versión nueva y conserva
+   * su estado. Los pasos son del catálogo cerrado. Una plantilla nunca autoriza nada. */
+  saveTaskTemplate: (
+    id: string | null,
+    name: string,
+    conditions: { sender?: string; sender_domain?: string },
+    steps: Array<{ kind: string }>,
+  ) => invoke<TaskTemplate>("save_task_template", { id, name, conditions, steps }),
+  setTaskTemplateActive: (id: string, active: boolean) =>
+    invoke<TaskTemplate>("set_task_template_active", { id, active }),
+  /** Archivar no borra: la plantilla queda inactiva y se puede restaurar (D151). */
+  archiveTaskTemplate: (id: string, archived: boolean) => invoke<TaskTemplate>("archive_task_template", { id, archived }),
+  /** Ejecuciones de pipeline con sus pasos y, por tarea retenida, qué la retiene (D148). */
+  pipelineOverview: () => invoke<PipelineOverview>("pipeline_overview"),
+  /** «Continuar sin ese paso» (D150): la respuesta irá siempre a revisión. */
+  waivePipelineStep: (stepId: number, note: string) =>
+    invoke<PipelineRunView>("waive_pipeline_step", { stepId, note }),
   /** Preferencias por remitente (D161). Solo lectura. */
   senderPreferences: () => invoke<SenderPreference[]>("sender_preferences"),
   /** «Siempre a Informativos» (`informative`) o «Siempre a Pendientes» (`review`) para una dirección o un dominio. El backend normaliza la clave, rechaza los dominios de correo público y avisa si contradice una regla activa. Solo afecta a los correos nuevos. */

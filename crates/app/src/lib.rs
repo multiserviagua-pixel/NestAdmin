@@ -10,6 +10,7 @@
 pub mod accounts;
 pub mod initial_read;
 pub mod panel;
+pub mod pipelines;
 pub mod preferences;
 pub mod profile;
 pub mod refine;
@@ -49,7 +50,7 @@ use crate::accounts::{
     split_id, AccountFetch, AccountView, Accounts, AttachmentFetch, AttachmentIssue, FetchReport,
     MailAccountsView, MailEnv, MailIssue, MailProviderKind,
 };
-use crate::rules::{evaluate_result, RuleDecision, REGISTER_INVOICE, SEND_DRAFT};
+use crate::rules::{evaluate_result_in_run, RuleDecision, REGISTER_INVOICE, SEND_DRAFT};
 
 pub const INVOICE: &str = "invoice";
 pub const EMAIL: &str = "email";
@@ -1260,7 +1261,7 @@ impl App {
         name: &str,
         bytes: &[u8],
     ) -> AppResult<Task> {
-        self.import_attachment_keyed(message_task, name, bytes, "", "")
+        self.import_attachment_keyed(message_task, name, bytes, "", "", None)
     }
 
     fn import_attachment_keyed(
@@ -1270,6 +1271,7 @@ impl App {
         bytes: &[u8],
         attachment_key: &str,
         attachment_id: &str,
+        step: Option<i64>,
     ) -> AppResult<Task> {
         let task = self.store.task(message_task)?;
         if task.kind != EMAIL {
@@ -1305,7 +1307,7 @@ impl App {
         // convierten en un pendiente (E5).
         let read =
             is_initial_read(&input).then(|| input["read_source"].as_str().unwrap_or("").to_owned());
-        self.store_document(name, &extension, bytes, origin, read.as_deref())
+        self.store_document_for(name, &extension, bytes, origin, read.as_deref(), step)
     }
 
     /// Guarda la copia y encola la tarea. `origin` dice de dónde vino; aquí se añaden la
@@ -1315,8 +1317,22 @@ impl App {
         name: &str,
         extension: &str,
         bytes: &[u8],
+        origin: Value,
+        initial_read: Option<&str>,
+    ) -> AppResult<Task> {
+        self.store_document_for(name, extension, bytes, origin, initial_read, None)
+    }
+
+    /// Como `store_document`; con `step`, la tarea es la de ese paso de un pipeline y se crea
+    /// junto con su vínculo en una transacción (D148): repetir la descarga no la duplica.
+    fn store_document_for(
+        &mut self,
+        name: &str,
+        extension: &str,
+        bytes: &[u8],
         mut origin: Value,
         initial_read: Option<&str>,
+        step: Option<i64>,
     ) -> AppResult<Task> {
         let now = SystemTime::now().duration_since(UNIX_EPOCH).ok();
         let stamp = now.map(|d| d.as_nanos()).unwrap_or(0);
@@ -1330,7 +1346,12 @@ impl App {
             input["initial_read"] = json!(true);
             input["read_source"] = json!(source);
         }
-        Ok(self.store.enqueue(INVOICE, &input.to_string())?)
+        Ok(match step {
+            Some(step_id) => self
+                .store
+                .enqueue_for_step(step_id, INVOICE, &input.to_string())?,
+            None => self.store.enqueue(INVOICE, &input.to_string())?,
+        })
     }
 
     /// Copia guardada del documento de una tarea, para abrirla con el visor del sistema. Solo
@@ -1394,6 +1415,8 @@ impl App {
                 _ => {}
             }
         }
+        // Plantillas activas (D149): solo se miran al encolar un correo nuevo.
+        let templates = self.active_task_templates()?;
         // Preferencias por remitente (D161), leídas una vez por consulta.
         let preference_index =
             preferences::PreferenceIndex::from_rows(&self.store.sender_preferences()?);
@@ -1457,7 +1480,12 @@ impl App {
                                         ),
                                         "posible fallo de entrega",
                                     )?,
-                                    Route::Ia => self.store.enqueue(EMAIL, &input)?,
+                                    // Solo un correo que va a la IA puede abrir una ejecución
+                                    // de plantilla (D149): el informativo y el rebote no tienen
+                                    // respuesta que retener y sus adjuntos siguen el flujo normal.
+                                    Route::Ia => {
+                                        self.enqueue_new_mail(&input, message, &templates)?
+                                    }
                                 };
                                 // Los contadores, solo con la tarea ya guardada.
                                 if route == Route::Informativo {
@@ -1522,17 +1550,32 @@ impl App {
         report: &mut AttachmentFetch,
         mut cap: Option<(&mut usize, &mut usize)>,
     ) -> AppResult<()> {
+        // Pasos de pipeline que esperan su adjunto (D149). La primera lectura nunca tiene.
+        let rejected: HashSet<String> = if cap.is_none() {
+            self.store
+                .rejected_attachment_keys(message_task)?
+                .into_iter()
+                .collect()
+        } else {
+            HashSet::new()
+        };
+        let mut steps: HashMap<String, i64> = if cap.is_none() {
+            self.store
+                .pending_attachment_steps(message_task)?
+                .into_iter()
+                .filter_map(|s| Some((s.attachment_key?, s.id)))
+                .collect()
+        } else {
+            HashMap::new()
+        };
         for attachment in &message.attachments {
             let name = attachment_name(attachment);
-            let key = format!(
-                "{}#{}#{}",
-                message.id,
-                name,
-                attachment.size.map(|s| s.to_string()).unwrap_or_default()
-            );
-            if imported.contains(&key) {
+            let key = attachment_key(&message.id, &name, attachment.size);
+            // Rechazado de forma definitiva: no se vuelve a descargar (D150).
+            if imported.contains(&key) || rejected.contains(&key) {
                 continue;
             }
+            let step = steps.get(&key).copied();
             if !supported_document(&name) {
                 report.skipped.push(name);
                 continue;
@@ -1548,35 +1591,49 @@ impl App {
                 code: code.to_owned(),
                 message,
             };
-            if attachment
-                .size
-                .is_some_and(|s| s > MAX_DOCUMENT_BYTES as u64)
-            {
-                report.failed.push(fail(
-                    "invalid_input",
-                    format!(
-                        "supera el tamaño máximo de {} MB",
-                        MAX_DOCUMENT_BYTES / 1_000_000
-                    ),
-                ));
+            if let Some(reason) = attachment_rejection(attachment.size) {
+                report.failed.push(fail("invalid_input", reason));
+                if let Some(step) = step {
+                    self.store
+                        .record_step_error(step, nestadmin_core::ATTACHMENT_REJECTED)?;
+                }
                 continue;
             }
             let bytes = match self.mail.fetch_attachment(&message.id, &attachment.id) {
                 Ok(bytes) => bytes,
                 Err(e) => {
+                    // El paso queda sin tarea y con un código corto, nunca contenido; el
+                    // reintento de la consulta siguiente lo enlaza sin duplicar.
+                    if let Some(step) = step {
+                        self.store.record_step_error(step, &e.code)?;
+                    }
                     report.failed.push(fail(&e.code, e.message));
                     continue;
                 }
             };
-            match self.import_attachment_keyed(message_task, &name, &bytes, &key, &attachment.id) {
+            match self.import_attachment_keyed(
+                message_task,
+                &name,
+                &bytes,
+                &key,
+                &attachment.id,
+                step,
+            ) {
                 Ok(_) => {
+                    steps.remove(&key);
                     imported.insert(key);
                     report.imported += 1;
                     if let Some((budget, _)) = cap.as_mut() {
                         **budget = budget.saturating_sub(1);
                     }
                 }
-                Err(AppError::Invalid(reason)) => report.failed.push(fail("invalid_input", reason)),
+                Err(AppError::Invalid(reason)) => {
+                    if let Some(step) = step {
+                        self.store
+                            .record_step_error(step, nestadmin_core::ATTACHMENT_REJECTED)?;
+                    }
+                    report.failed.push(fail("invalid_input", reason));
+                }
                 Err(other) => return Err(other),
             }
         }
@@ -1607,7 +1664,7 @@ impl App {
             // Sin IA utilizable solo avanzan las tareas que no la necesitan: reanudar una
             // acción ya intentada (D50) o una factura ya separada (D68).
             let mut found = None;
-            for queued in self.store.tasks_in(TaskState::Queued)? {
+            for queued in self.store.ready_tasks()? {
                 let input: Value = serde_json::from_str(&queued.input_ref).unwrap_or(Value::Null);
                 if self.attempted_result(&queued)?.is_some() || split_preset(&input).is_some() {
                     found = Some(queued.id);
@@ -1810,7 +1867,17 @@ impl App {
         // Un importe dudoso o una factura separada de un documento con varias nunca se
         // registran por regla (D120, D68): `evaluate_result` los resuelve antes de las reglas.
         let (rules, any_sender) = self.rules_for_evaluation()?;
-        let evaluation = evaluate_result(&rules, &any_sender, kind, &result);
+        // Si se continuó sin un paso anterior del pipeline, la tarea siempre se revisa (D150).
+        // Si no se puede consultar, se supone omitido (más restrictivo) y no se pierde el resultado.
+        let step_waived = match self.store.has_waived_prerequisite(task.id) {
+            Ok(waived) => waived,
+            Err(error) => {
+                result["evidence_error"] =
+                    json!(format!("no se pudo comprobar el pipeline: {error}"));
+                true
+            }
+        };
+        let evaluation = evaluate_result_in_run(&rules, &any_sender, kind, &result, step_waived);
         // Solo ids, códigos e importes o nombres que ya están en el resultado (D125).
         result["evaluation"] = json!(evaluation.explanation);
         // La evidencia (D129) no puede impedir ni duplicar la acción: si no se guarda, la
@@ -1867,6 +1934,15 @@ impl App {
         }
         let of = others.len() + 1;
         result["part"] = json!({ "index": 1, "of": of });
+        // Una factura cancelada mientras corría no crea partes nuevas: nadie las pidió ya.
+        let running = self
+            .store
+            .task_by_id(task.id)
+            .map_err(|e| task_error("unavailable", e.to_string(), true))?
+            .is_some_and(|t| t.state == TaskState::Running);
+        if !running {
+            return Ok(());
+        }
         let existing: HashSet<u64> = self
             .store
             .all_tasks()
@@ -1891,8 +1967,7 @@ impl App {
                 "provider": generated.provider,
                 "model": generated.model,
             });
-            self.store
-                .enqueue(INVOICE, &part_input.to_string())
+            self.enqueue_part(task, index, of, &part_input.to_string())
                 .map_err(|e| task_error("unavailable", e.to_string(), true))?;
         }
         Ok(())
@@ -2101,7 +2176,7 @@ impl App {
         let held = self.held_read_sources()?;
         let queued: Vec<Task> = self
             .store
-            .tasks_in(TaskState::Queued)?
+            .ready_tasks()?
             .into_iter()
             .filter(|t| {
                 let Ok(input) = serde_json::from_str::<Value>(&t.input_ref) else {
@@ -2968,6 +3043,29 @@ fn check_document(name: &str, bytes: &[u8]) -> AppResult<String> {
         )));
     }
     Ok(extension)
+}
+
+/// Un adjunto cuyo tamaño ya dice que nunca podrá importarse: sobre el máximo o vacío. Lo usan la
+/// importación y los pasos de pipeline, de modo que no divergen; el contenido bajado se comprueba
+/// además con `check_document`.
+fn attachment_rejection(size: Option<u64>) -> Option<String> {
+    match size {
+        Some(s) if s > MAX_DOCUMENT_BYTES as u64 => Some(format!(
+            "supera el tamaño máximo de {} MB",
+            MAX_DOCUMENT_BYTES / 1_000_000
+        )),
+        Some(0) => Some("está vacío".to_owned()),
+        _ => None,
+    }
+}
+
+/// Clave de un adjunto: el mensaje, su nombre y su tamaño, que no cambian entre consultas (el
+/// identificador de Gmail sí puede cambiar). La usan la importación y los pasos de pipeline.
+pub(crate) fn attachment_key(message_id: &str, name: &str, size: Option<u64>) -> String {
+    format!(
+        "{message_id}#{name}#{}",
+        size.map(|s| s.to_string()).unwrap_or_default()
+    )
 }
 
 fn hex(bytes: &[u8]) -> String {

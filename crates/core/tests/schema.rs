@@ -30,6 +30,11 @@ const DROP_SALES: &str = "DROP TABLE received_delivery_notes; DROP TABLE payment
 /// la versión anterior.
 const DROP_PANEL: &str = "DROP TABLE rule_settings; DROP TABLE rule_suggestions; DROP TABLE rule_signals; DROP TABLE rule_evaluations; DROP TABLE rule_meta; ALTER TABLE actions DROP COLUMN rule_id; ALTER TABLE actions DROP COLUMN rule_version; DROP INDEX IF EXISTS tasks_redraft_of; DROP TABLE IF EXISTS sender_preferences; DROP TABLE IF EXISTS business_profile;";
 
+/// Quita lo que añadió la migración 8 (plantillas y ejecuciones de pipeline), como si la base
+/// la hubiera creado la versión anterior. Va antes de los `DROP` anteriores.
+const DROP_PIPELINES: &str =
+    "DROP TABLE pipeline_steps; DROP TABLE pipeline_runs; DROP TABLE task_templates;";
+
 fn has_table(path: &std::path::Path, name: &str) -> bool {
     rusqlite::Connection::open(path)
         .unwrap()
@@ -62,7 +67,7 @@ fn migrating_keeps_a_copy_of_the_previous_schema() {
     // Simula una base creada por la versión anterior (esquema 1, sin la tabla de reglas).
     let conn = rusqlite::Connection::open(&path).unwrap();
     conn.execute_batch(&format!(
-        "{DROP_PANEL} {DROP_SALES} DROP TABLE rules; PRAGMA user_version = 1;"
+        "{DROP_PIPELINES} {DROP_PANEL} {DROP_SALES} DROP TABLE rules; PRAGMA user_version = 1;"
     ))
     .unwrap();
     drop(conn);
@@ -94,7 +99,7 @@ fn migrating_from_schema_2_adds_sales_tables_and_keeps_a_copy() {
     // Base de la versión anterior (esquema 2): con reglas y sin tablas de venta.
     let conn = rusqlite::Connection::open(&path).unwrap();
     conn.execute_batch(&format!(
-        "{DROP_PANEL} {DROP_SALES} PRAGMA user_version = 2;"
+        "{DROP_PIPELINES} {DROP_PANEL} {DROP_SALES} PRAGMA user_version = 2;"
     ))
     .unwrap();
     conn.execute(
@@ -106,7 +111,7 @@ fn migrating_from_schema_2_adds_sales_tables_and_keeps_a_copy() {
 
     let store = Store::open(&path).unwrap();
     assert_eq!(store.schema_version().unwrap(), SCHEMA_VERSION);
-    assert_eq!(SCHEMA_VERSION, 7);
+    assert_eq!(SCHEMA_VERSION, 8);
     assert_eq!(
         store.audit_log().unwrap().len(),
         1,
@@ -149,8 +154,10 @@ fn migrating_from_schema_3_adds_the_rules_panel_and_keeps_old_actions() {
     let path = dir.path().join("nestadmin.db");
     drop(Store::open(&path).unwrap());
     let conn = rusqlite::Connection::open(&path).unwrap();
-    conn.execute_batch(&format!("{DROP_PANEL} PRAGMA user_version = 3;"))
-        .unwrap();
+    conn.execute_batch(&format!(
+        "{DROP_PIPELINES} {DROP_PANEL} PRAGMA user_version = 3;"
+    ))
+    .unwrap();
     conn.execute(
         "INSERT INTO tasks (id, kind, input_ref, state, created_at, updated_at) VALUES (1, 'invoice', '{}', 'completed', 1, 1)",
         [],
@@ -198,8 +205,10 @@ fn migrating_from_schema_3_deactivates_old_rules_whose_conditions_now_apply() {
     let path = dir.path().join("nestadmin.db");
     drop(Store::open(&path).unwrap());
     let conn = rusqlite::Connection::open(&path).unwrap();
-    conn.execute_batch(&format!("{DROP_PANEL} PRAGMA user_version = 3;"))
-        .unwrap();
+    conn.execute_batch(&format!(
+        "{DROP_PIPELINES} {DROP_PANEL} PRAGMA user_version = 3;"
+    ))
+    .unwrap();
     let rule = |id: &str, version: i64, kind: &str, conditions: &str, active: i64| {
         conn.execute(
             "INSERT INTO rules (id, version, action_kind, conditions, active, created_at) VALUES (?1, ?2, ?3, ?4, ?5, 1)",
@@ -298,6 +307,62 @@ fn migrating_from_schema_3_deactivates_old_rules_whose_conditions_now_apply() {
     assert!(migrated.iter().all(|e| e.status == "inactive"));
 }
 
+/// La migración 8 (D148) solo añade tablas: tareas, estados y acciones de una base del
+/// esquema 7 quedan como estaban, y las tareas siguen listas para ejecutarse.
+#[test]
+fn migrating_from_schema_7_adds_pipeline_tables_and_keeps_tasks() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("nestadmin.db");
+    drop(Store::open(&path).unwrap());
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    conn.execute_batch(&format!("{DROP_PIPELINES} PRAGMA user_version = 7;"))
+        .unwrap();
+    for (id, state) in [
+        (1, "queued"),
+        (2, "running"),
+        (3, "awaiting_review"),
+        (4, "completed"),
+        (5, "failed"),
+        (6, "cancelled"),
+    ] {
+        conn.execute(
+            "INSERT INTO tasks (id, kind, input_ref, state, attempts, created_at, updated_at) VALUES (?1, 'invoice', '{}', ?2, 1, 1, 1)",
+            rusqlite::params![id, state],
+        )
+        .unwrap();
+    }
+    drop(conn);
+
+    let store = Store::open(&path).unwrap();
+    assert_eq!(store.schema_version().unwrap(), SCHEMA_VERSION);
+    let states: Vec<_> = store
+        .all_tasks()
+        .unwrap()
+        .into_iter()
+        .rev()
+        .map(|t| (t.id, t.state.as_str().to_owned(), t.attempts))
+        .collect();
+    assert_eq!(
+        states,
+        [
+            (1, "queued".to_owned(), 1),
+            (2, "running".to_owned(), 1),
+            (3, "awaiting_review".to_owned(), 1),
+            (4, "completed".to_owned(), 1),
+            (5, "failed".to_owned(), 1),
+            (6, "cancelled".to_owned(), 1),
+        ]
+    );
+    let ready: Vec<_> = store.ready_tasks().unwrap().iter().map(|t| t.id).collect();
+    assert_eq!(ready, [1], "sin ejecuciones, la cola en espera sigue lista");
+    drop(store);
+    for table in ["task_templates", "pipeline_runs", "pipeline_steps"] {
+        assert!(has_table(&path, table), "{table} debe existir tras migrar");
+        assert!(!has_table(&backup_path(&path, 7), table));
+    }
+    assert_eq!(user_version(&backup_path(&path, 7)), 7);
+}
+
 #[test]
 fn newer_schema_error_points_to_the_backup() {
     let dir = tempfile::tempdir().unwrap();
@@ -326,9 +391,9 @@ fn migrating_from_schema_4_adds_the_redraft_index_and_keeps_a_copy() {
     let path = dir.path().join("nestadmin.db");
     drop(Store::open(&path).unwrap());
     let conn = rusqlite::Connection::open(&path).unwrap();
-    conn.execute_batch(
-        "DROP INDEX tasks_redraft_of; DROP TABLE sender_preferences; DROP TABLE business_profile; PRAGMA user_version = 4;",
-    )
+    conn.execute_batch(&format!(
+        "{DROP_PIPELINES} DROP INDEX tasks_redraft_of; DROP TABLE sender_preferences; DROP TABLE business_profile; PRAGMA user_version = 4;"
+    ))
     .unwrap();
     for (id, input) in [(1, "{}"), (2, "no es json"), (3, r#"{"redraft_of": 1}"#)] {
         conn.execute(
@@ -364,9 +429,9 @@ fn migrating_from_schema_5_adds_sender_preferences_and_keeps_a_copy() {
     let path = dir.path().join("nestadmin.db");
     drop(Store::open(&path).unwrap());
     let conn = rusqlite::Connection::open(&path).unwrap();
-    conn.execute_batch(
-        "DROP TABLE sender_preferences; DROP TABLE business_profile; PRAGMA user_version = 5;",
-    )
+    conn.execute_batch(&format!(
+        "{DROP_PIPELINES} DROP TABLE sender_preferences; DROP TABLE business_profile; PRAGMA user_version = 5;"
+    ))
     .unwrap();
     conn.execute(
         "INSERT INTO audit_log (at, action, status) VALUES (1, 'previa', 'ok')",
@@ -421,8 +486,10 @@ fn migrating_from_schema_6_adds_the_business_profile_and_keeps_a_copy() {
     let path = dir.path().join("nestadmin.db");
     drop(Store::open(&path).unwrap());
     let conn = rusqlite::Connection::open(&path).unwrap();
-    conn.execute_batch("DROP TABLE business_profile; PRAGMA user_version = 6;")
-        .unwrap();
+    conn.execute_batch(&format!(
+        "{DROP_PIPELINES} DROP TABLE business_profile; PRAGMA user_version = 6;"
+    ))
+    .unwrap();
     conn.execute(
         "INSERT INTO audit_log (at, action, status) VALUES (1, 'previa', 'ok')",
         [],

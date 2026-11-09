@@ -75,6 +75,8 @@ CREATE TABLE rules (
     include_str!("migrations/006_sender_preferences.sql"),
     // Perfil del negocio para la redacción (D163).
     include_str!("migrations/007_business_profile.sql"),
+    // Plantillas de pipeline y sus ejecuciones (D148); ver pipeline.rs.
+    include_str!("migrations/008_pipelines.sql"),
 ];
 
 /// Base de datos local. Cada operación pública se confirma en una transacción,

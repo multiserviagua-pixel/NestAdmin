@@ -50,6 +50,8 @@ pub enum ReasonCode {
     /// El documento no muestra el euro (`€`, `EUR`, «euro»): no se puede comprobar que sea en
     /// euros, sea texto digital o escaneado (D127).
     CurrencyNotShown,
+    /// Se continuó sin un paso del pipeline: la respuesta siempre se revisa (D150).
+    PipelineStepWaived,
     /// El mensaje lleva señales de correo automático (D157, D158): ninguna regla responde a un
     /// remitente automático.
     AutomaticSender,
@@ -114,6 +116,7 @@ impl Explanation {
             ),
             ReasonCode::CurrencyNotChecked => CURRENCY_UNCHECKED.into(),
             ReasonCode::CurrencyNotShown => CURRENCY_NOT_SHOWN.into(),
+            ReasonCode::PipelineStepWaived => PIPELINE_WAIVED.into(),
             ReasonCode::AutomaticSender => format!(
                 "el correo parece automático (señales: {}); ninguna regla responde a un remitente automático",
                 join_ids(&self.facts["codes"])
@@ -163,6 +166,15 @@ impl Explanation {
         }
     }
 
+    /// Explicación de una tarea cuyo pipeline continuó sin un paso (D150).
+    pub fn pipeline_step_waived() -> Self {
+        Self {
+            code: ReasonCode::PipelineStepWaived,
+            facts: json!({}),
+            candidates: Vec::new(),
+        }
+    }
+
     /// Explicación de una factura separada de un documento con varias.
     pub fn split_invoice() -> Self {
         Self {
@@ -172,6 +184,10 @@ impl Explanation {
         }
     }
 }
+
+/// Motivo cuando el pipeline continuó sin un paso (D150).
+pub const PIPELINE_WAIVED: &str =
+    "se continuó sin un paso anterior del pipeline; revise antes de enviar";
 
 /// Motivo cuando falta la comprobación local de moneda (D127).
 pub const CURRENCY_UNCHECKED: &str = "no consta la comprobación de moneda; reprocese o revise";
@@ -517,7 +533,7 @@ fn sender_mismatch(
     any_sender_ack: bool,
     result: &Value,
 ) -> Option<Mismatch> {
-    let actual = result["message"]["from"].as_str().map(str::trim);
+    let actual = result["message"]["from"].as_str();
     let (key, wanted) = match (conditions.get("sender"), conditions.get("sender_domain")) {
         (Some(_), Some(_)) => {
             return no("la regla indica a la vez una dirección y un dominio de remitente")
@@ -539,13 +555,21 @@ fn sender_mismatch(
     let Some(wanted) = wanted.as_str().map(str::trim).filter(|w| !w.is_empty()) else {
         return no("el remitente de la regla no es un texto válido");
     };
-    let Some(actual) = actual.filter(|a| !a.is_empty()) else {
-        return no(format!(
+    sender_matches(key, wanted, actual).err().and_then(no)
+}
+
+/// Comparación de remitente de D126, compartida por las reglas de envío y por las plantillas
+/// de pipeline (D149): `key` es `sender` (dirección exacta) o `sender_domain` (dominio exacto, sin
+/// subdominios), sin distinguir mayúsculas. `actual` es `message.from`; si falta, está vacío o no
+/// es una dirección simple (`is_email_address`), no coincide. El error es el motivo en texto.
+pub fn sender_matches(key: &str, wanted: &str, actual: Option<&str>) -> Result<(), String> {
+    let Some(actual) = actual.map(str::trim).filter(|a| !a.is_empty()) else {
+        return Err(format!(
             "el correo no indica remitente y la regla pide «{wanted}»"
         ));
     };
     if !is_email_address(actual) {
-        return no(format!(
+        return Err(format!(
             "el remitente «{actual}» no es una dirección de correo simple"
         ));
     }
@@ -557,13 +581,13 @@ fn sender_mismatch(
             .is_some_and(|(_, domain)| domain.eq_ignore_ascii_case(wanted))
     };
     if same {
-        None
+        Ok(())
     } else if key == "sender" {
-        no(format!(
+        Err(format!(
             "el remitente es «{actual}» y la regla pide «{wanted}»"
         ))
     } else {
-        no(format!(
+        Err(format!(
             "el remitente es «{actual}», de otro dominio que «{wanted}»"
         ))
     }
@@ -665,6 +689,40 @@ pub fn rules_fingerprint(
 /// (D120) y una factura separada de un documento con varias (D68) nunca se registran por
 /// regla. Es el único camino que usan `finish` y la simulación.
 pub fn evaluate_result(
+    rules: &[Rule],
+    any_sender: &HashSet<String>,
+    action_kind: &str,
+    result: &Value,
+) -> Evaluation {
+    evaluate_result_in_run(rules, any_sender, action_kind, result, false)
+}
+
+/// Como `evaluate_result`, para una tarea de un pipeline. Si se continuó sin un paso anterior
+/// (`step_waived`, D150), una decisión de automatizar pasa a revisión con su propia explicación,
+/// manteniendo las reglas candidatas para los recuentos (D129). Solo restringe: nunca convierte
+/// una revisión en automatización ni cambia el motivo de una revisión que ya lo era.
+pub fn evaluate_result_in_run(
+    rules: &[Rule],
+    any_sender: &HashSet<String>,
+    action_kind: &str,
+    result: &Value,
+    step_waived: bool,
+) -> Evaluation {
+    let evaluation = evaluate_shortcuts(rules, any_sender, action_kind, result);
+    match evaluation.decision {
+        RuleDecision::Automate { .. } if step_waived => {
+            let mut explanation = Explanation::pipeline_step_waived();
+            explanation.candidates = evaluation.explanation.candidates;
+            Evaluation {
+                decision: RuleDecision::Review(explanation.summary()),
+                explanation,
+            }
+        }
+        _ => evaluation,
+    }
+}
+
+fn evaluate_shortcuts(
     rules: &[Rule],
     any_sender: &HashSet<String>,
     action_kind: &str,
@@ -1386,8 +1444,9 @@ pub struct SimTask {
 /// Id con el que la regla nueva aparece en `automated_after_by`.
 pub const MERGED_RULE: &str = MERGED;
 
-/// Qué cambiaría en las tareas guardadas, evaluadas con `evaluate_result` como en producción,
-/// si la regla nueva estuviera activa y las originales archivadas.
+/// Qué cambiaría en las tareas guardadas, evaluadas con `evaluate_result_in_run` (una respuesta con
+/// un paso omitido nunca se automatiza, D150, igual que en `finish_task` y en `simulate_rule`), si
+/// la regla nueva estuviera activa y las originales archivadas.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct MergeSimulation {
     pub considered: usize,
@@ -1611,7 +1670,7 @@ fn sim_task(
 }
 
 /// Propone la regla resultante de unificar `ids` (reglas `Equal` o `Contains` del mismo tipo)
-/// y simula con `evaluate_result` qué cambiaría en `tasks`. Es de solo lectura. Si las
+/// y simula con `evaluate_result_in_run` qué cambiaría en `tasks`. Es de solo lectura. Si las
 /// condiciones difieren, `chosen` debe ser la clave de una de las opciones (`merge_options`);
 /// sin elección es un error claro (`ChoiceRequired`, con las opciones). Rechaza mezclar tipos,
 /// proveedores solo parecidos y reglas archivadas.
@@ -1621,6 +1680,19 @@ pub fn merge_plan(
     ids: &[String],
     chosen: Option<&str>,
     tasks: &[Task],
+) -> Result<MergePlan, MergeError> {
+    merge_plan_in_runs(rules, marks, ids, chosen, tasks, &HashSet::new())
+}
+
+/// Como `merge_plan`, sabiendo qué tareas tienen un paso anterior omitido (`step_waived`, D150):
+/// su respuesta siempre va a revisión, así que no cuenta como automatizable ni antes ni después.
+pub fn merge_plan_in_runs(
+    rules: &[Rule],
+    marks: &Marks,
+    ids: &[String],
+    chosen: Option<&str>,
+    tasks: &[Task],
+    step_waived: &HashSet<i64>,
 ) -> Result<MergePlan, MergeError> {
     let members = merge_members(rules, marks, ids)?;
     let options = options_of(&members);
@@ -1683,13 +1755,12 @@ pub fn merge_plan(
     let of_kind: Vec<&Task> = tasks.iter().filter(|t| t.kind == task_kind).collect();
     let simulate = |future_marks: &HashSet<String>| {
         simulate_merge(
-            &current,
-            &future,
-            &marks.any_sender,
-            future_marks,
+            (&current, &marks.any_sender),
+            (&future, future_marks),
             &originals,
             &action_kind,
             &of_kind,
+            step_waived,
         )
     };
     let simulation = simulate(&future_marks);
@@ -1716,17 +1787,17 @@ pub fn merge_plan(
     })
 }
 
-/// Evalúa las tareas con las reglas de hoy y con las de después, con `evaluate_result` como
-/// en producción. Cada grupo lleva la regla que automatiza, para que el texto no deduzca
+/// Evalúa las tareas con las reglas de hoy y con las de después, con `evaluate_result_in_run`:
+/// una tarea de `step_waived` (con un paso anterior omitido) nunca se automatiza, como en
+/// `finish_task` (D150). Cada grupo lleva la regla que automatiza, para que el texto no deduzca
 /// tramos que los datos no sostienen.
 fn simulate_merge(
-    current: &[Rule],
-    future: &[Rule],
-    current_marks: &HashSet<String>,
-    future_marks: &HashSet<String>,
+    (current, current_marks): (&[Rule], &HashSet<String>),
+    (future, future_marks): (&[Rule], &HashSet<String>),
     originals: &HashSet<&str>,
     action_kind: &str,
     tasks: &[&Task],
+    step_waived: &HashSet<i64>,
 ) -> MergeSimulation {
     let invoice = action_kind == REGISTER_INVOICE;
     let mut simulation = MergeSimulation {
@@ -1746,8 +1817,9 @@ fn simulate_merge(
             continue;
         };
         simulation.considered += 1;
-        let before = evaluate_result(current, current_marks, action_kind, result);
-        let after = evaluate_result(future, future_marks, action_kind, result);
+        let waived = step_waived.contains(&task.id);
+        let before = evaluate_result_in_run(current, current_marks, action_kind, result, waived);
+        let after = evaluate_result_in_run(future, future_marks, action_kind, result, waived);
         let covered = before
             .explanation
             .candidates

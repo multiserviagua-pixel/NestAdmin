@@ -18,6 +18,75 @@ export interface Task {
   updated_at: number;
 }
 
+// ---- Plantillas de pipeline (D149, D150) ----
+
+/** Pasos del catálogo cerrado de la versión 1; la interfaz no inventa otros. */
+export type TemplateStepKind = "attachment_invoices" | "reply";
+
+export interface TaskTemplate {
+  id: string;
+  version: number;
+  name: string;
+  /** `{}`, `{ sender }` o `{ sender_domain }`. */
+  conditions: { sender?: string; sender_domain?: string };
+  steps: Array<{ kind: TemplateStepKind | string }>;
+  active: boolean;
+  archived: boolean;
+  created_at: number;
+}
+
+/** Por qué un paso retiene a una tarea: `waiting` avanza; los demás son «Bloqueada». */
+/** `attachment_rejected`: el adjunto nunca podrá importarse (demasiado grande, vacío o inválido):
+ * no se resolverá solo y la salida es «Continuar sin ese paso». */
+export type BlockerCode = "waiting" | "failed" | "cancelled" | "attachment_missing" | "attachment_rejected";
+
+export interface PipelineBlocker {
+  step_id: number;
+  task_id: number | null;
+  task_state: TaskState | null;
+  code: BlockerCode;
+  /** Código corto del último fallo de descarga del adjunto, si lo hubo (sin contenido). */
+  error_code: string | null;
+}
+
+/** `waiting` («Esperando») o `blocked` («Bloqueada»). Los textos los genera la interfaz. */
+export interface PipelineBlock {
+  reason: "waiting" | "blocked";
+  by: PipelineBlocker[];
+}
+
+export interface PipelineStepView {
+  id: number;
+  stage: number;
+  kind: TemplateStepKind | string;
+  label: string;
+  task_id: number | null;
+  task_state: TaskState | null;
+  waived: boolean;
+  waived_note: string | null;
+  error_code: string | null;
+  /** «Continuar sin ese paso» es válido ahora para este paso. */
+  waivable: boolean;
+  /** El adjunto llegó después de omitir su paso: se importó igual y la respuesta sigue en revisión. */
+  linked_after_waive: boolean;
+  /** Solo si la tarea del paso está en cola y algo la retiene. */
+  blocked: PipelineBlock | null;
+}
+
+export interface PipelineRunView {
+  id: number;
+  template_id: string;
+  template_version: number;
+  template_name: string | null;
+  subject_task_id: number;
+  created_at: number;
+  steps: PipelineStepView[];
+}
+
+export interface PipelineOverview {
+  runs: PipelineRunView[];
+}
+
 export interface Rule {
   id: string;
   version: number;

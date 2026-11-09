@@ -15,6 +15,24 @@ pub enum CoreError {
         from: TaskState,
         to: TaskState,
     },
+    #[error("la tarea {0} espera a que terminen los pasos anteriores de su pipeline")]
+    TaskBlocked(i64),
+    #[error("el paso {0} del pipeline no existe")]
+    PipelineStepNotFound(i64),
+    #[error("la ejecución {0} del pipeline no existe")]
+    PipelineRunNotFound(i64),
+    #[error(
+        "una ejecución de pipeline necesita exactamente un paso cuya tarea sea la tarea sujeto"
+    )]
+    PipelineSubjectNotAStep,
+    #[error("añadir un paso en la etapa {0} retendría una tarea de una etapa posterior que ya fue tomada")]
+    PipelineStageTooLate(i64),
+    #[error("el paso {0} no retiene ninguna tarea que pueda empezar, o ya se omitió")]
+    PipelineStepNotRetaining(i64),
+    #[error("la plantilla {0} no existe")]
+    TemplateNotFound(String),
+    #[error("la plantilla {0} está archivada; desarchívela para volver a usarla")]
+    TemplateArchived(String),
     #[error(
         "esquema de base de datos {found} más reciente que el soportado ({supported}); \n         instale la versión de NestAdmin que lo creó o restaure la copia nestadmin.esquema-{supported}.db"
     )]

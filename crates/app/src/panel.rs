@@ -9,9 +9,9 @@ use serde::Serialize;
 use serde_json::{json, Value};
 
 use crate::rules::{
-    analyze, evaluate_result, evaluate_with, merge_before, merge_options, merge_plan,
-    rules_fingerprint, Evaluation, FindingKind, Marks, MergeError, MergeOption, MergePlan,
-    PlanRule, ReasonCode, RuleDecision, RuleFinding,
+    analyze, evaluate_result_in_run, evaluate_with, merge_before, merge_options, merge_plan,
+    merge_plan_in_runs, rules_fingerprint, Evaluation, FindingKind, Marks, MergeError, MergeOption,
+    MergePlan, PlanRule, ReasonCode, RuleDecision, RuleFinding,
 };
 use crate::{
     action_kind, check_rule, check_rule_id, App, AppError, AppResult, EMAIL, INVOICE,
@@ -548,8 +548,18 @@ impl App {
                     result["message"]["subject"].as_str()
                 }
                 .map(str::to_owned);
-                let before = evaluate_result(&rules, &any_sender, action_kind, result);
-                let after = evaluate_result(&with_hypothetical, &any_sender, action_kind, result);
+                // Una respuesta con un paso omitido siempre se revisa (D150): no cuenta como
+                // automatizable. Ante un fallo al consultarlo se supone omitido (cierra en falso).
+                let waived = self.store.has_waived_prerequisite(task.id).unwrap_or(true);
+                let before =
+                    evaluate_result_in_run(&rules, &any_sender, action_kind, result, waived);
+                let after = evaluate_result_in_run(
+                    &with_hypothetical,
+                    &any_sender,
+                    action_kind,
+                    result,
+                    waived,
+                );
                 // Si la regla coincide con los datos se mira sin los atajos previos a las reglas
                 // (importe dudoso, factura separada), que mandan la tarea a revisión aunque
                 // coincida cualquier regla.
@@ -560,7 +570,12 @@ impl App {
                     .iter()
                     .find(|c| c.id == SIMULATED);
                 let code = after.explanation.code;
-                let shortcut = matches!(code, ReasonCode::AmountReview | ReasonCode::SplitInvoice);
+                let shortcut = matches!(
+                    code,
+                    ReasonCode::AmountReview
+                        | ReasonCode::SplitInvoice
+                        | ReasonCode::PipelineStepWaived
+                );
                 let item = match mine {
                     None => review_item(sim, task.id, label, &after),
                     Some(check) if check.matches && shortcut => {
@@ -771,7 +786,15 @@ impl App {
             // Tampoco un informativo, un rebote o una redacción a mano (D159).
             .filter(|t| !crate::task_is_initial_read(t) && !crate::task_is_triaged_or_redraft(t))
             .collect();
-        let plan = match merge_plan(&rules, &marks, ids, chosen, &tasks) {
+        // Una respuesta con un paso omitido siempre se revisa (D150). Ante un fallo al consultarlo
+        // se supone omitida (cierra en falso), como en `finish_task`.
+        let step_waived: HashSet<i64> = tasks
+            .iter()
+            .filter(|t| t.kind == EMAIL)
+            .filter(|t| self.store.has_waived_prerequisite(t.id).unwrap_or(true))
+            .map(|t| t.id)
+            .collect();
+        let plan = match merge_plan_in_runs(&rules, &marks, ids, chosen, &tasks, &step_waived) {
             Ok(plan) => Some(plan),
             Err(MergeError::ChoiceRequired(_)) => None,
             Err(e) => return Err(invalid(e)),
@@ -1031,7 +1054,7 @@ fn clean_name(name: Option<&str>) -> AppResult<Option<String>> {
 }
 
 /// Identificador legible a partir de un nombre: minúsculas, sin acentos, cifras y guiones.
-fn slugify(name: &str) -> String {
+pub(crate) fn slugify(name: &str) -> String {
     let mut slug = String::new();
     for c in name.chars().flat_map(char::to_lowercase) {
         let c = match c {
