@@ -1118,7 +1118,7 @@ function emailDetail(task: Task) {
               let version = r.version ?? 1;
               // Si se ha editado, se guarda primero como versión nueva y se aprueba esa.
               if (body.value !== (draft.body ?? "")) version = (await api.editDraft(task.id, body.value)).result?.version;
-              afterApproval(await api.approve(task.id, version), `Respuesta enviada desde ${accountName(message.id, r.origin)}`);
+              afterApproval(await api.approve(task.id, version), `Enviada desde ${accountName(message.id, r.origin)}; la entrega al destinatario no se comprueba`);
             }),
         },
         "Aprobar y enviar",

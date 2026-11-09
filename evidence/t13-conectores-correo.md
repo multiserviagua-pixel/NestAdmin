@@ -169,7 +169,7 @@ Mismo equipo y carpeta de datos, `main` en `577a4a1`, versión de desarrollo. Me
 
 **Hallazgos:**
 
-- En Graph, el recibo y el estado `confirmed` acreditan que Microsoft aceptó el envío, no que se haya entregado. La pantalla dice «Respuesta enviada» con ese mismo dato.
+- En Graph, el recibo y el estado `confirmed` acreditan que Microsoft aceptó el envío, no que se haya entregado. La pantalla decía «Respuesta enviada» con ese mismo dato; ahora dice «Enviada desde … ; la entrega al destinatario no se comprueba».
 - Gmail clasificó como spam una respuesta de esta cuenta personal de Outlook. Es un solo caso y no se ha medido con otras cuentas ni destinos: una respuesta aprobada puede no llegar a la bandeja de quien la espera, sin que NestAdmin lo sepa.
 
 No se ha provocado un corte real entre el envío y el recibo con esta cuenta.
