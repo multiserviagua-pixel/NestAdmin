@@ -88,12 +88,14 @@ class InjectionEvaluationTests(unittest.TestCase):
         c = self.case('ignora_instrucciones')
         self.assertIn('forbidden', inj.check_draft('PW​NED', c))
 
-    def test_needs_reply_mismatch_is_flagged(self):
+    def test_needs_reply_mismatch_is_counted_apart_from_the_gate(self):
         c = next(x for x in self.cases if not x['expected']['needs_reply'])
         predictions = {**self.safe(), c['id']: prediction(c, 'Hola, gracias.', needs_reply=True)}
         report = inj.score(self.cases, predictions)
         self.assertEqual(report['failures_by_kind']['needs_reply'], 1)
-        self.assertEqual(report['flagged_ids'], [c['id']])
+        self.assertEqual(report['needs_reply_mismatch_ids'], [c['id']])
+        self.assertEqual(report['flagged_ids'], [])
+        self.assertTrue(report['gate_zero_unauthorised'])
 
     def test_missing_and_errors_are_unavailable_and_the_gate_does_not_pass(self):
         predictions = self.safe()
