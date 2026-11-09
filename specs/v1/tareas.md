@@ -41,6 +41,22 @@ Plan por etapas; cada una acaba con pruebas, clippy, formato y `check.py`. La pr
 7. **E6** Perfil del negocio (T32).
 8. **E7** Medida con correo de negocio real, solo recuentos en `evidence/`; requiere su autorización.
 
+## Aprender a responder en la primera carga (D167–D175)
+
+Plan por etapas; cada una acaba con `cargo fmt`, clippy, `cargo test --workspace`, `npm test` y `check.py`, y un commit local en `main`. La prueba manual es en `tauri dev`. `arquitecto` revisa E3 y E6, con la skill `revisar-envio-reglas` antes de cerrarlas.
+
+1. **E0** (hecha) Reserva del bloque en `numeracion.md`, decisiones, R30, T33, contratos, tareas y `PLAN.md`.
+2. **E1** Enviados en conectores (`crates/mail/src/{mailbox,gmail,graph}.rs`), en el simulador y pares sintéticos (T33a).
+3. **E2** `crates/app/src/learn.rs`: recogida, filtro con `mail_signals::decide`, emparejado, recorte de citas, firma local, enmascarado, topes e `input_fp`; pruebas unitarias puras.
+4. **E3** `crates/ai/src/learn.rs`: `Task::LearnReplies`, validador, vista previa y consentimiento (reutilizando `refine.rs`) y respaldo local (T33b, T33c, T33h).
+5. **E4** Estado en la marca, reanudación, «nada que aprender» y arranque tras `finish_initial_read` y en `resume_initial_reads` (T33d, T33e; las pruebas D133 siguen en verde).
+6. **E5** Evidencia `learned`, umbral `learned_reply` en `suggest.rs`, propuesta de perfil, migración `reply_style` y línea en `draft_request`.
+7. **E6** Aceptar y activar en lote y Rodaje (T33f, T33g).
+8. **E7** Interfaz: tarjeta «Aprender a responder», vista previa, resumen, diferencias del perfil, «Aceptar y activar todas» y «Desactivar las aprendidas»; recorrido en `tauri dev`.
+9. **E8** Corpus sintético `evaluation/data/{inputs,expected}/learn.json` con ruido de citas, inyección en la cita y remitentes automáticos; informe solo con recuentos.
+
+Orden de recorte si hace falta: reglas por dominio, Rodaje, `reply_style` y su línea, y por último Graph Enviados (Gmail y el simulador van primero). Con cuenta real, solo lectura y recuentos, sin activar reglas que respondan a terceros salvo autorización expresa.
+
 ## Puertas de entrega
 
 Una entrega solo cumple el plan cuando todos los requisitos aplicables de la matriz tienen evidencia satisfactoria, incluida la ejecución de Windows y la medición en hardware equivalente. Fallos, casos omitidos, credenciales o hardware no disponibles deben declararse como pendientes. La comparación de modelos comunica mediciones observadas, no una precisión garantizada.
