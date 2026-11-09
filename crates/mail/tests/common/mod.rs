@@ -75,6 +75,11 @@ pub struct World {
     /// Gmail: el mensaje enviado conserva el ID del mensaje del borrador. Por defecto no,
     /// como se observó con una cuenta real (T13).
     pub keep_sent_id: bool,
+    /// Gmail: el mensaje enviado conserva el `Message-ID` del borrador. Por defecto no: Gmail
+    /// lo sustituye por uno suyo (`...@mail.gmail.com`), como se observó con una cuenta real.
+    pub keep_message_id: bool,
+    /// Gmail: `threads.get` responde 200 sin lista `messages`.
+    pub thread_without_messages: bool,
     /// Estado forzado para cualquier ruta que contenga el texto.
     pub force: Option<(String, u16)>,
 }

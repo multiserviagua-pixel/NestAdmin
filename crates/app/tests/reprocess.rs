@@ -139,8 +139,18 @@ enum Resp {
 #[derive(Default)]
 struct GmailDraft {
     message_id: String,
-    rfc822: String,
+    thread_id: Option<String>,
+    own_id: Option<String>,
     body: String,
+}
+
+/// Mensaje enviado por el Gmail simulado: otro ID y otro `Message-ID` que el borrador, con la
+/// marca `X-NestAdmin-Id` y el hilo conservados.
+struct GmailSent {
+    id: String,
+    rfc822: String,
+    own_id: Option<String>,
+    thread_id: Option<String>,
 }
 
 #[derive(Default)]
@@ -148,8 +158,11 @@ struct World {
     /// Graph: ID del borrador → (¿sigue siendo borrador?, texto).
     graph_drafts: HashMap<String, (bool, String)>,
     gmail_drafts: HashMap<String, GmailDraft>,
-    /// Gmail: (ID del enviado, `Message-ID`).
-    gmail_sent: Vec<(String, String)>,
+    gmail_sent: Vec<GmailSent>,
+    /// Consultas `threads.get` recibidas (con `format=metadata` y la cabecera pedida).
+    gmail_thread_gets: usize,
+    /// Búsquedas `rfc822msgid:` recibidas: el último recurso, que no vale con Gmail real.
+    gmail_rfc_searches: usize,
     /// Borradores creados en total (los dos proveedores).
     created: usize,
     /// Texto de cada envío realizado (los dos proveedores).
@@ -326,19 +339,32 @@ fn parse_mime(raw: &str) -> (String, String) {
     )
 }
 
-/// Gmail mínimo: un mensaje en la bandeja, borradores, envío con ID nuevo y búsqueda por
-/// `rfc822msgid:` entre los enviados.
+/// Cabecera de un mensaje MIME de borrador.
+fn mime_header(raw: &str, name: &str) -> Option<String> {
+    let mime = String::from_utf8(URL_SAFE.decode(raw).unwrap()).unwrap();
+    let (head, _) = mime.split_once("\r\n\r\n").unwrap();
+    head.lines().find_map(|l| {
+        let (n, v) = l.split_once(':')?;
+        n.eq_ignore_ascii_case(name).then(|| v.trim().to_owned())
+    })
+}
+
+/// Gmail mínimo como el real: un mensaje en la bandeja, borradores con `threadId` y, al
+/// enviar, otro ID y otro `Message-ID` (`...@mail.gmail.com`) con `X-NestAdmin-Id` y el hilo
+/// conservados. `GET threads/{id}` exige `format=metadata` y `metadataHeaders=X-NestAdmin-Id`.
+/// `rfc822msgid:` con el `Message-ID` propio no encuentra nada.
 fn gmail(req: &Req, path: &str, w: &mut World) -> Resp {
     let segments: Vec<&str> = path.split('/').collect();
     match (req.method.as_str(), segments.as_slice()) {
         ("GET", ["messages"]) => match req.query("q") {
             Some(q) => {
+                w.gmail_rfc_searches += 1;
                 let wanted = format!("<{}>", q.trim_start_matches("rfc822msgid:"));
                 let found: Vec<Value> = w
                     .gmail_sent
                     .iter()
-                    .filter(|(_, rfc)| *rfc == wanted)
-                    .map(|(id, _)| json!({ "id": id }))
+                    .filter(|s| s.rfc822 == wanted)
+                    .map(|s| json!({ "id": s.id }))
                     .collect();
                 Resp::Json(200, json!({ "messages": found }))
             }
@@ -359,12 +385,49 @@ fn gmail(req: &Req, path: &str, w: &mut World) -> Resp {
                 },
             }),
         ),
+        ("GET", ["threads", id]) => {
+            w.gmail_thread_gets += 1;
+            if req.query("format").as_deref() != Some("metadata")
+                || req.query("metadataHeaders").as_deref() != Some("X-NestAdmin-Id")
+            {
+                return Resp::Json(400, json!({ "error": { "status": "INVALID_ARGUMENT" } }));
+            }
+            if *id != "hilo-m1" {
+                return not_found();
+            }
+            // Solo las cabeceras pedidas. El borrador (DRAFT) lleva la marca y no confirma nada.
+            let marked = |own: &Option<String>| match own {
+                Some(own) => json!([{ "name": "X-NestAdmin-Id", "value": own }]),
+                None => json!([]),
+            };
+            let mut messages = vec![json!({
+                "id": "m1", "threadId": id, "labelIds": ["INBOX"],
+                "payload": { "headers": [] },
+            })];
+            for d in w.gmail_drafts.values() {
+                if d.thread_id.as_deref() == Some(*id) {
+                    messages.push(json!({
+                        "id": d.message_id, "threadId": id, "labelIds": ["DRAFT"],
+                        "payload": { "headers": marked(&d.own_id) },
+                    }));
+                }
+            }
+            for s in &w.gmail_sent {
+                if s.thread_id.as_deref() == Some(*id) {
+                    messages.push(json!({
+                        "id": s.id, "threadId": id, "labelIds": ["SENT"],
+                        "payload": { "headers": marked(&s.own_id) },
+                    }));
+                }
+            }
+            Resp::Json(200, json!({ "id": id, "messages": messages }))
+        }
         ("GET", ["messages", id]) => {
-            if let Some((id, rfc)) = w.gmail_sent.iter().find(|(s, _)| s == id) {
+            if let Some(s) = w.gmail_sent.iter().find(|s| s.id == *id) {
                 return Resp::Json(
                     200,
-                    json!({ "id": id, "labelIds": ["SENT"],
-                            "payload": { "headers": [{ "name": "Message-ID", "value": rfc }] } }),
+                    json!({ "id": s.id, "labelIds": ["SENT"],
+                            "payload": { "headers": [{ "name": "Message-ID", "value": s.rfc822 }] } }),
                 );
             }
             if w.gmail_drafts.values().any(|d| d.message_id == *id) {
@@ -374,19 +437,25 @@ fn gmail(req: &Req, path: &str, w: &mut World) -> Resp {
         }
         ("POST", ["drafts"]) => {
             let body: Value = serde_json::from_str(&req.body).unwrap();
-            let (rfc822, text) = parse_mime(body["message"]["raw"].as_str().unwrap());
+            let raw = body["message"]["raw"].as_str().unwrap();
+            let (_, text) = parse_mime(raw);
+            let thread_id = body["message"]["threadId"].as_str().map(str::to_owned);
             let n = w.created + 1;
             let (id, message_id) = (format!("r-{n}"), format!("dm-{n}"));
             w.gmail_drafts.insert(
                 id.clone(),
                 GmailDraft {
                     message_id: message_id.clone(),
-                    rfc822,
+                    thread_id: thread_id.clone(),
+                    own_id: mime_header(raw, "X-NestAdmin-Id"),
                     body: text,
                 },
             );
             after_create(w);
-            Resp::Json(200, json!({ "id": id, "message": { "id": message_id } }))
+            Resp::Json(
+                200,
+                json!({ "id": id, "message": { "id": message_id, "threadId": thread_id } }),
+            )
         }
         ("POST", ["drafts", "send"]) => {
             if w.fail_send {
@@ -395,9 +464,16 @@ fn gmail(req: &Req, path: &str, w: &mut World) -> Resp {
             let body: Value = serde_json::from_str(&req.body).unwrap();
             match w.gmail_drafts.remove(body["id"].as_str().unwrap()) {
                 Some(draft) => {
-                    // Gmail da al mensaje enviado un ID distinto del del borrador.
-                    let sent_id = format!("s-{}", w.gmail_sent.len() + 1);
-                    w.gmail_sent.push((sent_id.clone(), draft.rfc822));
+                    // Como Gmail: otro ID y otro `Message-ID` que el borrador; la marca
+                    // `X-NestAdmin-Id` y el hilo se conservan.
+                    let n = w.gmail_sent.len() + 1;
+                    let sent_id = format!("s-{n}");
+                    w.gmail_sent.push(GmailSent {
+                        id: sent_id.clone(),
+                        rfc822: format!("<CAF{n}@mail.gmail.com>"),
+                        own_id: draft.own_id,
+                        thread_id: draft.thread_id,
+                    });
                     w.sends.push(draft.body);
                     if std::mem::take(&mut w.drop_send) {
                         Resp::Drop
@@ -562,6 +638,15 @@ fn body(task: &Task) -> String {
 
 // ---- Pruebas ----
 
+/// En Gmail, el envío se confirmó por el hilo (`threads.get`) y no por el último recurso,
+/// la búsqueda `rfc822msgid:`, que con Gmail real no encuentra el mensaje enviado.
+fn assert_thread_path(world: &World, kind: Kind) {
+    if let Kind::Gmail = kind {
+        assert!(world.gmail_thread_gets > 0, "no se consultó el hilo");
+        assert_eq!(world.gmail_rfc_searches, 0, "se recurrió a rfc822msgid");
+    }
+}
+
 #[test]
 fn a_lost_send_response_and_a_restart_complete_the_task_without_resending() {
     for kind in REAL {
@@ -601,6 +686,7 @@ fn a_lost_send_response_and_a_restart_complete_the_task_without_resending() {
         let world = fixture.world();
         assert_eq!(world.sends, [proposal(1)], "{kind:?}: un solo envío");
         assert_eq!(world.created, 1);
+        assert_thread_path(&world, kind);
         drop(world);
         assert_eq!(
             statuses(&app, task.id),
@@ -878,6 +964,7 @@ fn a_new_text_after_a_lost_send_never_sends_a_second_version() {
         let world = fixture.world();
         assert_eq!(world.sends, [proposal(1)], "{kind:?}: un solo envío");
         assert_eq!(world.created, 1);
+        assert_thread_path(&world, kind);
     }
 }
 
@@ -945,6 +1032,12 @@ fn a_draft_deleted_by_the_user_needs_explicit_confirmation_before_a_new_one() {
         let result = review.result.unwrap();
         assert_eq!(result["recovery"]["needs_confirmation"], true, "{kind:?}");
         assert_eq!(result["recovery"]["error"], "not_found");
+        if let Kind::Gmail = kind {
+            assert!(
+                fixture.world().gmail_thread_gets > 0,
+                "se consultó el hilo antes de dar por no enviado"
+            );
+        }
 
         // Aprobar otra vez la misma versión no reenvía: falla visible con `not_found`.
         let again = app.approve(task.id, 1).unwrap();

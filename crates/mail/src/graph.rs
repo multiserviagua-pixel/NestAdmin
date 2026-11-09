@@ -228,6 +228,7 @@ impl MailProvider for Graph {
             draft_id: draft_id.to_owned(),
             message_id: None,
             rfc822_id: None,
+            thread_id: None,
         })
     }
 

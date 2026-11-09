@@ -122,7 +122,7 @@ En `tests/mail_accounts.rs`, la prueba de respuesta perdida en Graph termina aho
 ## Pendiente para completar T13
 
 - Microsoft 365 real: inicio de sesión, lectura y borradores hechos el 2026-11-07; envío aprobado hecho el 2026-11-09, recibido una vez en el destino, en su carpeta de spam (ver al final).
-- Gmail: corte real provocado el 2026-11-09: no hay reenvío, pero **la reconciliación por `Message-ID` propio (D41) no funciona**, porque Gmail sustituye esa cabecera al enviar (ver al final). Falta corregirla y repetir el corte.
+- Gmail: corte real provocado el 2026-11-09 desde la terminal. D41 no funcionaba, porque Gmail sustituye el `Message-ID` al enviar; corregido con D156 y comprobado con otro corte real (ver al final). Falta provocarlo desde la ventana de la aplicación.
 - Recorrido con una cuenta real desde la ventana: añadir la cuenta, consultar, aprobar un envío y desconectar. Requiere `correo-oauth.json` con los clientes del editor (D43).
 - Calidad de clasificación y borradores con correo real: sin medir.
 
@@ -190,3 +190,18 @@ No se ha provocado un corte real entre el envío y el recibo con esta cuenta.
 
 - **D41 no funciona con Gmail real.** Las pruebas `lost_send_is_confirmed_*` pasan porque el simulador conserva la cabecera, cosa que Gmail real no hace. El resultado es seguro en cuanto a que no reenvía, pero el envío nunca se confirma.
 - **Riesgo de duplicado por decisión humana.** Por el código, sin probarlo en la ventana: ese `not_found` lleva la tarea a revisión con `needs_confirmation` («ya no existe en el buzón y no consta enviado») y ofrece «Confirmo que no se envió: preparar uno nuevo». Tras un corte real en Gmail, ese texto aparecería aunque el correo sí haya salido; si el usuario confirma y aprueba, se enviaría otra respuesta.
+
+### Después de corregirlo (D156)
+
+Mismo procedimiento, con otro mensaje sintético enviado a sí misma y con el cambio de D156 aplicado.
+
+| Paso | Resultado |
+|---|---|
+| Corte | Salida con código 3. El registro local queda con 1 envío, 0 recibos y `thread_id`. |
+| Reanudación | Confirma el envío con el ID real del mensaje, a los 10 s. Repetir la clave devuelve el mismo recibo, sin segundo envío. El registro queda con 1 recibo. |
+| Efecto en el buzón | El hilo tiene el original y una sola respuesta, con etiqueta `SENT`. |
+| Cabeceras del enviado | `Message-Id` sustituido por Gmail y `X-NestAdmin-Id` conservada con el identificador propio. |
+
+Las pruebas simuladas pasaban antes con un comportamiento que Gmail no tiene: los simuladores de `crates/mail` y `crates/app` conservaban la cabecera. Ahora cambian el ID y el `Message-ID` al enviar, como se ha observado en Gmail real, y las pruebas de reproceso (D50) pasan por el hilo.
+
+**Sin cubrir:** el corte es un `process::exit` justo después de la llamada a `drafts.send` en la herramienta de terminal, no un corte durante la petición ni en la ventana de la aplicación. El registro del primer corte, anterior a D156, sigue sin recibo; es el límite que anota D156.

@@ -1,5 +1,6 @@
 //! Lógica común a todos los proveedores: borradores idempotentes por clave, envío único y
-//! reconciliación por el ID del borrador (D33; en Gmail, también por `Message-ID`, D41). Cada
+//! reconciliación por el ID del borrador (D33; en Gmail, también por el hilo y la cabecera
+//! `X-NestAdmin-Id`, D41). Cada
 //! proveedor solo implementa [`MailProvider`].
 
 use std::path::Path;
@@ -17,9 +18,13 @@ pub struct CreatedDraft {
     pub draft_id: String,
     /// ID del mensaje del borrador cuando no coincide con el del borrador (Gmail).
     pub message_id: Option<String>,
-    /// Cabecera `Message-ID` que NestAdmin puso al borrador, para encontrarlo una vez enviado
-    /// aunque el proveedor le haya dado otro ID (Gmail).
+    /// Identificador propio que NestAdmin puso al borrador (cabeceras `X-NestAdmin-Id` y
+    /// `Message-ID`), para encontrarlo una vez enviado aunque el proveedor le haya dado otro
+    /// ID (Gmail).
     pub rfc822_id: Option<String>,
+    /// Hilo del borrador (Gmail): Gmail cambia el `Message-ID` y el ID al enviar, pero el
+    /// mensaje enviado sigue en el hilo y conserva `X-NestAdmin-Id`.
+    pub thread_id: Option<String>,
 }
 
 /// Estado de un borrador en el proveedor.
@@ -184,6 +189,7 @@ impl<P: MailProvider> MailConnector for Mailbox<P> {
             draft_id: created.draft_id.clone(),
             provider_message_id: created.message_id,
             rfc822_id: created.rfc822_id,
+            thread_id: created.thread_id,
         };
         self.state.mutate(|d| d.drafts.push(record))?;
         Ok(created.draft_id)
