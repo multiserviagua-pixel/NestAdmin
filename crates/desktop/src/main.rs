@@ -544,6 +544,31 @@ fn reject<R: Runtime>(
     Ok(task)
 }
 
+/// Archivar (D159): cierra un correo en revisión sin enviar nada ni contar como rechazo.
+#[tauri::command]
+fn archive<R: Runtime>(
+    shared: State<'_, SharedState>,
+    handle: AppHandle<R>,
+    id: i64,
+) -> CmdResult<Task> {
+    let task = shared.app()?.archive(id).map_err(text)?;
+    changed(&handle);
+    Ok(task)
+}
+
+/// Redactar respuesta (D159): crea la tarea que solo redacta y la pone en marcha.
+#[tauri::command]
+fn redraft<R: Runtime>(
+    shared: State<'_, SharedState>,
+    handle: AppHandle<R>,
+    id: i64,
+) -> CmdResult<Task> {
+    let task = shared.app()?.redraft(id).map_err(text)?;
+    shared.wake();
+    changed(&handle);
+    Ok(task)
+}
+
 #[tauri::command]
 fn retry<R: Runtime>(
     shared: State<'_, SharedState>,
@@ -2061,6 +2086,8 @@ fn configure<R: Runtime>(builder: Builder<R>, prepare_only: bool) -> Builder<R> 
             confirm_not_sent,
             edit_draft,
             reject,
+            archive,
+            redraft,
             retry,
             rules,
             rule_views,

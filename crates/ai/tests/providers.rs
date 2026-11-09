@@ -223,7 +223,13 @@ fn ollama_extraction_sends_schema_without_reasoning_and_reports_model() {
     assert_eq!(body["options"]["temperature"], 0);
     // Los seis campos más la lista de las demás facturas del documento (D68).
     assert_eq!(body["format"]["required"].as_array().unwrap().len(), 7);
-    assert_eq!(body["messages"][1]["content"], "texto sintético");
+    // El documento viaja entre marcadores, como dato y no como orden (D160).
+    assert_eq!(
+        body["messages"][1]["content"],
+        "<<<DOCUMENTO>>>
+texto sintético
+<<<FIN>>>"
+    );
 
     let raw = parse_extraction(&result.output).unwrap();
     assert_eq!(raw.tax, None, "un null del modelo es un dato ausente");

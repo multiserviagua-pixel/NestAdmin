@@ -86,6 +86,52 @@ impl Signal {
     }
 }
 
+/// Ruta local de un correo nuevo (D157, D161 aún sin preferencias): lo decide el código, sin IA.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Route {
+    /// Aviso de entrega fallida: revisión sin IA ni borrador.
+    Rebote,
+    /// Señal fuerte: se cierra como informativo sin IA.
+    Informativo,
+    /// Sin señal fuerte: sigue el flujo normal con la IA.
+    Ia,
+}
+
+impl Route {
+    /// Código estable que se guarda en `triage.route` (y que usa el corpus de triaje).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Route::Rebote => "rebote",
+            Route::Informativo => "informativo",
+            Route::Ia => "ia",
+        }
+    }
+}
+
+/// Rebote antes que señal fuerte; una señal débil sola no oculta.
+pub fn route(signals: &[Signal]) -> Route {
+    if signals.iter().any(|s| s.is_bounce()) {
+        Route::Rebote
+    } else if signals.iter().any(|s| s.is_strong()) {
+        Route::Informativo
+    } else {
+        Route::Ia
+    }
+}
+
+/// Ruta de un mensaje a partir de su remitente y de los códigos guardados (`Message.signals`).
+/// Con `None` (sin comprobar) solo cuenta la dirección, que siempre se puede recalcular; un
+/// código desconocido se ignora. Devuelve también las señales consideradas, ya ordenadas.
+pub fn route_of_message(from: Option<&str>, codes: Option<&[String]>) -> (Route, Vec<Signal>) {
+    let mut found = address_signals(from);
+    if let Some(codes) = codes {
+        found.extend(codes.iter().filter_map(|c| Signal::from_code(c)));
+    }
+    found.sort();
+    found.dedup();
+    (route(&found), found)
+}
+
 /// Códigos de texto de una lista de señales.
 pub fn codes(signals: &[Signal]) -> Vec<String> {
     signals.iter().map(|s| s.code().to_owned()).collect()
@@ -366,5 +412,32 @@ mod tests {
             assert_eq!(n, 1, "{} en una sola clase", s.code());
         }
         assert_eq!(Signal::from_code("otra"), None);
+    }
+
+    #[test]
+    fn routes_follow_the_precedence_and_unchecked_messages_use_the_address() {
+        let codes = |c: &[&str]| c.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>();
+        let route_of = |from: &str, c: Option<&[String]>| route_of_message(Some(from), c).0;
+        // Una señal débil sola no oculta; la fuerte sí; el rebote manda sobre la fuerte.
+        assert_eq!(route_of("a@a.test", Some(&codes(&["list_id"]))), Route::Ia);
+        assert_eq!(
+            route_of("a@a.test", Some(&codes(&["auto_submitted", "list_id"]))),
+            Route::Informativo
+        );
+        assert_eq!(
+            route_of(
+                "a@a.test",
+                Some(&codes(&["auto_submitted", "null_return_path"]))
+            ),
+            Route::Rebote
+        );
+        // Sin comprobar, la dirección se recalcula; sin señal, a la IA.
+        assert_eq!(route_of("no-reply@a.test", None), Route::Informativo);
+        assert_eq!(route_of("mailer-daemon@a.test", None), Route::Rebote);
+        assert_eq!(route_of("ana@a.test", None), Route::Ia);
+        // Un código desconocido no cuenta; un mensaje sin remitente ni señales va a la IA.
+        assert_eq!(route_of("a@a.test", Some(&codes(&["otro"]))), Route::Ia);
+        assert_eq!(route_of_message(None, None).0, Route::Ia);
+        assert_eq!(Route::Rebote.as_str(), "rebote");
     }
 }

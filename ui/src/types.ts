@@ -71,6 +71,8 @@ export interface Simulation {
   skipped_without_result: number;
   /** Facturas sin la comprobación local de moneda (tareas antiguas). */
   without_currency_check: number;
+  /** Correos sin la comprobación de correo automático (tareas antiguas): irían a revisión. */
+  without_signal_check?: number;
   would_automate: number;
   would_review: Record<string, number>;
   overlaps: number;
@@ -311,6 +313,8 @@ export interface AccountFetch {
   account: string;
   read: number;
   added: number;
+  /** Mensajes nuevos que la ruta local cerró como informativos, sin IA (D157). */
+  informative?: number;
   error: MailIssue | null;
   attachments: AttachmentFetch;
 }

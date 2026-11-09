@@ -522,6 +522,14 @@ export const REASON_CODES = [
   "foreign_currency",
   "currency_not_checked",
   "currency_not_shown",
+  "automatic_sender",
+  "signals_not_checked",
+  "recipient_automatic",
+  "no_reply_needed",
+  "redraft",
+  "empty_draft",
+  "draft_not_checked",
+  "draft_flagged",
 ] as const;
 
 export type ReasonCode = (typeof REASON_CODES)[number];
@@ -565,6 +573,22 @@ export function reasonText(code: string, facts?: Record<string, unknown> | null)
       return "no consta la comprobación de moneda; reprocese o revise";
     case "currency_not_shown":
       return "el documento no muestra la moneda; no se puede comprobar que sea en euros";
+    case "automatic_sender":
+      return "el correo parece automático; ninguna regla responde a un remitente automático";
+    case "signals_not_checked":
+      return "no consta la comprobación de correo automático; reprocese o revise";
+    case "recipient_automatic":
+      return "el destinatario del borrador parece una dirección automática";
+    case "no_reply_needed":
+      return "la IA considera que el correo no requiere respuesta";
+    case "redraft":
+      return "la respuesta se pidió a mano; una persona debe revisarla siempre";
+    case "empty_draft":
+      return "el borrador está vacío";
+    case "draft_not_checked":
+      return "no consta la comprobación del borrador; reprocese o revise";
+    case "draft_flagged":
+      return "el borrador contiene enlaces, direcciones, teléfonos o IBAN que no se pueden dar por buenos; compruébelos";
     default:
       return `motivo no reconocido (${code})`;
   }
@@ -582,6 +606,7 @@ export interface SimulationLike {
   limit: number;
   skipped_without_result: number;
   without_currency_check: number;
+  without_signal_check?: number;
   would_automate: number;
   would_review: Record<string, number>;
   overlaps: number;
@@ -653,6 +678,13 @@ export function simulationSummary(sim: SimulationLike, actionKind: string): Simu
       sim.without_currency_check === 1
         ? `1 ${word(1)} no se pudo comprobar en cuanto a la moneda: iría a revisión.`
         : `${sim.without_currency_check} ${word(sim.without_currency_check)} no se pudieron comprobar en cuanto a la moneda: irían a revisión.`,
+    );
+  const unchecked = sim.without_signal_check ?? 0;
+  if (unchecked > 0)
+    notes.push(
+      unchecked === 1
+        ? "1 correo no se pudo comprobar en cuanto a si es automático: iría a revisión."
+        : `${unchecked} correos no se pudieron comprobar en cuanto a si son automáticos: irían a revisión.`,
     );
   if (sim.truncated) notes.push(`Solo se han mirado las últimas ${sim.limit} tareas: hay más antiguas que no se han comprobado.`);
   if (sim.skipped_without_result > 0)

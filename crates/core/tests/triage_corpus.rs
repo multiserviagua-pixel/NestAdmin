@@ -1,5 +1,5 @@
-//! Paridad de la capa local (D157) con el corpus de triaje (D164): la ruta que calcula
-//! `mail_signals` debe coincidir con la esperada en `evaluation/data/expected/triage.json`,
+//! Paridad de la capa local (D157) con el corpus de triaje (D164): la ruta de producción
+//! (`mail_signals::route`) debe coincidir con la esperada en `evaluation/data/expected/triage.json`,
 //! que se etiquetó a mano. El evaluador de Python (`evaluate_triage.py`) reimplementa la misma
 //! lógica y lo comprueba contra las mismas etiquetas, de modo que ambos lados quedan atados a
 //! la referencia y no uno al otro.
@@ -7,7 +7,7 @@
 use std::fs;
 use std::path::PathBuf;
 
-use nestadmin_core::mail_signals::{detect, Signal};
+use nestadmin_core::mail_signals::{detect, route};
 use serde_json::Value;
 
 fn corpus(kind: &str) -> Vec<Value> {
@@ -16,17 +16,6 @@ fn corpus(kind: &str) -> Vec<Value> {
         .join(kind)
         .join("triage.json");
     serde_json::from_str(&fs::read_to_string(path).unwrap()).unwrap()
-}
-
-/// Rebote antes que señal fuerte; una señal débil sola no oculta.
-fn route(signals: &[Signal]) -> &'static str {
-    if signals.iter().any(|s| s.is_bounce()) {
-        "rebote"
-    } else if signals.iter().any(|s| s.is_strong()) {
-        "informativo"
-    } else {
-        "ia"
-    }
 }
 
 #[test]
@@ -47,7 +36,7 @@ fn local_route_matches_the_hand_labelled_corpus() {
             .map(|h| (h["name"].as_str().unwrap(), h["value"].as_str().unwrap()))
             .collect();
         let signals = detect(input["from"].as_str(), Some(&headers));
-        let got = route(&signals);
+        let got = route(&signals).as_str();
         assert_eq!(got, gold["expected"]["route"], "{id}");
         if got == "informativo" && gold["expected"]["needs_reply"] == true {
             hidden_false_negatives += 1;

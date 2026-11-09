@@ -107,6 +107,10 @@ export const api = {
   confirmNotSent: (id: number) => invoke<Task>("confirm_not_sent", { id }),
   editDraft: (id: number, body: string) => invoke<Task>("edit_draft", { id, body }),
   reject: (id: number) => invoke<Task>("reject", { id }),
+  /** Cierra un correo en revisión sin enviar nada ni contar como rechazo (D159). */
+  archive: (id: number) => invoke<Task>("archive", { id }),
+  /** Crea la tarea que solo redacta la respuesta a un informativo, un rebote o un correo sin respuesta necesaria (D159). */
+  redraft: (id: number) => invoke<Task>("redraft", { id }),
   retry: (id: number) => invoke<Task>("retry", { id }),
   rules: () => invoke<Rule[]>("rules"),
   ruleViews: () => invoke<RuleView[]>("rule_views"),

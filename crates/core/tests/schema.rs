@@ -28,7 +28,7 @@ const DROP_SALES: &str = "DROP TABLE received_delivery_notes; DROP TABLE payment
 
 /// Quita lo que añadió la migración 4 (panel de reglas), como si la base la hubiera creado
 /// la versión anterior.
-const DROP_PANEL: &str = "DROP TABLE rule_settings; DROP TABLE rule_suggestions; DROP TABLE rule_signals; DROP TABLE rule_evaluations; DROP TABLE rule_meta; ALTER TABLE actions DROP COLUMN rule_id; ALTER TABLE actions DROP COLUMN rule_version;";
+const DROP_PANEL: &str = "DROP TABLE rule_settings; DROP TABLE rule_suggestions; DROP TABLE rule_signals; DROP TABLE rule_evaluations; DROP TABLE rule_meta; ALTER TABLE actions DROP COLUMN rule_id; ALTER TABLE actions DROP COLUMN rule_version; DROP INDEX IF EXISTS tasks_redraft_of;";
 
 fn has_table(path: &std::path::Path, name: &str) -> bool {
     rusqlite::Connection::open(path)
@@ -106,7 +106,7 @@ fn migrating_from_schema_2_adds_sales_tables_and_keeps_a_copy() {
 
     let store = Store::open(&path).unwrap();
     assert_eq!(store.schema_version().unwrap(), SCHEMA_VERSION);
-    assert_eq!(SCHEMA_VERSION, 4);
+    assert_eq!(SCHEMA_VERSION, 5);
     assert_eq!(
         store.audit_log().unwrap().len(),
         1,
@@ -165,7 +165,7 @@ fn migrating_from_schema_3_adds_the_rules_panel_and_keeps_old_actions() {
     drop(conn);
 
     let store = Store::open(&path).unwrap();
-    assert_eq!(store.schema_version().unwrap(), 4);
+    assert_eq!(store.schema_version().unwrap(), SCHEMA_VERSION);
     drop(store);
     for table in [
         "rule_meta",
@@ -316,4 +316,40 @@ fn newer_schema_error_points_to_the_backup() {
         .contains(&format!("nestadmin.esquema-{SCHEMA_VERSION}.db")));
     // Rechazarla no la modifica.
     assert_eq!(user_version(&path), SCHEMA_VERSION + 1);
+}
+
+/// La migración 5 añade el índice único de «Redactar respuesta» (D159), con copia previa del
+/// esquema 4, sin tocar las tareas que ya existen y sin romper entradas que no son JSON.
+#[test]
+fn migrating_from_schema_4_adds_the_redraft_index_and_keeps_a_copy() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("nestadmin.db");
+    drop(Store::open(&path).unwrap());
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    conn.execute_batch("DROP INDEX tasks_redraft_of; PRAGMA user_version = 4;")
+        .unwrap();
+    for (id, input) in [(1, "{}"), (2, "no es json"), (3, r#"{"redraft_of": 1}"#)] {
+        conn.execute(
+            "INSERT INTO tasks (id, kind, input_ref, state, created_at, updated_at) VALUES (?1, 'email', ?2, 'queued', 1, 1)",
+            rusqlite::params![id, input],
+        )
+        .unwrap();
+    }
+    drop(conn);
+
+    let mut store = Store::open(&path).unwrap();
+    assert_eq!(store.schema_version().unwrap(), SCHEMA_VERSION);
+    let backup = backup_path(&path, 4);
+    assert_eq!(backup.file_name().unwrap(), "nestadmin.esquema-4.db");
+    assert_eq!(user_version(&backup), 4);
+    // Lo anterior sigue ahí.
+    assert_eq!(store.all_tasks().unwrap().len(), 3);
+    // Una entrada que no es JSON se acepta; un segundo `redraft_of` vivo, no.
+    store
+        .enqueue("email", "otra entrada que no es json")
+        .unwrap();
+    assert!(store.enqueue("email", r#"{"redraft_of": 1}"#).is_err());
+    // Cancelada la primera, deja el sitio libre.
+    store.cancel(3).unwrap();
+    store.enqueue("email", r#"{"redraft_of": 1}"#).unwrap();
 }

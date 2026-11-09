@@ -294,6 +294,7 @@ function fetchMail(): FetchReport {
             account: a.id,
             read: Math.min(mailLimit, a.provider === "simulator" ? 5 : 2),
             added: 0,
+            informative: 0,
             error: null,
             attachments: { imported: 0, skipped: [], failed: [] },
           }
@@ -568,8 +569,11 @@ task("email", { message_id: "simulador:M-0005", account: "simulador" }, "awaitin
     to: ["administracion@nestadmin.test"],
     body: "El horario de recogida cambia a partir del lunes.",
     date: "2026-10-06",
+    signals: [],
   },
   category: "otros",
+  needs_reply: true,
+  draft_flags: [],
   draft: {
     to: ["logistica@transportes-delta.test"],
     subject: "Re: Cambio de horario",
@@ -603,8 +607,11 @@ task("email", { message_id: "microsoft-1:AAMk-sintetico-2", account: "microsoft-
     to: ["oficina@empresa.test", "compras@empresa.test"],
     body: "¿Podrían confirmar la fecha de entrega del pedido 2231?",
     date: "2026-11-04T09:12:00Z",
+    signals: [],
   },
   category: "consulta_pago",
+  needs_reply: true,
+  draft_flags: [],
   draft: {
     to: ["cliente.beta@ejemplo.test"],
     subject: "Re: Consulta sobre el pedido 2231",
@@ -626,8 +633,11 @@ task("email", { message_id: "google-1:18c2-sintetico-7", account: "google-1" }, 
     subject: "Solicitud de duplicado de factura",
     from: "compras@cliente-delta.test",
     body: "¿Pueden reenviarnos el duplicado de la factura FS-2026-011?",
+    signals: [],
   },
   category: "solicitud_factura",
+  needs_reply: true,
+  draft_flags: [],
   draft: {
     to: ["compras@cliente-delta.test"],
     subject: "Re: Solicitud de duplicado de factura",
@@ -689,8 +699,11 @@ task("email", { message_id: "google-1:18c2-sintetico-9", account: "google-1" }, 
     to: ["oficina@empresa.test"],
     body: "Buenos días: ¿pueden enviarme otra copia de la factura FS-2026-020?",
     date: "2026-11-05T10:30:00Z",
+    signals: [],
   },
   category: "solicitud_factura",
+  needs_reply: true,
+  draft_flags: [],
   draft: {
     to: ["lucia.perez@gmail.com"],
     subject: "Re: Duplicado de la factura FS-2026-020",
@@ -1766,6 +1779,40 @@ const handlers: Record<string, (a: any, options?: any) => unknown> = {
     return t;
   },
   reject: ({ id }) => Object.assign(reviewable(id), { state: "cancelled" }),
+  // Archivar (D159): cierra un correo en revisión sin enviar nada y sin contar como rechazo.
+  archive: ({ id }) => {
+    const t = reviewable(id);
+    if (t.kind !== "email") throw "solo se archivan correos";
+    const { action: _action, ...rest } = t.result ?? {};
+    audit.push({ task_id: id, action: "archive", status: "archived", authorization: null, detail: "{}" });
+    return Object.assign(t, { state: "completed", result: { ...rest, archived: true } });
+  },
+  // Redactar respuesta (D159): una sola tarea nueva por correo de origen.
+  redraft: ({ id }) => {
+    const source = find(id);
+    const existing = tasks.find((t) => t.state !== "cancelled" && t.result?.redraft_of === id);
+    if (existing) return existing;
+    const r = source.result ?? {};
+    const noAnswer = r.triage?.route === "rebote" || r.needs_reply === false;
+    const ok = source.state === "completed" ? r.triage?.route === "informativo" || (r.archived === true && noAnswer) : source.state === "awaiting_review" && noAnswer;
+    if (source.kind !== "email" || !ok) throw "esta tarea no admite pedir una respuesta: solo un informativo, un rebote o un correo sin respuesta necesaria";
+    if (source.state === "awaiting_review") {
+      const { action: _action, ...rest } = r;
+      Object.assign(source, { state: "completed", result: { ...rest, archived: true } });
+    }
+    const from = String(r.message?.from ?? "");
+    return task("email", { message_id: r.message?.id, redraft_of: id }, "awaiting_review", {
+      type: "email",
+      version: 1,
+      origin: r.origin,
+      message: r.message,
+      needs_reply: true,
+      redraft_of: id,
+      draft: { to: from ? [from] : [], subject: r.message?.subject ? `Re: ${r.message.subject}` : null, body: "Buenos días:\n\nGracias por su mensaje; le responderemos en breve.\n\nUn saludo." },
+      draft_flags: [],
+      action: { kind: "send_draft" },
+    });
+  },
   retry: ({ id }) => {
     const t = find(id);
     if (t.state !== "failed") throw "solo se reintentan tareas fallidas";
@@ -1894,6 +1941,7 @@ const handlers: Record<string, (a: any, options?: any) => unknown> = {
       truncated: ofKind.length > max,
       skipped_without_result: 0,
       without_currency_check: 0,
+      without_signal_check: 0,
       would_automate: 0,
       would_review: {},
       overlaps: 0,
@@ -1913,6 +1961,7 @@ const handlers: Record<string, (a: any, options?: any) => unknown> = {
       sim.considered++;
       const label = kind === "invoice" ? (r.document ?? null) : (r.message?.subject ?? null);
       if (kind === "invoice" && foreignOf(r) === null) sim.without_currency_check++;
+      if (kind === "email" && !Array.isArray(r.message?.signals)) sim.without_signal_check = (sim.without_signal_check ?? 0) + 1;
       const push = (outcome: SimulationItem["outcome"], reason_code: string | null, explanation: string, overlapping_rules: string[] = []) =>
         items.push({ task_id: t.id, label, outcome, reason_code, explanation, overlapping_rules });
       const review = (code: string, text: string) => {
@@ -1945,6 +1994,13 @@ const handlers: Record<string, (a: any, options?: any) => unknown> = {
       else if (kind === "invoice" && foreign && foreign.length) review("foreign_currency", `el documento menciona ${foreign.join(", ")}; hoy la aplicación solo registra facturas en euros`);
       else if (kind === "invoice" && r.currency_evidence?.euro !== true) review("currency_not_shown", "el documento no muestra la moneda; no se puede comprobar que sea en euros");
       else if (kind === "email" && !(r.draft?.to ?? []).length) review("no_recipient", "el borrador no tiene destinatario");
+      else if (kind === "email" && r.needs_reply === false) review("no_reply_needed", "la IA considera que el correo no requiere respuesta");
+      else if (kind === "email" && r.redraft_of != null) review("redraft", "la respuesta se pidió a mano; una persona debe revisarla siempre");
+      else if (kind === "email" && !String(r.draft?.body ?? "").trim()) review("empty_draft", "el borrador está vacío");
+      else if (kind === "email" && !Array.isArray(r.message?.signals)) review("signals_not_checked", "no consta la comprobación de correo automático; reprocese o revise");
+      else if (kind === "email" && r.message.signals.length) review("automatic_sender", "el correo parece automático; ninguna regla responde a un remitente automático");
+      else if (kind === "email" && !Array.isArray(r.draft_flags)) review("draft_not_checked", "no consta la comprobación del borrador; reprocese o revise");
+      else if (kind === "email" && r.draft_flags.length) review("draft_flagged", "el borrador contiene enlaces, direcciones, teléfonos o IBAN que no se pueden dar por buenos; compruébelos");
       else {
         const others = live
           .filter((o) => matchRule(kind, { conditions: o.conditions, ack: metaOf(o.id).any_sender_ack_at !== null }, r).matches)
@@ -2267,6 +2323,8 @@ const mutating = new Set([
   "confirm_not_sent",
   "edit_draft",
   "reject",
+  "archive",
+  "redraft",
   "retry",
   "create_rule",
   "rename_rule",

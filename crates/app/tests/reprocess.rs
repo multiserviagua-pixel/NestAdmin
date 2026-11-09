@@ -286,6 +286,9 @@ fn graph(req: &Req, path: &str, w: &mut World) -> Resp {
                 "id": "g1", "subject": "Solicitud de factura",
                 "from": { "emailAddress": { "address": "facturas@proveedor-g.test" } },
                 "body": { "contentType": "text", "content": "¿Pueden enviarnos la factura?" },
+                // Con cabeceras, Graph comprueba las señales de correo automático (D157); sin
+                // ellas ninguna regla enviaría (D158).
+                "internetMessageHeaders": [{ "name": "Content-Type", "value": "text/plain" }],
             }] }),
         ),
         ("POST", ["me", "messages", "g1", "createReply"]) => {

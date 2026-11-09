@@ -174,8 +174,11 @@ pub struct AccountFetch {
     pub account: String,
     /// Mensajes leídos en esta consulta (como mucho, el límite).
     pub read: usize,
-    /// Mensajes nuevos encolados.
+    /// Mensajes nuevos que esperan a la IA o a una persona (los informativos no cuentan).
     pub added: usize,
+    /// Mensajes nuevos que la ruta local cerró como informativos, sin IA (D157).
+    #[serde(default)]
+    pub informative: usize,
     pub error: Option<MailIssue>,
     /// Adjuntos de los mensajes leídos.
     pub attachments: AttachmentFetch,

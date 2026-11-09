@@ -69,6 +69,8 @@ CREATE TABLE rules (
     include_str!("migrations/003_sales.sql"),
     // Panel de reglas: nombre, archivado, evaluaciones, señales y regla de cada acción.
     include_str!("migrations/004_rules_panel.sql"),
+    // Redactar respuesta: un solo borrador vivo por correo de origen (D159).
+    include_str!("migrations/005_redraft.sql"),
 ];
 
 /// Base de datos local. Cada operación pública se confirma en una transacción,

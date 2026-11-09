@@ -3,7 +3,7 @@ use std::str::FromStr;
 
 use rusqlite::{params, OptionalExtension, Row, Transaction};
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{json, Value};
 
 use crate::error::{CoreError, Result};
 use crate::store::{now_ms, Store};
@@ -180,6 +180,38 @@ fn transition(
     load(tx, id)
 }
 
+/// Inserta una tarea que nace ya en `state` con su resultado, y su transición desde `NULL`, en
+/// la transacción dada. No cambia `can_move_to`: es una creación, no una transición.
+fn insert_born(
+    tx: &Transaction<'_>,
+    kind: &str,
+    input_ref: &str,
+    state: TaskState,
+    result: &Value,
+    reason: &str,
+) -> Result<Task> {
+    let now = now_ms();
+    tx.execute(
+        "INSERT INTO tasks (kind, input_ref, state, result, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?5)",
+        params![kind, input_ref, state.as_str(), serde_json::to_string(result)?, now],
+    )?;
+    let id = tx.last_insert_rowid();
+    tx.execute(
+        "INSERT INTO task_transitions (task_id, from_state, to_state, reason, at) VALUES (?1, NULL, ?2, ?3, ?4)",
+        params![id, state.as_str(), reason, now],
+    )?;
+    load(tx, id)
+}
+
+/// Evento del historial sin contenido (mismo formato que `record_event`) dentro de una transacción.
+fn insert_event(tx: &Transaction<'_>, task_id: i64, event: (&str, &str, &Value)) -> Result<()> {
+    tx.execute(
+        "INSERT INTO audit_log (at, task_id, action, status, authorization, detail) VALUES (?1, ?2, ?3, ?4, NULL, ?5)",
+        params![now_ms(), task_id, event.0, event.1, event.2.to_string()],
+    )?;
+    Ok(())
+}
+
 impl Store {
     pub fn enqueue(&mut self, kind: &str, input_ref: &str) -> Result<Task> {
         let tx = self.conn.transaction()?;
@@ -196,6 +228,142 @@ impl Store {
         let task = load(&tx, id)?;
         tx.commit()?;
         Ok(task)
+    }
+
+    /// Crea una tarea ya `completed` con su resultado y su transición desde `NULL`, en una sola
+    /// transacción (D157): un corte deja la tarea completa o ninguna, nunca una tarea en cola
+    /// que otro paso pudiera llevar a la IA. Solo para tareas que no tienen nada que ejecutar.
+    pub fn enqueue_closed(
+        &mut self,
+        kind: &str,
+        input_ref: &str,
+        result: &Value,
+        reason: &str,
+    ) -> Result<Task> {
+        let tx = self.conn.transaction()?;
+        let task = insert_born(&tx, kind, input_ref, TaskState::Completed, result, reason)?;
+        tx.commit()?;
+        Ok(task)
+    }
+
+    /// Como `enqueue_closed`, pero la tarea nace pendiente de revisión (un rebote, D157): no pasa
+    /// por la cola ni por la IA.
+    pub fn enqueue_review(
+        &mut self,
+        kind: &str,
+        input_ref: &str,
+        result: &Value,
+        reason: &str,
+    ) -> Result<Task> {
+        let tx = self.conn.transaction()?;
+        let task = insert_born(
+            &tx,
+            kind,
+            input_ref,
+            TaskState::AwaitingReview,
+            result,
+            reason,
+        )?;
+        tx.commit()?;
+        Ok(task)
+    }
+
+    /// Completa una tarea pendiente de revisión con ese resultado y deja un evento del historial
+    /// sin contenido, en la misma transacción («Archivar», D159).
+    pub fn complete_noting(
+        &mut self,
+        id: i64,
+        result: &Value,
+        reason: &str,
+        event: (&str, &str, &Value),
+    ) -> Result<Task> {
+        let tx = self.conn.transaction()?;
+        let task = transition(&tx, id, TaskState::Completed, reason, Some(result), None)?;
+        insert_event(&tx, id, event)?;
+        tx.commit()?;
+        Ok(task)
+    }
+
+    /// La tarea de «Redactar respuesta» (D159) cuya entrada lleva `redraft_of = source`, si hay una
+    /// que no esté cancelada.
+    pub fn redraft_of(&self, source: i64) -> Result<Option<Task>> {
+        Ok(self
+            .conn
+            .query_row(
+                &format!(
+                    "SELECT {TASK_COLUMNS} FROM tasks
+                     WHERE CASE WHEN json_valid(input_ref) THEN json_extract(input_ref, '$.redraft_of') END = ?1
+                       AND state <> 'cancelled' ORDER BY id LIMIT 1"
+                ),
+                [source],
+                task_from_row,
+            )
+            .optional()?)
+    }
+
+    /// Crea la tarea de «Redactar respuesta» y, si `archive` lleva el resultado, cierra la de origen
+    /// (que debe estar pendiente de revisión) en la misma transacción. Idempotente: si ya hay una
+    /// tarea de redacción viva para ese origen, la devuelve (`false`) sin crear otra ni tocar el
+    /// origen; el índice único de la migración 005 impide el duplicado aunque dos llamadas coincidan.
+    pub fn enqueue_redraft(
+        &mut self,
+        source: i64,
+        input_ref: &str,
+        archive: Option<&Value>,
+    ) -> Result<(Task, bool)> {
+        if let Some(existing) = self.redraft_of(source)? {
+            return Ok((existing, false));
+        }
+        match self.insert_redraft(source, input_ref, archive) {
+            // Otra conexión se adelantó entre la consulta y la inserción: el índice único lo
+            // impidió y la transacción se deshizo (el origen sigue como estaba). Se devuelve la
+            // tarea que ganó.
+            Err(CoreError::Storage(rusqlite::Error::SqliteFailure(error, message)))
+                if error.code == rusqlite::ErrorCode::ConstraintViolation =>
+            {
+                match self.redraft_of(source)? {
+                    Some(existing) => Ok((existing, false)),
+                    None => Err(CoreError::Storage(rusqlite::Error::SqliteFailure(
+                        error, message,
+                    ))),
+                }
+            }
+            other => other,
+        }
+    }
+
+    fn insert_redraft(
+        &mut self,
+        source: i64,
+        input_ref: &str,
+        archive: Option<&Value>,
+    ) -> Result<(Task, bool)> {
+        let tx = self.conn.transaction()?;
+        if let Some(result) = archive {
+            transition(
+                &tx,
+                source,
+                TaskState::Completed,
+                "archivada al pedir una respuesta",
+                Some(result),
+                None,
+            )?;
+            insert_event(&tx, source, ("archive", "archived", &json!({})))?;
+        }
+        let now = now_ms();
+        tx.execute(
+            "INSERT INTO tasks (kind, input_ref, state, created_at, updated_at) VALUES ('email', ?1, 'queued', ?2, ?2)",
+            params![input_ref, now],
+        )?;
+        let id = tx.last_insert_rowid();
+        tx.execute(
+            "INSERT INTO task_transitions (task_id, from_state, to_state, reason, at) VALUES (?1, NULL, 'queued', 'redacción pedida', ?2)",
+            params![id, now],
+        )?;
+        let task = load(&tx, id)?;
+        insert_event(&tx, id, ("redraft", "queued", &json!({ "of": source })))?;
+        tx.commit()?;
+        Ok((task, true))
     }
 
     pub fn task(&mut self, id: i64) -> Result<Task> {

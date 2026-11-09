@@ -100,6 +100,9 @@ pub struct Simulation {
     /// Facturas sin la comprobación local de moneda (tareas anteriores a D127): no se vuelve
     /// a leer su texto y, para una regla de registro que coincida, van a revisión.
     pub without_currency_check: usize,
+    /// Correos sin la comprobación de señales de correo automático (tareas anteriores a D157, o
+    /// un proveedor sin cabeceras): con cualquier regla de envío irían a revisión (D158).
+    pub without_signal_check: usize,
     pub would_automate: usize,
     /// Tareas que coinciden pero irían a revisión, por código de motivo.
     pub would_review: BTreeMap<String, usize>,
@@ -124,6 +127,7 @@ impl Simulation {
             truncated: false,
             skipped_without_result: 0,
             without_currency_check: 0,
+            without_signal_check: 0,
             would_automate: 0,
             would_review: BTreeMap::new(),
             overlaps: 0,
@@ -492,7 +496,13 @@ impl App {
             .into_iter()
             // Un correo de la primera lectura no tiene remitente ni borrador: no dice nada sobre
             // una regla de envío (D133). Sus facturas se simulan aparte, sin desplazar las reales.
-            .filter(|t| t.kind == task_kind && !(t.kind == EMAIL && crate::task_is_initial_read(t)))
+            // Tampoco un informativo, un rebote o una redacción a mano (D159): no son decisiones
+            // sobre un borrador de la IA y no dirían nada de una regla de envío.
+            .filter(|t| {
+                t.kind == task_kind
+                    && !(t.kind == EMAIL
+                        && (crate::task_is_initial_read(t) || crate::task_is_triaged_or_redraft(t)))
+            })
             .collect();
         let (real, read): (Vec<Task>, Vec<Task>) = of_kind
             .into_iter()
@@ -505,6 +515,7 @@ impl App {
             truncated,
             skipped_without_result: 0,
             without_currency_check: 0,
+            without_signal_check: 0,
             would_automate: 0,
             would_review: BTreeMap::new(),
             overlaps: 0,
@@ -527,6 +538,9 @@ impl App {
                     && crate::rules::foreign_currencies(result).is_none()
                 {
                     sim.without_currency_check += 1;
+                }
+                if action_kind == SEND_DRAFT && !result["message"]["signals"].is_array() {
+                    sim.without_signal_check += 1;
                 }
                 let label = if task_kind == INVOICE {
                     result["document"].as_str()
@@ -754,7 +768,8 @@ impl App {
             .all_tasks()?
             .into_iter()
             // Lo que solo se leyó (D133) no es una tarea que la persona vea: no entra en el plan.
-            .filter(|t| !crate::task_is_initial_read(t))
+            // Tampoco un informativo, un rebote o una redacción a mano (D159).
+            .filter(|t| !crate::task_is_initial_read(t) && !crate::task_is_triaged_or_redraft(t))
             .collect();
         let plan = match merge_plan(&rules, &marks, ids, chosen, &tasks) {
             Ok(plan) => Some(plan),
@@ -916,6 +931,14 @@ pub(crate) fn signal_for(task: &Task, result: &Value, signal: &str) -> Option<Si
     let by_rule = signal != "rejected"
         && (result["authorization"]["type"] == "rule" || result["rule_attempt"]["type"] == "rule");
     if result["part"]["of"].as_u64().is_some_and(|n| n > 1) || by_rule {
+        return None;
+    }
+    // Un correo resuelto por la ruta local, sin respuesta necesaria o redactado a mano no es una
+    // decisión sobre un borrador de la IA: no enseña qué reglas sugerir (D159).
+    if result.get("triage").is_some()
+        || result["needs_reply"].as_bool() == Some(false)
+        || result.get("redraft_of").is_some_and(|v| !v.is_null())
+    {
         return None;
     }
     let kind = action_kind(task);
