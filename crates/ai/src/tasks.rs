@@ -146,6 +146,58 @@ fn delimited(start: &str, text: &str) -> String {
     format!("{start}\n{clean}\n{MAIL_END}")
 }
 
+/// Valor de cabecera en una sola línea: los caracteres de control y los saltos de línea (también
+/// U+2028 y U+2029) pasan a espacios, así un valor no puede fabricar líneas `De:` o `Asunto:`.
+/// `None` si queda en blanco.
+fn header_value(value: &str) -> Option<String> {
+    let clean: String = value
+        .chars()
+        .map(|c| {
+            if c.is_control() || c == '\u{2028}' || c == '\u{2029}' {
+                ' '
+            } else {
+                c
+            }
+        })
+        .collect();
+    let clean = clean.trim();
+    (!clean.is_empty()).then(|| clean.to_owned())
+}
+
+/// Texto de un correo tal como lo recibe el proveedor (D102): líneas `De`, `Para`, `Fecha` y
+/// `Asunto` (en ese orden), una línea en blanco y el cuerpo. Los campos ausentes o en blanco se
+/// omiten, nunca se inventan; los valores se sanean a una línea y el cuerpo no se toca. Sin
+/// ninguna cabecera, el resultado es el cuerpo. Es la única función que da formato al correo,
+/// para la aplicación y para la evaluación.
+pub fn email_text(
+    subject: Option<&str>,
+    from: Option<&str>,
+    to: Option<&[String]>,
+    date: Option<&str>,
+    body: &str,
+) -> String {
+    let recipients = to.map(|list| {
+        list.iter()
+            .filter_map(|r| header_value(r))
+            .collect::<Vec<_>>()
+            .join(", ")
+    });
+    let lines: Vec<String> = [
+        ("De", from.and_then(header_value)),
+        ("Para", recipients.and_then(|r| header_value(&r))),
+        ("Fecha", date.and_then(header_value)),
+        ("Asunto", subject.and_then(header_value)),
+    ]
+    .into_iter()
+    .filter_map(|(name, value)| value.map(|v| format!("{name}: {v}")))
+    .collect();
+    if lines.is_empty() {
+        body.to_owned()
+    } else {
+        format!("{}\n\n{body}", lines.join("\n"))
+    }
+}
+
 fn delimited_mail(text: &str) -> String {
     delimited(MAIL_START, text)
 }

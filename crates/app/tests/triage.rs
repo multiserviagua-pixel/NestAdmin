@@ -478,15 +478,31 @@ fn a_normal_mail_is_classified_and_then_drafted_with_only_the_mail_in_each_call(
             "{}",
             request.content
         );
-        // Solo salen el asunto y el cuerpo: ni el buzón de destino ni el remitente (D102).
-        let sent = format!("{}{}", request.instructions, request.content);
-        for private in [
+        // Salen remitente, destinatarios, fecha, asunto y cuerpo (D102), nada más.
+        for line in [
+            "De: cliente@clienteficticio.test
+",
+            "Para: administracion@nestadmin.test
+",
+            "Fecha: 2026-10-01
+",
+            "Asunto: Factura SENTINELA-A1
+
+¿Me envían la factura?",
+        ] {
+            assert!(
+                request.content.contains(line),
+                "{line}: {}",
+                request.content
+            );
+        }
+        // Las instrucciones nunca llevan direcciones: solo el correo las trae.
+        for address in [
             "administracion@nestadmin.test",
             "cliente@clienteficticio.test",
         ] {
-            assert!(!sent.contains(private), "{private}");
+            assert!(!request.instructions.contains(address), "{address}");
         }
-        assert!(request.content.contains("Asunto: Factura SENTINELA-A1"));
     }
     assert!(triage.schema.as_ref().unwrap()["properties"]
         .get("draft")
@@ -1396,4 +1412,116 @@ fn the_injection_suite_sends_nothing_by_rule_and_leaks_are_invalid_responses() {
         0,
         "ninguna acción por regla sobre el corpus"
     );
+}
+
+// ---- Texto del correo (D102) ----
+
+#[test]
+fn triage_draft_and_redraft_receive_the_same_header_block() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut mail = msg(
+        "H1",
+        "cliente@clienteficticio.test",
+        "Gracias [[SIN-RESPUESTA]] SENTINELA-H1",
+        "Cuerpo SENTINELA-H1",
+        &[],
+    );
+    mail.to = Some(vec![
+        "administracion@nestadmin.test".into(),
+        "contabilidad@nestadmin.test".into(),
+    ]);
+    seed(dir.path(), vec![mail], &[]);
+    let spy = Spy::external();
+    let mut app = open(dir.path(), spy.clone());
+    app.fetch_mail().unwrap();
+    process_all(&mut app);
+    let source = mail_task(&app, "H1");
+    app.redraft(source.id).unwrap();
+    process_all(&mut app);
+
+    let expected = "De: cliente@clienteficticio.test
+Para: administracion@nestadmin.test, contabilidad@nestadmin.test
+Fecha: 2026-10-01
+Asunto: Gracias [[SIN-RESPUESTA]] SENTINELA-H1
+
+Cuerpo SENTINELA-H1";
+    let requests = spy.requests.lock().unwrap().clone();
+    let of = |task: AiTask| -> Vec<&GenerateRequest> {
+        requests
+            .iter()
+            .filter(|r| r.task == task && r.content.contains("SENTINELA-H1"))
+            .collect()
+    };
+    // La clasificación y la redacción original del mensaje (aquí solo la redacción de
+    // «Redactar respuesta», porque needs_reply = false no redacta).
+    let triage = of(AiTask::Classification);
+    let drafts = of(AiTask::Draft);
+    assert_eq!(triage.len(), 1);
+    assert_eq!(drafts.len(), 1, "solo la redacción pedida");
+    for request in [triage[0], drafts[0]] {
+        let body = request
+            .content
+            .strip_prefix(MAIL_START)
+            .and_then(|c| c.strip_prefix("\n"))
+            .and_then(|c| c.strip_suffix("<<<FIN>>>"))
+            .and_then(|c| c.strip_suffix("\n"))
+            .unwrap();
+        // El marcador `[[` del asunto no se toca al delimitar; el bloque es idéntico.
+        assert_eq!(body, expected);
+    }
+}
+
+#[test]
+fn the_mailbox_address_never_goes_out_unless_the_mail_itself_carries_it() {
+    // La cuenta del simulador es `administracion@nestadmin.test`: solo puede salir dentro de
+    // `Para` si el propio correo la trae; con otros destinatarios o sin ellos, nunca.
+    for (id, to) in [
+        ("P1", Some(vec!["lista@ejemplo.test".to_owned()])),
+        ("P2", None),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let mut mail = msg(
+            id,
+            "cliente@clienteficticio.test",
+            &format!("Factura SENTINELA-{id}"),
+            &format!("Cuerpo SENTINELA-{id}"),
+            &[],
+        );
+        mail.to = to.clone();
+        seed(dir.path(), vec![mail], &[]);
+        let spy = Spy::external();
+        let mut app = open(dir.path(), spy.clone());
+        app.fetch_mail().unwrap();
+        process_all(&mut app);
+        let needle = format!("SENTINELA-{id}");
+        let requests = spy.requests.lock().unwrap().clone();
+        let mail_requests: Vec<_> = requests
+            .iter()
+            .filter(|r| r.content.contains(&needle))
+            .collect();
+        assert!(mail_requests
+            .iter()
+            .any(|r| r.task == AiTask::Classification));
+        assert!(mail_requests.iter().any(|r| r.task == AiTask::Draft));
+        for request in mail_requests {
+            let sent = format!("{}{}", request.instructions, request.content);
+            assert!(
+                !sent.contains("administracion@nestadmin.test"),
+                "{id}: {sent}"
+            );
+            match &to {
+                Some(list) => assert!(
+                    sent.contains(&format!(
+                        "Para: {}
+",
+                        list[0]
+                    )),
+                    "{sent}"
+                ),
+                None => assert!(!sent.contains("Para:"), "{sent}"),
+            }
+        }
+    }
+    // Nota: la petición del respaldo local no se comprueba aquí; provocarlo con este espía exige
+    // configurar un proveedor local aparte (véase `fallback.rs`).
 }

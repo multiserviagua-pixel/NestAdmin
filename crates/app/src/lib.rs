@@ -1724,12 +1724,19 @@ impl App {
                     Some(Message {
                         body: Some(body),
                         subject,
+                        from,
+                        to,
+                        date,
                         ..
                     }) => {
-                        let text = match subject {
-                            Some(subject) => format!("Asunto: {subject}\n\n{body}"),
-                            None => body,
-                        };
+                        // Remitente, destinatarios, fecha y asunto saneados, y el cuerpo (D102).
+                        let text = nestadmin_ai::tasks::email_text(
+                            subject.as_deref(),
+                            from.as_deref(),
+                            to.as_deref(),
+                            date.as_deref(),
+                            &body,
+                        );
                         if initial {
                             // La primera lectura no envía ningún correo a un proveedor (D133):
                             // `claim_normal_first` no los toma, y si uno llegara aquí falla.

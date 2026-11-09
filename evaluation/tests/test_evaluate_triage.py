@@ -24,7 +24,7 @@ class LocalLayerTests(unittest.TestCase):
     def test_corpus_size_and_shape(self):
         self.assertGreaterEqual(len(self.cases), 140)
         for case in self.cases:
-            self.assertEqual(set(case['input']), {'from', 'subject', 'body', 'headers'})
+            self.assertEqual(set(case['input']), {'from', 'to', 'date', 'subject', 'body', 'headers'})
             for header in case['input']['headers']:
                 self.assertEqual(set(header), {'name', 'value'})
             self.assertIn(case['expected']['route'], triage.ROUTES)
