@@ -23,5 +23,6 @@ Cada decisión (`D<n>`) tiene un número definitivo desde que se escribe, para q
 | D122–D122 | Lista de modelos de cada proveedor y prueba sintética, 2026-11-08 | Asignado |
 | D123–D135 | `claude/panel-reglas`: panel de reglas, sugerencias y primera lectura | Reservado |
 | D136–D145 | `claude/rediseno-ui`: rediseño visual y separación de Pendientes (D136–D138; el resto, hueco), integrado el 2026-11-08 | Asignado |
+| D146–D155 | `claude/tareas-pipelines`: errores del proveedor de IA, vistas de Tareas y plantillas de pipeline | Reservado |
 
-Siguiente número libre: **D146**.
+Siguiente número libre: **D156**.
