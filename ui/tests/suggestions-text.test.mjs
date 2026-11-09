@@ -10,6 +10,7 @@ import {
   explainFinding,
   originText,
   seedNotice,
+  SUGGESTION_INTRO,
   suggestionAccepted,
   suggestionLimitText,
   suggestionOutlierWarning,
@@ -361,4 +362,28 @@ test("lo ocultado por una factura vista con incidencias se dice, sin silencio", 
   assert.match(h, /2 proveedores con facturas solo leídas no se sugieren: basta una factura con incidencias, posiblemente enviada por un tercero, para que ninguna de las leídas cuente; sus aprobaciones, si las hay, se conservan/);
   assert.match(suggestionsHidden({ covered: 0, discarded: 0, accepted: 0, invalid: 0, seen_invalidated: 1 }), /1 proveedor con facturas solo leídas no se sugiere/);
   assert.equal(suggestionsHidden({ covered: 0, discarded: 0, accepted: 0, invalid: 0, seen_invalidated: 0 }), null);
+});
+
+test("la evidencia aprendida dice que son respuestas suyas observadas, no aprobaciones", () => {
+  const one = suggestionWhy(
+    reply({ category: "consulta_pago", subject: "cliente@ejemplo.test" }, { origin: "learned", learned: 3, count: 3, addresses: 1 }),
+  );
+  assert.equal(
+    one,
+    "Usted respondió 3 veces a cliente@ejemplo.test sobre Consulta de pago (observado en la primera carga; no son aprobaciones en NestAdmin).",
+  );
+  const dom = suggestionWhy(
+    reply({ category: "consulta_pago", subject: "ejemplo.test" }, { origin: "learned", learned: 4, count: 4, addresses: 2 }),
+  );
+  assert.equal(
+    dom,
+    "Usted respondió 4 veces a 2 direcciones de ejemplo.test sobre Consulta de pago (observado en la primera carga; no son aprobaciones en NestAdmin).",
+  );
+  assert.doesNotMatch(one + dom, /aprobadas|Constan/);
+});
+
+test("la cabecera de sugeridas menciona aprender a responder y la primera lectura", () => {
+  assert.match(SUGGESTION_INTRO, /Aprender a responder/);
+  assert.match(SUGGESTION_INTRO, /primera lectura/);
+  assert.match(SUGGESTION_INTRO, /nunca crea ni activa reglas/);
 });

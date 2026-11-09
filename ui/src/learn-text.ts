@@ -306,7 +306,7 @@ export function batchIntro(n: number): string {
 }
 
 export function batchEmpty(): string {
-  return "Todavía no hay reglas aprendidas que proponer. Aparecen cuando usted respondió varias veces a la misma dirección sobre el mismo tema.";
+  return "Todavía no hay reglas aprendidas que proponer. Aparecen cuando usted respondió varias veces a la misma dirección sobre el mismo tema (y ese tema es una de las categorías de facturación).";
 }
 
 export function rodajeNotice(sends: number): string {

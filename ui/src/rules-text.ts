@@ -1362,6 +1362,10 @@ export interface SuggestionEvidenceLike {
   /** De `count`: aprobaciones de la persona y facturas solo vistas en la primera lectura (E5). */
   approved?: number;
   seen?: number;
+  /** `learned`: respuestas propias observadas en la primera carga (D172); no son aprobaciones. */
+  origin?: string;
+  learned?: number;
+  addresses?: number;
   last_at: number;
   amounts: string[];
   limit: string | null;
@@ -1435,7 +1439,7 @@ export const SUGGESTION_HELP = {
 } as const;
 
 export const SUGGESTION_INTRO =
-  "Estas sugerencias salen de lo que usted aprueba en Pendientes y, solo para facturas, de la repetición observada en la primera lectura (que no es una aprobación). Se calculan en este equipo, sin IA, y ninguna se crea ni se activa sin su aceptación. Una IA puede afinarlas (ordenarlas, proponer ocultar las poco útiles, preguntar por proveedores parecidos o proponer otro límite), pero nunca crea ni activa reglas ni pone las cifras.";
+  "Estas sugerencias salen de lo que usted aprueba en Pendientes, de cómo respondió usted en la primera carga («Aprender a responder») y, para facturas, de la repetición observada en la primera lectura (ni una ni otra son aprobaciones). Se calculan en este equipo, sin IA, y ninguna se crea ni se activa sin su aceptación. Una IA puede afinarlas (ordenarlas, proponer ocultar las poco útiles, preguntar por proveedores parecidos o proponer otro límite), pero nunca crea ni activa reglas ni pone las cifras.";
 
 export const SUGGESTION_INACTIVE_NOTICE = "Si la crea, nacerá inactiva: no actuará hasta que usted la pruebe y la active.";
 
@@ -1481,6 +1485,11 @@ export function suggestionWhy(c: SuggestionLike): string {
     return `Constan ${n} ${plural(n, "factura aprobada", "facturas aprobadas")} de ${c.subject} sin incidencias; la última, el ${last}.${cutsText}`;
   }
   const cat = c.category ? categoryLabel(c.category) : "sin categoría";
+  if (e.origin === "learned") {
+    const times = e.learned || n;
+    const where = (e.addresses ?? 1) > 1 ? `a ${e.addresses} direcciones de ${c.subject}` : `a ${c.subject}`;
+    return `Usted respondió ${times} ${plural(times, "vez", "veces")} ${where} sobre ${cat} (observado en la primera carga; no son aprobaciones en NestAdmin).${before("con cambios, rechazo o sin clasificar")}`;
+  }
   return `Constan ${n} ${plural(n, "respuesta aprobada", "respuestas aprobadas")} sin cambios a ${c.subject} clasificadas como ${cat}; la última, el ${last}.${before("con cambios, rechazo o sin clasificar")}`;
 }
 
