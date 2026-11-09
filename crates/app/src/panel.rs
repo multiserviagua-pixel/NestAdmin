@@ -4,7 +4,9 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
-use nestadmin_core::{CoreError, EvaluationRecord, Rule, RuleStats, SignalRecord, Task};
+use nestadmin_core::{
+    is_learned_origin, CoreError, EvaluationRecord, Rule, RuleStats, SignalRecord, Task,
+};
 use serde::Serialize;
 use serde_json::{json, Value};
 
@@ -109,6 +111,11 @@ pub struct Simulation {
     pub overlaps: usize,
     pub no_match: usize,
     pub would_block_other: Vec<BlockedRule>,
+    /// Envíos de rodaje que le quedan a la regla que se prueba (`exclude_rule_id`) si es una regla
+    /// aprendida aceptada en lote (D174), o `None`. La simulación no modela el rodaje: las
+    /// `would_automate` cuentan lo que la regla haría sin él; con `Some(n)` las `n` primeras (más
+    /// las de las direcciones que falten, en una regla por dominio) irían a revisión.
+    pub rodaje_left: Option<i64>,
     /// Contradicciones que la regla crearía con las demás al activarse, con su explicación
     /// (D130). Una regla nueva sin guardar aparece como `(simulada)`.
     pub findings: Vec<RuleFinding>,
@@ -133,6 +140,7 @@ impl Simulation {
             overlaps: 0,
             no_match: 0,
             would_block_other: Vec::new(),
+            rodaje_left: None,
             findings: Vec::new(),
             items: Vec::new(),
             from_read: None,
@@ -518,7 +526,12 @@ impl App {
             .into_iter()
             .partition(|t| !crate::task_is_initial_read(t));
         let truncated = real.len() > limit;
+        let rodaje_left = match exclude_rule_id {
+            Some(id) => self.store.rodaje_left(id)?,
+            None => None,
+        };
         let mut sim = Simulation {
+            rodaje_left,
             action_kind: action_kind.into(),
             limit,
             considered: 0,
@@ -878,7 +891,7 @@ impl App {
             .iter()
             .map(|r| (r.id.clone(), r.version))
             .collect();
-        let origin = json!({
+        let mut origin = json!({
             "kind": "merge",
             "sources": plan.before.iter().map(|r| json!({
                 "id": r.id,
@@ -888,6 +901,20 @@ impl App {
             })).collect::<Vec<_>>(),
             "option": plan.chosen,
         });
+        // Si alguna original era aprendida, la unificada sigue siéndolo y conserva el rodaje más
+        // exigente (D174): no se pierde el freno de los primeros envíos al unificar.
+        if plan.before.iter().any(|r| {
+            metas
+                .get(&r.id)
+                .and_then(|m| m.origin.as_ref())
+                .is_some_and(is_learned_origin)
+        }) {
+            origin["evidence_origin"] = json!("learned");
+            let ids: Vec<&str> = plan.before.iter().map(|r| r.id.as_str()).collect();
+            if let Some(rodaje) = self.merged_rodaje(&ids, &plan.after.conditions)? {
+                origin["rodaje"] = rodaje;
+            }
+        }
         let rule = self.store.merge_rules(
             &sources,
             &new_id,
@@ -897,6 +924,44 @@ impl App {
             &origin,
         )?;
         self.rule_view(&rule.id)
+    }
+}
+
+impl App {
+    /// Rodaje de una regla unificada (D174): el `left` más alto de las originales que lo tengan y,
+    /// si la unificada es por dominio, la unión de las huellas de direcciones ya cubiertas. Con la
+    /// cobertura incompleta, el rodaje no queda en 0. `None` si ninguna original tenía rodaje.
+    /// Una original con el origen ilegible aporta el rodaje completo (falla cerrado).
+    fn merged_rodaje(&self, ids: &[&str], conditions: &Value) -> AppResult<Option<Value>> {
+        let mut left: Option<i64> = None;
+        let mut hashes: Vec<String> = Vec::new();
+        for id in ids {
+            if let Some(state) = self.store.rodaje_state(id)? {
+                left = Some(left.map_or(state.left, |l| l.max(state.left)));
+                for hash in state.address_hashes {
+                    if !hashes.contains(&hash) {
+                        hashes.push(hash);
+                    }
+                }
+            }
+        }
+        let Some(mut left) = left else {
+            return Ok(None);
+        };
+        let min = if conditions.get("sender_domain").is_some() {
+            crate::suggest::DOMAIN_MIN_ADDRESSES
+        } else {
+            0
+        };
+        if left == 0 && hashes.len() < min {
+            left = 1;
+        }
+        let mut rodaje = json!({ "left": left, "of": nestadmin_core::RODAJE_SENDS });
+        if min > 0 {
+            rodaje["min_addresses"] = json!(min);
+            rodaje["address_hashes"] = json!(hashes);
+        }
+        Ok(Some(rodaje))
     }
 }
 

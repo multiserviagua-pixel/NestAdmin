@@ -420,12 +420,12 @@ impl Store {
         rodaje_rule: Option<&str>,
     ) -> Result<Option<i64>> {
         let tx = self.conn.transaction()?;
-        let before: Option<(String, String)> = tx
+        let before: Option<(String, String, String)> = tx
             .query_row(
-                "SELECT state, edit_state FROM rule_signals
+                "SELECT state, edit_state, subject_key FROM rule_signals
                  WHERE kind = 'approved' AND task_id = ?1 AND content_version = ?2",
                 params![task_id, content_version],
-                |r| Ok((r.get(0)?, r.get(1)?)),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
             )
             .optional()?;
         tx.execute(
@@ -438,11 +438,33 @@ impl Store {
             ],
         )?;
         let mut left = None;
-        if let (true, Some((state, edit)), Some(rule)) = (valid, before, rodaje_rule) {
+        if let (true, Some((state, edit, subject_key)), Some(rule)) = (valid, before, rodaje_rule) {
             if state != "valid" && edit == "unedited" {
-                if let Some((now, _)) = rodaje_of(&tx, rule)?.filter(|(n, _)| *n > 0) {
-                    set_rodaje(&tx, rule, now - 1, "envío de rodaje aprobado sin editar")?;
-                    left = Some(now - 1);
+                // Un origen ilegible no se reescribe: el rodaje sigue completo (falla cerrado).
+                if let Some(now) = rodaje_of(&tx, rule)?.filter(|n| n.readable && n.active()) {
+                    let mut hashes = now.address_hashes.clone();
+                    // En una regla por dominio se anota la dirección (solo su huella) de cada
+                    // aprobación que cuenta: el rodaje no acaba hasta cubrir `min_addresses`.
+                    if now.min_addresses > 1 {
+                        if let Some((_, address)) = subject_key.split_once('|') {
+                            let hash = address_hash(address);
+                            if !address.trim().is_empty() && !hashes.contains(&hash) {
+                                hashes.push(hash);
+                            }
+                        }
+                    }
+                    let mut next = (now.left - 1).max(0);
+                    if next == 0 && hashes.len() < now.min_addresses {
+                        next = 1;
+                    }
+                    set_rodaje(
+                        &tx,
+                        rule,
+                        next,
+                        Some(&hashes),
+                        "envío de rodaje aprobado sin editar",
+                    )?;
+                    left = Some(next);
                 }
             }
         }
@@ -601,27 +623,29 @@ impl Store {
     /// Acepta y activa varias sugerencias aprendidas (D173) en **una sola transacción**: para cada
     /// regla, la misma aceptación que `accept_suggestion` (idempotente por huella) y su activación
     /// como una versión nueva. Todo o nada: si una falla (por ejemplo, un identificador ya usado o
-    /// una regla archivada) se deshace todo y se devuelve el índice de la que falló. Deja una
+    /// una regla archivada) se deshace todo y se devuelve el índice de la que falló; si falla la
+    /// transacción misma (abrirla, el agregado de auditoría o confirmarla) no hay regla a la que
+    /// atribuirlo y el índice es `None`. Deja una
     /// entrada de auditoría por regla y, si cambió algo, una agregada con `detail`; ninguna lleva
     /// contenido. Quien llama ya comprobó cada regla con `check_rule`.
     pub fn accept_and_activate_batch(
         &mut self,
         rules: &[BatchRule<'_>],
         detail: &str,
-    ) -> std::result::Result<Vec<BatchApplied>, (usize, CoreError)> {
-        let tx = self.conn.transaction().map_err(|e| (0, e.into()))?;
+    ) -> std::result::Result<Vec<BatchApplied>, (Option<usize>, CoreError)> {
+        let tx = self.conn.transaction().map_err(|e| (None, e.into()))?;
         let mut applied = Vec::with_capacity(rules.len());
         for (index, rule) in rules.iter().enumerate() {
-            applied.push(apply_batch_rule(&tx, rule).map_err(|e| (index, e))?);
+            applied.push(apply_batch_rule(&tx, rule).map_err(|e| (Some(index), e))?);
         }
         if applied.iter().any(|a| a.created || a.activated) {
             tx.execute(
                 "INSERT INTO audit_log (at, task_id, action, status, authorization, detail) VALUES (?1, NULL, 'rule_learned_batch', 'activated_all', NULL, ?2)",
                 params![now_ms(), detail],
             )
-            .map_err(|e| (0, e.into()))?;
+            .map_err(|e| (None, e.into()))?;
         }
-        tx.commit().map_err(|e| (0, e.into()))?;
+        tx.commit().map_err(|e| (None, e.into()))?;
         Ok(applied)
     }
 
@@ -684,7 +708,13 @@ impl Store {
     /// Envíos de rodaje que le quedan a una regla (D174), o `None` si no tiene rodaje (no se aceptó
     /// por el lote aprendido). `Some(0)`: el rodaje terminó.
     pub fn rodaje_left(&self, id: &str) -> Result<Option<i64>> {
-        Ok(rodaje_of(&self.conn, id)?.map(|(left, _)| left))
+        Ok(rodaje_of(&self.conn, id)?.map(|state| state.left))
+    }
+
+    /// Estado completo del rodaje de una regla (D174), o `None` si no tiene. Un origen que existe
+    /// pero no se puede leer devuelve el rodaje completo (falla cerrado).
+    pub fn rodaje_state(&self, id: &str) -> Result<Option<RodajeState>> {
+        rodaje_of(&self.conn, id)
     }
 
     /// Reinicia el rodaje de una regla que aún lo tiene a medias (D174): una edición o un rechazo
@@ -693,8 +723,16 @@ impl Store {
     pub fn rodaje_reset(&mut self, id: &str) -> Result<bool> {
         let tx = self.conn.transaction()?;
         let changed = match rodaje_of(&tx, id)? {
-            Some((left, of)) if left > 0 && left < of => {
-                set_rodaje(&tx, id, of, "reiniciado por una edición o un rechazo")?;
+            Some(state) if state.readable && state.left > 0 && state.left < state.of => {
+                // La serie vuelve a empezar: también la cobertura de direcciones.
+                let cleared: Vec<String> = Vec::new();
+                set_rodaje(
+                    &tx,
+                    id,
+                    state.of,
+                    Some(&cleared),
+                    "reiniciado por una edición o un rechazo",
+                )?;
                 true
             }
             _ => false,
@@ -1259,8 +1297,56 @@ fn apply_batch_rule(tx: &rusqlite::Transaction<'_>, r: &BatchRule<'_>) -> Result
     })
 }
 
-/// Envíos de rodaje que quedan y total, leídos del origen de la regla (`origin.rodaje`).
-fn rodaje_of(conn: &rusqlite::Connection, id: &str) -> Result<Option<(i64, i64)>> {
+/// Estado del rodaje de una regla aprendida (D174), leído de `origin.rodaje`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RodajeState {
+    /// Aprobaciones sin editar que faltan.
+    pub left: i64,
+    pub of: i64,
+    /// Direcciones distintas que se exigen entre las aprobaciones (reglas por dominio; 0 si no).
+    pub min_addresses: usize,
+    /// Huellas (nunca la dirección) de las direcciones ya cubiertas por aprobaciones contadas.
+    pub address_hashes: Vec<String>,
+    /// `false`: el origen existe pero no se pudo leer; el estado es el del rodaje completo.
+    pub readable: bool,
+}
+
+impl RodajeState {
+    /// Rodaje completo y sin cobertura: lo que se supone cuando no se puede leer el contador.
+    pub fn closed() -> Self {
+        Self {
+            left: RODAJE_SENDS,
+            of: RODAJE_SENDS,
+            min_addresses: 0,
+            address_hashes: Vec::new(),
+            readable: false,
+        }
+    }
+
+    /// Direcciones distintas cubiertas.
+    pub fn addresses(&self) -> usize {
+        self.address_hashes.len()
+    }
+
+    /// El rodaje sigue activo: faltan aprobaciones o, en una regla por dominio, direcciones.
+    pub fn active(&self) -> bool {
+        self.left > 0 || self.addresses() < self.min_addresses
+    }
+}
+
+/// Huella de una dirección (minúsculas, sin espacios): lo único que se guarda de ella.
+fn address_hash(address: &str) -> String {
+    use sha2::{Digest, Sha256};
+    Sha256::digest(address.trim().to_ascii_lowercase().as_bytes())
+        .iter()
+        .take(8)
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
+/// Estado del rodaje leído del origen de la regla. `None` si el origen es NULL o no lleva la marca.
+/// Con un origen que existe pero no se puede leer, falla cerrado: rodaje completo.
+fn rodaje_of(conn: &rusqlite::Connection, id: &str) -> Result<Option<RodajeState>> {
     let origin: Option<Option<String>> = conn
         .query_row(
             "SELECT origin_json FROM rule_meta WHERE rule_id = ?1",
@@ -1268,43 +1354,80 @@ fn rodaje_of(conn: &rusqlite::Connection, id: &str) -> Result<Option<(i64, i64)>
             |r| r.get(0),
         )
         .optional()?;
-    let origin: Value = origin
-        .flatten()
-        .and_then(|text| serde_json::from_str(&text).ok())
-        .unwrap_or(Value::Null);
-    // Con marca de rodaje pero un contador ilegible, falla cerrado: el rodaje sigue completo.
-    if origin["rodaje"].is_null() {
+    let Some(Some(text)) = origin else {
+        return Ok(None);
+    };
+    let origin: Value = match serde_json::from_str(&text) {
+        Ok(origin @ Value::Object(_)) => origin,
+        _ => return Ok(Some(RodajeState::closed())),
+    };
+    let rodaje = &origin["rodaje"];
+    if rodaje.is_null() {
         return Ok(None);
     }
-    Ok(Some((
-        origin["rodaje"]["left"]
+    // Con marca de rodaje pero un contador ilegible, falla cerrado: el rodaje sigue completo.
+    Ok(Some(RodajeState {
+        left: rodaje["left"]
             .as_i64()
             .map_or(RODAJE_SENDS, |left| left.clamp(0, RODAJE_SENDS)),
-        origin["rodaje"]["of"].as_i64().unwrap_or(RODAJE_SENDS),
-    )))
+        of: rodaje["of"].as_i64().unwrap_or(RODAJE_SENDS),
+        min_addresses: rodaje["min_addresses"]
+            .as_u64()
+            .map_or(0, |n| usize::try_from(n).unwrap_or(usize::MAX)),
+        address_hashes: rodaje["address_hashes"]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_owned)
+                    .collect()
+            })
+            .unwrap_or_default(),
+        readable: true,
+    }))
 }
 
-/// Cambia el contador de rodaje del origen de la regla y lo deja en el historial, sin contenido.
-fn set_rodaje(tx: &rusqlite::Transaction<'_>, id: &str, left: i64, why: &str) -> Result<()> {
+/// Cambia el contador de rodaje del origen de la regla (y, si se pasan, las huellas de direcciones
+/// cubiertas) y lo deja en el historial, sin contenido. Un origen ilegible no se reescribe.
+fn set_rodaje(
+    tx: &rusqlite::Transaction<'_>,
+    id: &str,
+    left: i64,
+    hashes: Option<&[String]>,
+    why: &str,
+) -> Result<()> {
     let text: Option<String> = tx.query_row(
         "SELECT origin_json FROM rule_meta WHERE rule_id = ?1",
         [id],
         |r| r.get(0),
     )?;
-    let mut origin: Value = text
-        .and_then(|t| serde_json::from_str(&t).ok())
-        .unwrap_or(Value::Null);
+    let mut origin: Value = serde_json::from_str(text.as_deref().unwrap_or("null"))?;
     origin["rodaje"]["left"] = Value::from(left);
+    if let Some(hashes) = hashes {
+        origin["rodaje"]["address_hashes"] = Value::from(hashes.to_vec());
+    }
     tx.execute(
         "UPDATE rule_meta SET origin_json = ?2 WHERE rule_id = ?1",
         params![id, serde_json::to_string(&origin)?],
     )?;
+    let covered = origin["rodaje"]["min_addresses"]
+        .as_u64()
+        .filter(|n| *n > 1)
+        .map(|n| {
+            format!(
+                "; direcciones cubiertas {} de {n}",
+                origin["rodaje"]["address_hashes"]
+                    .as_array()
+                    .map_or(0, Vec::len)
+            )
+        })
+        .unwrap_or_default();
     tx.execute(
         "INSERT INTO audit_log (at, task_id, action, status, authorization, detail) VALUES (?1, NULL, 'rule_rodaje', ?2, NULL, ?3)",
         params![
             now_ms(),
             if left == 0 { "finished" } else { "counted" },
-            format!("{id}: {why}; faltan {left} envíos de rodaje")
+            format!("{id}: {why}; faltan {left} envíos de rodaje{covered}")
         ],
     )?;
     Ok(())

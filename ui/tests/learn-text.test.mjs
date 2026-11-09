@@ -186,6 +186,9 @@ test("el fallo de la tanda nombra la regla y pide desmarcarla", () => {
   assert.match(line, /No se activó ninguna regla: «Respuestas a ana@ejemplo.test» ya existe una regla igual/);
   assert.match(line, /Desmárquela/);
   assert.match(batchFailureLine({ id: "x", name: "R", code: "nuevo" }), /falló \(nuevo\)/);
+  const whole = batchFailureLine({ id: null, name: null, code: "batch_write_failed" });
+  assert.match(whole, /No se activó ninguna regla: no se pudo guardar la tanda/);
+  assert.doesNotMatch(whole, /Desmárquela|«/);
   const stale = batchStaleLine("La tanda de reglas aprendidas ha cambiado desde que la vio");
   assert.match(stale, /ha cambiado desde que la vio\. Se ha recargado la lista/);
   assert.match(batchStaleLine(""), /^Se ha recargado la lista/);

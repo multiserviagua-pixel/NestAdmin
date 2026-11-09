@@ -138,7 +138,7 @@ impl Explanation {
                 "el borrador contiene datos de contacto que no se pueden dar por buenos ({}); compruébelos",
                 join_ids(&self.facts["flags"])
             ),
-            ReasonCode::Rodaje => RODAJE_REASON.into(),
+            ReasonCode::Rodaje => rodaje_reason(&self.facts),
             ReasonCode::SenderRequired => format!(
                 "la regla no indica remitente; añádalo o valide la opción avanzada (regla: {})",
                 self.facts["rule_ids"]
@@ -182,14 +182,22 @@ impl Explanation {
     /// Explicación de un envío de rodaje (D174): la regla aprendida coincide y no hay bloqueos, pero
     /// aún no ha enviado sola. Solo ids y recuentos; las candidatas se conservan para las
     /// estadísticas (D129).
-    pub fn rodaje(rule_id: &str, rule_version: i64, left: i64, candidates: Vec<RuleCheck>) -> Self {
+    pub fn rodaje(
+        rule_id: &str,
+        rule_version: i64,
+        state: &nestadmin_core::RodajeState,
+        candidates: Vec<RuleCheck>,
+    ) -> Self {
         Self {
             code: ReasonCode::Rodaje,
             facts: json!({
                 "rule_id": rule_id,
                 "rule_version": rule_version,
-                "left": left,
+                "left": state.left,
                 "of": nestadmin_core::RODAJE_SENDS,
+                // Reglas por dominio: direcciones distintas exigidas y ya cubiertas (0 y 0 si no).
+                "min_addresses": state.min_addresses,
+                "addresses": state.addresses(),
             }),
             candidates,
         }
@@ -209,9 +217,27 @@ impl Explanation {
 pub const PIPELINE_WAIVED: &str =
     "se continuó sin un paso anterior del pipeline; revise antes de enviar";
 
-/// Motivo de un envío de rodaje (D174).
-pub const RODAJE_REASON: &str =
-    "En rodaje: esta regla aprendida enviará sola a partir del envío n.º 4";
+/// Motivo de un envío de rodaje (D174): «En rodaje: quedan N aprobaciones antes de enviar sola»,
+/// y en una regla por dominio, las direcciones distintas que aún faltan por ver. Los datos
+/// estructurados van en `facts`.
+fn rodaje_reason(facts: &Value) -> String {
+    let left = facts["left"]
+        .as_i64()
+        .unwrap_or(nestadmin_core::RODAJE_SENDS);
+    let mut text = if left == 1 {
+        "En rodaje: queda 1 aprobación antes de enviar sola".to_owned()
+    } else {
+        format!("En rodaje: quedan {left} aprobaciones antes de enviar sola")
+    };
+    let min = facts["min_addresses"].as_u64().unwrap_or(0);
+    let seen = facts["addresses"].as_u64().unwrap_or(0);
+    if seen < min {
+        text.push_str(&format!(
+            "; hacen falta aprobaciones de al menos {min} direcciones distintas del dominio (llevan {seen})"
+        ));
+    }
+    text
+}
 
 /// Motivo cuando falta la comprobación local de moneda (D127).
 pub const CURRENCY_UNCHECKED: &str = "no consta la comprobación de moneda; reprocese o revise";
@@ -252,7 +278,7 @@ pub struct Evaluation {
 
 impl Evaluation {
     /// Si la decisión es automatizar, la pasa a revisión por el rodaje de la regla (D174), con
-    /// `left` envíos de rodaje pendientes. Solo restringe: una revisión previa (y su motivo, que
+    /// el estado `state` (aprobaciones y direcciones pendientes). Solo restringe: una revisión previa (y su motivo, que
     /// viene de los bloqueos de `send_draft_blocker`) no cambia nunca. Devuelve el id de la regla
     /// que automatizaría, para que quien llama sepa si hay rodaje que consultar.
     pub fn automating_rule(&self) -> Option<(&str, i64)> {
@@ -265,7 +291,7 @@ impl Evaluation {
         }
     }
 
-    pub fn into_rodaje(self, left: i64) -> Self {
+    pub fn into_rodaje(self, state: &nestadmin_core::RodajeState) -> Self {
         let RuleDecision::Automate {
             rule_id,
             rule_version,
@@ -274,7 +300,7 @@ impl Evaluation {
             return self;
         };
         let explanation =
-            Explanation::rodaje(rule_id, *rule_version, left, self.explanation.candidates);
+            Explanation::rodaje(rule_id, *rule_version, state, self.explanation.candidates);
         Evaluation {
             decision: RuleDecision::Review(explanation.summary()),
             explanation,

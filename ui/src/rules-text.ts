@@ -594,8 +594,15 @@ export function reasonText(code: string, facts?: Record<string, unknown> | null)
     case "draft_flagged":
       return "el borrador contiene enlaces, direcciones, teléfonos o IBAN que no se pueden dar por buenos; compruébelos";
     case "rodaje":
-      // Regla aprendida aceptada en lote (D174): sus 3 primeros envíos se revisan. El mismo texto que el backend.
-      return "en rodaje: esta regla aprendida enviará sola a partir del envío n.º 4";
+    {
+      // Regla aprendida aceptada en lote (D174). El mismo texto que el backend (`rodaje_reason`).
+      const left = typeof f.left === "number" ? f.left : 3;
+      let text = left === 1 ? "en rodaje: queda 1 aprobación antes de enviar sola" : `en rodaje: quedan ${left} aprobaciones antes de enviar sola`;
+      const min = typeof f.min_addresses === "number" ? f.min_addresses : 0;
+      const seen = typeof f.addresses === "number" ? f.addresses : 0;
+      if (seen < min) text += `; hacen falta aprobaciones de al menos ${min} direcciones distintas del dominio (llevan ${seen})`;
+      return text;
+    }
     default:
       return `motivo no reconocido (${code})`;
   }
@@ -619,6 +626,7 @@ export interface SimulationLike {
   overlaps: number;
   no_match: number;
   would_block_other: Array<{ rule_id: string; task_ids: number[] }>;
+  rodaje_left?: number | null;
   items: Array<{
     task_id: number;
     label: string | null;
@@ -647,6 +655,8 @@ export interface SimulationSummary {
   noMatch: number;
   blocked: Array<{ rule_id: string; count: number }>;
   notes: string[];
+  /** Regla aprendida en rodaje (D174): «Las N primeras irían a revisión (rodaje)». Null si no tiene. */
+  rodaje: string | null;
   automateExamples: Array<{ task_id: number; label: string }>;
 }
 
@@ -717,6 +727,7 @@ export function simulationSummary(sim: SimulationLike, actionKind: string): Simu
     noMatch: sim.no_match,
     blocked,
     notes,
+    rodaje: sim.rodaje_left && sim.rodaje_left > 0 && !empty ? `Las ${sim.rodaje_left} primeras irían a revisión (rodaje).` : null,
     automateExamples: sim.items.filter((i) => i.outcome === "automate").map(exampleLabel),
   };
 }

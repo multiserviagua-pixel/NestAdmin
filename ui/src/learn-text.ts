@@ -333,10 +333,13 @@ const BATCH_FAILURE_WORDS: Record<string, string> = {
   rule_exists: "ya existe una regla igual",
   rule_archived: "existe una regla archivada igual",
   write_failed: "no se pudo guardar",
+  batch_write_failed: "no se pudo guardar la tanda",
 };
 
 /** Qué regla hizo fallar el lote: no se activó ninguna y se puede desmarcar. */
-export function batchFailureLine(f: { name: string; code: string }): string {
+export function batchFailureLine(f: { name: string | null; code: string }): string {
+  // Sin regla asociada (falló la escritura de la tanda): no hay nada que desmarcar.
+  if (f.name === null) return `No se activó ninguna regla: ${BATCH_FAILURE_WORDS[f.code] ?? `falló (${f.code})`}. Vuelva a pulsar el botón; si se repite, avise.`;
   return `No se activó ninguna regla: «${f.name}» ${BATCH_FAILURE_WORDS[f.code] ?? `falló (${f.code})`}. Desmárquela y vuelva a pulsar el botón.`;
 }
 

@@ -25,8 +25,8 @@ pub use preferences::{normalize_key, PreferenceScope, SenderPreference};
 pub use queue::{Task, TaskError, TaskState};
 pub use rule_panel::{
     is_learned_origin, BatchApplied, BatchRule, EvaluationRecord, EvaluationRow, LearnedEvidence,
-    LearnedSignal, RuleMeta, RuleStats, SignalRecord, SignalRow, SuggestionRow, LEARN_MARK_PREFIX,
-    LEARN_RESULT_PREFIX, READ_MARK_PREFIX, REFINEMENT_KEY, RODAJE_SENDS,
+    LearnedSignal, RodajeState, RuleMeta, RuleStats, SignalRecord, SignalRow, SuggestionRow,
+    LEARN_MARK_PREFIX, LEARN_RESULT_PREFIX, READ_MARK_PREFIX, REFINEMENT_KEY, RODAJE_SENDS,
 };
 pub use rules::Rule;
 pub use store::Store;

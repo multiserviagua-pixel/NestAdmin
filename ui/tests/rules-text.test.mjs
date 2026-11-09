@@ -319,12 +319,19 @@ test("los códigos del frontend son los del backend", () => {
 
 test("el motivo del rodaje dice lo mismo que el backend y no lleva contenido del correo", () => {
   const rust = readFileSync(new URL("../../crates/app/src/rules.rs", import.meta.url), "utf8").replace(/\r\n/g, "\n");
-  const backend = /RODAJE_REASON: &str =\s*"([^"]+)"/.exec(rust)?.[1];
-  assert.equal(backend, "En rodaje: esta regla aprendida enviará sola a partir del envío n.º 4");
-  assert.equal(capitalize(reasonText("rodaje")), backend);
-  // Con o sin hechos, el texto es el mismo: los hechos (regla, versión, envíos que faltan) no se mezclan.
-  assert.equal(reasonText("rodaje", { rule_id: "regla-ana", rule_version: 2, left: 2, of: 3 }), reasonText("rodaje"));
-  assert.ok(!reasonText("rodaje", { rule_id: "regla-ana" }).includes("regla-ana"));
+  // Las frases del backend (`rodaje_reason`) y las de la interfaz dicen lo mismo.
+  assert.ok(rust.includes('"En rodaje: queda 1 aprobación antes de enviar sola"'));
+  assert.ok(rust.includes('"En rodaje: quedan {left} aprobaciones antes de enviar sola"'));
+  assert.ok(rust.includes("; hacen falta aprobaciones de al menos {min} direcciones distintas del dominio (llevan {seen})"));
+  assert.equal(capitalize(reasonText("rodaje")), "En rodaje: quedan 3 aprobaciones antes de enviar sola");
+  assert.equal(reasonText("rodaje", { left: 2, of: 3 }), "en rodaje: quedan 2 aprobaciones antes de enviar sola");
+  assert.equal(reasonText("rodaje", { left: 1 }), "en rodaje: queda 1 aprobación antes de enviar sola");
+  assert.equal(
+    reasonText("rodaje", { left: 1, min_addresses: 2, addresses: 1 }),
+    "en rodaje: queda 1 aprobación antes de enviar sola; hacen falta aprobaciones de al menos 2 direcciones distintas del dominio (llevan 1)",
+  );
+  // Los hechos de identificación (regla, versión) no se mezclan en el texto.
+  assert.ok(!reasonText("rodaje", { rule_id: "regla-ana", rule_version: 2, left: 2 }).includes("regla-ana"));
 });
 
 test("los motivos usan los datos de la evaluación y no inventan", () => {
@@ -424,6 +431,13 @@ test("la simulación se resume en lenguaje normal", () => {
   assert.match(s.notes[1], /últimas 6 tareas/);
   assert.match(s.notes[2], /1 tarea no tiene resultado/);
   assert.deepEqual(s.automateExamples, [{ task_id: 1, label: "factura-a.pdf" }]);
+});
+
+test("la simulación de una regla en rodaje dice cuántas irían a revisión", () => {
+  const s = simulationSummary(sim({ considered: 4, would_automate: 4, rodaje_left: 3 }), "send_draft");
+  assert.equal(s.rodaje, "Las 3 primeras irían a revisión (rodaje).");
+  assert.equal(simulationSummary(sim({ considered: 4, would_automate: 4 }), "send_draft").rodaje, null);
+  assert.equal(simulationSummary(sim({ considered: 4, would_automate: 4, rodaje_left: 0 }), "send_draft").rodaje, null);
 });
 
 test("la simulación sin tareas lo dice", () => {

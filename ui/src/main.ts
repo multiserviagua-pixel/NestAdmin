@@ -2454,6 +2454,7 @@ function simulationBox(key: string, kind: string): HTMLElement | null {
           "ul",
           { class: "sim-list" },
           h("li", {}, h("strong", {}, `Se automatizarían sin revisión: ${summary.automate}`), exampleList(summary.automateExamples)),
+          summary.rodaje ? h("li", {}, summary.rodaje) : null,
           ...summary.groups.map((g) =>
             h("li", {}, h("strong", {}, `Irían a revisión: ${g.count}`), ` porque ${g.text}.`, exampleList(g.examples)),
           ),

@@ -1980,14 +1980,14 @@ impl App {
         let Some((rule_id, _)) = evaluation.automating_rule() else {
             return evaluation;
         };
-        match self.store.rodaje_left(rule_id) {
-            Ok(Some(left)) if left > 0 => evaluation.into_rodaje(left),
+        match self.store.rodaje_state(rule_id) {
+            Ok(Some(state)) if state.active() => evaluation.into_rodaje(&state),
             Ok(_) => evaluation,
             Err(error) => {
                 result["evidence_error"] = json!(format!(
                     "no se pudo comprobar el rodaje de la regla: {error}"
                 ));
-                evaluation.into_rodaje(nestadmin_core::RODAJE_SENDS)
+                evaluation.into_rodaje(&nestadmin_core::RodajeState::closed())
             }
         }
     }

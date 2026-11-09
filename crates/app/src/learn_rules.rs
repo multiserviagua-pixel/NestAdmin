@@ -13,7 +13,7 @@ use serde::Serialize;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
-use crate::suggest::{stale_message, Candidate};
+use crate::suggest::{stale_message, Candidate, DOMAIN_MIN_ADDRESSES};
 use crate::{check_rule, App, AppError, AppResult, SEND_DRAFT};
 
 /// Una regla de la tanda aprendida, con la evidencia que la sostiene. Solo recuentos y la dirección
@@ -63,10 +63,12 @@ pub struct LearnedAcceptedRule {
 /// La regla por la que se deshizo todo, y por qué, para que la persona pueda desmarcarla.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct LearnedAcceptFailure {
-    pub id: String,
-    pub name: String,
+    /// La regla que falló; `None` si falló la transacción misma (`batch_write_failed`).
+    pub id: Option<String>,
+    pub name: Option<String>,
     /// `invalid_rule` (no pasa `check_rule`), `not_valid` (la sugerencia ya no es válida),
-    /// `rule_exists`, `rule_archived` o `write_failed`.
+    /// `rule_exists`, `rule_archived`, `write_failed` (una regla) o `batch_write_failed` (abrir,
+    /// agregar la auditoría o confirmar la transacción: sin regla asociada).
     pub code: &'static str,
     pub message: String,
 }
@@ -99,7 +101,11 @@ fn batch_of(candidates: &[Candidate]) -> LearnedBatch {
     let items: Vec<LearnedBatchItem> = candidates
         .iter()
         .filter(|c| {
-            c.action_kind == SEND_DRAFT && c.evidence.origin == "learned" && !c.evidence.needs_limit
+            c.action_kind == SEND_DRAFT
+                && c.evidence.origin == "learned"
+                && !c.evidence.needs_limit
+                // Una sugerencia descartada que reaparece solo se acepta con su tarjeta (D173).
+                && c.evidence.reappeared.is_none()
         })
         .map(|c| LearnedBatchItem {
             id: c.fingerprint.clone(),
@@ -248,8 +254,8 @@ impl App {
                 activated: 0,
                 already_active: 0,
                 failed: Some(LearnedAcceptFailure {
-                    id: item.id.clone(),
-                    name: item.name.clone(),
+                    id: Some(item.id.clone()),
+                    name: Some(item.name.clone()),
                     code,
                     message,
                 }),
@@ -263,6 +269,12 @@ impl App {
             }
             plan.origin["batch"] = json!(true);
             plan.origin["rodaje"] = json!({ "left": RODAJE_SENDS, "of": RODAJE_SENDS });
+            // Una regla por dominio no sale del rodaje hasta aprobar a varias direcciones distintas
+            // (solo se guardan sus huellas).
+            if plan.conditions.get("sender_domain").is_some() {
+                plan.origin["rodaje"]["min_addresses"] = json!(DOMAIN_MIN_ADDRESSES);
+                plan.origin["rodaje"]["address_hashes"] = json!([]);
+            }
             let rule_id = self.unique_rule_id_avoiding(&plan.name, &reserved)?;
             reserved.insert(rule_id.clone());
             prepared.push(Prepared {
@@ -290,10 +302,12 @@ impl App {
         let applied = match self.store.accept_and_activate_batch(&rules, &detail) {
             Ok(applied) => applied,
             Err((index, error)) => {
-                let item = &prepared[index];
-                let code = match error {
-                    CoreError::IdempotencyConflict(_) => "rule_exists",
-                    CoreError::RuleArchived(_) => "rule_archived",
+                // Sin índice falló la transacción misma, no una regla.
+                let item = index.map(|i| &prepared[i]);
+                let code = match (&error, item) {
+                    (_, None) => "batch_write_failed",
+                    (CoreError::IdempotencyConflict(_), _) => "rule_exists",
+                    (CoreError::RuleArchived(_), _) => "rule_archived",
                     _ => "write_failed",
                 };
                 return Ok(LearnedAcceptOutcome {
@@ -302,8 +316,8 @@ impl App {
                     activated: 0,
                     already_active: 0,
                     failed: Some(LearnedAcceptFailure {
-                        id: item.id.clone(),
-                        name: item.plan.name.clone(),
+                        id: item.map(|i| i.id.clone()),
+                        name: item.map(|i| i.plan.name.clone()),
                         code,
                         message: error.to_string(),
                     }),
@@ -320,7 +334,9 @@ impl App {
                 } else {
                     "already_active"
                 },
-                rodaje_left: self.store.rodaje_left(&applied.rule.id)?,
+                // Todo quedó activado y confirmado: un fallo al leer el contador no lo convierte en
+                // error, solo se omite el dato.
+                rodaje_left: self.store.rodaje_left(&applied.rule.id).ok().flatten(),
             });
         }
         // En el orden en que la persona las marcó.
@@ -354,5 +370,65 @@ fn outcome(rules: Vec<LearnedAcceptedRule>) -> LearnedAcceptOutcome {
         activated,
         rules,
         failed: None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::suggest::{Evidence, Reappearance};
+
+    fn candidate(fingerprint: &str, reappeared: Option<Reappearance>) -> Candidate {
+        Candidate {
+            fingerprint: fingerprint.into(),
+            shown: format!("shown-{fingerprint}"),
+            action_kind: SEND_DRAFT.into(),
+            name: format!("Responder a {fingerprint}"),
+            conditions: json!({ "category": "otros", "sender": format!("{fingerprint}@alfa.test") }),
+            subject: format!("{fingerprint}@alfa.test"),
+            category: Some("otros".into()),
+            evidence: Evidence {
+                count: 3,
+                threshold: 3,
+                earlier_breaks: 0,
+                last_at: 0,
+                task_ids: Vec::new(),
+                amounts: Vec::new(),
+                limit: None,
+                needs_limit: false,
+                origin: "learned",
+                learned: 3,
+                addresses: 1,
+                approved: 0,
+                seen: 0,
+                amount_min: None,
+                amount_second: None,
+                limit_outlier: false,
+                reappeared,
+            },
+            overlaps: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn a_reappeared_discarded_suggestion_is_left_out_of_the_batch() {
+        let reappeared = Reappearance {
+            at_discard: 3,
+            new_since: 6,
+            needed_new: 6,
+        };
+        let all = [candidate("ana", None), candidate("luis", Some(reappeared))];
+        let batch = batch_of(&all);
+        assert_eq!(
+            batch
+                .items
+                .iter()
+                .map(|i| i.id.as_str())
+                .collect::<Vec<_>>(),
+            ["ana"]
+        );
+        // La huella de la tanda no cubre a la excluida: solo se acepta con su tarjeta.
+        assert_ne!(batch.batch_fp, batch_of(&all[1..]).batch_fp);
+        assert_eq!(batch.batch_fp, batch_of(&all[..1]).batch_fp);
     }
 }

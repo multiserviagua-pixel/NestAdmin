@@ -159,6 +159,8 @@ export interface Simulation {
   overlaps: number;
   no_match: number;
   would_block_other: Array<{ rule_id: string; task_ids: number[] }>;
+  /** Envíos de rodaje que le quedan a la regla que se prueba (D174), o null si no tiene. */
+  rodaje_left?: number | null;
   /** Contradicciones que la regla crearía al activarse, con su explicación (D130). */
   findings: RuleFinding[];
   items: SimulationItem[];
@@ -600,9 +602,10 @@ export interface LearnedAcceptedRule {
 
 /** La regla por la que se deshizo todo, y por qué, para que la persona pueda desmarcarla. */
 export interface LearnedAcceptFailure {
-  id: string;
-  name: string;
-  code: "invalid_rule" | "not_valid" | "rule_exists" | "rule_archived" | "write_failed";
+  /** La regla que falló; `null` si falló la transacción misma (`batch_write_failed`). */
+  id: string | null;
+  name: string | null;
+  code: "invalid_rule" | "not_valid" | "rule_exists" | "rule_archived" | "write_failed" | "batch_write_failed";
   message: string;
 }
 

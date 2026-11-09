@@ -22,7 +22,7 @@ use serde_json::{json, Value};
 
 const ACCOUNT: &str = "simulador";
 const REPLY_SENTINEL: &str = "RESPUESTA-SENTINELA-456";
-const RODAJE_TEXT: &str = "En rodaje: esta regla aprendida enviará sola a partir del envío n.º 4";
+const RODAJE_TEXT: &str = "En rodaje: quedan 3 aprobaciones antes de enviar sola";
 
 // ---- Proveedor espía ----
 
@@ -415,7 +415,17 @@ fn accepting_the_batch_activates_every_rule_with_rodaje_origin_and_audit_without
         assert_eq!(origin["kind"], "suggestion");
         assert_eq!(origin["evidence_origin"], "learned");
         assert_eq!(origin["batch"], json!(true));
-        assert_eq!(origin["rodaje"], json!({ "left": 3, "of": 3 }));
+        assert_eq!(
+            (
+                origin["rodaje"]["left"].clone(),
+                origin["rodaje"]["of"].clone()
+            ),
+            (json!(3), json!(3))
+        );
+        // Solo las reglas por dominio exigen además varias direcciones distintas.
+        let by_domain =
+            r.name.contains("alfa.test") && origin["rodaje"].get("min_addresses").is_some();
+        assert_eq!(origin["rodaje"].get("min_addresses").is_some(), by_domain);
     }
 
     // Una auditoría por regla y una agregada en el Historial, sin contenido.
@@ -496,7 +506,7 @@ fn a_failing_check_rule_undoes_everything_and_names_the_rule() {
     assert!(!outcome.applied);
     assert!(outcome.rules.is_empty());
     let failed = outcome.failed.expect("dice qué regla falló");
-    assert_eq!(failed.id, marta);
+    assert_eq!(failed.id.as_deref(), Some(marta.as_str()));
     assert_eq!(failed.code, "invalid_rule");
     assert!(failed.message.contains("condiciones de prueba rechazadas"));
     assert_eq!(rule_rows(dir.path()), 0);
@@ -539,8 +549,8 @@ fn a_write_failure_after_the_first_rule_rolls_the_whole_transaction_back() {
     assert!(!outcome.applied);
     let failed = outcome.failed.unwrap();
     assert_eq!(
-        (failed.id.as_str(), failed.code),
-        (last.as_str(), "write_failed")
+        (failed.id.as_deref(), failed.code),
+        (Some(last.as_str()), "write_failed")
     );
     assert_eq!(rule_rows(dir.path()), 0, "las anteriores se deshicieron");
     assert_eq!(accepted_rows(dir.path()), 0);
@@ -937,4 +947,314 @@ fn an_unreadable_rodaje_counter_fails_closed() {
     assert_eq!(task.state, TaskState::AwaitingReview, "{task:?}");
     assert_eq!(code(&task), "rodaje");
     assert_eq!(sent(&app), before);
+}
+
+// ---- Revisión de E6: rodaje por dominio, fallo cerrado, lote sin regla, fusión, simulación ----
+
+fn origin_text(dir: &Path, rule_id: &str) -> String {
+    sql(dir)
+        .query_row(
+            "SELECT origin_json FROM rule_meta WHERE rule_id = ?1",
+            [rule_id],
+            |r| r.get(0),
+        )
+        .unwrap()
+}
+
+fn origin_of(dir: &Path, rule_id: &str) -> Value {
+    serde_json::from_str(&origin_text(dir, rule_id)).unwrap()
+}
+
+/// Acepta solo la regla del dominio alfa.test y devuelve su identificador de regla.
+fn accept_domain(app: &mut App) -> String {
+    let batch = app.learned_suggestions_batch().unwrap();
+    let domain = id_of(&batch, "sender_domain", "alfa.test");
+    let outcome = app
+        .accept_and_activate_learned(&batch.batch_fp, &[domain])
+        .unwrap();
+    assert!(outcome.applied && outcome.activated == 1, "{outcome:?}");
+    outcome.rules[0].rule_id.clone()
+}
+
+fn mail_from(app: &mut App, n: usize, from: &str) -> Task {
+    new_mail(app, n, from, "Necesito la factura.", Some(&[]));
+    app.fetch_mail().unwrap();
+    process_all(app);
+    task_of(app, n)
+}
+
+fn version_of(task: &Task) -> i64 {
+    result_of(task)["version"].as_i64().unwrap_or(1)
+}
+
+fn hashes_len(dir: &Path, rule: &str) -> usize {
+    origin_of(dir, rule)["rodaje"]["address_hashes"]
+        .as_array()
+        .unwrap()
+        .len()
+}
+
+#[test]
+fn a_domain_rule_stays_in_rodaje_until_two_distinct_addresses_were_approved() {
+    let (dir, mut app) = learned();
+    let rule = accept_domain(&mut app);
+    let origin = origin_of(dir.path(), &rule);
+    assert_eq!(origin["rodaje"]["left"], 3);
+    assert_eq!(origin["rodaje"]["min_addresses"], 2);
+    assert_eq!(origin["rodaje"]["address_hashes"], json!([]));
+    let before = sent(&app);
+
+    // Una aprobación cuenta y anota la dirección; editar la siguiente reinicia también las huellas.
+    let a = mail_from(&mut app, 61, "ana@alfa.test");
+    let b = mail_from(&mut app, 62, "ana@alfa.test");
+    assert_eq!(code(&a), "rodaje");
+    app.approve(a.id, version_of(&a)).unwrap();
+    assert_eq!(rodaje_left(dir.path(), &rule), Some(2));
+    assert_eq!(hashes_len(dir.path(), &rule), 1);
+    app.edit_draft(b.id, "Texto corregido a mano.").unwrap();
+    assert_eq!(rodaje_left(dir.path(), &rule), Some(3));
+    assert_eq!(hashes_len(dir.path(), &rule), 0);
+
+    // Tres aprobaciones de la misma dirección: el contador llega al final pero el rodaje sigue.
+    for n in 63..=65 {
+        let task = mail_from(&mut app, n, "ana@alfa.test");
+        assert_eq!(code(&task), "rodaje", "m{n}");
+        app.approve(task.id, version_of(&task)).unwrap();
+    }
+    assert_eq!(
+        rodaje_left(dir.path(), &rule),
+        Some(1),
+        "la tercera no acaba el rodaje"
+    );
+    let again = mail_from(&mut app, 66, "ana@alfa.test");
+    assert_eq!(again.state, TaskState::AwaitingReview);
+    assert_eq!(code(&again), "rodaje");
+    let reason = result_of(&again)["review_reason"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert!(
+        reason.starts_with("En rodaje: queda 1 aprobación antes de enviar sola")
+            && reason.contains("al menos 2 direcciones distintas del dominio (llevan 1)"),
+        "{reason}"
+    );
+    let facts = result_of(&again)["evaluation"]["facts"].clone();
+    assert_eq!(facts["min_addresses"], 2);
+    assert_eq!(facts["addresses"], 1);
+
+    // Aprobar de nuevo a la misma dirección tampoco lo cierra.
+    app.approve(again.id, version_of(&again)).unwrap();
+    assert_eq!(rodaje_left(dir.path(), &rule), Some(1));
+
+    // Una segunda dirección distinta cierra el rodaje.
+    let luis = mail_from(&mut app, 67, "luis@alfa.test");
+    assert_eq!(code(&luis), "rodaje");
+    app.approve(luis.id, version_of(&luis)).unwrap();
+    assert_eq!(rodaje_left(dir.path(), &rule), Some(0));
+    assert!(audit(dir.path()).iter().any(|(a, s, d)| a == "rule_rodaje"
+        && s == "finished"
+        && d.contains("direcciones cubiertas 2 de 2")));
+
+    // Ahora una persona del dominio que nunca se vio ya recibe la respuesta sola.
+    let pedro = mail_from(&mut app, 68, "pedro@alfa.test");
+    assert_eq!(pedro.state, TaskState::Completed, "{pedro:?}");
+    assert_eq!(result_of(&pedro)["authorization"]["type"], "rule");
+    assert!(sent(&app) > before);
+
+    // Las direcciones solo se guardan como huellas.
+    let text = origin_text(dir.path(), &rule);
+    for plain in ["ana@alfa.test", "luis@alfa.test", "pedro@alfa.test"] {
+        assert!(!text.contains(plain), "se guardó {plain} en claro");
+    }
+    for (action, _, detail) in audit(dir.path()) {
+        if action == "rule_rodaje" {
+            assert!(!detail.contains("@alfa.test"), "{detail}");
+        }
+    }
+}
+
+#[test]
+fn a_domain_rule_with_the_counter_at_zero_but_one_address_is_still_in_rodaje() {
+    let (dir, mut app) = learned();
+    let rule = accept_domain(&mut app);
+    set_rodaje(dir.path(), &rule, 0);
+    let task = mail_from(&mut app, 71, "ana@alfa.test");
+    assert_eq!(task.state, TaskState::AwaitingReview, "{task:?}");
+    assert_eq!(code(&task), "rodaje");
+}
+
+#[test]
+fn an_unparseable_origin_is_a_full_rodaje_and_is_never_rewritten() {
+    let (dir, mut app) = learned();
+    let rule = accept_ana(&mut app);
+    sql(dir.path())
+        .execute(
+            "UPDATE rule_meta SET origin_json = '{no es json' WHERE rule_id = ?1",
+            [&rule],
+        )
+        .unwrap();
+    let before = sent(&app);
+    let task = mail_and_process(&mut app, 81, "Necesito la factura.", Some(&[]));
+    assert_eq!(task.state, TaskState::AwaitingReview, "{task:?}");
+    assert_eq!(code(&task), "rodaje");
+    assert_eq!(sent(&app), before);
+    // Aprobar el envío no cuenta ni reescribe el origen ilegible.
+    app.approve(task.id, version_of(&task)).unwrap();
+    assert_eq!(origin_text(dir.path(), &rule), "{no es json");
+    let next = mail_and_process(&mut app, 82, "Necesito la factura.", Some(&[]));
+    assert_eq!(code(&next), "rodaje");
+    // Un origen NULL, en cambio, es una regla sin rodaje.
+    sql(dir.path())
+        .execute(
+            "UPDATE rule_meta SET origin_json = NULL WHERE rule_id = ?1",
+            [&rule],
+        )
+        .unwrap();
+    let free = mail_and_process(&mut app, 83, "Necesito la factura.", Some(&[]));
+    assert_eq!(free.state, TaskState::Completed, "{free:?}");
+}
+
+#[test]
+fn a_failure_of_the_transaction_itself_is_not_blamed_on_a_rule() {
+    let (dir, mut app) = learned();
+    let batch = app.learned_suggestions_batch().unwrap();
+    let ids = all_ids(&batch);
+    let log = audit(dir.path()).len();
+    // Falla el agregado de auditoría, que se escribe después de todas las reglas.
+    sql(dir.path())
+        .execute_batch(
+            "CREATE TRIGGER sin_agregado BEFORE INSERT ON audit_log
+             WHEN NEW.action = 'rule_learned_batch' AND NEW.status = 'activated_all'
+             BEGIN SELECT RAISE(ABORT, 'fallo de prueba'); END;",
+        )
+        .unwrap();
+    let outcome = app
+        .accept_and_activate_learned(&batch.batch_fp, &ids)
+        .unwrap();
+    assert!(!outcome.applied);
+    let failed = outcome.failed.unwrap();
+    assert_eq!(failed.code, "batch_write_failed");
+    assert!(failed.id.is_none() && failed.name.is_none());
+    assert_eq!(rule_rows(dir.path()), 0);
+    assert_eq!(accepted_rows(dir.path()), 0);
+    assert_eq!(audit(dir.path()).len(), log);
+
+    sql(dir.path())
+        .execute_batch("DROP TRIGGER sin_agregado;")
+        .unwrap();
+    let ok = app
+        .accept_and_activate_learned(&batch.batch_fp, &ids)
+        .unwrap();
+    assert!(ok.applied && ok.activated == 3, "{ok:?}");
+}
+
+fn accept_ana_and_domain(app: &mut App) -> Vec<String> {
+    let batch = app.learned_suggestions_batch().unwrap();
+    let ana = id_of(&batch, "sender", "ana@alfa.test");
+    let domain = id_of(&batch, "sender_domain", "alfa.test");
+    let outcome = app
+        .accept_and_activate_learned(&batch.batch_fp, &[ana, domain])
+        .unwrap();
+    assert!(outcome.applied, "{outcome:?}");
+    outcome.rules.iter().map(|r| r.rule_id.clone()).collect()
+}
+
+fn merge_domain(app: &mut App, both: &[String]) -> String {
+    let plan = app
+        .preview_merge(both, Some("domain:alfa.test"))
+        .unwrap()
+        .plan
+        .unwrap();
+    app.merge_rules(both, Some("domain:alfa.test"), None, &plan.fingerprint)
+        .unwrap()
+        .rule
+        .id
+}
+
+#[test]
+fn merging_learned_rules_keeps_the_origin_and_the_highest_rodaje() {
+    let (dir, mut app) = learned();
+    let both = accept_ana_and_domain(&mut app);
+    // Las originales con 0 y 2 envíos de rodaje: la unificada hereda el más alto.
+    let domain_rule = both
+        .iter()
+        .find(|r| origin_of(dir.path(), r)["rodaje"]["min_addresses"] == 2)
+        .unwrap()
+        .clone();
+    for rule in &both {
+        set_rodaje(dir.path(), rule, if *rule == domain_rule { 2 } else { 0 });
+    }
+    let merged = merge_domain(&mut app, &both);
+    let origin = origin_of(dir.path(), &merged);
+    assert_eq!(origin["kind"], "merge");
+    assert_eq!(origin["evidence_origin"], "learned");
+    assert_eq!(origin["rodaje"]["left"], 2, "el más alto de las originales");
+    assert_eq!(origin["rodaje"]["min_addresses"], 2);
+    assert_eq!(origin["rodaje"]["address_hashes"], json!([]));
+}
+
+#[test]
+fn merging_finished_learned_rules_into_a_domain_rule_keeps_the_address_coverage_pending() {
+    let (dir, mut app) = learned();
+    let both = accept_ana_and_domain(&mut app);
+    for rule in &both {
+        set_rodaje(dir.path(), rule, 0);
+    }
+    let merged = merge_domain(&mut app, &both);
+    let origin = origin_of(dir.path(), &merged);
+    assert_eq!(origin["evidence_origin"], "learned");
+    assert_eq!(
+        origin["rodaje"]["left"], 1,
+        "sin dos direcciones vistas el rodaje no queda en 0"
+    );
+}
+
+#[test]
+fn merging_rules_that_were_not_learned_adds_no_learned_origin() {
+    let (dir, mut app) = learned();
+    for (id, cond) in [
+        (
+            "manual-a",
+            json!({ "category": "solicitud_factura", "sender": "ana@alfa.test" }),
+        ),
+        (
+            "manual-b",
+            json!({ "category": "solicitud_factura", "sender_domain": "alfa.test" }),
+        ),
+    ] {
+        app.create_rule_full(NewRule {
+            id: Some(id),
+            name: None,
+            action_kind: SEND_DRAFT,
+            conditions: &cond,
+            allow_any_sender: false,
+        })
+        .unwrap();
+    }
+    let both = vec!["manual-a".to_owned(), "manual-b".to_owned()];
+    let merged = merge_domain(&mut app, &both);
+    let origin = origin_of(dir.path(), &merged);
+    assert_eq!(origin["kind"], "merge");
+    assert!(origin.get("evidence_origin").is_none() && origin.get("rodaje").is_none());
+}
+
+#[test]
+fn the_simulation_reports_the_rodaje_left_of_the_tested_rule() {
+    let (dir, mut app) = learned();
+    let rule = accept_ana(&mut app);
+    let conditions = json!({ "category": "solicitud_factura", "sender": "ana@alfa.test" });
+    let sim = app
+        .simulate_rule(SEND_DRAFT, &conditions, None, false, Some(&rule))
+        .unwrap();
+    assert_eq!(sim.rodaje_left, Some(3));
+    set_rodaje(dir.path(), &rule, 1);
+    let sim = app
+        .simulate_rule(SEND_DRAFT, &conditions, None, false, Some(&rule))
+        .unwrap();
+    assert_eq!(sim.rodaje_left, Some(1));
+    // Una regla hipotética no tiene rodaje.
+    let sim = app
+        .simulate_rule(SEND_DRAFT, &conditions, None, false, None)
+        .unwrap();
+    assert_eq!(sim.rodaje_left, None);
 }
