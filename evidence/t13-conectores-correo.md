@@ -124,7 +124,7 @@ En `tests/mail_accounts.rs`, la prueba de respuesta perdida en Graph termina aho
 - Microsoft 365 real: inicio de sesión, lectura y borradores hechos el 2026-11-07; envío aprobado hecho el 2026-11-09, recibido una vez en el destino, en su carpeta de spam (ver al final).
 - Gmail: corte real provocado el 2026-11-09 desde la terminal. D41 no funcionaba, porque Gmail sustituye el `Message-ID` al enviar; corregido con D156 y comprobado con otro corte real (ver al final). Falta provocarlo desde la ventana de la aplicación.
 - Recorrido con una cuenta real desde la ventana (Microsoft): hecho el 2026-11-09 en la versión de desarrollo, con los límites que se anotan al final. Sin hacer con Gmail ni en una instalación.
-- Calidad de clasificación y borradores con correo real: sin medir.
+- Calidad de clasificación y borradores con correo real: primera revisión el 2026-11-09 solo sobre correo automático (ver al final). Sin medir con correo de negocio ni, en la práctica, con `gemma4:31b`.
 
 ## 2026-11-06 — Adjuntos (D66)
 
@@ -225,3 +225,30 @@ Versión de desarrollo (`scripts/dev-pruebas.ps1`), cuenta personal de Outlook, 
 - El borrador de esta prueba anuncia que informa del horario pero no lo da: no inventa el dato, aunque tampoco sirve como respuesta sin editarla.
 
 **Sin cubrir:** aprobar una tarea en revisión de una cuenta ya desconectada, porque las que quedan son de correo real; dónde se archivó la respuesta en el destino, porque el conector usado para comprobarlo solo da el recuento del hilo; el mismo recorrido con Gmail y en una instalación.
+
+## 2026-11-09 — Primera revisión de calidad con correo real
+
+Revisión manual, por encargo del usuario, de las tareas de correo de dos cuentas reales ya procesadas. Hay un solo evaluador (Claude), sin segunda lectura, y solo leyó los primeros 450 caracteres de cuerpo y borrador. La especificación no fija umbrales, así que esto no acredita ningún criterio de aceptación. Aquí solo constan recuentos; el juicio por tarea, sin contenido de los correos, queda en `evaluation/results/`, fuera de Git.
+
+Muestra: 33 tareas, de las que 25 son correo de terceros y 8 pruebas propias, que se excluyen de los recuentos siguientes.
+
+| Medida (correo de terceros) | Resultado |
+|---|---|
+| Procesados | 24 de 25; 1 `failed` por `timeout` |
+| Modelo | `qwen3:8b` en 23 y `gemma4:31b` en 1 |
+| Categoría | 24 de 24 correctas, todas `otros`; ningún correo real de las otras cuatro categorías |
+| Correos que necesitaban respuesta | 0 de 24: notificaciones automáticas, avisos de seguridad, bienvenidas y publicidad |
+| Borradores propuestos pese a eso | 24 de 24; 13 dirigidos a direcciones `no-reply` |
+| Borradores que servirían sin editar | 0 de 24 |
+| Comentario para el lector en lugar de respuesta | 14, todos con `qwen3:8b`; 7 mencionan las categorías internas de clasificación |
+| Habla como el remitente o responde sin sentido | 9, todos con `qwen3:8b` |
+| Genérico, pregunta el motivo a un envío automático | 1, con `gemma4:31b` |
+| Envíos a terceros | 0: ninguno se aprobó y no hay reglas |
+
+**Conclusión:** el producto no distingue los correos que no requieren respuesta. Siempre redacta un borrador, y solo la revisión humana evita que salga. El contrato de categorías no tiene hoy ningún resultado que signifique «sin respuesta».
+
+**Lo que esta muestra no permite afirmar:**
+
+- La cobertura de las categorías de negocio: nada real las ejercita. El acierto en `otros` es poco informativo, porque toda la muestra es de esa categoría.
+- La calidad de `gemma4:31b`, el modelo por defecto (D100): 1 correo de terceros. La diferencia con `qwen3:8b` tampoco se puede atribuir solo al modelo, porque las instrucciones cambiaron entre medias (D105).
+- La invención de datos: no se vio ninguna, pero la lectura estaba recortada.
