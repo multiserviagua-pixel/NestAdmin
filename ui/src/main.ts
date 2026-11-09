@@ -170,7 +170,27 @@ import {
   type TaskReason,
   type TasksView,
 } from "./tasks-text";
-import { ageText, chooseTab, emailFlags, formatAmount, invoiceFlags, isKnownKind, nextSelection, sortForReview, splitByTab, tabOf, totalIsProposed, type Flag, type ReviewTab } from "./pendientes-text";
+import { ageText, chooseTab, emailFlags, formatAmount, invoiceFlags, isKnownKind, nextSelection, sortForReview, splitByTab, tabOf, totalIsProposed, type Flag, type QueueTab, type ReviewTab } from "./pendientes-text";
+import {
+  ARCHIVED_NOTICE,
+  ARCHIVE_LABEL,
+  ARCHIVE_TITLE,
+  INFORMATIVE_EMPTY,
+  INFORMATIVE_INTRO,
+  INFORMATIVE_TAB,
+  REDRAFT_CONFIRM_NO,
+  REDRAFT_CONFIRM_YES,
+  REDRAFT_LABEL,
+  REDRAFT_NOTICE,
+  REDRAFT_TITLE,
+  informativeReason,
+  informativeTasks,
+  redraftConfirmText,
+  redraftFor,
+  redraftNeedsConfirm,
+  reviewEmailActions,
+  triageNotices,
+} from "./triage-text";
 
 const STATE_LABEL: Record<string, string> = {
   queued: "En cola",
@@ -248,8 +268,11 @@ const state = {
   view: "review" as View,
   // Pendientes (D137): pestaña, seleccionado de cada una y orden mostrado, para pasar al siguiente.
   reviewTab: null as ReviewTab | null,
-  selected: { invoices: null, emails: null } as Record<ReviewTab, number | null>,
-  reviewOrder: { invoices: [], emails: [] } as Record<ReviewTab, number[]>,
+  selected: { invoices: null, emails: null, informative: null } as Record<ReviewTab, number | null>,
+  reviewOrder: { invoices: [], emails: [], informative: [] } as Record<ReviewTab, number[]>,
+  // Informativos (D157): cuántos se enseñan y el correo cuya redacción espera confirmación.
+  informativeShown: BOARD_PAGE,
+  confirmRedraft: null as number | null,
   // Clave del control que debe recibir el foco tras el repintado (flechas de la lista).
   focusAfterRender: null as string | null,
   // Filtro de la lista de pendientes por origen: "" (todo), "file" o el ID de una cuenta.
@@ -667,7 +690,7 @@ function nav() {
   );
 }
 
-const TAB_NAME: Record<ReviewTab, string> = { invoices: "Facturas", emails: "Correos" };
+const TAB_NAME: Record<ReviewTab, string> = { invoices: "Facturas", emails: "Correos", informative: INFORMATIVE_TAB };
 
 /** Fecha corta de una fila. Sin dato, «Sin fecha». */
 function shortDate(value: unknown): string {
@@ -734,20 +757,43 @@ function emailRow(task: Task): Child[] {
   ];
 }
 
+/** Fila de un informativo (D157): remitente, asunto, cuenta y motivo legible. */
+function informativeRow(task: Task): Child[] {
+  const input = safeJson(task.input_ref);
+  const message = task.result?.message ?? input.message ?? {};
+  return [
+    h(
+      "span",
+      { class: "item-line" },
+      message.from ? h("span", { class: "item-title" }, message.from) : h("span", { class: "item-title missing" }, "Remitente no consta"),
+      h("span", { class: "item-side" }, shortDate(message.date)),
+    ),
+    h("span", { class: "item-sub" }, message.subject ?? "(sin asunto)"),
+    h("span", { class: "item-sub" }, `Cuenta: ${accountShort(taskMailOrigin(task), accountId(message.id ?? input.message_id))}`),
+    h("span", { class: "item-sub" }, informativeReason(task.result)),
+  ];
+}
+
 function reviewView() {
   const all = sortForReview(state.tasks.filter((t) => t.state === "awaiting_review"));
   const split = splitByTab(all);
+  // Informativos (D157): correos ya cerrados; no cuentan como pendientes.
+  const informative = informativeTasks(state.tasks);
   const tab = chooseTab(state.reviewTab, { invoices: split.invoices.length, emails: split.emails.length });
   state.reviewTab = tab;
-  const inTab = split[tab];
+  const isInfo = tab === "informative";
+  const inTab: Task[] = isInfo ? informative : split[tab as QueueTab];
   // Orígenes de esta pestaña, para el filtro: archivos importados y cada cuenta.
   const origins = new Map<string, string>();
-  for (const t of inTab) {
+  for (const t of isInfo ? [] : inTab) {
     const key = originKey(t);
     if (!origins.has(key)) origins.set(key, key === "file" ? "Archivos importados" : accountShort(taskMailOrigin(t), key));
   }
   if (state.originFilter && !origins.has(state.originFilter)) state.originFilter = "";
-  const pending = inTab.filter((t) => !state.originFilter || originKey(t) === state.originFilter);
+  const pending = inTab.filter((t) => isInfo || !state.originFilter || originKey(t) === state.originFilter);
+  // En Informativos se enseñan por tandas; la selección cuenta con todos.
+  const rows = isInfo ? pending.slice(0, state.informativeShown) : pending;
+  const hiddenInfo = pending.length - rows.length;
   const ids = pending.map((t) => t.id);
   const previous = state.selected[tab];
   state.selected[tab] = nextSelection(state.reviewOrder[tab], ids, previous);
@@ -755,7 +801,7 @@ function reviewView() {
   state.reviewOrder[tab] = ids;
   const selected = pending.find((t) => t.id === state.selected[tab]);
   const now = Date.now();
-  const otherTab: ReviewTab = tab === "invoices" ? "emails" : "invoices";
+  const otherTab: QueueTab = tab === "invoices" ? "emails" : "invoices";
   const moveTo = (id: number | undefined) => {
     if (id === undefined) return;
     state.selected[tab] = id;
@@ -790,19 +836,25 @@ function reviewView() {
           label: "Tipo de pendiente",
           panelId: "review-list",
           active: tab,
-          items: (["invoices", "emails"] as ReviewTab[]).map((key) => ({ key, label: TAB_NAME[key], count: split[key].length })),
+          items: (["invoices", "emails", "informative"] as ReviewTab[]).map((key) => ({ key, label: TAB_NAME[key], count: key === "informative" ? informative.length : split[key as QueueTab].length })),
           onSelect: (key) => {
             state.reviewTab = key;
             state.originFilter = "";
+            state.confirmRedraft = null;
             render();
           },
         }),
       ),
-      origins.size > 1 ? h("label", { class: "filter" }, "Origen", filter) : null,
+      isInfo ? h("p", { class: "meta list-intro" }, INFORMATIVE_INTRO) : null,
+      !isInfo && origins.size > 1 ? h("label", { class: "filter" }, "Origen", filter) : null,
       h(
         "div",
         { class: "list-items", id: "review-list", role: "tabpanel", "aria-label": TAB_NAME[tab], "data-scroll-key": `list:${tab}` },
-        all.length === 0
+        isInfo
+          ? inTab.length === 0
+            ? emptyState(INFORMATIVE_EMPTY)
+            : null
+          : all.length === 0
           ? emptyState("No hay nada pendiente", "Las tareas nuevas aparecerán aquí.")
           : inTab.length === 0
             ? emptyState(
@@ -820,7 +872,7 @@ function reviewView() {
                 ),
               )
             : null,
-        ...pending.map((t, index) =>
+        ...rows.map((t, index) =>
           h(
             "button",
             {
@@ -831,19 +883,38 @@ function reviewView() {
               // Las flechas solo mueven la selección: aprobar o descartar nunca tienen atajo (D138).
               onkeydown: (event) => {
                 const key = (event as KeyboardEvent).key;
-                const target = key === "ArrowDown" ? index + 1 : key === "ArrowUp" ? index - 1 : key === "Home" ? 0 : key === "End" ? pending.length - 1 : -1;
-                if (target < 0 || target >= pending.length) return;
+                const target = key === "ArrowDown" ? index + 1 : key === "ArrowUp" ? index - 1 : key === "Home" ? 0 : key === "End" ? rows.length - 1 : -1;
+                if (target < 0 || target >= rows.length) return;
                 event.preventDefault();
-                state.focusAfterRender = `item:${pending[target]!.id}`;
-                moveTo(pending[target]!.id);
+                state.focusAfterRender = `item:${rows[target]!.id}`;
+                moveTo(rows[target]!.id);
               },
             },
-            ...(tabOf(t.kind) === "invoices" ? invoiceRow(t, ageText(t.created_at, now)) : emailRow(t)),
+            ...(isInfo ? informativeRow(t) : tabOf(t.kind) === "invoices" ? invoiceRow(t, ageText(t.created_at, now)) : emailRow(t)),
           ),
         ),
+        hiddenInfo > 0
+          ? h(
+              "div",
+              { class: "list-more" },
+              h(
+                "button",
+                {
+                  type: "button",
+                  "data-focus-key": "informative:more",
+                  onclick: () => {
+                    state.informativeShown += BOARD_PAGE;
+                    state.focusAfterRender = hiddenInfo > BOARD_PAGE ? "informative:more" : `item:${pending[rows.length]?.id}`;
+                    render();
+                  },
+                },
+                `Ver más (${hiddenInfo} sin mostrar)`,
+              ),
+            )
+          : null,
       ),
     ),
-    selected ? guardActions(tabOf(selected.kind) === "invoices" ? invoiceDetail(selected) : emailDetail(selected)) : h("div", { class: "detail" }),
+    selected ? guardActions(isInfo ? informativeDetail(selected) : tabOf(selected.kind) === "invoices" ? invoiceDetail(selected) : emailDetail(selected)) : h("div", { class: "detail" }),
   );
 }
 
@@ -1050,8 +1121,105 @@ function invoiceDetail(task: Task) {
   );
 }
 
+/** Tras archivar o redactar, el foco pasa al correo siguiente de la lista (o a la pestaña si no queda ninguno). */
+function focusAfterLeaving(task: Task, tab: ReviewTab) {
+  const order = state.reviewOrder[tab];
+  const next = nextSelection(
+    order,
+    order.filter((id) => id !== task.id),
+    task.id,
+  );
+  state.focusAfterRender = next !== null ? `item:${next}` : `tab:Tipo de pendiente:${tab}`;
+}
+
+function archiveEmail(task: Task) {
+  focusAfterLeaving(task, "emails");
+  resolveTask(task, () => api.archive(task.id), ARCHIVED_NOTICE);
+}
+
+function requestRedraft(task: Task, tab: ReviewTab) {
+  state.confirmRedraft = null;
+  if (tab === "informative") state.focusAfterRender = `redraft:${task.id}`;
+  else focusAfterLeaving(task, tab);
+  resolveTask(task, () => api.redraft(task.id), REDRAFT_NOTICE);
+}
+
+function askRedraft(task: Task, tab: ReviewTab) {
+  if (!redraftNeedsConfirm(task.result)) return requestRedraft(task, tab);
+  state.confirmRedraft = task.id;
+  state.focusAfterRender = `redraft-no:${task.id}`;
+  render();
+}
+
+function redraftButton(task: Task, tab: ReviewTab) {
+  return h("button", { title: REDRAFT_TITLE, "data-focus-key": `redraft:${task.id}`, onclick: () => askRedraft(task, tab) }, REDRAFT_LABEL);
+}
+
+/** Confirmación al redactar a una dirección que no admite respuestas. */
+function redraftConfirm(task: Task, tab: ReviewTab) {
+  if (state.confirmRedraft !== task.id) return null;
+  return h(
+    "div",
+    { class: "notice warn", role: "group", "aria-label": "Confirmar redacción" },
+    h("span", { role: "status" }, redraftConfirmText(task.result?.message?.from)),
+    h("button", { onclick: () => requestRedraft(task, tab) }, REDRAFT_CONFIRM_YES),
+    h(
+      "button",
+      {
+        class: "primary",
+        "data-focus-key": `redraft-no:${task.id}`,
+        onclick: () => {
+          state.confirmRedraft = null;
+          state.focusAfterRender = `redraft:${task.id}`;
+          render();
+        },
+      },
+      REDRAFT_CONFIRM_NO,
+    ),
+  );
+}
+
+/** Detalle de solo lectura de un informativo (D157): no tiene borrador ni nada que aprobar. */
+function informativeDetail(task: Task) {
+  const r = task.result ?? {};
+  const message = r.message ?? safeJson(task.input_ref).message ?? {};
+  const requested = redraftFor(state.tasks, task.id);
+  const article = h(
+    "article",
+    {},
+    h("div", { class: "detail-head" }, h("h2", {}, message.subject ?? h("span", { class: "missing" }, "(sin asunto)")), statusChip("Informativo")),
+    h("p", { class: "reason" }, `Motivo: ${informativeReason(r)}`),
+    h("p", { class: "meta" }, "No se envió a la IA ni se ha borrado."),
+    h(
+      "dl",
+      { class: "origin" },
+      h("dt", {}, "Cuenta"),
+      h("dd", {}, accountLine(r.origin ?? safeJson(task.input_ref).origin, message.id)),
+      h("dt", {}, "De"),
+      h("dd", {}, message.from ?? missing()),
+      h("dt", {}, "Para"),
+      h("dd", {}, Array.isArray(message.to) && message.to.length ? message.to.join(", ") : missing()),
+      h("dt", {}, "Recibido"),
+      h("dd", {}, message.date ? dateText(message.date) : missing()),
+    ),
+    h("div", { class: "message" }, h("p", {}, message.body ?? missing())),
+    redraftConfirm(task, "informative"),
+  );
+  return h(
+    "div",
+    { class: "detail" },
+    h("div", { class: "detail-scroll", "data-scroll-key": `detail:${task.id}` }, article),
+    actionBar(
+      requested ? "Ya se pidió una respuesta a este correo: aparece en Pendientes." : null,
+      requested ? h("button", { "data-focus-key": `redraft:${task.id}`, onclick: () => openInReview(requested) }, "Ver en Pendientes") : redraftButton(task, "informative"),
+    ),
+  );
+}
+
 function emailDetail(task: Task) {
   const r = task.result ?? {};
+  const acts = reviewEmailActions(r);
+  const notices = triageNotices(r);
   const message = r.message ?? {};
   const draft = r.draft ?? {};
   const body = h("textarea", {
@@ -1078,6 +1246,10 @@ function emailDetail(task: Task) {
     h("p", { class: "reason" }, `Motivo de la revisión: ${r.review_reason ?? "requiere aprobación"}`),
     whyHere(task),
     recoveryBox(task, "enviar"),
+    notices.length
+      ? h("div", { class: "triage-notices" }, ...notices.map((n) => h("div", { class: `notice ${n.tone}`, role: "status" }, h("span", {}, n.text))))
+      : null,
+    redraftConfirm(task, "emails"),
     h(
       "dl",
       { class: "origin" },
@@ -1091,9 +1263,9 @@ function emailDetail(task: Task) {
       h("dd", {}, message.date ? dateText(message.date) : missing()),
     ),
     h("div", { class: "message" }, h("p", {}, message.body ?? missing())),
-    h("h3", {}, "Borrador de respuesta"),
-    h("p", { class: "meta" }, "Para: ", recipients.length ? recipients.join(", ") : h("span", { class: "missing" }, "sin destinatario; no se puede enviar")),
-    body,
+    acts.editor ? h("h3", {}, "Borrador de respuesta") : null,
+    acts.editor ? h("p", { class: "meta" }, "Para: ", recipients.length ? recipients.join(", ") : h("span", { class: "missing" }, "sin destinatario; no se puede enviar")) : null,
+    acts.editor ? body : null,
   );
   return h(
     "div",
@@ -1102,29 +1274,35 @@ function emailDetail(task: Task) {
     actionBar(
       !isKnownKind(task.kind)
         ? "Tipo de tarea no reconocido: no se puede enviar desde aquí."
-        : recipients.length === 0
-          ? "Sin destinatario: no se puede enviar."
-          : needsConfirmation
-            ? "Para aprobar, confirme primero que el intento anterior no se envió."
-            : null,
-      h(
-        "button",
-        {
-          class: "primary",
-          // Con el borrador anterior desaparecido, primero hay que confirmar que no se envió.
-          disabled: !isKnownKind(task.kind) || recipients.length === 0 || needsConfirmation,
-          onclick: () =>
-            resolveTask(task, async () => {
-              let version = r.version ?? 1;
-              // Si se ha editado, se guarda primero como versión nueva y se aprueba esa.
-              if (body.value !== (draft.body ?? "")) version = (await api.editDraft(task.id, body.value)).result?.version;
-              afterApproval(await api.approve(task.id, version), `Enviada desde ${accountName(message.id, r.origin)}; la entrega al destinatario no se comprueba`);
-            }),
-        },
-        "Aprobar y enviar",
-      ),
-      h("button", { onclick: () => void act(() => api.editDraft(task.id, body.value), "Borrador guardado como versión nueva") }, "Guardar borrador"),
-      createRuleButton(task),
+        : !acts.approve
+          ? acts.approveHint
+          : recipients.length === 0
+            ? "Sin destinatario: no se puede enviar."
+            : needsConfirmation
+              ? "Para aprobar, confirme primero que el intento anterior no se envió."
+              : null,
+      acts.approve
+        ? h(
+            "button",
+            {
+              class: "primary",
+              // Con el borrador anterior desaparecido, primero hay que confirmar que no se envió.
+              disabled: !isKnownKind(task.kind) || recipients.length === 0 || needsConfirmation,
+              onclick: () =>
+                resolveTask(task, async () => {
+                  let version = r.version ?? 1;
+                  // Si se ha editado, se guarda primero como versión nueva y se aprueba esa.
+                  if (body.value !== (draft.body ?? "")) version = (await api.editDraft(task.id, body.value)).result?.version;
+                  afterApproval(await api.approve(task.id, version), `Enviada desde ${accountName(message.id, r.origin)}; la entrega al destinatario no se comprueba`);
+                }),
+            },
+            "Aprobar y enviar",
+          )
+        : null,
+      acts.editor ? h("button", { onclick: () => void act(() => api.editDraft(task.id, body.value), "Borrador guardado como versión nueva") }, "Guardar borrador") : null,
+      acts.redraft ? redraftButton(task, "emails") : null,
+      acts.archive ? h("button", { title: ARCHIVE_TITLE, "data-focus-key": `archive:${task.id}`, onclick: () => archiveEmail(task) }, ARCHIVE_LABEL) : null,
+      acts.editor ? createRuleButton(task) : null,
       h("button", { class: "danger", onclick: () => resolveTask(task, () => api.reject(task.id), "Tarea descartada") }, "Descartar"),
     ),
   );

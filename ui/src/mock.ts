@@ -429,6 +429,9 @@ function task(kind: string, input: object, state: Task["state"], result: Task["r
   return t;
 }
 
+// D159: los correos del triaje local y las redacciones a mano no cuentan para la simulación.
+const triagedOrRedraft = (t: Task) => ["informativo", "rebote"].includes(t.result?.triage?.route) || t.result?.redraft_of != null;
+
 const origin = (account: string): MailOrigin => {
   const a = mailAccounts.find((m) => m.id === account);
   return a
@@ -714,6 +717,87 @@ task("email", { message_id: "google-1:18c2-sintetico-9", account: "google-1" }, 
   review_reason: "ninguna regla activa coincide",
   action: { kind: "send_draft" },
 });
+
+// Triaje de correo (D157-D160), datos sintéticos.
+{
+  const triaged = (id: string, account: string, from: string, subject: string, body: string, codes: string[], date: string) => ({
+    type: "email",
+    version: 1,
+    origin: origin(account),
+    message: { id, subject, from, to: ["oficina@empresa.test"], body, date, signals: codes },
+  });
+  // Informativos: cerrados sin IA, con su motivo; el último, de una dirección sin respuesta, es el más reciente.
+  const informatives: Array<[string, string, string, string, string, string[], string]> = [
+    ["simulador:M-info-1", "simulador", "no-reply@avisos-banco.test", "Aviso de movimiento en su cuenta", "Se ha registrado un movimiento. Este mensaje es automático.", ["noreply_address"], "2026-11-06T08:00:00Z"],
+    ["google-1:info-2", "google-1", "sistema@portal-envios.test", "Su paquete está en reparto", "Su pedido 8841 sale hoy en reparto.", ["auto_submitted"], "2026-11-07T09:30:00Z"],
+    ["microsoft-1:info-3", "microsoft-1", "promociones@tienda-omega.test", "Oferta de la semana", "Descuentos en material de oficina.", ["precedence_junk", "list_unsubscribe"], "2026-11-08T07:15:00Z"],
+  ];
+  for (const [id, account, from, subject, body, codes, date] of informatives) {
+    task("email", { message_id: id, account }, "completed", { ...triaged(id, account, from, subject, body, codes, date), triage: { route: "informativo", codes, source: "local" } });
+  }
+  // `?muchos`: más de 50 informativos para probar «Ver más».
+  if (new URLSearchParams(location.search).has("muchos")) {
+    for (let i = 1; i <= 54; i++) {
+      const id = `simulador:M-info-lote-${i}`;
+      const t = task("email", { message_id: id, account: "simulador" }, "completed", {
+        ...triaged(id, "simulador", `aviso${i}@lotes.test`, `Aviso automático ${i}`, "Mensaje automático de prueba.", ["noreply_address"], "2026-10-20"),
+        triage: { route: "informativo", codes: ["noreply_address"], source: "local" },
+      });
+      t.created_at -= i * 60_000;
+    }
+  }
+  // Rebote: en revisión, sin IA ni borrador.
+  const bounceId = "simulador:M-reb-1";
+  task("email", { message_id: bounceId, account: "simulador" }, "awaiting_review", {
+    ...triaged(bounceId, "simulador", "mailer-daemon@correo-saliente.test", "Undelivered Mail Returned to Sender", "No se pudo entregar su mensaje a clientes@dominio-inexistente.test.", ["bounce_address"], "2026-11-08T10:00:00Z"),
+    triage: { route: "rebote", codes: ["bounce_address"], source: "local" },
+    needs_reply: false,
+    review_reason: "Posible fallo de entrega: un correo enviado no llegó. Revise el destinatario.",
+  });
+  // needs_reply falso: la IA clasificó y no preparó borrador.
+  const noReplyId = "google-1:nr-1";
+  task("email", { message_id: noReplyId, account: "google-1" }, "awaiting_review", {
+    ...triaged(noReplyId, "google-1", "ana.ruiz@cliente-sigma.test", "Gracias por la factura", "Recibida, muchas gracias.", [], "2026-11-08T11:20:00Z"),
+    category: "otros",
+    needs_reply: false,
+    draft_flags: [],
+    provider: "ollama",
+    model: "qwen3:8b",
+    review_reason: "la IA considera que el correo no requiere respuesta",
+  });
+  // Borrador con enlaces, correos e IBAN, y remitente de lista de distribución (señal débil).
+  const flagsId = "microsoft-1:flags-1";
+  task("email", { message_id: flagsId, account: "microsoft-1" }, "awaiting_review", {
+    ...triaged(flagsId, "microsoft-1", "boletin@asociacion-gamma.test", "Cuota anual", "¿A qué cuenta abonamos la cuota?", ["list_id", "list_unsubscribe"], "2026-11-08T12:00:00Z"),
+    category: "consulta_pago",
+    needs_reply: true,
+    draft_flags: ["url", "email", "iban"],
+    draft: {
+      to: ["boletin@asociacion-gamma.test"],
+      subject: "Re: Cuota anual",
+      body: "Buenos días:\n\nPuede abonar en ES00 0000 0000 0000 0000 0000 o consultar https://pagos.ejemplo.test.\n\nUn saludo.",
+    },
+    provider: "ollama",
+    model: "qwen3:8b",
+    review_reason: "el borrador incluye datos que no constan en el perfil",
+    action: { kind: "send_draft" },
+  });
+  // Señales sin comprobar (conector sin cabeceras): `signals` ausente.
+  const uncheckedId = "microsoft-1:unchecked-1";
+  const unchecked = triaged(uncheckedId, "microsoft-1", "pedidos@proveedor-theta.test", "Confirmación de pedido 5512", "Confirmamos el pedido 5512.", [], "2026-11-08T13:00:00Z");
+  delete (unchecked.message as { signals?: string[] }).signals;
+  task("email", { message_id: uncheckedId, account: "microsoft-1" }, "awaiting_review", {
+    ...unchecked,
+    category: "otros",
+    needs_reply: true,
+    draft_flags: [],
+    draft: { to: ["pedidos@proveedor-theta.test"], subject: "Re: Confirmación de pedido 5512", body: "Buenos días:\n\nRecibido, gracias.\n\nUn saludo." },
+    provider: "ollama",
+    model: "qwen3:8b",
+    review_reason: "ninguna regla activa coincide",
+    action: { kind: "send_draft" },
+  });
+}
 
 // Evaluación guardada con cada tarea (D125): reglas comprobadas, si coincidían y por qué. Las
 // tareas sin ella son anteriores al registro y el panel lo dice.
@@ -1205,7 +1289,7 @@ function mockPlan(members: Rule[], chosen: string): MergePlan {
   const current = latest().filter((r) => !metaOf(r.id).archived_at && r.action_kind === members[0]!.action_kind);
   const merged: Rule = { id: "(unificada)", version: 1, action_kind: model.action_kind, conditions: model.conditions, active: true, created_at: 0 };
   const future = [...current.filter((r) => !originals.has(r.id)), merged];
-  const ofKind = tasks.filter((t) => t.kind === kind).sort((a, b) => b.id - a.id);
+  const ofKind = tasks.filter((t) => t.kind === kind && !triagedOrRedraft(t)).sort((a, b) => b.id - a.id);
   const simulate = (validated: boolean): MergePlan["simulation"] => {
     const sim: MergePlan["simulation"] = { considered: 0, truncated: ofKind.length > 200, skipped_without_result: 0, touched: 0, start_automating: [], stop_automating: [], unchanged_automated: 0, unchanged_review: 0, without_currency_check: 0 };
     for (const t of ofKind.slice(0, 200)) {
@@ -1932,7 +2016,7 @@ const handlers: Record<string, (a: any, options?: any) => unknown> = {
     checkConditions(actionKind, conditions, true);
     const max = limit ?? 200;
     const kind = actionKind === "register_invoice" ? "invoice" : "email";
-    const ofKind = tasks.filter((t) => t.kind === kind).sort((a, b) => b.id - a.id);
+    const ofKind = tasks.filter((t) => t.kind === kind && !triagedOrRedraft(t)).sort((a, b) => b.id - a.id);
     const items: SimulationItem[] = [];
     const sim: Simulation = {
       action_kind: actionKind,

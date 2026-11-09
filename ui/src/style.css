@@ -2030,3 +2030,22 @@ h2 + .section {
     padding: var(--s4);
   }
 }
+
+/* ---- Triaje de correo (D157-D160) ---- */
+
+.triage-notices {
+  margin: var(--s3) 0;
+}
+
+.triage-notices .notice {
+  margin-bottom: var(--s2);
+}
+
+.list-intro {
+  margin: 0 0 var(--s2);
+  padding: 0 var(--s3);
+}
+
+.list-more {
+  padding: var(--s2) var(--s3);
+}
