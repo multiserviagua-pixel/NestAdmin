@@ -6,7 +6,7 @@
 use nestadmin_core::{Connector, ConnectorError};
 
 use crate::admin::{Invoice, InvoiceCriteria, InvoiceMatch, InvoiceReceipt};
-use crate::mail::{MessagePage, NewDraft, SendReceipt};
+use crate::mail::{MessagePage, NewDraft, OwnReply, SendReceipt};
 
 /// Tamaño máximo de un adjunto que se descarga (igual que el de un documento importado).
 pub const MAX_ATTACHMENT_BYTES: u64 = 50_000_000;
@@ -39,6 +39,25 @@ pub trait MailConnector: Connector {
     /// proveedor no lo permite o el hilo no consta): quien llama sigue el flujo normal y no oculta
     /// nada. Por defecto, desconocido.
     fn last_message_is_ours(&self, _thread_key: &str) -> Result<Option<bool>, ConnectorError> {
+        Ok(None)
+    }
+
+    /// Si el conector sabe leer la carpeta Enviados (D168). Por defecto no: así se distingue
+    /// «sin Enviados» de «sin respuesta propia» (`own_reply_in_thread` devuelve `Ok(None)` en
+    /// ambos casos).
+    fn supports_sent(&self) -> bool {
+        false
+    }
+
+    /// Primera respuesta propia (Enviados) del hilo `thread_key` posterior al mensaje recibido
+    /// `after_id` (ID del conector, sin prefijo de cuenta). Cuerpo en texto plano tal como llega,
+    /// con la cita. Solo lectura. `Ok(None)` = no hay respuesta o el conector no lee Enviados
+    /// (consulte [`supports_sent`](Self::supports_sent)). Por defecto, sin Enviados.
+    fn own_reply_in_thread(
+        &self,
+        _thread_key: &str,
+        _after_id: &str,
+    ) -> Result<Option<OwnReply>, ConnectorError> {
         Ok(None)
     }
 

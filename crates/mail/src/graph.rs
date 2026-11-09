@@ -10,7 +10,7 @@
 use base64::engine::general_purpose::STANDARD;
 use base64::Engine;
 use nestadmin_core::mail_signals;
-use nestadmin_simulators::{codes, Attachment, Message, MessagePage, NewDraft};
+use nestadmin_simulators::{codes, Attachment, Message, MessagePage, NewDraft, OwnReply};
 use serde_json::{json, Value};
 
 use crate::http::{Api, Method};
@@ -97,21 +97,25 @@ fn signals(value: &Value, from: Option<&str>) -> Option<Vec<String>> {
     )))
 }
 
+/// Cuerpo en texto: el HTML se convierte; vacío es dato ausente.
+fn body_text(value: &Value) -> Option<String> {
+    let body = value.get("body")?;
+    let content = body.get("content").and_then(Value::as_str)?;
+    let html = body
+        .get("contentType")
+        .and_then(Value::as_str)
+        .is_some_and(|t| t.eq_ignore_ascii_case("html"));
+    let text = if html {
+        html_to_text(content)
+    } else {
+        content.trim().to_owned()
+    };
+    (!text.is_empty()).then_some(text)
+}
+
 fn message(value: &Value) -> Option<Message> {
     let from = value.get("from").and_then(address);
-    let body = value.get("body").and_then(|body| {
-        let content = body.get("content").and_then(Value::as_str)?;
-        let html = body
-            .get("contentType")
-            .and_then(Value::as_str)
-            .is_some_and(|t| t.eq_ignore_ascii_case("html"));
-        let text = if html {
-            html_to_text(content)
-        } else {
-            content.trim().to_owned()
-        };
-        (!text.is_empty()).then_some(text)
-    });
+    let body = body_text(value);
     Some(Message {
         id: value.get("id").and_then(Value::as_str)?.to_owned(),
         subject: non_empty(value.get("subject")),
@@ -162,7 +166,74 @@ impl Graph {
     }
 }
 
+/// Valor de una cadena OData entre comillas simples: la comilla se duplica.
+fn odata_quote(text: &str) -> String {
+    format!("'{}'", text.replace('\'', "''"))
+}
+
+/// Máximo de mensajes de Enviados que se piden por conversación; una conversación real queda
+/// muy por debajo y no se sigue `@odata.nextLink`.
+const SENT_PAGE: &str = "50";
+
 impl MailProvider for Graph {
+    fn supports_sent(&self) -> bool {
+        true
+    }
+
+    /// D168. Dos lecturas: la fecha de recepción de `after_id` (`$select=receivedDateTime`) y
+    /// `sentitems` filtrado por `conversationId`. No se combina `$orderby` con `$filter` (Graph
+    /// lo limita): se ordena en local por `sentDateTime`, que es UTC con formato fijo. Sin
+    /// fecha en el recibido o en el enviado no se puede ordenar y no hay respuesta. `Mail.ReadWrite`
+    /// ya cubre Enviados: no hace falta permiso nuevo. Sin verificar contra un buzón real.
+    fn own_reply_in_thread(
+        &self,
+        thread_key: &str,
+        after_id: &str,
+    ) -> MailResult<Option<OwnReply>> {
+        let url = self.api.url(
+            &["me", "messages", after_id],
+            &[("$select", "id,receivedDateTime")],
+        );
+        let received = match self.api.call(Method::Get, &url, None) {
+            Ok(value) => non_empty(value.get("receivedDateTime")),
+            Err(e) if e.code == codes::NOT_FOUND => return Ok(None),
+            Err(e) => return Err(e),
+        };
+        let Some(received) = received else {
+            return Ok(None);
+        };
+        let filter = format!("conversationId eq {}", odata_quote(thread_key));
+        let url = self.api.url(
+            &["me", "mailFolders", "sentitems", "messages"],
+            &[
+                ("$filter", filter.as_str()),
+                ("$select", "id,sentDateTime,body,conversationId"),
+                ("$top", SENT_PAGE),
+            ],
+        );
+        let body = self.api.call(Method::Get, &url, None)?;
+        let list = body.get("value").and_then(Value::as_array).ok_or_else(|| {
+            error(
+                codes::UNAVAILABLE,
+                "respuesta de Graph sin lista de mensajes enviados",
+            )
+        })?;
+        let Some((sent, value)) = list
+            .iter()
+            .filter(|m| m.get("conversationId").and_then(Value::as_str) == Some(thread_key))
+            .filter_map(|m| Some((non_empty(m.get("sentDateTime"))?, m)))
+            .filter(|(sent, _)| sent.as_str() > received.as_str())
+            .min_by(|a, b| a.0.cmp(&b.0))
+        else {
+            return Ok(None);
+        };
+        Ok(value.get("id").and_then(Value::as_str).map(|id| OwnReply {
+            id: id.to_owned(),
+            date: Some(sent),
+            body: body_text(value),
+        }))
+    }
+
     fn attachment(&self, message_id: &str, attachment_id: &str) -> MailResult<Vec<u8>> {
         let url = self.api.url(
             &["me", "messages", message_id, "attachments", attachment_id],

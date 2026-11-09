@@ -7,7 +7,7 @@ use std::path::Path;
 use nestadmin_core::Connector;
 use nestadmin_simulators::{
     codes, AdminConnector, AdminSimulator, ConnectorError, FailureMode, Invoice, InvoiceCriteria,
-    MailConnector, MailSimulator, Message, NewDraft,
+    MailConnector, MailSimulator, Message, NewDraft, SentMessage,
 };
 use serde_json::json;
 
@@ -703,4 +703,89 @@ fn message_without_new_fields_still_deserializes_and_omits_them() {
     assert_eq!((m.signals.as_ref(), m.thread_key.as_ref()), (None, None));
     let back = serde_json::to_string(&m).unwrap();
     assert!(!back.contains("signals") && !back.contains("thread_key"));
+}
+
+// ---- Enviados (D168, T33a) ----
+
+fn threaded(id: &str, thread: &str, date: Option<&str>) -> Message {
+    Message {
+        id: id.into(),
+        subject: Some("Consulta".into()),
+        from: Some("cliente@ejemplo.test".into()),
+        to: Some(vec!["admin@empresa.test".into()]),
+        body: Some("¿Podrían confirmar?".into()),
+        date: date.map(str::to_owned),
+        attachments: Vec::new(),
+        signals: None,
+        thread_key: Some(thread.into()),
+    }
+}
+
+fn sent(id: &str, thread: &str, date: Option<&str>, body: &str) -> SentMessage {
+    SentMessage {
+        id: id.into(),
+        thread_key: thread.into(),
+        date: date.map(str::to_owned),
+        body: Some(body.into()),
+    }
+}
+
+#[test]
+fn own_reply_is_the_first_sent_message_of_the_thread_after_the_received_one() {
+    let mail = MailSimulator::with_messages(vec![
+        threaded("M-1", "h-1", Some("2026-10-02T09:00:00Z")),
+        threaded("M-2", "h-2", None),
+    ]);
+    assert!(mail.supports_sent());
+    for message in [
+        sent("S-0", "h-1", Some("2026-10-01T09:00:00Z"), "anterior"),
+        sent("S-2", "h-1", Some("2026-10-04T09:00:00Z"), "segunda"),
+        sent("S-1", "h-1", Some("2026-10-03T09:00:00Z"), "primera"),
+        sent("S-x", "h-9", Some("2026-10-03T08:00:00Z"), "otro hilo"),
+        sent("S-n", "h-1", None, "sin fecha"),
+    ] {
+        mail.add_sent_message(message).unwrap();
+    }
+    let reply = mail.own_reply_in_thread("h-1", "M-1").unwrap().unwrap();
+    assert_eq!(reply.id, "S-1");
+    assert_eq!(reply.date.as_deref(), Some("2026-10-03T09:00:00Z"));
+    assert_eq!(reply.body.as_deref(), Some("primera"));
+    // Sin respuesta en el hilo, recibido desconocido o sin fecha: `None`.
+    assert_eq!(mail.own_reply_in_thread("h-7", "M-1").unwrap(), None);
+    assert_eq!(mail.own_reply_in_thread("h-1", "M-0").unwrap(), None);
+    assert_eq!(mail.own_reply_in_thread("h-1", "M-2").unwrap(), None);
+}
+
+#[test]
+fn sent_messages_persist_and_an_older_state_file_without_them_still_opens() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("mail.json");
+    {
+        let mail = MailSimulator::open(&path).unwrap();
+        mail.add_sent_message(sent("S-1", "h-1", Some("2026-10-03"), "ok"))
+            .unwrap();
+    }
+    let mail = MailSimulator::open(&path).unwrap();
+    // Los ejemplos no traen hilo: se comprueba solo que el estado conserva el mensaje.
+    let text = std::fs::read_to_string(&path).unwrap();
+    assert!(text.contains("own_replies") && text.contains("S-1"));
+    drop(mail);
+
+    // Un archivo guardado antes de Enviados (sin la lista) se sigue leyendo.
+    fn strip(value: &mut serde_json::Value) {
+        match value {
+            serde_json::Value::Object(map) => {
+                map.remove("own_replies");
+                map.values_mut().for_each(strip);
+            }
+            serde_json::Value::Array(list) => list.iter_mut().for_each(strip),
+            _ => {}
+        }
+    }
+    let mut value: serde_json::Value = serde_json::from_str(&text).unwrap();
+    strip(&mut value);
+    std::fs::write(&path, serde_json::to_string(&value).unwrap()).unwrap();
+    let mail = MailSimulator::open(&path).unwrap();
+    assert_eq!(mail.own_reply_in_thread("h-1", "M-0001").unwrap(), None);
+    assert_eq!(mail.list_messages(None).unwrap().messages.len(), 6);
 }

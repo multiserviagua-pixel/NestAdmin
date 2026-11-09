@@ -6,7 +6,7 @@
 use std::path::Path;
 
 use nestadmin_core::{Connector, ConnectorError};
-use nestadmin_simulators::{codes, MailConnector, MessagePage, NewDraft, SendReceipt};
+use nestadmin_simulators::{codes, MailConnector, MessagePage, NewDraft, OwnReply, SendReceipt};
 use serde_json::Value;
 
 use crate::state::{DraftRecord, LocalState, SendRecord};
@@ -50,6 +50,21 @@ pub trait MailProvider {
     /// Si el último mensaje del hilo es propio (D162), solo con metadatos. Por defecto, `None`
     /// (desconocido): un proveedor sin una llamada segura no inventa la respuesta.
     fn last_message_is_ours(&self, _thread_key: &str) -> MailResult<Option<bool>> {
+        Ok(None)
+    }
+    /// Si el proveedor lee la carpeta Enviados (D168). Por defecto no: permite distinguir
+    /// «conector sin Enviados» de «sin respuesta propia», pues ambos dan `Ok(None)`.
+    fn supports_sent(&self) -> bool {
+        false
+    }
+    /// Primera respuesta propia (Enviados) del hilo `thread_key` posterior al mensaje `after_id`
+    /// (D168), con el cuerpo en texto plano tal como llega. Solo lectura. Por defecto,
+    /// `Ok(None)` sin llamar a nadie.
+    fn own_reply_in_thread(
+        &self,
+        _thread_key: &str,
+        _after_id: &str,
+    ) -> MailResult<Option<OwnReply>> {
         Ok(None)
     }
 }
@@ -208,6 +223,22 @@ impl<P: MailProvider> MailConnector for Mailbox<P> {
         self.provider.last_message_is_ours(thread_key)
     }
 
+    fn supports_sent(&self) -> bool {
+        self.provider.supports_sent()
+    }
+
+    /// Solo lectura. Claves vacías o un proveedor sin Enviados no llaman al servicio.
+    fn own_reply_in_thread(
+        &self,
+        thread_key: &str,
+        after_id: &str,
+    ) -> Result<Option<OwnReply>, ConnectorError> {
+        if thread_key.trim().is_empty() || after_id.trim().is_empty() {
+            return Ok(None);
+        }
+        self.provider.own_reply_in_thread(thread_key, after_id)
+    }
+
     /// Solo lectura: no anota nada en el registro local ni en el buzón.
     fn fetch_attachment(
         &self,
@@ -298,5 +329,41 @@ impl<P: MailProvider> Connector for Mailbox<P> {
             .ok_or_else(|| error(codes::INVALID_INPUT, "falta draft_id en la carga útil"))?;
         serde_json::to_value(self.send_draft(draft_id, key)?)
             .map_err(|e| error(codes::UNAVAILABLE, e.to_string()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Proveedor mínimo que no implementa Enviados: usa los valores por defecto (D168).
+    struct NoSent;
+
+    impl MailProvider for NoSent {
+        fn list(&self, _: Option<&str>) -> MailResult<MessagePage> {
+            unreachable!()
+        }
+        fn create_reply(&self, _: &str, _: &NewDraft) -> MailResult<CreatedDraft> {
+            unreachable!()
+        }
+        fn send(&self, _: &str) -> MailResult<String> {
+            unreachable!()
+        }
+        fn status(&self, _: &CreatedDraft) -> MailResult<DraftStatus> {
+            unreachable!()
+        }
+        fn attachment(&self, _: &str, _: &str) -> MailResult<Vec<u8>> {
+            unreachable!()
+        }
+    }
+
+    #[test]
+    fn a_provider_without_sent_support_says_so_and_finds_nothing() {
+        let mailbox = Mailbox::in_memory(NoSent);
+        assert!(!MailConnector::supports_sent(&mailbox));
+        assert_eq!(
+            MailConnector::own_reply_in_thread(&mailbox, "hilo-1", "m-1").unwrap(),
+            None
+        );
     }
 }

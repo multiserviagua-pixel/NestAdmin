@@ -14,7 +14,7 @@ use nestadmin_ai::CredentialStore;
 use nestadmin_core::{Connector, ConnectorError};
 use nestadmin_mail::{Gmail, Graph, Mailbox, OAuthConfig, TokenSource, Tokens};
 use nestadmin_simulators::{
-    codes, MailConnector, MailSimulator, Message, MessagePage, NewDraft, SendReceipt,
+    codes, MailConnector, MailSimulator, Message, MessagePage, NewDraft, OwnReply, SendReceipt,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -318,6 +318,16 @@ impl MailConnector for SharedSimulator {
     }
     fn last_message_is_ours(&self, thread_key: &str) -> Result<Option<bool>, ConnectorError> {
         self.0.last_message_is_ours(thread_key)
+    }
+    fn supports_sent(&self) -> bool {
+        self.0.supports_sent()
+    }
+    fn own_reply_in_thread(
+        &self,
+        thread_key: &str,
+        after_id: &str,
+    ) -> Result<Option<OwnReply>, ConnectorError> {
+        self.0.own_reply_in_thread(thread_key, after_id)
     }
     fn fetch_attachment(
         &self,
@@ -758,6 +768,25 @@ impl Accounts {
         thread_key: &str,
     ) -> Result<Option<bool>, ConnectorError> {
         self.connector(account)?.last_message_is_ours(thread_key)
+    }
+
+    /// Si el conector de la cuenta lee Enviados (D168).
+    #[allow(dead_code)] // lo usa la fase de aprendizaje (E2)
+    pub(crate) fn supports_sent(&self, account: &str) -> Result<bool, ConnectorError> {
+        Ok(self.connector(account)?.supports_sent())
+    }
+
+    /// Primera respuesta propia del hilo posterior a `after_id` (ID del conector, sin prefijo de
+    /// cuenta) en la cuenta indicada (D168). Solo lectura.
+    #[allow(dead_code)] // lo usa la fase de aprendizaje (E2)
+    pub(crate) fn own_reply_in_thread(
+        &self,
+        account: &str,
+        thread_key: &str,
+        after_id: &str,
+    ) -> Result<Option<OwnReply>, ConnectorError> {
+        self.connector(account)?
+            .own_reply_in_thread(thread_key, after_id)
     }
 
     /// Contenido de un adjunto de un mensaje con ID de cuenta (`<cuenta>:<mensaje>`).

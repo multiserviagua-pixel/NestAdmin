@@ -53,6 +53,19 @@ fn handler(req: &Req, w: &mut World) -> Resp {
                 None => not_found(),
             }
         }
+        ("GET", ["threads", id]) if req.query("format").as_deref() == Some("full") => {
+            let messages: Vec<Value> = w
+                .messages
+                .iter()
+                .filter(|m| m["threadId"] == *id)
+                .cloned()
+                .collect();
+            if messages.is_empty() {
+                not_found()
+            } else {
+                Resp::Json(200, json!({ "id": id, "messages": messages }))
+            }
+        }
         ("GET", ["threads", id]) => {
             // Como Gmail: sin `format=metadata` y `metadataHeaders=X-NestAdmin-Id` no hay
             // cabeceras propias que comparar, y solo se devuelven las cabeceras pedidas.
@@ -1023,5 +1036,80 @@ fn an_unknown_missing_or_failing_thread_is_unknown_or_an_error_never_a_guess() {
     // Una clave vacía no llama al servicio.
     let before = world.lock().unwrap().requests.len();
     assert_eq!(mailbox.last_message_is_ours("  ").unwrap(), None);
+    assert_eq!(world.lock().unwrap().requests.len(), before);
+}
+
+// ---- Respuesta propia en Enviados (D168, T33a) ----
+
+fn full_message(id: &str, labels: Value, date: &str, body: &str) -> Value {
+    json!({
+        "id": id, "threadId": "t-9", "labelIds": labels, "internalDate": date,
+        "payload": { "mimeType": "text/plain", "headers": [],
+                     "body": { "data": b64(body) } },
+    })
+}
+
+#[test]
+fn gmail_finds_the_first_sent_message_after_the_received_one() {
+    let (mailbox, world) = mailbox();
+    assert!(mailbox.supports_sent());
+    world.lock().unwrap().messages = vec![
+        full_message("out-0", json!(["SENT"]), "500000", "respuesta anterior"),
+        full_message("in-1", json!(["INBOX"]), "1000000", "pregunta"),
+        // No SENT: otro remitente, borrador y papelera posteriores no cuentan.
+        full_message("in-2", json!(["INBOX"]), "1500000", "otro del cliente"),
+        full_message("dr-1", json!(["DRAFT", "SENT"]), "1600000", "borrador"),
+        full_message("tr-1", json!(["SENT", "TRASH"]), "1700000", "papelera"),
+        // Dos propios posteriores, desordenados: gana el más temprano.
+        full_message("out-2", json!(["SENT"]), "3000000", "segunda"),
+        full_message(
+            "out-1",
+            json!(["SENT"]),
+            "2000000",
+            "Hola,\nLo vemos hoy.\n\nEl lun escribió:\n> pregunta",
+        ),
+    ];
+    let reply = mailbox.own_reply_in_thread("t-9", "in-1").unwrap().unwrap();
+    assert_eq!(reply.id, "out-1");
+    assert_eq!(reply.date.as_deref(), Some("1970-01-01T00:33:20Z"));
+    // Tal como llega: la cita no se recorta aquí.
+    assert_eq!(
+        reply.body.as_deref(),
+        Some("Hola,\nLo vemos hoy.\n\nEl lun escribió:\n> pregunta")
+    );
+
+    // Solo `threads.get` con `format=full`: ninguna escritura.
+    let w = world.lock().unwrap();
+    assert_eq!(w.requests.len(), 1);
+    assert_eq!(w.requests[0].method, "GET");
+    assert!(w.requests[0].url.path().ends_with("/threads/t-9"));
+    assert_eq!(w.requests[0].query("format").as_deref(), Some("full"));
+}
+
+#[test]
+fn gmail_without_a_later_sent_message_has_no_own_reply() {
+    let (mailbox, world) = mailbox();
+    // Solo anteriores al recibido y mensajes no SENT.
+    world.lock().unwrap().messages = vec![
+        full_message("out-0", json!(["SENT"]), "500000", "anterior"),
+        full_message("in-1", json!(["INBOX"]), "1000000", "pregunta"),
+        full_message("in-2", json!(["INBOX"]), "2000000", "otro"),
+    ];
+    assert_eq!(mailbox.own_reply_in_thread("t-9", "in-1").unwrap(), None);
+    // El recibido no está en el hilo: no se puede ordenar.
+    assert_eq!(mailbox.own_reply_in_thread("t-9", "no-esta").unwrap(), None);
+    // Hilo inexistente (404): sin respuesta, no error.
+    assert_eq!(mailbox.own_reply_in_thread("t-0", "in-1").unwrap(), None);
+    // Un fallo del servicio es un error, no `None`.
+    world.lock().unwrap().force = Some(("/threads/".into(), 500));
+    assert_eq!(
+        mailbox.own_reply_in_thread("t-9", "in-1").unwrap_err().code,
+        "unavailable"
+    );
+    // Claves vacías: sin llamada.
+    world.lock().unwrap().force = None;
+    let before = world.lock().unwrap().requests.len();
+    assert_eq!(mailbox.own_reply_in_thread("  ", "in-1").unwrap(), None);
+    assert_eq!(mailbox.own_reply_in_thread("t-9", "").unwrap(), None);
     assert_eq!(world.lock().unwrap().requests.len(), before);
 }

@@ -76,6 +76,34 @@ fn handler(req: &Req, w: &mut World) -> Resp {
                 None => Resp::Json(404, json!({ "error": { "code": "ErrorItemNotFound" } })),
             }
         }
+        ("GET", ["me", "mailFolders", "sentitems", "messages"]) => {
+            // Como Graph: el filtro es una expresión OData; la comilla simple se duplica.
+            let filter = req.query("$filter").unwrap_or_default();
+            let Some(quoted) = filter.strip_prefix("conversationId eq '") else {
+                return Resp::Json(400, json!({ "error": { "code": "BadFilter" } }));
+            };
+            let Some(quoted) = quoted.strip_suffix('\'') else {
+                return Resp::Json(400, json!({ "error": { "code": "BadFilter" } }));
+            };
+            if quoted.replace("''", "").contains('\'') {
+                return Resp::Json(400, json!({ "error": { "code": "BadFilter" } }));
+            }
+            let conversation = quoted.replace("''", "'");
+            let list: Vec<Value> = w
+                .messages
+                .iter()
+                .filter(|m| m["_sent"] == true && m["conversationId"] == conversation.as_str())
+                .cloned()
+                .collect();
+            Resp::Json(200, json!({ "value": list }))
+        }
+        ("GET", ["me", "messages", id]) if w.messages.iter().any(|m| m["id"] == *id) => {
+            let m = w.messages.iter().find(|m| m["id"] == *id).unwrap();
+            Resp::Json(
+                200,
+                json!({ "id": id, "receivedDateTime": m["receivedDateTime"] }),
+            )
+        }
         ("GET", ["me", "messages", id]) => match w.drafts.iter().find(|d| d.0 == *id) {
             Some(draft) => Resp::Json(200, json!({ "id": id, "isDraft": draft.2["isDraft"] })),
             None => Resp::Json(404, json!({ "error": { "code": "ErrorItemNotFound" } })),
@@ -543,4 +571,85 @@ fn graph_reports_the_thread_state_as_unknown_without_calling_the_service() {
         None
     );
     assert!(world.lock().unwrap().requests.is_empty());
+}
+
+fn sent_item(id: &str, conversation: &str, sent: &str, body: &str) -> Value {
+    json!({
+        "id": id, "_sent": true, "conversationId": conversation, "sentDateTime": sent,
+        "body": { "contentType": "text", "content": body },
+    })
+}
+
+/// T33a (Graph): la primera respuesta de `sentitems` posterior al recibido; ignora otras
+/// conversaciones y respuestas anteriores; sin respuesta, `None`.
+#[test]
+fn graph_finds_the_first_own_reply_after_the_received_message() {
+    let (mailbox, world) = mailbox();
+    assert!(mailbox.supports_sent());
+    world.lock().unwrap().messages.extend([
+        // Anterior al recibido (m-1: 2026-11-02T09:30:00Z).
+        sent_item("s-0", "c-1", "2026-11-01T08:00:00Z", "respuesta vieja"),
+        // Dos posteriores, desordenadas: gana la más temprana.
+        sent_item("s-2", "c-1", "2026-11-04T10:00:00Z", "segunda"),
+        sent_item(
+            "s-1",
+            "c-1",
+            "2026-11-03T10:00:00Z",
+            "Hola,\r\nLo vemos hoy.\r\n",
+        ),
+        // Otra conversación.
+        sent_item("s-x", "c-9", "2026-11-03T09:00:00Z", "ajena"),
+    ]);
+    let reply = mailbox.own_reply_in_thread("c-1", "m-1").unwrap().unwrap();
+    assert_eq!(reply.id, "s-1");
+    assert_eq!(reply.date.as_deref(), Some("2026-11-03T10:00:00Z"));
+    assert_eq!(reply.body.as_deref(), Some("Hola,\r\nLo vemos hoy."));
+    // Conversación sin respuestas, o mensaje desconocido: `None`, no error.
+    assert_eq!(mailbox.own_reply_in_thread("c-7", "m-1").unwrap(), None);
+    assert_eq!(
+        mailbox.own_reply_in_thread("c-1", "no-existe").unwrap(),
+        None
+    );
+    // Claves vacías: sin llamada.
+    let before = world.lock().unwrap().requests.len();
+    assert_eq!(mailbox.own_reply_in_thread(" ", "m-1").unwrap(), None);
+    assert_eq!(world.lock().unwrap().requests.len(), before);
+}
+
+/// El filtro duplica la comilla simple del `conversationId`; sin ello se podría inyectar OData.
+#[test]
+fn graph_sent_filter_escapes_a_quote_in_the_conversation_id() {
+    let (mailbox, world) = mailbox();
+    let hostile = "c-1' or 'a'='a";
+    world.lock().unwrap().messages.extend([
+        sent_item("s-h", hostile, "2026-11-03T10:00:00Z", "solo de la hostil"),
+        sent_item("s-1", "c-1", "2026-11-03T11:00:00Z", "de c-1"),
+    ]);
+    let reply = mailbox
+        .own_reply_in_thread(hostile, "m-1")
+        .unwrap()
+        .unwrap();
+    assert_eq!(reply.id, "s-h");
+    let w = world.lock().unwrap();
+    let filter = w
+        .requests
+        .iter()
+        .find(|r| r.url.path().ends_with("/sentitems/messages"))
+        .and_then(|r| r.query("$filter"))
+        .unwrap();
+    assert_eq!(filter, "conversationId eq 'c-1'' or ''a''=''a'");
+}
+
+/// Sin fecha de recepción no se puede ordenar: no hay respuesta, y no se consulta Enviados.
+#[test]
+fn graph_without_a_received_date_gives_no_reply() {
+    let (mailbox, world) = mailbox();
+    world
+        .lock()
+        .unwrap()
+        .messages
+        .push(sent_item("s-1", "c-1", "2026-11-03T10:00:00Z", "x"));
+    // m-2 no tiene `receivedDateTime`.
+    assert_eq!(mailbox.own_reply_in_thread("c-1", "m-2").unwrap(), None);
+    assert_eq!(count(&world, "GET", "/sentitems/messages"), 0);
 }

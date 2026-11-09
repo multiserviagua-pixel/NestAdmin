@@ -10,7 +10,7 @@
 use base64::engine::general_purpose::{URL_SAFE, URL_SAFE_NO_PAD};
 use base64::Engine;
 use nestadmin_core::mail_signals;
-use nestadmin_simulators::{codes, Attachment, Message, MessagePage, NewDraft};
+use nestadmin_simulators::{codes, Attachment, Message, MessagePage, NewDraft, OwnReply};
 use serde_json::{json, Value};
 
 use crate::http::{Api, Method};
@@ -405,7 +405,61 @@ fn thread_last_is_ours(thread: &Value) -> Option<bool> {
     Some(is_sent(last))
 }
 
+/// `internalDate` (milisegundos) de un mensaje de `threads.get`.
+fn internal_millis(message: &Value) -> Option<u64> {
+    message
+        .get("internalDate")
+        .and_then(Value::as_str)
+        .and_then(|ms| ms.parse::<u64>().ok())
+}
+
+/// Primer mensaje `SENT` del hilo (`threads.get` completo) con `internalDate` posterior al del
+/// mensaje `after_id` (D168). Se ignoran borradores y papelera. Sin `after_id` en el hilo o sin
+/// fechas no se puede ordenar: `None`. El cuerpo va tal como llega, con la cita.
+fn thread_own_reply(thread: &Value, after_id: &str) -> Option<OwnReply> {
+    let messages = thread.get("messages").and_then(Value::as_array)?;
+    let after = messages
+        .iter()
+        .find(|m| m.get("id").and_then(Value::as_str) == Some(after_id))
+        .and_then(internal_millis)?;
+    let (millis, reply) = messages
+        .iter()
+        .filter(|m| {
+            let labels = labels(m);
+            is_sent(m) && !labels.contains(&"DRAFT") && !labels.contains(&"TRASH")
+        })
+        .filter_map(|m| Some((internal_millis(m).filter(|d| *d > after)?, m)))
+        .min_by_key(|(millis, _)| *millis)?;
+    Some(OwnReply {
+        id: reply.get("id").and_then(Value::as_str)?.to_owned(),
+        date: Some(format_utc_millis(millis)),
+        body: body(reply),
+    })
+}
+
 impl MailProvider for Gmail {
+    fn supports_sent(&self) -> bool {
+        true
+    }
+
+    /// `threads.get` con `format=full` (D168): el único caso en que se lee el cuerpo de un
+    /// mensaje propio del hilo. `gmail.modify` ya cubre la lectura; no hay scope nuevo. Un 404 es
+    /// «no hay respuesta».
+    fn own_reply_in_thread(
+        &self,
+        thread_key: &str,
+        after_id: &str,
+    ) -> MailResult<Option<OwnReply>> {
+        let url = self
+            .api
+            .url(&["threads", thread_key], &[("format", "full")]);
+        match self.api.call(Method::Get, &url, None) {
+            Ok(thread) => Ok(thread_own_reply(&thread, after_id)),
+            Err(e) if e.code == codes::NOT_FOUND => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
     /// `threads.get` con `format=metadata` y solo la cabecera propia: nunca el cuerpo ni el texto
     /// de los mensajes del hilo (D162). Un 404 o un hilo sin mensajes es «no se sabe».
     fn last_message_is_ours(&self, thread_key: &str) -> MailResult<Option<bool>> {

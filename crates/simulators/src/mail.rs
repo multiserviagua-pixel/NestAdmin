@@ -49,6 +49,27 @@ impl Message {
     }
 }
 
+/// Respuesta propia hallada en Enviados (D168): lo mínimo para emparejarla con el recibido. El
+/// cuerpo va en texto plano tal como llega, con la cita incluida: recortarla es cosa de quien
+/// aprende (E2).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OwnReply {
+    pub id: String,
+    /// Fecha de envío tal como la da el proveedor; `None` si no la da.
+    pub date: Option<String>,
+    /// Cuerpo en texto plano; `None` si el mensaje no trae texto.
+    pub body: Option<String>,
+}
+
+/// Mensaje propio del simulador en Enviados, con el hilo al que responde.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SentMessage {
+    pub id: String,
+    pub thread_key: String,
+    pub date: Option<String>,
+    pub body: Option<String>,
+}
+
 /// Adjunto de un mensaje. El contenido se pide aparte con
 /// [`MailConnector::fetch_attachment`](crate::MailConnector::fetch_attachment).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -114,6 +135,9 @@ struct MailState {
     sent: Vec<SendReceipt>,
     #[serde(default)]
     files: Vec<SimFile>,
+    /// Carpeta Enviados (D168). No se llama `sent`: ese nombre ya guarda los recibos de envío.
+    #[serde(default)]
+    own_replies: Vec<SentMessage>,
 }
 
 pub struct MailSimulator {
@@ -166,6 +190,14 @@ impl MailSimulator {
                 ));
             }
             s.messages.push(message);
+            Ok(((), true))
+        })
+    }
+
+    /// Para pruebas: añade un mensaje sintético a la carpeta Enviados.
+    pub fn add_sent_message(&self, message: SentMessage) -> SimResult<()> {
+        self.state.mutate(|s| {
+            s.own_replies.push(message);
             Ok(((), true))
         })
     }
@@ -343,6 +375,35 @@ impl MailConnector for MailSimulator {
         }
     }
 
+    fn supports_sent(&self) -> bool {
+        true
+    }
+
+    /// Primer mensaje de Enviados del hilo con fecha posterior a la de `after_id`. Sin fecha en
+    /// el recibido o en el enviado no se puede ordenar: no hay respuesta que dar.
+    fn own_reply_in_thread(&self, thread_key: &str, after_id: &str) -> SimResult<Option<OwnReply>> {
+        self.state.read(|s| {
+            let Some(after) = s
+                .messages
+                .iter()
+                .find(|m| m.id == after_id)
+                .and_then(|m| m.date.as_deref())
+            else {
+                return Ok(None);
+            };
+            Ok(s.own_replies
+                .iter()
+                .filter(|r| r.thread_key == thread_key)
+                .filter_map(|r| Some((r.date.as_deref().filter(|d| *d > after)?, r)))
+                .min_by_key(|(date, _)| *date)
+                .map(|(_, r)| OwnReply {
+                    id: r.id.clone(),
+                    date: r.date.clone(),
+                    body: r.body.clone(),
+                }))
+        })
+    }
+
     /// Envía un borrador una sola vez. La misma clave para el mismo borrador devuelve el
     /// recibo original; otra clave para un borrador ya enviado es `conflict`.
     fn send_draft(&self, draft_id: &str, idempotency_key: &str) -> SimResult<SendReceipt> {
@@ -409,6 +470,7 @@ impl MailState {
             drafts: Vec::new(),
             sent: Vec::new(),
             files: Vec::new(),
+            own_replies: Vec::new(),
         };
         state.sample_attachments();
         state

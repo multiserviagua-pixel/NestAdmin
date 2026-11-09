@@ -10,7 +10,10 @@ mod state;
 
 pub use admin::{AdminSimulator, Invoice, InvoiceCriteria, InvoiceMatch, InvoiceReceipt};
 pub use contracts::{AdminConnector, MailConnector, MAX_ATTACHMENT_BYTES};
-pub use mail::{Attachment, Draft, MailSimulator, Message, MessagePage, NewDraft, SendReceipt};
+pub use mail::{
+    Attachment, Draft, MailSimulator, Message, MessagePage, NewDraft, OwnReply, SendReceipt,
+    SentMessage,
+};
 pub use nestadmin_core::ConnectorError;
 
 /// Resultado de una operación de simulador; los errores usan los códigos de contratos.md.

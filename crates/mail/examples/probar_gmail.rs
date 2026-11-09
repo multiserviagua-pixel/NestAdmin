@@ -172,6 +172,18 @@ impl MailProvider for CutAfterSend {
     ) -> std::result::Result<Vec<u8>, ConnectorError> {
         self.0.attachment(message_id, attachment_id)
     }
+
+    fn supports_sent(&self) -> bool {
+        self.0.supports_sent()
+    }
+
+    fn own_reply_in_thread(
+        &self,
+        thread_key: &str,
+        after_id: &str,
+    ) -> std::result::Result<Option<nestadmin_simulators::OwnReply>, ConnectorError> {
+        self.0.own_reply_in_thread(thread_key, after_id)
+    }
 }
 
 /// Usa la misma clave que `send`, de modo que `enviar` retome este envío.
