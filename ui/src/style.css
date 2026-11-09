@@ -1164,9 +1164,13 @@ h2 + .section {
   gap: var(--s2);
 }
 
+/* Elemento de la lista de Tareas: no baja de ~180 px y no parte las palabras letra a letra; los
+   cortes de las direcciones los marca el texto con <wbr> (ver `breakable` en main.ts). */
 .cell-title {
+  display: block;
+  min-width: 180px;
   font-weight: 600;
-  overflow-wrap: anywhere;
+  overflow-wrap: break-word;
 }
 
 .accounts {
@@ -1398,12 +1402,6 @@ h2 + .section {
 
 .rule-preview p {
   margin: var(--s1) 0;
-}
-
-.row-actions {
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--s2);
 }
 
 .tabpanel {
@@ -1823,4 +1821,212 @@ h2 + .section {
   margin-top: var(--s4);
   padding-top: var(--s3);
   border-top: 1px dashed var(--line-strong);
+}
+
+/* ---- Tareas: lista y tablero (D147) ---- */
+
+/* Acciones siempre visibles: la última columna se queda fija a la derecha dentro de la tabla. */
+.tasks-grid .grid th:last-child,
+.tasks-grid .grid td:last-child {
+  position: sticky;
+  right: 0;
+  background: var(--surface);
+  box-shadow: inset 1px 0 0 var(--line);
+}
+
+.tasks-grid .grid tbody tr:hover td:last-child {
+  background: var(--hover);
+}
+
+.tasks-grid .grid th,
+.tasks-grid .grid td {
+  padding-inline: var(--s2);
+}
+
+.tasks-grid .detail-cell {
+  min-width: 160px;
+}
+
+.tasks-grid .row-actions {
+  flex-wrap: nowrap;
+}
+
+.tasks-grid .row-actions button {
+  white-space: nowrap;
+}
+
+/* El tablero ocupa el alto disponible (main.fill) y se desplaza por dentro, no la página. */
+.tasks-page.is-board {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  max-width: none;
+  width: 100%;
+  padding: var(--s5);
+}
+
+.tasks-page.is-board > .tabpanel {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.board {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  gap: var(--s2);
+  overflow-x: auto;
+  overflow-y: hidden;
+}
+
+/* Las columnas con tarjetas reparten el ancho con un mínimo; si no caben, el tablero se desplaza. */
+.board-col {
+  flex: 1 1 0;
+  min-width: 208px;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+}
+
+.board-col h3 {
+  margin: 0;
+  padding: var(--s3);
+  font-size: var(--fs-body);
+  line-height: 20px;
+}
+
+.board-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding-right: var(--s2);
+}
+
+.fold-button {
+  min-height: 24px;
+  min-width: 24px;
+  padding: 0;
+  line-height: 20px;
+}
+
+.board-col.is-folded {
+  padding-top: var(--s2);
+  gap: var(--s1);
+}
+
+.board-count {
+  color: var(--muted);
+  font-weight: 400;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Columna vacía: carril estrecho con el nombre y el 0 girados. */
+.board-col.is-empty {
+  flex: 0 0 calc(var(--s6) + var(--s2));
+  min-width: 0;
+  align-items: center;
+}
+
+.board-col.is-empty h3 {
+  writing-mode: vertical-rl;
+  white-space: nowrap;
+  color: var(--muted);
+  padding: var(--s3) 0;
+}
+
+.board-cards {
+  flex: 1;
+  min-height: 0;
+  margin: 0;
+  padding: 0 var(--s2) var(--s2);
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: var(--s2);
+  overflow-y: auto;
+}
+
+/* Tarjeta plana: borde fino, sin sombra ni degradado. */
+.task-card {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  gap: var(--s1);
+  padding: var(--s3);
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+}
+
+.task-card p {
+  margin: 0;
+}
+
+.task-card-title {
+  font-weight: 600;
+  overflow-wrap: break-word;
+}
+
+.task-card-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s2);
+  color: var(--muted);
+  font-size: var(--fs-small);
+}
+
+.task-card-reason {
+  font-size: var(--fs-small);
+  line-height: 18px;
+  overflow-wrap: break-word;
+}
+
+/* Solo recorte visual: el texto entero sigue en el DOM y se despliega con «Ver el motivo completo». */
+.task-card-reason.clamp {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  overflow: hidden;
+}
+
+.task-more {
+  align-self: flex-start;
+  min-height: 24px;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: var(--brand);
+  font-size: var(--fs-small);
+  text-decoration: underline;
+}
+
+.task-card .row-actions {
+  justify-content: flex-start;
+  margin-top: var(--s1);
+}
+
+.task-card .row-actions:empty {
+  display: none;
+}
+
+.board-more {
+  flex: none;
+}
+
+.board-more button {
+  width: 100%;
+}
+
+@media (max-width: 960px) {
+  .tasks-page.is-board {
+    padding: var(--s4);
+  }
 }

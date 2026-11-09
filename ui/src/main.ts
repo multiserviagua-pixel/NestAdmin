@@ -154,7 +154,22 @@ import {
 } from "./rules-text";
 
 import { actionBar, dataTable, emptyState, h, helpTip, icon, sectionHeader, statusChip, tabs, type Child, type IconName, type Tone } from "./components";
-import { taskTitle } from "./tasks-text";
+import {
+  BOARD_COLUMNS,
+  BOARD_PAGE,
+  TASKS_VIEW_KEY,
+  breakSegments,
+  filterByState,
+  groupForBoard,
+  limitColumn,
+  parseTasksView,
+  showStateChip,
+  taskReason,
+  taskTitle,
+  type BoardColumn,
+  type TaskReason,
+  type TasksView,
+} from "./tasks-text";
 import { ageText, chooseTab, emailFlags, formatAmount, invoiceFlags, isKnownKind, nextSelection, sortForReview, splitByTab, tabOf, totalIsProposed, type Flag, type ReviewTab } from "./pendientes-text";
 
 const STATE_LABEL: Record<string, string> = {
@@ -276,6 +291,14 @@ const state = {
   // Borradores editados y aún no guardados, para no perderlos al refrescar.
   // Incluye los formularios de reglas en curso, con clave «rule:new» o «rule:edit:<id>».
   drafts: {} as Record<string, string>,
+  // Tareas (D147): vista elegida, filtro por estado de la lista, tarjetas mostradas en cada columna
+  // del tablero y tarjetas con el motivo completo desplegado.
+  tasksView: readTasksView(),
+  taskFilter: "",
+  boardShown: {} as Partial<Record<BoardColumn, number>>,
+  reasonsOpen: new Set<number>(),
+  // «Cerradas» empieza plegada aunque tenga tarjetas; solo en memoria, no se guarda.
+  closedOpen: false,
   // Panel de reglas: pestaña, filtros de «Mis reglas» y formulario abierto.
   rulesTab: "mine" as "mine" | "categories" | "suggested",
   // Sugerencias calculadas por código (D132), su error si no se pudieron calcular, las que se
@@ -1116,53 +1139,251 @@ const TASK_TONE: Record<string, Tone> = {
   cancelled: "neutral",
 };
 
-function tasksView() {
+/**
+ * La vista de Tareas elegida la última vez. Es solo una comodidad de pantalla del navegador
+ * integrado (no son datos de NestAdmin): si el almacenamiento falla o trae otra cosa, se usa la lista.
+ */
+function readTasksView(): TasksView {
+  try {
+    return parseTasksView(localStorage.getItem(TASKS_VIEW_KEY));
+  } catch {
+    return "list";
+  }
+}
+
+function setTasksView(view: TasksView) {
+  state.tasksView = view;
+  try {
+    localStorage.setItem(TASKS_VIEW_KEY, view);
+  } catch {
+    // Sin almacenamiento la elección vale solo para esta sesión.
+  }
+  render();
+}
+
+/** Texto que puede cortarse tras `@`, `.` y `-` sin partir las palabras letra a letra. */
+function breakable(text: string): Child[] {
+  const parts = breakSegments(text);
+  const out: Child[] = [];
+  parts.forEach((part, i) => {
+    if (i > 0 && !/\s/.test(part) && !/\s/.test(parts[i - 1]!)) out.push(document.createElement("wbr"));
+    out.push(part);
+  });
+  return out;
+}
+
+const kindLabel = (kind: string) => (isKnownKind(kind) ? (kind === "invoice" ? "Factura" : "Correo") : "Tipo no reconocido");
+
+function reasonSpan(reason: TaskReason): HTMLElement {
+  return reason.tone === "error"
+    ? h("span", { class: "error-text" }, reason.text)
+    : reason.tone === "muted"
+      ? h("span", { class: "meta" }, reason.text)
+      : reason.tone === "warn"
+        ? h("span", { class: "warn-text" }, reason.text)
+      : reason.tone === "missing"
+        ? missing(reason.text)
+        : h("span", {}, reason.text);
+}
+
+/** Motivo corto de una tarea, igual en la fila y en la tarjeta (el aviso largo de espera va solo arriba). */
+function reasonOf(t: Task): TaskReason | null {
+  return taskReason(t, Boolean(state.settings?.ai_wait_message), (i) => ISSUE_LABEL[i] ?? i);
+}
+
+/** Acciones de una tarea: las mismas en la fila y en la tarjeta. Aprobar y enviar solo existen en Pendientes (R07). */
+function taskActions(t: Task): HTMLElement {
+  return h(
+    "div",
+    { class: "row-actions" },
+    t.state === "failed"
+      ? h("button", { "data-focus-key": `task:retry:${t.id}`, onclick: () => void act(() => api.retry(t.id), "Tarea reencolada") }, "Reintentar")
+      : null,
+    t.state === "awaiting_review" ? h("button", { "data-focus-key": `task:review:${t.id}`, onclick: () => openInReview(t) }, "Revisar") : null,
+  );
+}
+
+const taskChip = (t: Task) => statusChip(STATE_LABEL[t.state] ?? t.state, TASK_TONE[t.state] ?? "neutral");
+
+// Más de esto no cabe en las dos líneas de la tarjeta: se ofrece desplegarlo.
+const CARD_REASON_CHARS = 60;
+
+function taskCard(t: Task): HTMLElement {
+  const reason = reasonOf(t);
+  const open = state.reasonsOpen.has(t.id);
+  const long = reason !== null && reason.text.length > CARD_REASON_CHARS;
+  const fallback = t.result?.fallback;
+  return h(
+    "li",
+    { class: "task-card" },
+    h("p", { class: "task-card-title" }, ...breakable(title(t))),
+    h("p", { class: "task-card-meta" }, h("span", {}, `${kindLabel(t.kind)} ${t.id}`), showStateChip(t) ? taskChip(t) : null),
+    reason
+      ? h(
+          "p",
+          // El texto entero está siempre en el DOM; el recorte a dos líneas es solo visual.
+          { class: long && !open ? "task-card-reason clamp" : "task-card-reason", title: long ? reason.text : undefined },
+          reasonSpan(reason),
+          fallback ? h("span", { class: "meta" }, ` ${fallbackText(fallback)}`) : null,
+        )
+      : null,
+    long
+      ? h(
+          "button",
+          {
+            class: "task-more",
+            type: "button",
+            "aria-expanded": open ? "true" : "false",
+            "data-focus-key": `task:reason:${t.id}`,
+            onclick: () => {
+              if (open) state.reasonsOpen.delete(t.id);
+              else state.reasonsOpen.add(t.id);
+              render();
+            },
+          },
+          open ? "Ver menos" : "Ver el motivo completo",
+        )
+      : null,
+    taskActions(t),
+  );
+}
+
+function boardColumn(key: BoardColumn, label: string, items: Task[]): HTMLElement {
+  const headingId = `board-heading-${key}`;
+  const heading = h("h3", { id: headingId }, label, " ", h("span", { class: "board-count" }, items.length));
+  // Una columna vacía se pliega en un carril estrecho para que las cinco quepan, sin botón.
+  if (!items.length) return h("section", { class: "board-col is-empty", "aria-labelledby": headingId }, heading);
+  // «Cerradas» es lo menos urgente: plegada por defecto, con un botón para desplegarla o plegarla.
+  const foldable = key === "closed";
+  const toggle = () => {
+    state.closedOpen = !state.closedOpen;
+    state.focusAfterRender = "board:fold:closed";
+    render();
+  };
+  if (foldable && !state.closedOpen)
+    return h(
+      "section",
+      { class: "board-col is-empty is-folded", "aria-labelledby": headingId },
+      h("button", { class: "fold-button", type: "button", "aria-expanded": "false", "aria-label": `Mostrar ${items.length} tareas cerradas`, "data-focus-key": "board:fold:closed", onclick: toggle }, "+"),
+      heading,
+    );
+  const shown = state.boardShown[key] ?? BOARD_PAGE;
+  const { visible, hidden } = limitColumn(items, shown);
   return h(
     "section",
-    { class: "page" },
+    { class: "board-col", "aria-labelledby": headingId },
+    foldable
+      ? h(
+          "div",
+          { class: "board-head" },
+          heading,
+          h("button", { class: "fold-button", type: "button", "aria-expanded": "true", "aria-label": "Plegar las tareas cerradas", "data-focus-key": "board:fold:closed", onclick: toggle }, "\u2212"),
+        )
+      : heading,
+    h(
+      "ul",
+      { class: "board-cards", tabindex: "0", "aria-labelledby": headingId, "data-scroll-key": `tasks:col:${key}`, "data-focus-key": `board:col:${key}` },
+      ...visible.map(taskCard),
+      hidden > 0
+        ? h(
+            "li",
+            { class: "board-more" },
+            h(
+              "button",
+              {
+                type: "button",
+                "data-focus-key": `board:more:${key}`,
+                onclick: () => {
+                  state.boardShown[key] = shown + BOARD_PAGE;
+                  state.focusAfterRender = hidden > BOARD_PAGE ? `board:more:${key}` : `board:col:${key}`;
+                  render();
+                },
+              },
+              `Ver más (${hidden} sin mostrar)`,
+            ),
+          )
+        : null,
+    ),
+  );
+}
+
+function tasksBoard(): HTMLElement {
+  const groups = groupForBoard(state.tasks);
+  return h("div", { class: "board", role: "group", "aria-label": "Tareas por estado", tabindex: "0" }, ...BOARD_COLUMNS.map((c) => boardColumn(c.key, c.label, groups[c.key])));
+}
+
+function tasksList(): HTMLElement {
+  const filter = state.taskFilter;
+  const rows = filterByState(state.tasks, filter);
+  const select = h(
+    "select",
+    { "data-focus-key": "tasks:filter", onchange: () => ((state.taskFilter = select.value), render()) },
+    h("option", { value: "" }, "Todos los estados"),
+    ...Object.entries(STATE_LABEL).map(([value, label]) => h("option", { value }, label)),
+  ) as HTMLSelectElement;
+  select.value = filter;
+  const table = dataTable(
+    [
+      { label: "#", numeric: true },
+      { label: "Tipo" },
+      { label: "Elemento" },
+      { label: "Estado" },
+      { label: "Intentos", numeric: true },
+      { label: "Motivo o detalle" },
+      { label: "Acciones" },
+    ],
+    rows.map((t) => {
+      const reason = reasonOf(t);
+      return [
+        t.id,
+        kindLabel(t.kind),
+        h("span", { class: "cell-title" }, ...breakable(title(t))),
+        taskChip(t),
+        t.attempts,
+        h("div", { class: "detail-cell" }, reason ? reasonSpan(reason) : null, t.result?.fallback ? h("span", { class: "meta" }, ` ${fallbackText(t.result.fallback)}`) : null),
+        taskActions(t),
+      ];
+    }),
+  );
+  table.classList.add("tasks-grid");
+  return h(
+    "div",
+    {},
+    h(
+      "div",
+      { class: "filters", role: "search" },
+      h("div", { class: "field" }, h("div", { class: "field-head" }, h("label", {}, "Mostrar", select))),
+      filter ? h("div", { class: "field" }, h("button", { "data-focus-key": "tasks:clear", onclick: () => ((state.taskFilter = ""), render()) }, "Quitar filtro")) : null,
+    ),
+    rows.length ? table : emptyState("Ninguna tarea está en ese estado", "Pruebe con otro estado o quite el filtro."),
+  );
+}
+
+function tasksView() {
+  const view = state.tasksView;
+  return h(
+    "section",
+    { class: view === "board" && state.tasks.length ? "page tasks-page is-board" : "page tasks-page" },
     h("h2", {}, "Tareas"),
-    state.tasks.length === 0
-      ? emptyState("Todavía no hay tareas", "Importe un documento o consulte el correo para crear la primera.")
-      : dataTable(
-          [
-            { label: "#", numeric: true },
-            { label: "Tipo" },
-            { label: "Elemento" },
-            { label: "Estado" },
-            { label: "Intentos", numeric: true },
-            { label: "Motivo o detalle" },
-            { label: "Acciones" },
-          ],
-          state.tasks.map((t) => [
-            t.id,
-            isKnownKind(t.kind) ? (t.kind === "invoice" ? "Factura" : "Correo") : "Tipo no reconocido",
-            h("span", { class: "cell-title" }, title(t)),
-            statusChip(STATE_LABEL[t.state] ?? t.state, TASK_TONE[t.state] ?? "neutral"),
-            t.attempts,
-            h(
-              "div",
-              { class: "detail-cell" },
-              t.error
-                ? h("span", { class: "error-text" }, t.error.message)
-                : t.state === "failed"
-                  ? missing("Motivo no consta")
-                  : t.state === "queued" && state.settings?.ai_wait_message
-                    ? h("span", { class: "warn-text" }, state.settings.ai_wait_message)
-                    : t.result?.issues?.length
-                      ? t.result.issues.map((i: string) => ISSUE_LABEL[i] ?? i).join(", ")
-                      : null,
-              t.result?.fallback ? h("span", { class: "meta" }, ` ${fallbackText(t.result.fallback)}`) : null,
-            ),
-            h(
-              "div",
-              { class: "row-actions" },
-              t.state === "failed"
-                ? h("button", { "data-focus-key": `task:retry:${t.id}`, onclick: () => void act(() => api.retry(t.id), "Tarea reencolada") }, "Reintentar")
-                : null,
-              t.state === "awaiting_review" ? h("button", { "data-focus-key": `task:review:${t.id}`, onclick: () => openInReview(t) }, "Revisar") : null,
-            ),
-          ]),
-        ),
+    tabs({
+      label: "Vista de tareas",
+      items: [
+        { key: "list" as TasksView, label: "Lista" },
+        { key: "board" as TasksView, label: "Tablero" },
+      ],
+      active: view,
+      panelId: "tasks-panel",
+      onSelect: setTasksView,
+    }),
+    h(
+      "div",
+      { role: "tabpanel", id: "tasks-panel", class: "tabpanel", "aria-label": view === "board" ? "Tablero" : "Lista" },
+      state.tasks.length === 0
+        ? emptyState("Todavía no hay tareas", "Importe un documento o consulte el correo para crear la primera.")
+        : view === "board"
+          ? tasksBoard()
+          : tasksList(),
+    ),
   );
 }
 
@@ -4664,7 +4885,7 @@ function render(background = false) {
       "div",
       { class: "body" },
       nav(),
-      h("main", { class: state.view === "review" ? "fill" : undefined, "data-scroll-key": `main:${state.view}` }, ocrBanner, notice, waitBanner, views[state.view]()),
+      h("main", { class: state.view === "review" || (state.view === "tasks" && state.tasksView === "board" && state.tasks.length > 0) ? "fill" : undefined, "data-scroll-key": `main:${state.view}` }, ocrBanner, notice, waitBanner, views[state.view]()),
     ),
   );
   restore();

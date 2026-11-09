@@ -533,6 +533,29 @@ if (new URLSearchParams(location.search).has("muchos")) {
     const name = `factura-lote-${i}.pdf`;
     task("invoice", { document: name }, "awaiting_review", invoiceResult(name, `${100 + i}.00`, [], fileOrigin(name, null, i)));
   }
+  // Tareas de Tareas (D147) en todos los estados y más de 50 en «Cerradas» y «Con error», para probar
+  // «Ver más» del tablero. Tiempos escalonados para que el orden por antigüedad se vea.
+  const stagger = (t: Task, i: number) => {
+    t.created_at -= i * 60_000;
+    t.updated_at -= i * 30_000;
+  };
+  for (let i = 1; i <= 58; i++) {
+    const name = `factura-cerrada-${i}.pdf`;
+    const done = task("invoice", { document: name }, i % 7 === 0 ? "cancelled" : "completed", invoiceResult(name, `${200 + i}.00`, [], fileOrigin(name, null, i)));
+    stagger(done, i);
+  }
+  for (let i = 1; i <= 54; i++) {
+    const failed = task("invoice", { document: `factura-error-${i}.pdf` }, "failed", null, { code: "unavailable", message: `unavailable: no se pudo conectar con Ollama (intento ${i})`, recoverable: true });
+    stagger(failed, i);
+  }
+  for (let i = 1; i <= 3; i++) {
+    const working = task("invoice", { document: `factura-en-curso-${i}.pdf` }, "running", null);
+    stagger(working, i);
+  }
+  for (let i = 1; i <= 4; i++) {
+    const waiting = task("email", { message_id: `simulador:M-lote-${i}`, account: "simulador", message: { id: `simulador:M-lote-${i}`, subject: `Consulta del lote ${i}`, from: "compras@cliente-gamma.test" } }, "queued", null);
+    stagger(waiting, i);
+  }
 }
 task("email", { message_id: "simulador:M-0005", account: "simulador" }, "awaiting_review", {
   type: "email",
