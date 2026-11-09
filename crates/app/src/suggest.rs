@@ -31,6 +31,11 @@ pub const SETTING_REPLY_MIN: &str = "suggest_reply_min";
 pub const DEFAULT_INVOICE_MIN: u32 = 3;
 /// Respuestas aprobadas sin edición, por remitente y categoría, por defecto.
 pub const DEFAULT_REPLY_MIN: u32 = 5;
+/// Observaciones mínimas de facturas que solo se *vieron* en la primera lectura (E5, D133) para
+/// sugerir una regla cuando la persona no ha aprobado suficientes: sin una aprobación humana que
+/// confirme que el modelo leyó bien las cifras, se exige más repetición que con aprobaciones.
+/// El umbral de facturas ajustable (`suggest_invoice_min`) puede subirla, nunca bajarla.
+pub const SEEN_INVOICE_MIN: u32 = 5;
 /// Una sola observación nunca basta: el mínimo de ambos umbrales.
 pub const MIN_THRESHOLD: u32 = 2;
 /// Máximo razonable de un umbral.
@@ -141,10 +146,19 @@ pub struct Evidence {
     /// Cuándo se guardó la última observación (ms).
     pub last_at: i64,
     pub task_ids: Vec<i64>,
-    /// Facturas: los importes observados, en orden.
+    /// Facturas: los importes de las facturas **aprobadas** por la persona, en orden. Las solo
+    /// vistas en la primera lectura no aportan importes (D133).
     pub amounts: Vec<String>,
-    /// Facturas: límite propuesto (el mayor de los importes observados).
+    /// Facturas: límite propuesto (el mayor de los importes aprobados). `None` si no hay ninguna
+    /// aprobada: un límite no sale de lo que solo se ha visto.
     pub limit: Option<String>,
+    /// Facturas sin ninguna aprobada: la persona debe escribir el límite; no se crea con un clic.
+    pub needs_limit: bool,
+    /// Cuántas de las `count` son aprobaciones de la persona (ya ejecutadas).
+    pub approved: u32,
+    /// Cuántas de las `count` solo se vieron en la primera lectura (E5): facturas existentes que
+    /// la persona nunca aprobó. `approved + seen == count`.
+    pub seen: u32,
     /// Facturas: el menor y el segundo mayor de los importes observados.
     pub amount_min: Option<String>,
     pub amount_second: Option<String>,
@@ -181,6 +195,8 @@ pub struct Progress {
     pub subject: String,
     pub category: Option<String>,
     pub count: u32,
+    pub approved: u32,
+    pub seen: u32,
     pub needed: u32,
     pub missing: u32,
 }
@@ -198,6 +214,9 @@ pub struct Hidden {
     pub invalid: u32,
     /// Respuestas de la categoría `otros`, que no se sugiere nunca (D132).
     pub not_suggested: u32,
+    /// Proveedores cuyas facturas solo leídas no cuentan porque basta una con incidencias, otra
+    /// moneda o un total no positivo (D133). Sus aprobaciones se conservan.
+    pub seen_invalidated: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -206,6 +225,10 @@ pub struct Suggestions {
     pub progress: Vec<Progress>,
     /// Señales válidas que se miraron. Cero: aún no hay datos.
     pub observed: u32,
+    /// De ellas, decisiones de la persona (aprobar, editar o rechazar).
+    pub decisions: u32,
+    /// De ellas, facturas vistas en la primera lectura (E5): no son decisiones de nadie.
+    pub seen: u32,
     /// Observaciones que cuentan como evidencia en las series actuales (de todos los sujetos,
     /// se muestren o no).
     pub counted: u32,
@@ -220,24 +243,68 @@ pub struct Suggestions {
 struct Series<'a> {
     items: Vec<&'a Signal>,
     breaks: u32,
+    /// Alguna factura solo vista de este proveedor no sirve (incidencias, otra moneda, total no
+    /// positivo): ninguna de las vistas cuenta (D133).
+    seen_blocked: bool,
 }
 
-/// Recorre las señales de un sujeto, en orden de llegada, y devuelve la serie actual.
+impl Series<'_> {
+    /// Aprobaciones de la persona entre las observaciones de la serie.
+    fn approved(&self) -> u32 {
+        let n = self.items.iter().filter(|s| s.kind == "approved").count();
+        u32::try_from(n).unwrap_or(u32::MAX)
+    }
+
+    /// Facturas que solo se vieron en la primera lectura.
+    fn seen(&self) -> u32 {
+        let n = self.items.iter().filter(|s| s.kind == "observed").count();
+        u32::try_from(n).unwrap_or(u32::MAX)
+    }
+}
+
+/// Observaciones que hacen falta para sugerir (D132, D133): con aprobaciones de la persona al
+/// menos iguales al umbral, el umbral; si no, y habiendo vistas en la primera lectura, el mayor
+/// de ese umbral y [`SEEN_INVOICE_MIN`]. Sin vistas, el umbral de siempre.
+fn needed_for(invoice: bool, approved: u32, seen: u32, thresholds: Thresholds) -> u32 {
+    if !invoice {
+        return thresholds.reply;
+    }
+    if approved >= thresholds.invoice || seen == 0 {
+        thresholds.invoice
+    } else {
+        thresholds.invoice.max(SEEN_INVOICE_MIN)
+    }
+}
+
+/// Recorre las señales de un sujeto y devuelve la serie actual.
 ///
-/// Cuenta una aprobación válida sin edición (en facturas, además limpia y con importe). Una
-/// edición, un rechazo, un «sin clasificar» o una factura con incidencias **reinician** la
-/// serie: lo anterior ya no sostiene la sugerencia y hacen falta nuevas observaciones tras
-/// el corte (si no, una sola edición antigua la bloquearía para siempre y una reciente no
-/// dejaría rastro). No son evidencia, ni cortan, los reintentos de una misma tarea, los
-/// documentos con el mismo hash ni las facturas marcadas solo como posible duplicado
-/// (`neutral`).
+/// **Decisiones de la persona** (en orden de llegada): cuenta una aprobación válida sin edición
+/// (en facturas, además limpia y con importe positivo). Una edición, un rechazo, un «sin
+/// clasificar» o una factura con incidencias **reinician** la serie: lo anterior ya no sostiene la
+/// sugerencia y hacen falta nuevas observaciones tras el corte. No son evidencia, ni cortan, los
+/// reintentos de una misma tarea, los documentos con el mismo hash ni las facturas marcadas solo
+/// como posible duplicado (`neutral`).
+///
+/// **Facturas solo vistas en la primera lectura** (D133): lo que nadie decidió no corta
+/// aprobaciones, y su recuento no depende del orden de lectura. Cuentan las limpias, con importe
+/// positivo, una por documento y tarea y que la persona no haya decidido (ni aprobado, ni
+/// rechazado, ni editado). Si **alguna** vista de ese proveedor tiene incidencias, otra moneda o un
+/// total no positivo, ninguna de las vistas cuenta (la serie de lo visto se invalida entera, no
+/// solo lo anterior), y las aprobaciones quedan como estaban. Nunca hay vistas en respuestas.
 fn series<'a>(group: &[&'a Signal], invoice: bool) -> Series<'a> {
     let mut items: Vec<&Signal> = Vec::new();
     let mut breaks = 0;
     let mut seen_tasks: HashSet<i64> = HashSet::new();
     let mut seen_sources: HashSet<&str> = HashSet::new();
     let mut break_tasks: HashSet<i64> = HashSet::new();
+    let mut decided_sources: HashSet<&str> = HashSet::new();
     for &s in group {
+        if s.kind == "observed" {
+            continue;
+        }
+        if let Some(k) = s.source_key.as_deref() {
+            decided_sources.insert(k);
+        }
         if s.neutral {
             continue;
         }
@@ -265,7 +332,38 @@ fn series<'a>(group: &[&'a Signal], invoice: bool) -> Series<'a> {
             }
         }
     }
-    Series { items, breaks }
+    let mut seen_blocked = false;
+    if invoice {
+        let observed: Vec<&Signal> = group
+            .iter()
+            .copied()
+            .filter(|s| s.kind == "observed" && !s.neutral)
+            .collect();
+        let usable = |s: &Signal| {
+            s.clean
+                && s.edit_state == "unedited"
+                && s.amount.as_deref().is_some_and(is_positive_amount)
+        };
+        seen_blocked = !observed.is_empty() && !observed.iter().all(|s| usable(s));
+        if !seen_blocked {
+            for s in observed {
+                let source_known = s
+                    .source_key
+                    .as_deref()
+                    .is_some_and(|k| decided_sources.contains(k) || !seen_sources.insert(k));
+                if source_known || !seen_tasks.insert(s.task_id) {
+                    continue;
+                }
+                items.push(s);
+            }
+        }
+    }
+    items.sort_by_key(|s| s.id);
+    Series {
+        items,
+        breaks,
+        seen_blocked,
+    }
 }
 
 /// Un importe canónico («1200.00») es positivo: no es cero ni negativo (rectificativas).
@@ -337,6 +435,8 @@ pub fn suggest(
         candidates: Vec::new(),
         progress: Vec::new(),
         observed: 0,
+        decisions: 0,
+        seen: 0,
         counted: 0,
         hidden: Hidden::default(),
         thresholds: ThresholdSettings {
@@ -353,6 +453,9 @@ pub fn suggest(
     let mut valid: Vec<&Signal> = signals.iter().filter(|s| s.state == "valid").collect();
     valid.sort_by_key(|s| s.id);
     out.observed = u32::try_from(valid.len()).unwrap_or(u32::MAX);
+    out.seen =
+        u32::try_from(valid.iter().filter(|s| s.kind == "observed").count()).unwrap_or(u32::MAX);
+    out.decisions = out.observed - out.seen;
 
     let mut groups: BTreeMap<(&str, &str), Vec<&Signal>> = BTreeMap::new();
     for s in &valid {
@@ -376,12 +479,12 @@ pub fn suggest(
 
     for ((action_kind, subject_key), group) in groups {
         let invoice = action_kind == REGISTER_INVOICE;
-        let needed = if invoice {
-            thresholds.invoice
-        } else {
-            thresholds.reply
-        };
         let series = series(&group, invoice);
+        if series.seen_blocked {
+            out.hidden.seen_invalidated += 1;
+        }
+        let (approved, seen) = (series.approved(), series.seen());
+        let needed = needed_for(invoice, approved, seen, thresholds);
         let count = u32::try_from(series.items.len()).unwrap_or(u32::MAX);
         out.counted = out.counted.saturating_add(count);
         if count == 0 {
@@ -432,6 +535,8 @@ pub fn suggest(
                         subject: draft.subject.clone(),
                         category: draft.category.clone(),
                         count,
+                        approved,
+                        seen,
                         needed,
                         missing: needed - count,
                     }),
@@ -470,9 +575,11 @@ pub fn suggest(
             None => {}
         }
         let last = series.items.last().copied();
+        // Los importes y el límite salen solo de lo aprobado por la persona (D133).
         let amounts: Vec<String> = series
             .items
             .iter()
+            .filter(|s| s.kind == "approved")
             .filter_map(|s| s.amount.clone())
             .collect();
         let limit = draft.conditions["max_total"].as_str().map(str::to_owned);
@@ -510,10 +617,13 @@ pub fn suggest(
                 count,
                 threshold: needed,
                 earlier_breaks: series.breaks,
+                approved,
+                seen,
                 last_at: last.map_or(0, |s| s.at),
                 task_ids: draft.items,
                 amounts,
                 limit,
+                needs_limit: invoice && approved == 0,
                 amount_min,
                 amount_second,
                 limit_outlier,
@@ -582,22 +692,26 @@ fn draft_of(action_kind: &str, subject_key: &str, series: &Series<'_>) -> Option
         {
             return None;
         }
+        // El límite sale solo de importes aprobados; sin aprobaciones no hay límite que proponer.
         let limit = series
             .items
             .iter()
+            .filter(|s| s.kind == "approved")
             .filter_map(|s| s.amount.as_deref())
             .filter(|a| is_positive_amount(a))
             .filter_map(|a| parse_amount("total", a).ok())
-            .max()?
-            .to_string();
-        if !is_positive_amount(&limit) {
-            return None;
-        }
+            .max()
+            .map(|m| m.to_string())
+            .filter(|l| is_positive_amount(l));
         let name = sanitize_name(&format!("Facturas de {supplier}"));
+        let conditions = match &limit {
+            Some(limit) => json!({ "supplier": supplier, "max_total": limit }),
+            None => json!({ "supplier": supplier }),
+        };
         return Some(Draft {
             fingerprint: fingerprint_of(&[REGISTER_INVOICE, "supplier", subject_key.trim()]),
             name,
-            conditions: json!({ "supplier": supplier, "max_total": limit }),
+            conditions,
             conditions_no_limit: json!({ "supplier": supplier }),
             subject: supplier.to_owned(),
             category: None,
@@ -640,6 +754,18 @@ pub struct RuleSeed {
     pub limit_skipped: Option<LimitSkipped>,
 }
 
+/// Una factura que solo se leyó en la primera lectura (D133).
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct SeenInvoice {
+    pub task_id: i64,
+    pub document: Option<String>,
+    /// Fecha de la factura tal como la leyó el modelo; `None` si no constaba.
+    pub date: Option<String>,
+    pub amount: Option<String>,
+    /// Cuándo se leyó (ms).
+    pub read_at: i64,
+}
+
 /// Por qué una factura no aporta un límite fiable.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct LimitSkipped {
@@ -661,7 +787,7 @@ impl App {
             .filter(|r| {
                 r.action_kind == REGISTER_INVOICE
                     && r.state == "valid"
-                    && matches!(r.kind.as_str(), "approved" | "rejected")
+                    && matches!(r.kind.as_str(), "approved" | "rejected" | "observed")
             })
             .map(|r| r.task_id)
             .collect();
@@ -853,6 +979,30 @@ impl App {
         name: Option<&str>,
         model_limit: Option<&str>,
     ) -> AppResult<crate::panel::RuleView> {
+        self.accept_inner(fingerprint, shown, name, model_limit, None)
+    }
+
+    /// Crea la regla de una sugerencia de facturas **solo vistas** (sin ninguna aprobada) con el
+    /// límite que escribe la persona: obligatorio y positivo. Es la única forma de aceptarla; con
+    /// un clic no se crea nada ni se crea nunca una regla sin límite por defecto (D133).
+    pub fn accept_suggestion_with_user_limit(
+        &mut self,
+        fingerprint: &str,
+        shown: &str,
+        name: Option<&str>,
+        limit: &str,
+    ) -> AppResult<crate::panel::RuleView> {
+        self.accept_inner(fingerprint, shown, name, None, Some(limit))
+    }
+
+    fn accept_inner(
+        &mut self,
+        fingerprint: &str,
+        shown: &str,
+        name: Option<&str>,
+        model_limit: Option<&str>,
+        user_limit: Option<&str>,
+    ) -> AppResult<crate::panel::RuleView> {
         // Ya aceptada: la misma regla, sin crear nada.
         if let Some(id) = self
             .store
@@ -879,11 +1029,39 @@ impl App {
         };
         let mut conditions = c.conditions.clone();
         let mut limit_source = "code";
-        match model_limit {
-            None if c.shown != shown => return Err(changed()),
-            None => {}
-            Some(limit) => {
-                let proposal = self
+        if c.evidence.needs_limit {
+            // Solo vistas: la regla necesita un límite que escriba la persona.
+            let Some(typed) = user_limit else {
+                return Err(AppError::Invalid(
+                    "Estas facturas solo se han leído: indique usted el límite de la regla; no se crea sin él."
+                        .into(),
+                ));
+            };
+            if c.shown != shown {
+                return Err(changed());
+            }
+            let amount = parse_amount("total", typed)
+                .ok()
+                .map(|a| a.to_string())
+                .filter(|a| is_positive_amount(a))
+                .ok_or_else(|| {
+                    AppError::Invalid(
+                        "El límite debe ser un importe positivo, por ejemplo 500,00.".into(),
+                    )
+                })?;
+            conditions["max_total"] = json!(amount);
+            limit_source = "user";
+        } else if user_limit.is_some() {
+            return Err(AppError::Invalid(
+                "Esta sugerencia ya lleva un límite calculado de sus aprobaciones: use «Crear regla»."
+                    .into(),
+            ));
+        } else {
+            match model_limit {
+                None if c.shown != shown => return Err(changed()),
+                None => {}
+                Some(limit) => {
+                    let proposal = self
                     .refinement_view_for(&all)?
                     .limits
                     .into_iter()
@@ -894,20 +1072,21 @@ impl App {
                                 .into(),
                         )
                     })?;
-                if proposal.shown != shown {
-                    return Err(changed());
-                }
-                // Se vuelve a comprobar con los datos de ahora, como cuando se propuso.
-                let checked = self.check_limit(c, &proposal.max_total).map_err(|code| {
+                    if proposal.shown != shown {
+                        return Err(changed());
+                    }
+                    // Se vuelve a comprobar con los datos de ahora, como cuando se propuso.
+                    let checked = self.check_limit(c, &proposal.max_total).map_err(|code| {
                     AppError::Invalid(format!(
                         "La propuesta de límite de la IA ya no es válida ({code}). Actualice la lista."
                     ))
                 })?;
-                if checked.shown != shown {
-                    return Err(changed());
+                    if checked.shown != shown {
+                        return Err(changed());
+                    }
+                    conditions["max_total"] = json!(checked.max_total);
+                    limit_source = "model";
                 }
-                conditions["max_total"] = json!(checked.max_total);
-                limit_source = "model";
             }
         }
         check_rule(&c.action_kind, &conditions, false)?;
@@ -925,6 +1104,8 @@ impl App {
             "count": c.evidence.count,
             "threshold": c.evidence.threshold,
             "earlier_breaks": c.evidence.earlier_breaks,
+            "approved": c.evidence.approved,
+            "seen": c.evidence.seen,
             "limit": conditions["max_total"].as_str().or(c.evidence.limit.as_deref()),
             "limit_source": limit_source,
             "code_limit": c.evidence.limit,
@@ -942,6 +1123,34 @@ impl App {
             &evidence,
         )?;
         self.rule_view(&rule.id)
+    }
+
+    /// Las facturas que solo se leyeron (primera lectura) en la serie de una sugerencia, con el
+    /// nombre del documento, la fecha de la factura y su importe, para que la persona las vea
+    /// antes de decidir (D133). Solo lectura.
+    pub fn seen_invoices(&self, fingerprint: &str) -> AppResult<Vec<SeenInvoice>> {
+        let all = self.rule_suggestions()?;
+        let Some(c) = all.candidates.iter().find(|c| c.fingerprint == fingerprint) else {
+            return Err(AppError::Invalid(stale_message()));
+        };
+        let mut out = Vec::new();
+        for task in self.store.tasks_by_ids(&c.evidence.task_ids)? {
+            if !crate::task_is_initial_read(&task) {
+                continue;
+            }
+            let Some(result) = task.result.as_ref() else {
+                continue;
+            };
+            let field = |name: &str| result["fields"][name].as_str().map(str::to_owned);
+            out.push(SeenInvoice {
+                task_id: task.id,
+                document: result["document"].as_str().map(str::to_owned),
+                date: field("date"),
+                amount: field("total"),
+                read_at: task.updated_at,
+            });
+        }
+        Ok(out)
     }
 
     /// Datos para precargar una regla desde una tarea en revisión. Solo lectura; la regla se
@@ -1078,7 +1287,7 @@ fn fill_invoice(signal: &mut Signal, result: &Value) {
         without["issues"] = json!([]);
         signal.neutral = is_clean(&without);
     }
-    if signal.kind != "approved" {
+    if !matches!(signal.kind.as_str(), "approved" | "observed") {
         return;
     }
     signal.display = supplier.map(str::to_owned);
@@ -1627,6 +1836,190 @@ mod tests {
             .collect::<Vec<_>>());
         assert_eq!(a.candidates[0].fingerprint, b.candidates[0].fingerprint);
         assert_ne!(a.candidates[0].shown, b.candidates[0].shown);
+    }
+
+    fn seen(id: i64, task: i64, supplier: &str, amount: &str) -> Signal {
+        Signal {
+            kind: "observed".into(),
+            ..inv(id, task, supplier, amount)
+        }
+    }
+
+    #[test]
+    fn invoices_only_seen_need_five_and_say_none_was_approved() {
+        let four: Vec<Signal> = (1..=4).map(|i| seen(i, i, "Alfa SL", "100.00")).collect();
+        let s = run(&four);
+        assert!(s.candidates.is_empty());
+        let p = &s.progress[0];
+        assert_eq!(
+            (p.count, p.approved, p.seen, p.needed, p.missing),
+            (4, 0, 4, 5, 1)
+        );
+        assert_eq!((s.observed, s.seen, s.decisions), (4, 4, 0));
+        let five: Vec<Signal> = (1..=5).map(|i| seen(i, i, "Alfa SL", "100.00")).collect();
+        let c = &run(&five).candidates[0];
+        assert_eq!(
+            (
+                c.evidence.count,
+                c.evidence.approved,
+                c.evidence.seen,
+                c.evidence.threshold
+            ),
+            (5, 0, 5, 5)
+        );
+        // Subir el umbral sube también este mínimo; bajarlo nunca lo baja de 5.
+        let low = suggest(
+            &four,
+            &[],
+            &Marks::default(),
+            &[],
+            Thresholds {
+                invoice: 2,
+                reply: 5,
+            },
+        );
+        assert!(low.candidates.is_empty());
+        let high = suggest(
+            &five,
+            &[],
+            &Marks::default(),
+            &[],
+            Thresholds {
+                invoice: 8,
+                reply: 5,
+            },
+        );
+        assert!(high.candidates.is_empty());
+    }
+
+    #[test]
+    fn a_seen_signal_never_counts_for_replies_and_enough_approvals_use_the_usual_threshold() {
+        let mut replies: Vec<Signal> = (1..=8)
+            .map(|i| Signal {
+                kind: "observed".into(),
+                ..reply(i, i, "cliente@ejemplo.test", "unedited")
+            })
+            .collect();
+        let s = run(&replies);
+        assert!(s.candidates.is_empty() && s.progress.is_empty());
+        replies.clear();
+        // Tres aprobadas bastan aunque haya vistas; con dos aprobadas y dos vistas faltan.
+        let mut mixed: Vec<Signal> = (1..=3).map(|i| inv(i, i, "Alfa SL", "100.00")).collect();
+        mixed.push(seen(4, 4, "Alfa SL", "150.00"));
+        let c = &run(&mixed).candidates[0];
+        assert_eq!(
+            (
+                c.evidence.count,
+                c.evidence.approved,
+                c.evidence.seen,
+                c.evidence.threshold
+            ),
+            (4, 3, 1, 3)
+        );
+        // El límite sale solo de lo aprobado (100): la factura vista de 150 no lo sube.
+        assert_eq!(c.evidence.limit.as_deref(), Some("100.00"));
+        assert!(!c.evidence.needs_limit);
+        let few = vec![
+            inv(1, 1, "Beta SL", "100.00"),
+            inv(2, 2, "Beta SL", "100.00"),
+            seen(3, 3, "Beta SL", "100.00"),
+            seen(4, 4, "Beta SL", "100.00"),
+        ];
+        assert!(run(&few).candidates.is_empty());
+    }
+
+    #[test]
+    fn seen_only_invoices_propose_no_limit_and_need_the_person_to_write_one() {
+        let five: Vec<Signal> = (1..=5).map(|i| seen(i, i, "Alfa SL", "9000.00")).collect();
+        let c = &run(&five).candidates[0];
+        assert!(c.evidence.needs_limit);
+        assert_eq!(c.evidence.limit, None);
+        assert!(c.evidence.amounts.is_empty() && !c.evidence.limit_outlier);
+        assert_eq!(c.conditions, json!({ "supplier": "Alfa SL" }));
+    }
+
+    #[test]
+    fn an_unclean_seen_invoice_never_erases_approvals_and_the_order_does_not_matter() {
+        let approved: Vec<Signal> = (1..=3)
+            .map(|i| inv(10 + i, i, "Alfa SL", "100.00"))
+            .collect();
+        let bad = Signal {
+            clean: false,
+            ..seen(20, 20, "Alfa SL", "100.00")
+        };
+        // La vista con incidencias llega antes o después de las aprobaciones: el resultado es el mismo.
+        for order in [[0usize, 1], [1, 0]] {
+            let mut signals = Vec::new();
+            let blocks = [approved.clone(), vec![bad.clone()]];
+            for i in order {
+                signals.extend(blocks[i].clone());
+            }
+            for (n, sig) in signals.iter_mut().enumerate() {
+                sig.id = i64::try_from(n).unwrap() + 1;
+            }
+            let c = &run(&signals).candidates[0];
+            assert_eq!(
+                (c.evidence.approved, c.evidence.seen, c.evidence.count),
+                (3, 0, 3)
+            );
+            assert_eq!(c.evidence.earlier_breaks, 0);
+        }
+    }
+
+    #[test]
+    fn one_bad_seen_invoice_is_reported_as_hidden_and_the_approvals_stay() {
+        // Cinco vistas y una con incidencias, quizá de un tercero: ninguna vista cuenta y se dice.
+        let mut signals: Vec<Signal> = (1..=5).map(|i| seen(i, i, "Alfa SL", "100.00")).collect();
+        signals.push(Signal {
+            clean: false,
+            ..seen(6, 6, "Alfa SL", "100.00")
+        });
+        let s = run(&signals);
+        assert!(s.candidates.is_empty() && s.progress.is_empty());
+        assert_eq!((s.counted, s.hidden.seen_invalidated), (0, 1));
+        // Con aprobaciones, estas se conservan y lo invalidado también se cuenta.
+        let mut with_approvals: Vec<Signal> = (1..=3)
+            .map(|i| inv(10 + i, 10 + i, "Beta SL", "100.00"))
+            .collect();
+        with_approvals.push(Signal {
+            clean: false,
+            ..seen(20, 20, "Beta SL", "100.00")
+        });
+        let s = run(&with_approvals);
+        assert_eq!(s.candidates[0].evidence.approved, 3);
+        assert_eq!(s.hidden.seen_invalidated, 1);
+        // Sin ninguna vista inválida no se dice nada.
+        assert_eq!(
+            run(&[seen(1, 1, "Gamma SL", "100.00")])
+                .hidden
+                .seen_invalidated,
+            0
+        );
+    }
+
+    #[test]
+    fn a_document_the_person_already_decided_is_not_only_seen() {
+        let mut signals: Vec<Signal> = (1..=5).map(|i| seen(i, i, "Alfa SL", "100.00")).collect();
+        // La persona aprobó una copia del primer documento: ya no es «solo vista».
+        signals.push(Signal {
+            source_key: Some("hash-1".into()),
+            ..inv(30, 30, "Alfa SL", "100.00")
+        });
+        let s = run(&signals);
+        let e = &s.candidates[0].evidence;
+        assert_eq!((e.approved, e.seen, e.count), (1, 4, 5));
+    }
+
+    #[test]
+    fn an_unclean_seen_invoice_cuts_the_series_like_an_unclean_approved_one() {
+        let mut signals: Vec<Signal> = (1..=5).map(|i| seen(i, i, "Alfa SL", "100.00")).collect();
+        signals.push(Signal {
+            clean: false,
+            ..seen(6, 6, "Alfa SL", "100.00")
+        });
+        let s = run(&signals);
+        assert!(s.candidates.is_empty());
+        assert_eq!(s.counted, 0);
     }
 
     fn row(kind: &str, edit_state: &str) -> Signal {

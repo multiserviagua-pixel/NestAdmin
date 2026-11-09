@@ -6,15 +6,20 @@ import type {
   MailAccount,
   AuditEntry,
   FetchReport,
+  FolderPreview,
+  InitialReadOverview,
+  InitialReadStatus,
   MailProviderKind,
   MailView,
   LaunchView,
   ProviderChoice,
   ProviderInfo,
+  ReadExpectation,
   ConsentView,
   MergePreview,
   RefinePreview,
   RefinementView,
+  SeenInvoice,
   Rule,
   RuleFinding,
   RuleSeed,
@@ -91,8 +96,9 @@ export const api = {
   mailAccounts: () => invoke<MailView>("mail_accounts"),
   setMailLimit: (limit: number) => invoke<void>("set_mail_limit", { limit }),
   // Sin `account` añade una cuenta; con ella, renueva su sesión. Termina al volver del navegador.
-  mailSignIn: (provider: MailProviderKind, label: string, account?: string) =>
-    invoke<MailAccount>("mail_sign_in", { provider, label, account: account ?? null }),
+  // `expect` es lo que se mostró antes de conectar: si ya no es cierto, la lectura no arranca sola (D133).
+  mailSignIn: (provider: MailProviderKind, label: string, account?: string, expect: ReadExpectation | null = null) =>
+    invoke<MailAccount>("mail_sign_in", { provider, label, account: account ?? null, expect }),
   mailSignInCancel: () => invoke<void>("mail_sign_in_cancel"),
   renameMailAccount: (id: string, label: string) => invoke<MailAccount>("rename_mail_account", { id, label }),
   removeMailAccount: (id: string) => invoke<void>("remove_mail_account", { id }),
@@ -142,8 +148,10 @@ export const api = {
   ruleSuggestions: () => invoke<Suggestions>("rule_suggestions"),
   /** Crea la regla de una sugerencia, siempre inactiva. Repetirlo no duplica. `shown` es la huella
    * de lo que se mostró: si los datos cambiaron, el backend rechaza y hay que revisar de nuevo. */
-  acceptSuggestion: (fingerprint: string, shown: string, name: string | null, modelLimit: string | null = null) =>
-    invoke<RuleView>("accept_suggestion", { fingerprint, shown, name, modelLimit }),
+  acceptSuggestion: (fingerprint: string, shown: string, name: string | null, modelLimit: string | null = null, userLimit: string | null = null) =>
+    invoke<RuleView>("accept_suggestion", { fingerprint, shown, name, modelLimit, userLimit }),
+  /** Las facturas solo leídas de la serie de una sugerencia, con documento, fecha e importe. Solo lectura. */
+  seenInvoices: (fingerprint: string) => invoke<SeenInvoice[]>("seen_invoices", { fingerprint }),
   /** Estado del afinado con IA (D134). Solo lectura: no llama al proveedor. */
   suggestionRefinement: () => invoke<RefinementView>("suggestion_refinement"),
   /** A qué proveedor y qué datos se enviarían al afinar. Solo lectura. */
@@ -155,6 +163,23 @@ export const api = {
   grantRefineConsent: (provider: string, model: string, host: string | null) => invoke<ConsentView>("grant_refine_consent", { provider, model, host: host ?? "" }),
   /** Retira el consentimiento del afinado automático. */
   withdrawRefineConsent: () => invoke<ConsentView>("withdraw_refine_consent"),
+  /** Primera lectura (E5, D133): modo, volumen, a qué proveedor se envía y qué, y el estado de cada fuente. Solo lectura. */
+  initialReadOverview: () => invoke<InitialReadOverview>("initial_read_overview"),
+  /** Una carpeta antes de leerla: archivos admitidos y si ya se leyó. No lee ni envía nada. */
+  initialReadFolderPreview: (path: string) => invoke<FolderPreview>("initial_read_folder_preview", { path }),
+  /** Selector de carpetas del sistema; `null` si se cancela. */
+  pickReadFolder: () => invoke<string | null>("pick_read_folder"),
+  /** Lectura bajo demanda de una cuenta, con lo que la persona vio. Solo clasifica: no envía ni registra nada. */
+  startInitialRead: (account: string, volume: number | null, expect: ReadExpectation | null) =>
+    invoke<InitialReadStatus>("start_initial_read", { account, volume, expect }),
+  startInitialReadFolder: (path: string, volume: number | null, expect: ReadExpectation | null) =>
+    invoke<InitialReadStatus>("start_initial_read_folder", { path, volume, expect }),
+  /** Detiene una lectura: no sale nada más y se puede continuar. */
+  stopInitialRead: (source: string) => invoke<InitialReadStatus>("stop_initial_read", { source }),
+  /** Continúa una lectura detenida o retenida por un cambio de destino, con el destino que se vio ahora. */
+  continueInitialRead: (source: string, expect: ReadExpectation) => invoke<InitialReadStatus>("continue_initial_read", { source, expect }),
+  /** Reintenta las tareas fallidas de una lectura (la misma tarea vuelve a la cola). */
+  retryInitialRead: (source: string) => invoke<number>("retry_initial_read", { source }),
   /** Descarta una sugerencia: solo reaparece con el doble de evidencia nueva. */
   discardSuggestion: (fingerprint: string) => invoke<void>("discard_suggestion", { fingerprint }),
   suggestionThresholds: () => invoke<ThresholdSettings>("suggestion_thresholds"),

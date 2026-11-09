@@ -19,12 +19,15 @@ use nestadmin_ai::{CredentialStore, ProviderChoice, Secret};
 use nestadmin_app::accounts::{
     AccountView, FetchReport, MailAccountsView, MailEnv, MailProviderKind,
 };
+use nestadmin_app::initial_read::{
+    FolderPreview, InitialReadOverview, InitialReadStatus, ReadExpectation, ReadStep,
+};
 use nestadmin_app::panel::{MergePreview, NewRule, RuleView, Simulation};
 use nestadmin_app::refine::{
     ConsentView, RefineExpectation, RefineMode, RefinePreview, RefineTrigger, RefinementView,
 };
 use nestadmin_app::rules::RuleFinding;
-use nestadmin_app::suggest::{RuleSeed, Suggestions, ThresholdSettings};
+use nestadmin_app::suggest::{RuleSeed, SeenInvoice, Suggestions, ThresholdSettings};
 use nestadmin_app::{AiWait, App, AppPaths, LocalFallback, ProviderInfo};
 use nestadmin_core::{AuditEntry, Rule, RuleStats, Task};
 use nestadmin_extract::{Extractor, Tesseract};
@@ -296,11 +299,19 @@ async fn mail_sign_in<R: Runtime>(
     provider: MailProviderKind,
     label: String,
     account: Option<String>,
+    expect: Option<ReadExpectation>,
 ) -> CmdResult<AccountView> {
     let shared = Arc::clone(shared.inner());
     let emitter = handle.clone();
     let view = tauri::async_runtime::spawn_blocking(move || {
-        sign_in(&shared, &emitter, provider, &label, account.as_deref())
+        sign_in(
+            &shared,
+            &emitter,
+            provider,
+            &label,
+            account.as_deref(),
+            expect.as_ref(),
+        )
     })
     .await
     .map_err(text)??;
@@ -314,6 +325,7 @@ fn sign_in<R: Runtime>(
     provider: MailProviderKind,
     label: &str,
     account: Option<&str>,
+    expect: Option<&ReadExpectation>,
 ) -> CmdResult<AccountView> {
     let config = shared.app()?.mail_oauth(provider).map_err(text)?;
     let pending = {
@@ -342,12 +354,72 @@ fn sign_in<R: Runtime>(
         Err(_) if cancelled => return Err("inicio de sesión cancelado".into()),
         Err(error) => return Err(text(error)),
     };
-    let mut app = shared.app()?;
-    match account {
-        Some(id) => app.reconnect_mail_account(id, &tokens),
-        None => app.add_mail_account(provider, label, &tokens),
+    // El cerrojo solo se retiene para anotar la cuenta y la lectura; el listado y las descargas
+    // van después, paso a paso, sin él.
+    let (view, source) = {
+        let mut app = shared.app()?;
+        let view = match account {
+            Some(id) => app.reconnect_mail_account(id, &tokens),
+            None => app.add_mail_account(provider, label, &tokens),
+        }
+        .map_err(text)?;
+        // Versión final: al conectar una cuenta nueva empieza su primera lectura (E5, D133) solo
+        // si lo mostrado antes de conectar sigue siendo cierto (`expect`); si no, o si no se
+        // mostró nada, queda pendiente con un botón. Un fallo no impide conectar la cuenta.
+        let source = if account.is_none() {
+            match app.request_initial_read(&view.id, expect) {
+                Ok(status) if status.state == "reading" => Some(status.source),
+                Ok(_) => None,
+                Err(error) => {
+                    eprintln!("no se pudo empezar la primera lectura: {error}");
+                    None
+                }
+            }
+        } else {
+            None
+        };
+        (view, source)
+    };
+    if let Some(source) = source {
+        drive_read(shared, handle, &source);
     }
-    .map_err(text)
+    Ok(view)
+}
+
+/// Lleva una primera lectura hasta el final paso a paso. El cerrojo de la aplicación se **retiene
+/// durante cada paso** (una página del listado, un mensaje con las descargas de sus adjuntos o un
+/// archivo) y se suelta **entre** un paso y el siguiente: la ventana y la cola no esperan a toda la
+/// lectura, pero sí mientras dura un paso.
+fn drive_read<R: Runtime>(shared: &Shared, handle: &AppHandle<R>, source: &str) {
+    let mut steps = 0u32;
+    loop {
+        if shared.stopping.load(Ordering::SeqCst) {
+            break;
+        }
+        let step = match shared.app() {
+            Ok(mut app) => app.read_step(source),
+            Err(_) => return,
+        };
+        match step {
+            Ok(ReadStep::Continue) => {
+                steps += 1;
+                if steps.is_multiple_of(5) {
+                    shared.wake();
+                    changed(handle);
+                }
+            }
+            Ok(_) => break,
+            Err(error) => {
+                eprintln!("no se pudo seguir con la primera lectura: {error}");
+                if let Ok(mut app) = shared.app() {
+                    app.note_initial_read_error(source, &error.to_string());
+                }
+                break;
+            }
+        }
+    }
+    shared.wake();
+    changed(handle);
 }
 
 /// Cancela el inicio de sesión en curso: la espera local recibe una redirección que no
@@ -712,6 +784,162 @@ fn auto_refine<R: Runtime>(shared: &SharedState, handle: &AppHandle<R>) {
     }
 }
 
+// ---- Primera lectura (E5, D133) ----
+
+/// Lo que la pantalla muestra antes y después de leer: modo, volumen, proveedor, qué se envía y el
+/// estado de cada cuenta y carpeta. Solo lectura.
+#[tauri::command]
+fn initial_read_overview(shared: State<'_, SharedState>) -> CmdResult<InitialReadOverview> {
+    shared.app()?.initial_read_overview().map_err(text)
+}
+
+/// Una carpeta antes de leerla (cuántos archivos admitidos tiene y si ya se leyó).
+#[tauri::command]
+fn initial_read_folder_preview(
+    shared: State<'_, SharedState>,
+    path: String,
+) -> CmdResult<FolderPreview> {
+    shared
+        .app()?
+        .initial_read_folder_preview(&PathBuf::from(path))
+        .map_err(text)
+}
+
+/// Abre el selector de carpetas del sistema; `None` si se cancela.
+#[tauri::command]
+async fn pick_read_folder<R: Runtime>(handle: AppHandle<R>) -> CmdResult<Option<String>> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let picked = handle
+            .dialog()
+            .file()
+            .set_title("Carpeta de archivos para la primera lectura")
+            .blocking_pick_folder();
+        picked
+            .map(|folder| folder.into_path().map(|p| p.display().to_string()))
+            .transpose()
+            .map_err(text)
+    })
+    .await
+    .map_err(text)?
+}
+
+/// Pide la lectura bajo demanda de una cuenta (o, en la versión final, la que quedó pendiente),
+/// con el volumen y el aviso que la persona vio. El cerrojo solo se toma para anotarla y, después,
+/// en cada paso: el buzón puede tardar sin bloquear la ventana.
+#[tauri::command]
+async fn start_initial_read<R: Runtime>(
+    shared: State<'_, SharedState>,
+    handle: AppHandle<R>,
+    account: String,
+    volume: Option<usize>,
+    expect: Option<ReadExpectation>,
+) -> CmdResult<InitialReadStatus> {
+    let shared = Arc::clone(shared.inner());
+    let emitter = handle.clone();
+    let worker = Arc::clone(&shared);
+    let status = tauri::async_runtime::spawn_blocking(move || {
+        let begun = worker
+            .app()?
+            .begin_initial_read(&account, volume, expect.as_ref())
+            .map_err(text)?;
+        drive_read(&worker, &emitter, &begun.source);
+        worker
+            .app()?
+            .initial_read_status(&begun.source)
+            .map_err(text)
+    })
+    .await
+    .map_err(text)??;
+    shared.wake();
+    changed(&handle);
+    Ok(status)
+}
+
+/// Lo mismo con una carpeta de archivos (solo en las versiones de prueba).
+#[tauri::command]
+async fn start_initial_read_folder<R: Runtime>(
+    shared: State<'_, SharedState>,
+    handle: AppHandle<R>,
+    path: String,
+    volume: Option<usize>,
+    expect: Option<ReadExpectation>,
+) -> CmdResult<InitialReadStatus> {
+    let shared = Arc::clone(shared.inner());
+    let emitter = handle.clone();
+    let worker = Arc::clone(&shared);
+    let status = tauri::async_runtime::spawn_blocking(move || {
+        let begun = worker
+            .app()?
+            .begin_initial_read_folder(&PathBuf::from(path), volume, expect.as_ref())
+            .map_err(text)?;
+        drive_read(&worker, &emitter, &begun.source);
+        worker
+            .app()?
+            .initial_read_status(&begun.source)
+            .map_err(text)
+    })
+    .await
+    .map_err(text)??;
+    shared.wake();
+    changed(&handle);
+    Ok(status)
+}
+
+/// Detiene una lectura: no sale nada más y se puede continuar.
+#[tauri::command]
+fn stop_initial_read<R: Runtime>(
+    shared: State<'_, SharedState>,
+    handle: AppHandle<R>,
+    source: String,
+) -> CmdResult<InitialReadStatus> {
+    let status = shared.app()?.stop_initial_read(&source).map_err(text)?;
+    changed(&handle);
+    Ok(status)
+}
+
+/// Continúa una lectura detenida o retenida por un cambio de destino, con el destino que la
+/// persona vio ahora.
+#[tauri::command]
+async fn continue_initial_read<R: Runtime>(
+    shared: State<'_, SharedState>,
+    handle: AppHandle<R>,
+    source: String,
+    expect: ReadExpectation,
+) -> CmdResult<InitialReadStatus> {
+    let shared = Arc::clone(shared.inner());
+    let emitter = handle.clone();
+    let worker = Arc::clone(&shared);
+    let status = tauri::async_runtime::spawn_blocking(move || {
+        worker
+            .app()?
+            .continue_initial_read(&source, &expect)
+            .map_err(text)?;
+        drive_read(&worker, &emitter, &source);
+        worker.app()?.initial_read_status(&source).map_err(text)
+    })
+    .await
+    .map_err(text)??;
+    shared.wake();
+    changed(&handle);
+    Ok(status)
+}
+
+/// Reintenta las tareas fallidas de una lectura. Devuelve cuántas volvieron a la cola.
+#[tauri::command]
+fn retry_initial_read<R: Runtime>(
+    shared: State<'_, SharedState>,
+    handle: AppHandle<R>,
+    source: String,
+) -> CmdResult<usize> {
+    let retried = shared.app()?.retry_initial_read(&source).map_err(text)?;
+    // Si quedaban adjuntos por descargar, la lectura vuelve a avanzar paso a paso.
+    let state = Arc::clone(shared.inner());
+    let emitter = handle.clone();
+    thread::spawn(move || drive_read(&state, &emitter, &source));
+    changed(&handle);
+    Ok(retried)
+}
+
 /// Crea la regla de una sugerencia, siempre inactiva (D132). Repetirlo no duplica.
 #[tauri::command]
 fn accept_suggestion<R: Runtime>(
@@ -721,18 +949,34 @@ fn accept_suggestion<R: Runtime>(
     shown: String,
     name: Option<String>,
     model_limit: Option<String>,
+    user_limit: Option<String>,
 ) -> CmdResult<RuleView> {
-    let view = shared
-        .app()?
-        .accept_suggestion_with_limit(
+    let mut app = shared.app()?;
+    // Facturas solo vistas (D133): la regla solo se crea con el límite que escribe la persona.
+    let view = match user_limit.as_deref() {
+        Some(limit) => {
+            app.accept_suggestion_with_user_limit(&fingerprint, &shown, name.as_deref(), limit)
+        }
+        None => app.accept_suggestion_with_limit(
             &fingerprint,
             &shown,
             name.as_deref(),
             model_limit.as_deref(),
-        )
-        .map_err(text)?;
+        ),
+    }
+    .map_err(text)?;
+    drop(app);
     changed(&handle);
     Ok(view)
+}
+
+/// Las facturas que solo se leyeron en la serie de una sugerencia (D133). Solo lectura.
+#[tauri::command]
+fn seen_invoices(
+    shared: State<'_, SharedState>,
+    fingerprint: String,
+) -> CmdResult<Vec<SeenInvoice>> {
+    shared.app()?.seen_invoices(&fingerprint).map_err(text)
 }
 
 /// Descarta una sugerencia; solo reaparece con el doble de evidencia nueva (D132).
@@ -1428,6 +1672,28 @@ fn startup_check<R: Runtime>(
     }
 }
 
+/// Versión final: retoma, un paso cada vez, las primeras lecturas que esperaban al proveedor o que
+/// se cortaron (E5, D133). Devuelve si hizo trabajo. Sin proveedor confirmado, con la cola en
+/// pausa o con lo pendiente retenido no hace nada ni envía nada; un error de una lectura queda en
+/// su marca y no se repite cada pocos segundos.
+fn resume_initial_reads<R: Runtime>(shared: &SharedState, handle: &AppHandle<R>) -> bool {
+    let worked = match shared.app() {
+        Ok(mut app) if app.refine_mode() == RefineMode::Automatic => app.read_tick(),
+        _ => return false,
+    };
+    match worked {
+        Ok(true) => {
+            changed(handle);
+            true
+        }
+        Ok(false) => false,
+        Err(error) => {
+            eprintln!("no se pudo retomar la primera lectura: {error}");
+            false
+        }
+    }
+}
+
 /// Procesa la cola sin bloquear la ventana: la llamada al modelo se hace sin el cerrojo.
 fn worker<R: Runtime>(shared: SharedState, handle: AppHandle<R>, wake: Receiver<()>) {
     let mut probe = probe::WaitProbe::default();
@@ -1449,6 +1715,9 @@ fn worker<R: Runtime>(shared: SharedState, handle: AppHandle<R>, wake: Receiver<
                 changed(&handle);
             }
             Ok(None) => {
+                if resume_initial_reads(&shared, &handle) {
+                    continue;
+                }
                 auto_refine(&shared, &handle);
                 probe_provider_wait(&shared, &handle, &mut probe, &probing);
                 let _ = wake.recv_timeout(Duration::from_secs(5));
@@ -1810,6 +2079,15 @@ fn configure<R: Runtime>(builder: Builder<R>, prepare_only: bool) -> Builder<R> 
             suggestion_refinement,
             refinement_preview,
             refine_suggestions,
+            initial_read_overview,
+            initial_read_folder_preview,
+            pick_read_folder,
+            start_initial_read,
+            start_initial_read_folder,
+            retry_initial_read,
+            stop_initial_read,
+            continue_initial_read,
+            seen_invoices,
             grant_refine_consent,
             withdraw_refine_consent,
             accept_suggestion,

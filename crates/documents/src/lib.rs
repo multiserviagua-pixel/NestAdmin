@@ -8,6 +8,7 @@ pub mod currency;
 pub mod duplicates;
 pub mod error;
 pub mod invoice;
+pub mod invoice_like;
 pub mod text;
 pub mod validation;
 
@@ -18,5 +19,6 @@ pub use invoice::{
     parse_amount, parse_currency, recover_amount, Evidenced, FieldError, FieldErrorKind, Invoice,
     IsoDate, RawInvoice, RecoveredAmount, RecoveryReason, EUR,
 };
+pub use invoice_like::{looks_like_invoice, NotInvoiceLike};
 pub use text::{DocumentFormat, DocumentText, ExtractedText, LocalDocumentText};
 pub use validation::{process_invoice, validate, Issue, ValidationReport};

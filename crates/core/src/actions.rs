@@ -280,6 +280,15 @@ impl Store {
         Ok(outcome)
     }
 
+    /// Ids de las tareas que tienen alguna acción registrada (de cualquier estado). Solo
+    /// lectura: la primera lectura (E5) lo usa para decir, con datos, si ha enviado o registrado
+    /// algo.
+    pub fn task_ids_with_actions(&self) -> Result<std::collections::HashSet<i64>> {
+        let mut stmt = self.conn.prepare("SELECT DISTINCT task_id FROM actions")?;
+        let rows = stmt.query_map([], |r| r.get::<_, i64>(0))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
     /// Acciones de una tarea, de la más antigua a la más reciente.
     pub fn task_actions(&self, task_id: i64) -> Result<Vec<ActionRecord>> {
         let mut stmt = self.conn.prepare(
@@ -381,6 +390,16 @@ impl Store {
         self.conn.execute(
             "INSERT INTO audit_log (at, task_id, action, status, authorization, detail) VALUES (?1, ?2, ?3, ?4, NULL, ?5)",
             params![now_ms(), task_id, action, status, detail.to_string()],
+        )?;
+        Ok(())
+    }
+
+    /// Entrada del historial sin tarea (por ejemplo, el resumen de una primera lectura, D133).
+    /// `detail` no debe llevar contenido ni secretos.
+    pub fn record_note(&mut self, action: &str, status: &str, detail: &Value) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO audit_log (at, task_id, action, status, authorization, detail) VALUES (?1, NULL, ?2, ?3, NULL, ?4)",
+            params![now_ms(), action, status, detail.to_string()],
         )?;
         Ok(())
     }

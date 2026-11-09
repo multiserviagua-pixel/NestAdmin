@@ -450,6 +450,7 @@ fn build_batch(suggestions: &Suggestions) -> Batch {
                 category: c.category.clone(),
                 sender_domain: domain,
                 count: c.evidence.count,
+                seen: c.evidence.seen,
                 earlier_breaks: c.evidence.earlier_breaks,
                 amount_min: invoice.then(|| c.evidence.amount_min.clone()).flatten(),
                 amount_max: invoice.then(|| c.evidence.limit.clone()).flatten(),
@@ -530,11 +531,11 @@ impl App {
     }
 
     /// Servidor real al que saldrían los datos (vacío con la IA local o si el proveedor no lo dice).
-    fn host(&self) -> String {
+    pub(crate) fn host(&self) -> String {
         self.provider.destination().unwrap_or_default()
     }
 
-    fn asked(&self) -> (String, String) {
+    pub(crate) fn asked(&self) -> (String, String) {
         (
             self.provider.kind().to_string(),
             self.provider.model().to_owned(),
@@ -1243,6 +1244,10 @@ impl App {
         candidate: &Candidate,
         proposed: &str,
     ) -> Result<LimitProposal, &'static str> {
+        // Un límite no sale de lo visto: sin importes aprobados la IA tampoco propone ninguno.
+        if candidate.evidence.needs_limit {
+            return Err("no_approved_amounts");
+        }
         let supplier = candidate.conditions["supplier"].as_str();
         let (true, Some(supplier), Some(code_limit)) = (
             candidate.action_kind == REGISTER_INVOICE,
