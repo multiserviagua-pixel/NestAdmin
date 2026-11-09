@@ -1339,7 +1339,7 @@ impl App {
             // Sin IA utilizable solo avanzan las tareas que no la necesitan: reanudar una
             // acción ya intentada (D50) o una factura ya separada (D68).
             let mut found = None;
-            for queued in self.store.tasks_in(TaskState::Queued)? {
+            for queued in self.store.ready_tasks()? {
                 let input: Value = serde_json::from_str(&queued.input_ref).unwrap_or(Value::Null);
                 if self.attempted_result(&queued)?.is_some() || split_preset(&input).is_some() {
                     found = Some(queued.id);
@@ -1805,7 +1805,7 @@ impl App {
         let held = self.held_read_sources()?;
         let queued: Vec<Task> = self
             .store
-            .tasks_in(TaskState::Queued)?
+            .ready_tasks()?
             .into_iter()
             .filter(|t| {
                 let Ok(input) = serde_json::from_str::<Value>(&t.input_ref) else {

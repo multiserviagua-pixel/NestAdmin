@@ -69,6 +69,8 @@ CREATE TABLE rules (
     include_str!("migrations/003_sales.sql"),
     // Panel de reglas: nombre, archivado, evaluaciones, señales y regla de cada acción.
     include_str!("migrations/004_rules_panel.sql"),
+    // Plantillas de pipeline y sus ejecuciones (D148); ver pipeline.rs.
+    include_str!("migrations/005_pipelines.sql"),
 ];
 
 /// Base de datos local. Cada operación pública se confirma en una transacción,

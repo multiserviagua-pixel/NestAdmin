@@ -98,6 +98,18 @@ pub struct Task {
     pub updated_at: i64,
 }
 
+/// Predicado único de «lista para ejecutarse» (D148), sobre una fila de `tasks` en cola: no
+/// existe en su ejecución de pipeline ningún paso de una etapa anterior, sin omitir, cuya
+/// tarea no esté `completed` (un paso sin tarea todavía, `task_id` NULL, también retiene).
+/// Solo `completed` desbloquea. Una tarea sin ejecución de pipeline está siempre lista.
+pub(crate) const READY_SQL: &str = "NOT EXISTS (
+    SELECT 1 FROM pipeline_steps me
+    JOIN pipeline_steps prev ON prev.run_id = me.run_id AND prev.stage < me.stage
+    LEFT JOIN tasks prev_task ON prev_task.id = prev.task_id
+    WHERE me.task_id = tasks.id AND prev.waived_at IS NULL
+      AND (prev_task.id IS NULL OR prev_task.state <> 'completed')
+)";
+
 const TASK_COLUMNS: &str =
     "id, kind, input_ref, state, attempts, result, error, created_at, updated_at";
 
@@ -135,7 +147,7 @@ fn task_from_row(row: &Row<'_>) -> rusqlite::Result<Task> {
     })
 }
 
-fn load(tx: &Transaction<'_>, id: i64) -> Result<Task> {
+pub(crate) fn load(tx: &Transaction<'_>, id: i64) -> Result<Task> {
     tx.query_row(
         &format!("SELECT {TASK_COLUMNS} FROM tasks WHERE id = ?1"),
         [id],
@@ -180,20 +192,25 @@ fn transition(
     load(tx, id)
 }
 
+/// Alta de una tarea en cola con su transición inicial, dentro de la transacción del llamador.
+pub(crate) fn enqueue_in(tx: &Transaction<'_>, kind: &str, input_ref: &str) -> Result<Task> {
+    let now = now_ms();
+    tx.execute(
+        "INSERT INTO tasks (kind, input_ref, state, created_at, updated_at) VALUES (?1, ?2, 'queued', ?3, ?3)",
+        params![kind, input_ref, now],
+    )?;
+    let id = tx.last_insert_rowid();
+    tx.execute(
+        "INSERT INTO task_transitions (task_id, from_state, to_state, reason, at) VALUES (?1, NULL, 'queued', 'creada', ?2)",
+        params![id, now],
+    )?;
+    load(tx, id)
+}
+
 impl Store {
     pub fn enqueue(&mut self, kind: &str, input_ref: &str) -> Result<Task> {
         let tx = self.conn.transaction()?;
-        let now = now_ms();
-        tx.execute(
-            "INSERT INTO tasks (kind, input_ref, state, created_at, updated_at) VALUES (?1, ?2, 'queued', ?3, ?3)",
-            params![kind, input_ref, now],
-        )?;
-        let id = tx.last_insert_rowid();
-        tx.execute(
-            "INSERT INTO task_transitions (task_id, from_state, to_state, reason, at) VALUES (?1, NULL, 'queued', 'creada', ?2)",
-            params![id, now],
-        )?;
-        let task = load(&tx, id)?;
+        let task = enqueue_in(&tx, kind, input_ref)?;
         tx.commit()?;
         Ok(task)
     }
@@ -213,12 +230,24 @@ impl Store {
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
-    /// Toma la tarea en cola más antigua y la pasa a `running`, contando el intento.
+    /// Tareas en cola que pueden empezar (`READY_SQL`), de la más antigua a la más reciente.
+    /// Una tarea bloqueada por su pipeline no aparece y no frena a las siguientes.
+    pub fn ready_tasks(&self) -> Result<Vec<Task>> {
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT {TASK_COLUMNS} FROM tasks WHERE state = 'queued' AND {READY_SQL} ORDER BY id"
+        ))?;
+        let rows = stmt.query_map([], task_from_row)?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Toma la tarea lista más antigua y la pasa a `running`, contando el intento.
     pub fn claim_next(&mut self) -> Result<Option<Task>> {
         let tx = self.conn.transaction()?;
         let next: Option<i64> = tx
             .query_row(
-                "SELECT id FROM tasks WHERE state = 'queued' ORDER BY id LIMIT 1",
+                &format!(
+                    "SELECT id FROM tasks WHERE state = 'queued' AND {READY_SQL} ORDER BY id LIMIT 1"
+                ),
                 [],
                 |r| r.get(0),
             )
@@ -239,8 +268,23 @@ impl Store {
     }
 
     /// Toma una tarea concreta en cola y la pasa a `running`, contando el intento.
+    /// Rechaza con `TaskBlocked`, sin gastar intento, una tarea que su pipeline retiene.
     pub fn claim(&mut self, id: i64) -> Result<Task> {
-        self.apply(id, TaskState::Running, "iniciada", None, None)
+        let tx = self.conn.transaction()?;
+        let blocked = tx
+            .query_row(
+                &format!("SELECT NOT ({READY_SQL}) FROM tasks WHERE id = ?1 AND state = 'queued'"),
+                [id],
+                |r| r.get::<_, bool>(0),
+            )
+            .optional()?
+            .unwrap_or(false);
+        if blocked {
+            return Err(CoreError::TaskBlocked(id));
+        }
+        let task = transition(&tx, id, TaskState::Running, "iniciada", None, None)?;
+        tx.commit()?;
+        Ok(task)
     }
 
     /// Devuelve a la cola una tarea en curso que no pudo ejecutarse por causas ajenas a ella
