@@ -93,6 +93,11 @@ fn sample_messages() -> Vec<Value> {
             "toRecipients": [{ "emailAddress": { "address": "compras@empresa.test" } }],
             "receivedDateTime": "2026-11-02T09:30:00Z",
             "body": { "contentType": "text", "content": "Adjunto la factura de octubre.\r\n" },
+            "conversationId": "c-1",
+            "internetMessageHeaders": [
+                { "name": "Precedence", "value": "Bulk" },
+                { "name": "X-Interna", "value": "CENTINELA-5d20" },
+            ],
         }),
         json!({
             "id": "m-2",
@@ -118,6 +123,31 @@ fn draft(body: &str) -> NewDraft {
         subject: None,
         body: body.into(),
     }
+}
+
+#[test]
+fn inbox_messages_carry_signals_only_when_headers_arrive() {
+    let (mailbox, world) = mailbox();
+    let first = mailbox.list_messages(None).unwrap();
+    let m1 = &first.messages[0];
+    assert_eq!(m1.signals, Some(vec!["precedence_bulk".to_owned()]));
+    assert_eq!(m1.thread_key.as_deref(), Some("c-1"));
+    assert!(!serde_json::to_string(&first.messages)
+        .unwrap()
+        .contains("CENTINELA"));
+    // Sin `internetMessageHeaders`: no comprobado (`None`), y sin hilo.
+    let m2 = &first.messages[1];
+    assert_eq!(m2.signals, None);
+    assert_eq!(m2.thread_key, None);
+    let list = world
+        .lock()
+        .unwrap()
+        .requests
+        .iter()
+        .find(|r| r.url.path().ends_with("/inbox/messages"))
+        .and_then(|r| r.query("$select"))
+        .unwrap();
+    assert!(list.contains("internetMessageHeaders") && list.contains("conversationId"));
 }
 
 #[test]

@@ -3,6 +3,7 @@
 
 use base64::engine::general_purpose::STANDARD;
 use base64::Engine;
+use nestadmin_core::mail_signals;
 use nestadmin_simulators::{codes, Attachment, Message, MessagePage, NewDraft};
 use serde_json::{json, Value};
 
@@ -14,7 +15,7 @@ use crate::{error, MailResult};
 
 pub const DEFAULT_BASE: &str = "https://graph.microsoft.com/v1.0";
 const PREFER: &str = "IdType=\"ImmutableId\", outlook.body-content-type=\"text\"";
-const SELECT: &str = "id,subject,from,toRecipients,receivedDateTime,body,hasAttachments";
+const SELECT: &str = "id,subject,from,toRecipients,receivedDateTime,body,hasAttachments,\ninternetMessageHeaders,conversationId";
 const FILE_ATTACHMENT: &str = "#microsoft.graph.fileAttachment";
 
 pub struct Graph {
@@ -65,7 +66,33 @@ fn non_empty(value: Option<&Value>) -> Option<String> {
         .map(str::to_owned)
 }
 
+/// Señales de la respuesta de Graph. Con `internetMessageHeaders` no vacío: `Some(lista)` con
+/// dirección y cabeceras. Sin ellas (ausentes, nulas o vacías) las cabeceras no se comprobaron
+/// y se devuelve `None`; eso no pierde la comprobación de la dirección, que quien decide
+/// recalcula con `mail_signals::address_signals(message.from)`.
+fn signals(value: &Value, from: Option<&str>) -> Option<Vec<String>> {
+    let pairs: Vec<(&str, &str)> = value
+        .get("internetMessageHeaders")
+        .and_then(Value::as_array)?
+        .iter()
+        .filter_map(|h| {
+            Some((
+                h.get("name").and_then(Value::as_str)?,
+                h.get("value").and_then(Value::as_str)?,
+            ))
+        })
+        .collect();
+    if pairs.is_empty() {
+        return None;
+    }
+    Some(mail_signals::codes(&mail_signals::detect(
+        from,
+        Some(&pairs),
+    )))
+}
+
 fn message(value: &Value) -> Option<Message> {
+    let from = value.get("from").and_then(address);
     let body = value.get("body").and_then(|body| {
         let content = body.get("content").and_then(Value::as_str)?;
         let html = body
@@ -82,7 +109,9 @@ fn message(value: &Value) -> Option<Message> {
     Some(Message {
         id: value.get("id").and_then(Value::as_str)?.to_owned(),
         subject: non_empty(value.get("subject")),
-        from: value.get("from").and_then(address),
+        signals: signals(value, from.as_deref()),
+        thread_key: non_empty(value.get("conversationId")),
+        from,
         to: value
             .get("toRecipients")
             .and_then(Value::as_array)

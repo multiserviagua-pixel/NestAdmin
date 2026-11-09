@@ -269,6 +269,8 @@ fn message(id: &str, from: &str, subject: &str, body: &str, date: Option<String>
         body: Some(body.into()),
         date,
         attachments: Vec::new(),
+        signals: None,
+        thread_key: None,
     }
 }
 

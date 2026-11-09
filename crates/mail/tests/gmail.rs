@@ -234,6 +234,9 @@ fn sample_messages() -> Vec<Value> {
                     { "name": "From", "value": "\"Compras, Beta\" <compras@beta.test>" },
                     { "name": "To", "value": "Admin <admin@empresa.test>, otra@empresa.test" },
                     { "name": "Message-ID", "value": "<pedido-77@beta.test>" },
+                    { "name": "Auto-Submitted", "value": "auto-generated" },
+                    { "name": "list-unsubscribe", "value": "<https://CENTINELA-9c41.test/baja>" },
+                    { "name": "X-Interna", "value": "CENTINELA-9c41" },
                 ],
                 "body": { "data": b64("Necesitamos la factura del pedido.") },
             },
@@ -262,6 +265,30 @@ fn draft() -> NewDraft {
         subject: None,
         body: "Se la enviamos hoy. Un saludo.".into(),
     }
+}
+
+#[test]
+fn inbox_messages_carry_signals_and_thread_key_without_raw_headers() {
+    let (mailbox, _world) = mailbox();
+    let first = mailbox.list_messages(None).unwrap();
+    let m = &first.messages[0];
+    assert_eq!(
+        m.signals,
+        Some(vec![
+            "auto_submitted".to_owned(),
+            "list_unsubscribe".to_owned()
+        ])
+    );
+    assert_eq!(m.thread_key.as_deref(), Some("t-1"));
+    let serialized = serde_json::to_string(&first.messages).unwrap();
+    assert!(
+        !serialized.contains("CENTINELA"),
+        "la cabecera en bruto no se guarda"
+    );
+    // Sin cabeceras: comprobado y sin señales, no «sin comprobar».
+    let second = mailbox.list_messages(first.next_cursor.as_deref()).unwrap();
+    assert_eq!(second.messages[0].signals, Some(Vec::new()));
+    assert_eq!(second.messages[0].thread_key, None);
 }
 
 #[test]

@@ -9,6 +9,7 @@
 
 use base64::engine::general_purpose::{URL_SAFE, URL_SAFE_NO_PAD};
 use base64::Engine;
+use nestadmin_core::mail_signals;
 use nestadmin_simulators::{codes, Attachment, Message, MessagePage, NewDraft};
 use serde_json::{json, Value};
 
@@ -182,13 +183,35 @@ fn body(message: &Value) -> Option<String> {
     (!text.is_empty()).then_some(text)
 }
 
+/// Cabeceras de `payload.headers` como pares; solo para calcular señales, nunca se guardan.
+fn header_pairs(value: &Value) -> Vec<(&str, &str)> {
+    value
+        .pointer("/payload/headers")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|h| {
+            Some((
+                h.get("name").and_then(Value::as_str)?,
+                h.get("value").and_then(Value::as_str)?,
+            ))
+        })
+        .collect()
+}
+
 fn message(value: &Value) -> Option<Message> {
+    let from = header(value, "From").and_then(single_address);
+    // `format=full` trae todas las cabeceras: Gmail siempre las comprueba (`Some`).
+    let signals = mail_signals::codes(&mail_signals::detect(
+        from.as_deref(),
+        Some(&header_pairs(value)),
+    ));
     Some(Message {
         id: value.get("id").and_then(Value::as_str)?.to_owned(),
         subject: header(value, "Subject")
             .filter(|s| !s.trim().is_empty())
             .map(str::to_owned),
-        from: header(value, "From").and_then(single_address),
+        from,
         to: header(value, "To").map(header_addresses),
         body: body(value),
         attachments: {
@@ -203,6 +226,12 @@ fn message(value: &Value) -> Option<Message> {
             .and_then(Value::as_str)
             .and_then(|ms| ms.parse::<u64>().ok())
             .map(format_utc_millis),
+        signals: Some(signals),
+        thread_key: value
+            .get("threadId")
+            .and_then(Value::as_str)
+            .filter(|t| !t.is_empty())
+            .map(str::to_owned),
     })
 }
 
