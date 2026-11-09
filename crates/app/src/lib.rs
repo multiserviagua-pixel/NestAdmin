@@ -842,6 +842,19 @@ fn profile_sent(
     }
 }
 
+/// Asunto de la respuesta: «Re: …» sin repetir el prefijo si ya lo trae.
+fn reply_subject(subject: &str) -> String {
+    let trimmed = subject.trim_start();
+    if trimmed
+        .get(..3)
+        .is_some_and(|p| p.eq_ignore_ascii_case("re:"))
+    {
+        trimmed.to_owned()
+    } else {
+        format!("Re: {subject}")
+    }
+}
+
 fn task_error(code: &str, message: impl Into<String>, recoverable: bool) -> TaskError {
     TaskError {
         code: code.to_owned(),
@@ -2161,7 +2174,7 @@ impl App {
         }
         // Sin remitente no hay a quién responder: el borrador se muestra, pero no se puede enviar.
         let to: Vec<String> = message.from.iter().cloned().collect();
-        let subject = message.subject.as_ref().map(|s| format!("Re: {s}"));
+        let subject = message.subject.as_ref().map(|s| reply_subject(s));
         let automatic: Vec<&str> = to
             .iter()
             .flat_map(|address| nestadmin_core::mail_signals::address_signals(Some(address)))
@@ -2169,7 +2182,15 @@ impl App {
             .collect();
         result["draft"] = json!({ "to": to, "subject": subject, "body": body });
         // Los contactos del perfil que llevó la redacción no se marcan (D160, D163); el resto sí.
-        result["draft_flags"] = json!(draft_flags_allowing(body, mail.profile_text.as_deref()));
+        // El asunto lo escribe el remitente y sale con la respuesta: se examina con el cuerpo.
+        let outgoing = match &subject {
+            Some(subject) => format!("{subject}\n{body}"),
+            None => body.to_owned(),
+        };
+        result["draft_flags"] = json!(draft_flags_allowing(
+            &outgoing,
+            mail.profile_text.as_deref()
+        ));
         if let Some(fp) = &mail.profile_fp {
             // Solo la huella: el texto del perfil no se guarda en ningún resultado.
             result["profile_fp"] = json!(fp);

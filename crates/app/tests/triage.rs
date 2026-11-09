@@ -916,6 +916,14 @@ fn a_matching_active_rule_sends_only_clean_mail_in_the_real_flow() {
                 &[("List-Unsubscribe", "<mailto:baja@x.test>")],
             ),
             msg("R3", from, "Consulta [[CON-URL]]", "Hola", &[]),
+            // El asunto lo escribe el remitente y sale en «Re: …»: también se examina.
+            msg(
+                "R4",
+                from,
+                "Nuevo IBAN ES91 2100 0418 4502 0005 1332",
+                "Hola",
+                &[],
+            ),
         ],
         &[],
     );
@@ -942,6 +950,15 @@ fn a_matching_active_rule_sends_only_clean_mail_in_the_real_flow() {
     assert_eq!(r3.state, TaskState::AwaitingReview);
     assert_eq!(result_of(&r3)["draft_flags"], json!(["url"]));
     assert_eq!(result_of(&r3)["evaluation"]["code"], "draft_flagged");
+    let r4 = mail_task(&app, "R4");
+    assert_eq!(r4.state, TaskState::AwaitingReview, "{r4:?}");
+    // Los dígitos del IBAN también parecen un teléfono: basta con que conste el IBAN.
+    let flags = result_of(&r4)["draft_flags"].clone();
+    assert!(
+        flags.as_array().unwrap().contains(&json!("iban")),
+        "{flags}"
+    );
+    assert_eq!(result_of(&r4)["evaluation"]["code"], "draft_flagged");
     // El control de la regla: M-0001 y M-0004 (facturas del proveedor Alfa) no coinciden con ella.
     assert_eq!(sent(&app), 1);
 }

@@ -21,7 +21,7 @@ use crate::{error, MailResult};
 
 pub const DEFAULT_BASE: &str = "https://graph.microsoft.com/v1.0";
 const PREFER: &str = "IdType=\"ImmutableId\", outlook.body-content-type=\"text\"";
-const SELECT: &str = "id,subject,from,toRecipients,receivedDateTime,body,hasAttachments,\ninternetMessageHeaders,conversationId";
+const SELECT: &str = "id,subject,from,toRecipients,receivedDateTime,body,hasAttachments,internetMessageHeaders,conversationId";
 const FILE_ATTACHMENT: &str = "#microsoft.graph.fileAttachment";
 
 pub struct Graph {
