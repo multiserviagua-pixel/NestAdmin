@@ -2272,3 +2272,87 @@ pre.block {
   max-height: 260px;
   overflow: auto;
 }
+
+/* Aprender a responder (E7): tarjeta, vista previa, propuesta de tono y tanda de reglas. */
+.learn-card progress {
+  display: block;
+  width: 100%;
+  margin: var(--s2) 0;
+  accent-color: var(--brand);
+}
+
+pre.learn-preview:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+
+.learn-proposal,
+.learn-batch {
+  margin: var(--s3) 0;
+  padding: var(--s3);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius);
+  background: var(--surface);
+}
+
+.learn-diff {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: var(--s3);
+  margin: var(--s2) 0;
+}
+
+.learn-side {
+  padding: var(--s2) var(--s3);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+}
+
+.learn-side h5 {
+  margin: 0 0 var(--s1);
+  font-size: var(--fs-label);
+  color: var(--muted);
+}
+
+.learn-side p {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.learn-rules {
+  list-style: none;
+  margin: var(--s3) 0;
+  padding: 0;
+  display: grid;
+  gap: var(--s2);
+}
+
+.learn-rule {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--s3);
+  padding: var(--s2) var(--s3);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+}
+
+.learn-rule input[type="checkbox"] {
+  flex: none;
+  width: 18px;
+  min-height: 18px;
+  height: 18px;
+  margin-top: 2px;
+}
+
+.learn-rule label {
+  display: grid;
+  gap: var(--s1);
+  cursor: pointer;
+}
+
+.learn-rule.is-failed {
+  border-color: var(--error);
+  background: var(--error-soft);
+}

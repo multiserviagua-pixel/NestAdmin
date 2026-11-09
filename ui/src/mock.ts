@@ -16,6 +16,7 @@ import type {
   InitialReadOverview,
   LearnCounts,
   LearningOverview,
+  LearningState,
   LearningPreview,
   LearningStatus,
   InitialReadStatus,
@@ -2133,8 +2134,8 @@ function preferenceWarnings(scope: string, key: string) {
 
 // ---- Aprender a responder (E4, D167, D175): estado de ejemplo, sin interfaz hasta E7 ----
 
-const mockLearnScenario = new URLSearchParams(location.search).get("learn") ?? "";
-const mockLearnState = new Map<string, { done: boolean; consent: boolean }>();
+let mockLearnScenario = new URLSearchParams(location.search).get("learn") ?? "";
+const mockLearnState = new Map<string, { done: boolean; consent: boolean; local?: boolean }>();
 const mockLearnPayload = ["<<<CORREO>>>", "id: p1", "de: R1", "asunto: Consulta de ejemplo", "¿Pueden confirmar la cita del martes?", "--- respuesta ---", "Confirmado.", "<<<FIN>>>"].join("\n");
 const mockLearnCounts = (nothing: boolean): LearnCounts => ({
   scanned: 24, automatic: nothing ? 24 : 18, unchecked: 0, no_sender: 0, no_thread: 0,
@@ -2143,15 +2144,34 @@ const mockLearnCounts = (nothing: boolean): LearnCounts => ({
 });
 const mockLearnFp = "mock-aprender-1";
 
+/** Escenarios de la vista previa del navegador: `?learn=` con waiting, starting, collecting, awaiting (por defecto), local,
+ * nothing, nothing_nosent, held, failed, withdrawn, readerror, interrupted o done. */
 function learningStatus(account: string): LearningStatus {
-  const nothing = mockLearnScenario === "nothing";
   const st = mockLearnState.get(account);
-  const state = nothing ? "nothing" : st?.done ? "done" : "awaiting_consent";
+  const nothing = mockLearnScenario === "nothing" || mockLearnScenario === "nothing_nosent";
+  const phase: LearningState =
+    st?.done ? "done"
+    : mockLearnScenario === "waiting" || mockLearnScenario === "starting" ? "not_started"
+    : mockLearnScenario === "collecting" ? "collected"
+    : nothing ? "nothing"
+    : mockLearnScenario === "held" ? "held"
+    : mockLearnScenario === "interrupted" ? "sent"
+    : mockLearnScenario === "done" ? "done"
+    : "awaiting_consent";
+  const counts = mockLearnCounts(nothing);
+  if (mockLearnScenario === "nothing_nosent") Object.assign(counts, { automatic: 5, no_own_reply: 1, no_sent_folder: 18, scanned: 24 });
+  const local = mockLearnScenario === "local";
+  const dest = local ? { provider: "ollama", model: "gemma4:e4b", host: null } : mockDest;
+  const failure = mockLearnScenario === "failed" ? "unavailable,no_local_ai" : mockLearnScenario === "withdrawn" ? "consent_withdrawn" : null;
   return {
-    source: `account:${account}`, account, label: account, address: null, state, interrupted: false, read_done: true,
-    input_fp: nothing ? null : mockLearnFp, counts: mockLearnCounts(nothing), pairs: nothing ? 0 : 3,
-    destination: mockDest, held: null, ai: st?.done ? "external" : null, fallback: null, failure: null, first_error: null,
-    error: null, started_at: now(), finished_at: state === "done" || nothing ? now() : null,
+    source: `account:${account}`, account, label: account, address: null, state: phase, interrupted: mockLearnScenario === "interrupted",
+    read_done: mockLearnScenario !== "waiting", input_fp: phase === "awaiting_consent" || phase === "held" ? mockLearnFp : null,
+    counts: phase === "not_started" || phase === "collected" ? null : counts, pairs: nothing ? 0 : 3,
+    destination: dest,
+    held: phase === "held" ? { reason: "destination_changed", authorized: mockDest, now: { provider: "openai_compatible", model: "modelo-ejemplo", host: "api.ejemplo.test" } } : null,
+    ai: phase === "done" ? (st?.local ? "local" : "external") : null, fallback: null, failure, first_error: null,
+    error: mockLearnScenario === "readerror" ? { code: "unauthorized", message: "token rechazado" } : null,
+    started_at: now(), finished_at: phase === "done" || phase === "nothing" ? now() : null,
   };
 }
 
@@ -2202,6 +2222,11 @@ const handlers: Record<string, (a: any, options?: any) => unknown> = {
   learning_overview: (): LearningOverview => ({ accounts: readOverview().accounts.map((a) => learningStatus(a.target)) }),
   learning_preview: ({ account }): AccountLearningPreview => {
     const status = learningStatus(String(account));
+    // Un reintento o una vista nueva dejan el escenario como está: en el mock solo «retenido» y «fallo» pasan a esperar.
+    if (status.state === "held" || status.state === "not_started" || status.state === "collected") {
+      mockLearnScenario = "";
+      return { status: learningStatus(String(account)), preview: learningPreview(String(account)) };
+    }
     return { status, preview: status.state === "awaiting_consent" ? learningPreview(String(account)) : null };
   },
   grant_learning_consent: ({ account, expect }): ConsentView => {
@@ -2214,11 +2239,15 @@ const handlers: Record<string, (a: any, options?: any) => unknown> = {
     if (choice?.kind === "send" && !mockLearnState.get(key)?.consent) throw "Falta el consentimiento: acéptelo antes de enviar, o use la IA local.";
     const fp = choice?.kind === "send" ? choice.expect?.input_fp : choice?.input_fp;
     if (fp !== mockLearnFp) throw "Lo que se iba a enviar ha cambiado desde que vio la vista previa: revísela de nuevo antes de continuar.";
-    mockLearnState.set(key, { done: true, consent: mockLearnState.get(key)?.consent ?? false });
+    mockLearnState.set(key, { done: true, consent: mockLearnState.get(key)?.consent ?? false, local: choice?.kind === "use_local" });
     audit.push({ task_id: null, action: "first_learning", status: "done", authorization: null, detail: `Aprender a responder de «${key}» terminado: 3 pares. No se envió ningún correo ni se creó ninguna regla.` });
     return learningStatus(key);
   },
-  retry_learning: ({ account }): LearningStatus => learningStatus(String(account)),
+  retry_learning: ({ account }): LearningStatus => {
+    // Reintentar recoge de nuevo y deja una vista previa nueva: el fallo desaparece.
+    if (["failed", "withdrawn", "readerror", "interrupted"].includes(mockLearnScenario)) mockLearnScenario = "";
+    return learningStatus(String(account));
+  },
   initial_read_overview: (): InitialReadOverview => {
     if (mockScenario === "broken") throw "no se pudo abrir la base de datos de ejemplo";
     return readOverview();

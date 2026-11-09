@@ -42,7 +42,66 @@ import type {
   TaskTemplate,
   ThresholdSettings,
   SenderPreference,
+  LearnedAcceptOutcome,
+  LearnedBatch,
+  LearnedProfileProposal,
+  LearningPreview,
+  LearningStatus,
 } from "./types";
+import {
+  BATCH_TITLE,
+  DEACTIVATE_BUTTON,
+  GO_PROFILE,
+  GO_RULES,
+  INTERRUPTED_LINE,
+  LEARN_INTRO,
+  LEARN_TITLE,
+  LOCAL_BUTTON,
+  LOCAL_BUTTON_HELP,
+  NEVER_SENT_HEADING,
+  NONE_MARKED,
+  PREVIEW_BUTTON,
+  PREVIEW_HIDE_BUTTON,
+  PREVIEW_LABEL,
+  PREVIEW_NOTE,
+  PROPOSAL_AFTER,
+  PROPOSAL_APPLY,
+  PROPOSAL_BEFORE,
+  PROPOSAL_DISMISS,
+  PROPOSAL_EMPTY,
+  PROPOSAL_INTRO,
+  PROPOSAL_NOTE,
+  PROPOSAL_TITLE,
+  REPREVIEW_BUTTON,
+  RETRY_BUTTON,
+  SEE_FIRST,
+  WITHDRAWN_LINE,
+  acceptButton as learnedAcceptButton,
+  acceptedLine as learnedAcceptedLine,
+  batchEmpty as learnedBatchEmpty,
+  batchFailureLine,
+  batchIntro as learnedBatchIntro,
+  batchStaleLine,
+  consentLine as learnConsentLine,
+  countLines as learnCountLines,
+  deactivateConfirm,
+  deactivatedLine,
+  doneLine as learnDoneLine,
+  evidenceText,
+  failureLine as learnFailureLine,
+  heldLine as learnHeldLine,
+  isExternalDestination,
+  learnDestinationLine,
+  learnPhase,
+  learnPhaseLabel,
+  learnPhaseLine,
+  learnPhaseTone,
+  learnedChips,
+  nothingText,
+  proposalBlockedLine,
+  rodajeNotice,
+  sendButtonLabel,
+} from "./learn-text";
 import {
   READ_HELP,
   recentMailWarning,
@@ -393,6 +452,23 @@ const state = {
   readConfirm: null as null | { source: string; kind: "account" | "folder"; target: string },
   readBusy: {} as Record<string, boolean>,
   readFolder: null as FolderPreview | null,
+  // Aprender a responder (E7, D167-D175): estado de cada cuenta, la vista previa vista, lo que está en curso
+  // y la tanda de reglas aprendidas con sus casillas (por defecto marcadas: solo se guardan las desmarcadas).
+  learning: [] as LearningStatus[],
+  learningError: null as string | null,
+  learnPreview: {} as Record<string, LearningPreview>,
+  learnShow: {} as Record<string, boolean>,
+  learnBusy: {} as Record<string, "collect" | "run" | "retry">,
+  learnedBatch: null as LearnedBatch | null,
+  learnedBatchError: null as string | null,
+  learnedOff: {} as Record<string, boolean>,
+  learnedBusy: false,
+  learnedMessage: null as null | { kind: "ok" | "warn" | "error"; text: string },
+  learnedFailedId: null as string | null,
+  learnedDeactivating: false,
+  learnedProposals: {} as Record<string, LearnedProfileProposal>,
+  learnedProposalBusy: {} as Record<string, boolean>,
+  learnedProposalError: {} as Record<string, string>,
   // Sugerencias de facturas solo vistas: formulario del límite (obligatorio, lo escribe la persona) y
   // lista de las facturas leídas de la serie.
   limitForm: {} as Record<string, { open: boolean; text: string }>,
@@ -613,9 +689,11 @@ async function refresh(background = false) {
     let refineError: string | null = null;
     let readError: string | null = null;
     let profileError: string | null = null;
+    let learningError: string | null = null;
+    let learnedBatchError: string | null = null;
     // Solo con la vista Tareas abierta: los demás refrescos no piden las ejecuciones (D151).
     const pipelineLoad = state.view === "tasks" ? loadPipeline() : null;
-    const [tasks, preferences, rules, findings, suggestions, refinement, refinePreview, audit, settings, mail, read, profile, profilePreview] = await Promise.all([
+    const [tasks, preferences, rules, findings, suggestions, refinement, refinePreview, audit, settings, mail, read, profile, profilePreview, learningOverview, learnedBatch] = await Promise.all([
       api.tasks(),
       api.senderPreferences(),
       api.ruleViews(),
@@ -650,9 +728,18 @@ async function refresh(background = false) {
         profileError = String(error);
         return null;
       }),
+      api.learningOverview().catch((error) => {
+        learningError = String(error);
+        return null;
+      }),
+      api.learnedSuggestionsBatch().catch((error) => {
+        learnedBatchError = String(error);
+        return null;
+      }),
     ]);
     await pipelineLoad;
-    Object.assign(state, { tasks, preferences, rules, findings, findingsError, suggestions, suggestionsError, refinement, refinePreview, refineError, audit, settings, mail, read, readError, profile, profilePreview, profileError });
+    Object.assign(state, { tasks, preferences, rules, findings, findingsError, suggestions, suggestionsError, refinement, refinePreview, refineError, audit, settings, mail, read, readError, profile, profilePreview, profileError, learningError, learnedBatch, learnedBatchError });
+    await syncLearning(learningOverview?.accounts ?? null);
     // La oferta de la IA local necesita saber si está preparada: se comprueba al aparecer la espera.
     if (isProviderWait(settings?.ai_wait)) {
       if (!checkedForWait) {
@@ -2968,6 +3055,11 @@ function moreMenu(r: RuleView, items: Array<[string, string, () => void]>): HTML
 
 /** Tarjeta de una regla: cabecera con nombre y estado, cuerpo con lo que hace y su riesgo, y pie
  * con las acciones siempre a la vista. Lo técnico va en «Detalles». */
+function learnedRuleChips(r: RuleView): HTMLElement[] {
+  const c = learnedChips(r.origin);
+  return [c.learned ? statusChip("Aprendida", "info") : null, c.rodaje ? statusChip(c.rodaje, "warn") : null].filter((x): x is HTMLElement => x !== null);
+}
+
 function ruleCard(r: RuleView): HTMLElement {
   const problem = ruleProblem(r);
   const known = isKnownAction(r.action_kind);
@@ -3019,6 +3111,7 @@ function ruleCard(r: RuleView): HTMLElement {
         { class: "status-cell" },
         statusChip(status.primary.text, status.primary.tone),
         status.extra ? statusChip(status.extra.text, status.extra.tone) : null,
+        ...learnedRuleChips(r),
         r.any_sender_ack_at && !archived ? statusChip("Contesta a cualquier remitente", "warn") : null,
       ),
     ),
@@ -3872,6 +3965,7 @@ function suggestedPanel(): HTMLElement {
     "div",
     {},
     h("p", { class: "intro" }, SUGGESTION_INTRO),
+    learnedBatchBox(),
     refinementBox(s),
     ...body,
     hidden ? h("p", { class: "meta" }, hidden) : null,
@@ -4009,6 +4103,7 @@ function rulesView() {
                 "Reglas guardadas",
                 h("button", { class: "primary", "data-focus-key": "rules:new", onclick: () => openRuleEditor({ mode: "new" }, undefined) }, "Nueva regla"),
               ),
+          learnedRulesBox(),
           findingsBlock(),
           rulesList(),
         )
@@ -4566,6 +4661,415 @@ async function readStatusNow(source: string): Promise<InitialReadStatus> {
   return found.status;
 }
 
+// ---- Aprender a responder (E7, D167-D175) ----
+
+/** Pone al día el estado de aprender: descarta una vista previa que ya no es la vigente y lee las propuestas de perfil. */
+async function syncLearning(accounts: LearningStatus[] | null) {
+  state.learning = accounts ?? [];
+  for (const a of state.learning) {
+    const seen = state.learnPreview[a.account];
+    if (seen && (a.state !== "awaiting_consent" || a.input_fp !== seen.input_fp)) {
+      delete state.learnPreview[a.account];
+      delete state.learnShow[a.account];
+    }
+  }
+  const next: Record<string, LearnedProfileProposal> = {};
+  await Promise.all(
+    state.learning
+      .filter((a) => a.state === "done")
+      .map(async (a) => {
+        try {
+          const p = await api.learnedProfileProposal(a.account);
+          if (p) next[a.account] = p;
+        } catch (error) {
+          state.learnedProposalError[a.account] = String(error);
+        }
+      }),
+  );
+  state.learnedProposals = next;
+}
+
+/** Lanza una acción de aprender una sola vez por cuenta: un doble clic no repite la llamada. */
+function runLearn(account: string, kind: "collect" | "run" | "retry", work: () => Promise<void>) {
+  if (state.learnBusy[account]) return;
+  state.learnBusy[account] = kind;
+  render();
+  void work()
+    .then(
+      () => undefined,
+      (error) => {
+        state.notice = { kind: "error", text: String(error) };
+      },
+    )
+    .finally(() => {
+      delete state.learnBusy[account];
+      void refresh();
+    });
+}
+
+/** Resultado de una ejecución, en una línea para el aviso. */
+function learnResultNotice(status: LearningStatus) {
+  const phase = learnPhase(status);
+  if (phase === "done") state.notice = { kind: "ok", text: "Aprender a responder: terminado" };
+  else if (phase === "nothing") state.notice = { kind: "ok", text: "Aprender a responder: nada que aprender" };
+  else if (phase === "failed" || phase === "consent_withdrawn") state.notice = { kind: "warn", text: learnFailureLine(status) };
+}
+
+/** Recoge de nuevo (el backend lee el buzón por pasos, soltando la aplicación entre uno y otro) y guarda la vista previa vigente. */
+function collectPreview(account: string) {
+  runLearn(account, "collect", async () => {
+    const view = await api.learningPreview(account);
+    if (view.preview) {
+      state.learnPreview[account] = view.preview;
+      state.learnShow[account] = true;
+    } else {
+      delete state.learnPreview[account];
+      delete state.learnShow[account];
+      learnResultNotice(view.status);
+    }
+  });
+}
+
+function learnCountsList(a: LearningStatus): HTMLElement | null {
+  return a.counts ? h("ul", { class: "sim-list", "aria-label": "Recuentos de la recogida" }, ...learnCountLines(a.counts).map((line) => h("li", {}, line))) : null;
+}
+
+/** La tarjeta «Aprender a responder» de una cuenta, con un estado por fase. */
+function learnCard(a: LearningStatus): HTMLElement {
+  const key = a.account;
+  const busy = state.learnBusy[key] ?? null;
+  const phase = learnPhase(a, busy);
+  const body: Child[] = [];
+  const line = learnPhaseLine(phase);
+  if (line) body.push(h("p", { class: "meta", role: "status", "aria-live": "polite" }, line));
+  if (phase === "collecting" || phase === "starting" || phase === "running") body.push(h("progress", { "aria-label": learnPhaseLabel(phase) }));
+  if (phase === "collecting" && !busy && a.state === "collected")
+    body.push(h("div", { class: "buttons" }, h("button", { type: "button", "data-focus-key": `learn:${key}:continue`, onclick: () => collectPreview(key) }, "Continuar ahora")));
+
+  if (phase === "awaiting_consent") {
+    const preview = state.learnPreview[key] ?? null;
+    const shown = preview !== null && Boolean(state.learnShow[key]);
+    const external = isExternalDestination(a.destination);
+    body.push(learnCountsList(a), h("p", { class: "meta" }, learnDestinationLine(a.destination)));
+    if (external) {
+      body.push(
+        h(
+          "div",
+          { class: "buttons" },
+          h(
+            "button",
+            {
+              type: "button",
+              "data-focus-key": `learn:${key}:preview`,
+              "aria-expanded": shown ? "true" : "false",
+              onclick: () => {
+                if (preview) {
+                  state.learnShow[key] = !state.learnShow[key];
+                  render();
+                } else collectPreview(key);
+              },
+            },
+            shown ? PREVIEW_HIDE_BUTTON : PREVIEW_BUTTON,
+          ),
+        ),
+      );
+    }
+    if (external && shown && preview) {
+      body.push(
+        h(
+          "div",
+          { class: "sub-block" },
+          h("pre", { class: "mono block learn-preview", tabindex: "0", role: "region", "aria-label": PREVIEW_LABEL }, preview.payload),
+          h("p", { class: "meta" }, PREVIEW_NOTE),
+          h("h4", {}, NEVER_SENT_HEADING),
+          h("ul", { class: "sim-list" }, ...preview.never_sent.map((item) => h("li", {}, item))),
+          preview.blocked ? h("p", { class: "meta warn", role: "alert" }, `El envío está bloqueado (${preview.blocked}). Puede usar la IA local.`) : h("p", { class: "meta" }, learnConsentLine(a.destination!)),
+        ),
+      );
+    } else if (external) {
+      body.push(h("p", { class: "meta" }, SEE_FIRST));
+    }
+    const actions: Child[] = [];
+    if (external && a.destination) {
+      actions.push(
+        h(
+          "button",
+          {
+            type: "button",
+            class: "primary",
+            "data-focus-key": `learn:${key}:send`,
+            disabled: !shown || !preview || Boolean(preview.blocked),
+            onclick: () => {
+              const seen = state.learnPreview[key];
+              if (!seen) return;
+              runLearn(key, "run", async () => {
+                // Consentir y enviar lo que vio, ligado a proveedor, modelo, servidor y huella.
+                if (seen.consent.state !== "granted") await api.grantLearningConsent(key, seen);
+                learnResultNotice(await api.runLearning(key, { kind: "send", expect: { provider: seen.provider.provider, model: seen.provider.model, host: seen.host ?? "", input_fp: seen.input_fp } }));
+              });
+            },
+          },
+          sendButtonLabel(a.destination.provider),
+        ),
+      );
+    }
+    actions.push(
+      h(
+        "button",
+        {
+          type: "button",
+          "data-focus-key": `learn:${key}:local`,
+          title: LOCAL_BUTTON_HELP,
+          disabled: !a.input_fp,
+          onclick: () => {
+            const fp = a.input_fp;
+            if (fp) runLearn(key, "run", async () => learnResultNotice(await api.runLearning(key, { kind: "use_local", input_fp: fp })));
+          },
+        },
+        external ? LOCAL_BUTTON : "Aprender con la IA local",
+      ),
+    );
+    body.push(h("div", { class: "buttons" }, ...actions), external ? h("p", { class: "meta" }, LOCAL_BUTTON_HELP) : null);
+  }
+
+  if (phase === "held") {
+    body.push(
+      h("p", { class: "meta warn", role: "status" }, learnHeldLine(a)),
+      h("div", { class: "buttons" }, h("button", { type: "button", class: "primary", "data-focus-key": `learn:${key}:repreview`, onclick: () => collectPreview(key) }, REPREVIEW_BUTTON)),
+    );
+  }
+
+  if (phase === "failed" || phase === "consent_withdrawn" || phase === "interrupted") {
+    const text = phase === "consent_withdrawn" ? WITHDRAWN_LINE : phase === "interrupted" ? INTERRUPTED_LINE : learnFailureLine(a);
+    body.push(
+      h("p", { class: "meta warn", role: "alert" }, text),
+      h("div", { class: "buttons" }, h("button", { type: "button", class: "primary", "data-focus-key": `learn:${key}:retry`, onclick: () => runLearn(key, "retry", async () => learnResultNotice(await api.retryLearning(key))) }, RETRY_BUTTON)),
+    );
+  }
+
+  if (phase === "done") {
+    const hasProposal = Boolean(state.learnedProposals[key]);
+    const rules = state.learnedBatch?.items.length ?? 0;
+    body.push(
+      h("p", {}, learnDoneLine(a)),
+      learnCountsList(a),
+      h(
+        "div",
+        { class: "buttons" },
+        hasProposal ? h("button", { type: "button", "data-focus-key": `learn:${key}:go-profile`, onclick: () => ((state.view = "settings"), render()) }, GO_PROFILE) : null,
+        rules
+          ? h(
+              "button",
+              {
+                type: "button",
+                "data-focus-key": `learn:${key}:go-rules`,
+                onclick: () => {
+                  state.view = "rules";
+                  state.rulesTab = "suggested";
+                  render();
+                },
+              },
+              GO_RULES,
+            )
+          : null,
+      ),
+      hasProposal ? null : h("p", { class: "meta" }, "No hay una propuesta de tono pendiente."),
+      rules ? null : h("p", { class: "meta" }, "No hay reglas propuestas."),
+    );
+  }
+
+  if (phase === "nothing") {
+    const n = nothingText(a.counts);
+    body.push(h("p", {}, h("strong", {}, n.title)), ...n.lines.map((l, i) => h("p", { class: i ? "meta" : "" }, l)));
+  }
+
+  return h(
+    "li",
+    { class: "account read-card learn-card", "aria-label": `${LEARN_TITLE}: ${a.label}` },
+    h("div", { class: "account-main" }, h("div", { class: "account-name" }, h("strong", {}, `${LEARN_TITLE}: ${a.label}`), statusChip(learnPhaseLabel(phase), learnPhaseTone(phase))), a.address ? h("div", { class: "meta" }, a.address) : null, ...body),
+  );
+}
+
+/** Bloque de aprender de la sección de lectura; sin cuentas con datos, no se pinta. */
+function learnSection(): HTMLElement | null {
+  if (state.learningError)
+    return h("div", {}, sectionHeader(LEARN_TITLE), h("p", { class: "meta warn", role: "alert" }, `No se pudo leer el estado de aprender a responder: ${state.learningError}`));
+  if (!state.learning.length) return null;
+  return h("div", { "aria-label": LEARN_TITLE }, sectionHeader(LEARN_TITLE), h("p", { class: "intro" }, LEARN_INTRO), h("ul", { class: "accounts" }, ...state.learning.map(learnCard)));
+}
+
+// -- Propuesta de perfil (D171) --
+
+function runProposal(account: string, work: () => Promise<void>) {
+  if (state.learnedProposalBusy[account]) return;
+  state.learnedProposalBusy[account] = true;
+  delete state.learnedProposalError[account];
+  render();
+  void work()
+    .then(
+      () => undefined,
+      (error) => {
+        state.learnedProposalError[account] = String(error);
+        state.notice = { kind: "error", text: String(error) };
+      },
+    )
+    .finally(() => {
+      delete state.learnedProposalBusy[account];
+      void refresh();
+    });
+}
+
+/** Antes y después del tono propuesto, con «Aplicar al perfil» y «Descartar». El motivo de un rechazo se muestra. */
+function learnedProposalBox(p: LearnedProfileProposal): HTMLElement {
+  const busy = Boolean(state.learnedProposalBusy[p.account]);
+  const error = state.learnedProposalError[p.account];
+  const side = (title: string, text: string) => h("div", { class: "learn-side" }, h("h5", {}, title), h("p", {}, text.trim() ? text : PROPOSAL_EMPTY));
+  return h(
+    "div",
+    { class: "confirm learn-proposal", role: "group", "aria-label": PROPOSAL_TITLE },
+    h("p", {}, h("strong", {}, PROPOSAL_TITLE)),
+    h("p", { class: "meta" }, PROPOSAL_INTRO),
+    h("div", { class: "learn-diff" }, side(PROPOSAL_BEFORE, p.before.tone), side(PROPOSAL_AFTER, p.after.tone)),
+    p.blocking.length ? h("p", { class: "meta warn", role: "alert" }, proposalBlockedLine(p.blocking)) : null,
+    error ? h("p", { class: "meta warn", role: "alert" }, error) : null,
+    h("p", { class: "meta" }, PROPOSAL_NOTE),
+    h(
+      "div",
+      { class: "buttons" },
+      h(
+        "button",
+        {
+          type: "button",
+          class: "primary",
+          "data-focus-key": `learn:${p.account}:proposal-apply`,
+          disabled: busy || p.blocking.length > 0,
+          onclick: () =>
+            runProposal(p.account, async () => {
+              const saved = await api.acceptLearnedProfile(p.account, p.fp);
+              state.profileDraft = null;
+              state.profileWarnings = saved.warnings;
+              state.notice = { kind: "ok", text: savedNotice(saved) };
+            }),
+        },
+        PROPOSAL_APPLY,
+      ),
+      h("button", { type: "button", "data-focus-key": `learn:${p.account}:proposal-dismiss`, disabled: busy, onclick: () => runProposal(p.account, () => api.dismissLearnedProfile(p.account)) }, PROPOSAL_DISMISS),
+    ),
+  );
+}
+
+// -- Reglas aprendidas (D172-D174) --
+
+/** La tanda de reglas aprendidas: una casilla por regla (marcadas) y un único botón para aceptar y activar. */
+function learnedBatchBox(): HTMLElement | null {
+  if (state.learnedBatchError) return h("p", { class: "meta warn", role: "alert" }, `No se pudieron leer las reglas aprendidas: ${state.learnedBatchError}`);
+  const b = state.learnedBatch;
+  if (!b) return null;
+  if (!b.items.length) return state.learning.some((a) => a.state === "done") ? h("p", { class: "meta" }, learnedBatchEmpty()) : null;
+  const marked = () => b.items.filter((i) => !state.learnedOff[i.id]).length;
+  const accept = h(
+    "button",
+    { type: "button", class: "primary", "data-focus-key": "learn:batch-accept", disabled: state.learnedBusy || marked() === 0, onclick: () => void acceptLearned(b) },
+    learnedAcceptButton(marked()),
+  ) as HTMLButtonElement;
+  const none = h("p", { class: "meta", role: "status", "aria-live": "polite" }, marked() === 0 ? NONE_MARKED : "");
+  const rows = b.items.map((item) => {
+    const id = `learned-${item.id}`;
+    const failed = state.learnedFailedId === item.id;
+    const box = h("input", {
+      type: "checkbox",
+      id,
+      "data-focus-key": `learn:batch:${item.id}`,
+      checked: !state.learnedOff[item.id],
+      onchange: (e: Event) => {
+        state.learnedOff[item.id] = !(e.target as HTMLInputElement).checked;
+        if (state.learnedFailedId === item.id) state.learnedFailedId = null;
+        accept.textContent = learnedAcceptButton(marked());
+        accept.disabled = state.learnedBusy || marked() === 0;
+        none.textContent = marked() === 0 ? NONE_MARKED : "";
+      },
+    });
+    const sentence = ruleSentence({ id: "", version: 0, action_kind: "send_draft", conditions: item.conditions, active: false, any_sender_ack_at: null });
+    return h(
+      "li",
+      { class: `learn-rule${failed ? " is-failed" : ""}` },
+      box,
+      h("label", { for: id }, h("span", { class: "rule-sentence" }, sentence), h("span", { class: "meta" }, evidenceText(item, categoryLabel))),
+    );
+  });
+  const m = state.learnedMessage;
+  return h(
+    "section",
+    { class: "learn-batch", "aria-label": BATCH_TITLE },
+    h("h3", {}, BATCH_TITLE),
+    h("p", { class: "intro" }, learnedBatchIntro(b.items.length)),
+    h("ul", { class: "learn-rules" }, ...rows),
+    h("div", { class: "notice info", role: "note" }, h("span", {}, rodajeNotice(b.rodaje_sends))),
+    m ? h("div", { class: `notice ${m.kind}`, role: m.kind === "error" ? "alert" : "status" }, h("span", {}, m.text)) : null,
+    h("div", { class: "buttons" }, accept),
+    none,
+  );
+}
+
+async function acceptLearned(batch: LearnedBatch) {
+  const ids = batch.items.filter((i) => !state.learnedOff[i.id]).map((i) => i.id);
+  if (!ids.length || state.learnedBusy) return;
+  state.learnedBusy = true;
+  state.learnedMessage = null;
+  state.learnedFailedId = null;
+  render();
+  try {
+    const out: LearnedAcceptOutcome = await api.acceptAndActivateLearned(batch.batch_fp, ids);
+    if (out.failed) {
+      state.learnedFailedId = out.failed.id;
+      state.learnedMessage = { kind: "error", text: batchFailureLine(out.failed) };
+    } else {
+      state.learnedMessage = null;
+      state.notice = { kind: "ok", text: learnedAcceptedLine(out, batch.rodaje_sends) };
+    }
+  } catch (error) {
+    // Huella caducada o sugerencia que ya no está vigente: se recarga la tanda y se avisa.
+    state.learnedMessage = { kind: "warn", text: batchStaleLine(String(error)) };
+  } finally {
+    state.learnedBusy = false;
+    await refresh();
+  }
+}
+
+/** «Desactivar las aprendidas» con su confirmación; solo aparece si hay reglas aprendidas activas. */
+function learnedRulesBox(): HTMLElement | null {
+  const n = state.rules.filter((r) => r.origin?.evidence_origin === "learned" && r.active && !r.archived_at).length;
+  if (!n) return null;
+  if (!state.learnedDeactivating)
+    return h("div", { class: "buttons" }, h("button", { type: "button", "data-focus-key": "learn:deactivate", onclick: () => ((state.learnedDeactivating = true), render()) }, DEACTIVATE_BUTTON));
+  return h(
+    "div",
+    { class: "confirm", role: "group", "aria-label": DEACTIVATE_BUTTON },
+    h("p", {}, deactivateConfirm(n)),
+    h(
+      "div",
+      { class: "buttons" },
+      h(
+        "button",
+        {
+          type: "button",
+          class: "primary",
+          "data-focus-key": "learn:deactivate-confirm",
+          onclick: () => {
+            state.learnedDeactivating = false;
+            void act(async () => {
+              const out = await api.deactivateLearnedRules();
+              state.notice = { kind: "ok", text: deactivatedLine(out.deactivated.length) };
+            });
+          },
+        },
+        "Desactivar",
+      ),
+      h("button", { type: "button", "data-focus-key": "learn:deactivate-cancel", onclick: () => ((state.learnedDeactivating = false), render()) }, "Cancelar"),
+    ),
+  );
+}
+
 async function chooseReadFolder() {
   try {
     const path = await api.pickReadFolder();
@@ -4598,6 +5102,7 @@ function readSection(): HTMLElement {
     h("p", { class: "meta warn" }, recentMailWarning(o)),
     h("details", { class: "sim-examples" }, h("summary", { "data-focus-key": "read:detail" }, "Ver el detalle de lo que sale y lo que no"), ...connectDetails(o).map((line) => h("p", { class: "meta" }, line)), h("p", { class: "meta" }, READ_HELP.sends)),
     o.accounts.length ? h("ul", { class: "accounts" }, ...accounts) : h("p", { class: "meta" }, "No hay cuentas conectadas: no hay nada que leer."),
+    learnSection(),
     removedCards.length ? h("div", {}, sectionHeader("Cuentas desconectadas"), h("p", { class: "meta" }, "Su lectura se canceló al desconectarlas; lo ya leído sigue constando."), h("ul", { class: "accounts" }, ...removedCards)) : null,
     o.mode === "on_demand"
       ? h(
@@ -5324,6 +5829,10 @@ function profileSection() {
     input.value = draft[f.key];
     return h("div", { class: "field" }, h("label", { for: `profile-${f.key}` }, f.label), input);
   });
+  // Propuestas de tono aprendidas (D171): van justo debajo del campo Tono, con su antes y después.
+  const proposals = Object.values(state.learnedProposals).map(learnedProposalBox);
+  const toneAt = PROFILE_FIELDS.findIndex((f) => f.key === "tone");
+  const fieldsShown: HTMLElement[] = toneAt < 0 ? [...fields, ...proposals] : [...fields.slice(0, toneAt + 1), ...proposals, ...fields.slice(toneAt + 1)];
   refreshControls();
   const preview = state.profilePreview;
   const status = preview ? profileStatus(preview) : null;
@@ -5349,7 +5858,7 @@ function profileSection() {
   const body: Child[] = [
     h("p", { class: "intro" }, PROFILE_INTRO),
     h("div", { class: "notice warn", role: "note" }, h("span", {}, PROFILE_NOTICE)),
-    ...fields,
+    ...fieldsShown,
     h("div", { class: "buttons" }, ...buttons, counter),
     ...warningTexts(state.profileWarnings).map((text) => h("div", { class: "notice warn", role: "status" }, h("span", {}, text))),
   ];
