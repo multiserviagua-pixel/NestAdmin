@@ -12,7 +12,12 @@ import type {
   MailOrigin,
   FetchReport,
   FolderPreview,
+  AccountLearningPreview,
   InitialReadOverview,
+  LearnCounts,
+  LearningOverview,
+  LearningPreview,
+  LearningStatus,
   InitialReadStatus,
   ReadExpectation,
   MailAccount,
@@ -2078,6 +2083,41 @@ function preferenceWarnings(scope: string, key: string) {
     .map((r) => ({ rule_id: r.id, rule_name: metaOf(r.id).name ?? r.id }));
 }
 
+// ---- Aprender a responder (E4, D167, D175): estado de ejemplo, sin interfaz hasta E7 ----
+
+const mockLearnScenario = new URLSearchParams(location.search).get("learn") ?? "";
+const mockLearnState = new Map<string, { done: boolean; consent: boolean }>();
+const mockLearnPayload = ["<<<CORREO>>>", "id: p1", "de: R1", "asunto: Consulta de ejemplo", "¿Pueden confirmar la cita del martes?", "--- respuesta ---", "Confirmado.", "<<<FIN>>>"].join("\n");
+const mockLearnCounts = (nothing: boolean): LearnCounts => ({
+  scanned: 24, automatic: nothing ? 24 : 18, unchecked: 0, no_sender: 0, no_thread: 0,
+  candidates: nothing ? 0 : 6, no_sent_folder: 0, no_own_reply: nothing ? 0 : 3, quote_dropped: 0, empty_text: 0,
+  unmasked: 0, fetch_errors: 0, over_limit: 0, pairs: nothing ? 0 : 3,
+});
+const mockLearnFp = "mock-aprender-1";
+
+function learningStatus(account: string): LearningStatus {
+  const nothing = mockLearnScenario === "nothing";
+  const st = mockLearnState.get(account);
+  const state = nothing ? "nothing" : st?.done ? "done" : "awaiting_consent";
+  return {
+    source: `account:${account}`, account, label: account, address: null, state, interrupted: false, read_done: true,
+    input_fp: nothing ? null : mockLearnFp, counts: mockLearnCounts(nothing), pairs: nothing ? 0 : 3,
+    destination: mockDest, held: null, ai: st?.done ? "external" : null, fallback: null, failure: null, first_error: null,
+    error: null, started_at: now(), finished_at: state === "done" || nothing ? now() : null,
+  };
+}
+
+function learningPreview(account: string): LearningPreview {
+  const st = mockLearnState.get(account);
+  return {
+    provider: { provider: mockDest.provider as LearningPreview["provider"]["provider"], model: mockDest.model },
+    host: mockDest.host, input_fp: mockLearnFp, external: true, local_fallback: true, blocked: null,
+    consent: { required: true, state: st?.consent ? "granted" : "missing", provider: mockDest.provider, model: mockDest.model, host: mockDest.host, at: st?.consent ? now() : null },
+    payload: mockLearnPayload, pairs: 3, counts: mockLearnCounts(false),
+    never_sent: ["direcciones de correo (se sustituyen por alias R1, R2…)", "IBAN, tarjetas, claves y teléfonos (enmascarados)", "la firma de las respuestas", "el texto citado de los hilos", "adjuntos y documentos", "credenciales y tokens"],
+  };
+}
+
 const handlers: Record<string, (a: any, options?: any) => unknown> = {
   // Preferencias por remitente (D161): normaliza, rechaza dominios públicos y deja el evento del historial.
   sender_preferences: () => [...mockPrefs].sort((a, b) => (a.scope + a.key < b.scope + b.key ? -1 : 1)),
@@ -2111,6 +2151,26 @@ const handlers: Record<string, (a: any, options?: any) => unknown> = {
     audit.push({ task_id: null, action: "sender_preference", status: "removed", authorization: null, detail: JSON.stringify({ scope, key: normalized, previous: removed!.route }) });
     return true;
   },
+  learning_overview: (): LearningOverview => ({ accounts: readOverview().accounts.map((a) => learningStatus(a.target)) }),
+  learning_preview: ({ account }): AccountLearningPreview => {
+    const status = learningStatus(String(account));
+    return { status, preview: status.state === "awaiting_consent" ? learningPreview(String(account)) : null };
+  },
+  grant_learning_consent: ({ account, expect }): ConsentView => {
+    if (expect?.input_fp !== mockLearnFp || expect?.provider !== mockDest.provider) throw "Lo que se iba a enviar ha cambiado desde que vio la vista previa: revísela de nuevo antes de enviar.";
+    mockLearnState.set(String(account), { done: false, consent: true });
+    return learningPreview(String(account)).consent;
+  },
+  run_learning: ({ account, choice }): LearningStatus => {
+    const key = String(account);
+    if (choice?.kind === "send" && !mockLearnState.get(key)?.consent) throw "Falta el consentimiento: acéptelo antes de enviar, o use la IA local.";
+    const fp = choice?.kind === "send" ? choice.expect?.input_fp : choice?.input_fp;
+    if (fp !== mockLearnFp) throw "Lo que se iba a enviar ha cambiado desde que vio la vista previa: revísela de nuevo antes de continuar.";
+    mockLearnState.set(key, { done: true, consent: mockLearnState.get(key)?.consent ?? false });
+    audit.push({ task_id: null, action: "first_learning", status: "done", authorization: null, detail: `Aprender a responder de «${key}» terminado: 3 pares. No se envió ningún correo ni se creó ninguna regla.` });
+    return learningStatus(key);
+  },
+  retry_learning: ({ account }): LearningStatus => learningStatus(String(account)),
   initial_read_overview: (): InitialReadOverview => {
     if (mockScenario === "broken") throw "no se pudo abrir la base de datos de ejemplo";
     return readOverview();

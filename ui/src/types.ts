@@ -864,3 +864,96 @@ export interface ProfilePreview {
   warnings: ProfileFinding[];
   notice: string;
 }
+
+// ---- Aprender a responder (E4, D167, D175) ----
+
+/** Recuentos de la recogida: solo números, sin contenido. */
+export interface LearnCounts {
+  scanned: number;
+  automatic: number;
+  unchecked: number;
+  no_sender: number;
+  no_thread: number;
+  candidates: number;
+  /** Candidatos que no se buscaron porque el conector no lee Enviados. */
+  no_sent_folder: number;
+  no_own_reply: number;
+  quote_dropped: number;
+  empty_text: number;
+  unmasked: number;
+  fetch_errors: number;
+  over_limit: number;
+  pairs: number;
+}
+
+export interface LearnDestination {
+  provider: string;
+  model: string;
+  /** `null` con la IA local. */
+  host: string | null;
+}
+
+/** Fase de un buzón; `held` se deduce al cambiar el destino (como en la primera lectura). */
+export type LearningState = "not_started" | "collected" | "awaiting_consent" | "sent" | "held" | "done" | "nothing";
+
+export interface LearningStatus {
+  source: string;
+  /** Identificador de la cuenta. */
+  account: string;
+  label: string;
+  address: string | null;
+  state: LearningState;
+  /** `sent` cortada: no se repite sola; la persona decide con «reintentar». */
+  interrupted: boolean;
+  /** La primera lectura del buzón ya terminó. */
+  read_done: boolean;
+  input_fp: string | null;
+  counts: LearnCounts | null;
+  pairs: number;
+  destination: LearnDestination | null;
+  held: { reason: "destination_changed"; authorized: LearnDestination | null; now: LearnDestination } | null;
+  /** Quién respondió y, si fue la IA local de respaldo, por qué código. */
+  ai: "external" | "local" | null;
+  fallback: string | null;
+  failure: string | null;
+  first_error: string | null;
+  error: { code: string; message: string } | null;
+  started_at: number | null;
+  finished_at: number | null;
+}
+
+export interface LearningOverview {
+  accounts: LearningStatus[];
+}
+
+/** Lo que saldría hacia la IA: el texto literal, el destino y la huella. */
+export interface LearningPreview {
+  provider: ProviderInfo;
+  host: string | null;
+  input_fp: string;
+  external: boolean;
+  local_fallback: boolean;
+  blocked: string | null;
+  consent: ConsentView;
+  /** Texto literal que viajaría (con alias y datos enmascarados). */
+  payload: string;
+  pairs: number;
+  counts: LearnCounts;
+  never_sent: string[];
+}
+
+export interface AccountLearningPreview {
+  status: LearningStatus;
+  /** `null` si ya terminó o no hay nada que enviar. */
+  preview: LearningPreview | null;
+}
+
+/** Lo que la persona vio antes de consentir o enviar: si algo cambia, el backend rechaza. */
+export interface LearnExpectation {
+  provider: string;
+  model: string;
+  host: string;
+  input_fp: string;
+}
+
+export type LearnChoice = { kind: "send"; expect: LearnExpectation } | { kind: "use_local"; input_fp: string };

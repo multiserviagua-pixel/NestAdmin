@@ -6,9 +6,13 @@ import type {
   MailAccount,
   AuditEntry,
   FetchReport,
+  AccountLearningPreview,
   FolderPreview,
   InitialReadOverview,
   InitialReadStatus,
+  LearnChoice,
+  LearningOverview,
+  LearningStatus,
   MailProviderKind,
   MailView,
   LaunchView,
@@ -232,6 +236,17 @@ export const api = {
   continueInitialRead: (source: string, expect: ReadExpectation) => invoke<InitialReadStatus>("continue_initial_read", { source, expect }),
   /** Reintenta las tareas fallidas de una lectura (la misma tarea vuelve a la cola). */
   retryInitialRead: (source: string) => invoke<number>("retry_initial_read", { source }),
+  /** Aprender a responder (E4, D167): estado de cada buzón. Solo lectura: no toca el buzón ni la IA. */
+  learningOverview: () => invoke<LearningOverview>("learning_overview"),
+  /** Vuelve a recoger y devuelve la vista previa vigente (texto literal, destino, huella). No llama a la IA. */
+  learningPreview: (account: string) => invoke<AccountLearningPreview>("learning_preview", { account }),
+  /** Consiente enviar lo que la persona vio, a ese proveedor, modelo y servidor. Se rechaza si algo cambió. */
+  grantLearningConsent: (account: string, seen: AccountLearningPreview["preview"] & object) =>
+    invoke<ConsentView>("grant_learning_consent", { account, expect: { provider: seen.provider.provider, model: seen.provider.model, host: seen.host ?? "", input_fp: seen.input_fp } }),
+  /** Ejecuta el aprendizaje: «send» con lo que vio o «use_local» (nada sale del equipo). */
+  runLearning: (account: string, choice: LearnChoice) => invoke<LearningStatus>("run_learning", { account, choice }),
+  /** Tras un fallo, una lectura fallida o un corte: recoge de nuevo y deja una vista previa nueva. No llama a la IA. */
+  retryLearning: (account: string) => invoke<LearningStatus>("retry_learning", { account }),
   /** Descarta una sugerencia: solo reaparece con el doble de evidencia nueva. */
   discardSuggestion: (fingerprint: string) => invoke<void>("discard_suggestion", { fingerprint }),
   suggestionThresholds: () => invoke<ThresholdSettings>("suggestion_thresholds"),

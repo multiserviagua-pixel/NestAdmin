@@ -11,6 +11,7 @@ pub mod accounts;
 pub mod initial_read;
 pub mod learn;
 pub mod learn_consent;
+pub mod learn_state;
 pub mod panel;
 pub mod pipelines;
 pub mod preferences;
@@ -317,6 +318,9 @@ pub struct App {
     /// el destino cambiado). Se comparte con las tareas en curso, que lo comprueban justo antes de
     /// llamar al proveedor (D133).
     read_gate: Arc<Mutex<HashSet<String>>>,
+    /// Estado en memoria de la fase «Aprender a responder» (E4, D175): reanudaciones hechas,
+    /// trabajos en curso y lo recogido. No se guarda nada de esto.
+    learning: learn_state::LearningRuntime,
 }
 
 /// Si se puede instalar una actualización sin cortar trabajo (actualizaciones.md, paso 5).
@@ -905,6 +909,7 @@ impl App {
             key_fixed: false,
             refine_mode: refine::RefineMode::of_build(),
             reads_active: HashSet::new(),
+            learning: learn_state::LearningRuntime::default(),
             read_gate: Arc::new(Mutex::new(HashSet::new())),
         };
         app.store.recover()?;

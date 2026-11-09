@@ -101,6 +101,14 @@ pub const REFINEMENT_KEY: &str = "(afinado)";
 /// Prefijo de las claves de `rule_settings` que guardan las marcas de primera lectura.
 pub const READ_MARK_PREFIX: &str = "initial_read:";
 
+/// Prefijo de las marcas de la fase «Aprender a responder» (D167, D175): estado, huella,
+/// ids y recuentos. Nunca cuerpos de correo.
+pub const LEARN_MARK_PREFIX: &str = "first_learning:";
+
+/// Prefijo de lo aprendido (estilo y enums por mensaje), clave hermana de la marca. Sin textos
+/// de correo (D175).
+pub const LEARN_RESULT_PREFIX: &str = "first_learning_result:";
+
 /// Contadores de una regla.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct RuleStats {
@@ -630,6 +638,76 @@ impl Store {
             params![format!("{READ_MARK_PREFIX}{source}"), mark.to_string()],
         )?;
         Ok(())
+    }
+
+    /// Marca de la fase de aprendizaje de una fuente (D175), o `None` si nunca se empezó. Vive en
+    /// `rule_settings` bajo `first_learning:<fuente>`, sin entrada en el historial.
+    pub fn learning_mark(&self, source: &str) -> Result<Option<Value>> {
+        Ok(self
+            .rule_setting(&format!("{LEARN_MARK_PREFIX}{source}"))?
+            .and_then(|text| serde_json::from_str(&text).ok()))
+    }
+
+    /// Lo aprendido de una fuente (`first_learning_result:<fuente>`), si ya terminó.
+    pub fn learning_result(&self, source: &str) -> Result<Option<Value>> {
+        Ok(self
+            .rule_setting(&format!("{LEARN_RESULT_PREFIX}{source}"))?
+            .and_then(|text| serde_json::from_str(&text).ok()))
+    }
+
+    /// Guarda en **una** transacción la marca de aprendizaje, lo aprendido (si lo hay) y, si se
+    /// pide, una entrada agregada del historial `(acción, estado, detalle)`. Sustituir una marca no
+    /// escribe nada en el historial; solo la nota explícita. Idempotente.
+    pub fn save_learning(
+        &mut self,
+        source: &str,
+        mark: &Value,
+        result: Option<&Value>,
+        note: Option<(&str, &str, &Value)>,
+    ) -> Result<()> {
+        let tx = self.conn.transaction()?;
+        let upsert = "INSERT INTO rule_settings (key, value) VALUES (?1, ?2)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value";
+        tx.execute(
+            upsert,
+            params![format!("{LEARN_MARK_PREFIX}{source}"), mark.to_string()],
+        )?;
+        if let Some(result) = result {
+            tx.execute(
+                upsert,
+                params![format!("{LEARN_RESULT_PREFIX}{source}"), result.to_string()],
+            )?;
+        }
+        if let Some((action, status, detail)) = note {
+            tx.execute(
+                "INSERT INTO audit_log (at, task_id, action, status, authorization, detail) VALUES (?1, NULL, ?2, ?3, NULL, ?4)",
+                params![now_ms(), action, status, detail.to_string()],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Todas las marcas de aprendizaje, por fuente, en orden estable.
+    pub fn learning_marks(&self) -> Result<Vec<(String, Value)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT key, value FROM rule_settings WHERE substr(key, 1, ?1) = ?2 ORDER BY key",
+        )?;
+        let rows = stmt.query_map(
+            params![LEARN_MARK_PREFIX.len() as i64, LEARN_MARK_PREFIX],
+            |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
+        )?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (key, value) = row?;
+            if let (Some(source), Ok(mark)) = (
+                key.strip_prefix(LEARN_MARK_PREFIX),
+                serde_json::from_str::<Value>(&value),
+            ) {
+                out.push((source.to_owned(), mark));
+            }
+        }
+        Ok(out)
     }
 
     /// Todas las marcas de primera lectura, por fuente, en orden estable.

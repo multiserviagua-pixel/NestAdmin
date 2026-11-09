@@ -22,6 +22,10 @@ use nestadmin_app::accounts::{
 use nestadmin_app::initial_read::{
     FolderPreview, InitialReadOverview, InitialReadStatus, ReadExpectation, ReadStep,
 };
+use nestadmin_app::learn_consent::LearnExpectation;
+use nestadmin_app::learn_state::{
+    AccountLearningPreview, LearnChoiceArg, LearningOverview, LearningStatus, LearningStep,
+};
 use nestadmin_app::panel::{MergePreview, NewRule, RuleView, Simulation};
 use nestadmin_app::pipelines::{PipelineOverview, RunView};
 use nestadmin_app::preferences::PreferenceChange;
@@ -1173,6 +1177,137 @@ fn retry_initial_read<R: Runtime>(
     Ok(retried)
 }
 
+// ---- Aprender a responder (E4, D167, D175) ----
+
+/// Estado de la fase de aprendizaje de cada buzón (recuentos, destino, retenciones). Solo
+/// lectura: no toca el buzón ni llama a la IA.
+#[tauri::command]
+fn learning_overview(shared: State<'_, SharedState>) -> CmdResult<LearningOverview> {
+    shared.app()?.learning_overview().map_err(text)
+}
+
+/// Vuelve a recoger los pares de una cuenta y devuelve la vista previa vigente: el texto literal
+/// que saldría, el destino y la huella. Si cambió algo, sustituye a la anterior y el
+/// consentimiento anterior deja de valer. No llama a la IA. La lectura del buzón se hace en un
+/// hilo aparte.
+#[tauri::command]
+async fn learning_preview<R: Runtime>(
+    shared: State<'_, SharedState>,
+    handle: AppHandle<R>,
+    account: String,
+) -> CmdResult<AccountLearningPreview> {
+    let shared = Arc::clone(shared.inner());
+    let view = tauri::async_runtime::spawn_blocking(move || {
+        shared
+            .app()?
+            .account_learning_preview(&account)
+            .map_err(text)
+    })
+    .await
+    .map_err(text)??;
+    changed(&handle);
+    Ok(view)
+}
+
+/// Consiente enviar lo que vio al proveedor, modelo y servidor que vio. Queda en el historial; si
+/// algo cambió, se rechaza.
+#[tauri::command]
+async fn grant_learning_consent<R: Runtime>(
+    shared: State<'_, SharedState>,
+    handle: AppHandle<R>,
+    account: String,
+    expect: LearnExpectation,
+) -> CmdResult<ConsentView> {
+    let shared = Arc::clone(shared.inner());
+    let consent = tauri::async_runtime::spawn_blocking(move || {
+        shared
+            .app()?
+            .grant_account_learning_consent(&account, &expect)
+            .map_err(text)
+    })
+    .await
+    .map_err(text)??;
+    changed(&handle);
+    Ok(consent)
+}
+
+/// Ejecuta el aprendizaje con la elección de la persona (`send` con lo que vio, o `use_local`).
+/// La llamada al modelo se hace sin el cerrojo de la aplicación y fuera del hilo de la ventana.
+#[tauri::command]
+async fn run_learning<R: Runtime>(
+    shared: State<'_, SharedState>,
+    handle: AppHandle<R>,
+    account: String,
+    choice: LearnChoiceArg,
+) -> CmdResult<LearningStatus> {
+    let shared = Arc::clone(shared.inner());
+    let emitter = handle.clone();
+    let status = tauri::async_runtime::spawn_blocking(move || {
+        let job = shared
+            .app()?
+            .begin_account_learning(&account, &choice)
+            .map_err(text)?;
+        // La ventana ve «enviado» mientras dura la llamada.
+        changed(&emitter);
+        let completed = job.run();
+        shared.app()?.finish_learning(completed).map_err(text)
+    })
+    .await
+    .map_err(text)??;
+    changed(&handle);
+    Ok(status)
+}
+
+/// Reintenta tras un fallo, una lectura fallida o un corte: vuelve a recoger y deja una vista
+/// previa nueva. No llama a la IA; la persona decide después.
+#[tauri::command]
+async fn retry_learning<R: Runtime>(
+    shared: State<'_, SharedState>,
+    handle: AppHandle<R>,
+    account: String,
+) -> CmdResult<LearningStatus> {
+    let shared = Arc::clone(shared.inner());
+    let status = tauri::async_runtime::spawn_blocking(move || {
+        shared.app()?.retry_learning(&account).map_err(text)
+    })
+    .await
+    .map_err(text)??;
+    changed(&handle);
+    Ok(status)
+}
+
+/// Retoma o empieza la fase de aprendizaje de los buzones con la primera lectura terminada, un
+/// paso cada vez. Con destino local, la llamada se hace sin el cerrojo. Nunca llama a la IA
+/// externa por sí sola. Devuelve si hizo trabajo.
+fn resume_learning<R: Runtime>(shared: &SharedState, handle: &AppHandle<R>) -> bool {
+    let step = match shared.app() {
+        Ok(mut app) => app.learning_tick(),
+        Err(_) => return false,
+    };
+    match step {
+        Ok(LearningStep::Idle) => false,
+        Ok(LearningStep::Progress) => {
+            changed(handle);
+            true
+        }
+        Ok(LearningStep::Job(job)) => {
+            changed(handle);
+            let completed = job.run();
+            if let Ok(mut app) = shared.app() {
+                if let Err(error) = app.finish_learning(completed) {
+                    eprintln!("no se pudo guardar lo aprendido: {error}");
+                }
+            }
+            changed(handle);
+            true
+        }
+        Err(error) => {
+            eprintln!("no se pudo retomar el aprendizaje: {error}");
+            false
+        }
+    }
+}
+
 /// Crea la regla de una sugerencia, siempre inactiva (D132). Repetirlo no duplica.
 #[tauri::command]
 fn accept_suggestion<R: Runtime>(
@@ -1948,7 +2083,7 @@ fn worker<R: Runtime>(shared: SharedState, handle: AppHandle<R>, wake: Receiver<
                 changed(&handle);
             }
             Ok(None) => {
-                if resume_initial_reads(&shared, &handle) {
+                if resume_initial_reads(&shared, &handle) || resume_learning(&shared, &handle) {
                     continue;
                 }
                 auto_refine(&shared, &handle);
@@ -2338,6 +2473,11 @@ fn configure<R: Runtime>(builder: Builder<R>, prepare_only: bool) -> Builder<R> 
             retry_initial_read,
             stop_initial_read,
             continue_initial_read,
+            learning_overview,
+            learning_preview,
+            grant_learning_consent,
+            run_learning,
+            retry_learning,
             seen_invoices,
             grant_refine_consent,
             withdraw_refine_consent,

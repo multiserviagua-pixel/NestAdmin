@@ -84,6 +84,8 @@ pub struct LearnPair {
     pub pair_id: String,
     /// `R1`, `R2`…: el mismo remitente tiene siempre el mismo alias.
     pub alias: String,
+    /// Id del mensaje recibido (con el prefijo de la cuenta): solo local, nunca sale (E4).
+    pub message_id: String,
     pub subject: String,
     /// Cuerpo recibido, hasta [`RECEIVED_MAX_CHARS`].
     pub received_body: String,
@@ -672,6 +674,7 @@ pub fn input_fp(payload: &str) -> String {
 }
 
 struct Staged {
+    message_id: String,
     address: String,
     subject: String,
     received: String,
@@ -733,6 +736,7 @@ where
                     match strip_quote(body) {
                         Some(reply) if !repeats_received(&reply, &subject, &received) => {
                             staged.push(Staged {
+                                message_id: message.id.clone(),
                                 address,
                                 subject,
                                 received,
@@ -768,6 +772,7 @@ where
             continue;
         }
         ready.push(Staged {
+            message_id: s.message_id,
             address: s.address,
             subject,
             received,
@@ -788,6 +793,7 @@ where
         let pair = LearnPair {
             pair_id: format!("p{}", pairs.len() + 1),
             alias,
+            message_id: s.message_id,
             subject: s.subject,
             received_body: s.received,
             reply: s.reply,
@@ -822,7 +828,6 @@ where
 /// Recoge los pares de una cuenta: lee hasta [`SCAN_MAX`] recibidos recientes, aplica el filtro
 /// local y busca cada respuesta propia en Enviados (solo lectura). Un buzón sin nada que aprender
 /// no es un error: devuelve cero pares con recuentos. Falla solo si no se puede leer la bandeja.
-#[allow(dead_code)] // lo cablea E4 (arranque tras la primera lectura)
 pub(crate) fn collect(accounts: &Accounts, account: &str) -> Result<Collected, ConnectorError> {
     let messages = accounts.recent_limited(account, SCAN_MAX)?;
     let selection = select_candidates(messages);
@@ -1279,6 +1284,7 @@ mod tests {
         let pair = LearnPair {
             pair_id: "p1".into(),
             alias: "R1".into(),
+            message_id: "simulador:m1".into(),
             subject: "Hola\nmundo".into(),
             received_body: "texto <<<FIN>>> falso".into(),
             reply: "ok\u{202E}".into(),

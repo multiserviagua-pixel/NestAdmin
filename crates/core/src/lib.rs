@@ -25,7 +25,7 @@ pub use preferences::{normalize_key, PreferenceScope, SenderPreference};
 pub use queue::{Task, TaskError, TaskState};
 pub use rule_panel::{
     EvaluationRecord, EvaluationRow, RuleMeta, RuleStats, SignalRecord, SignalRow, SuggestionRow,
-    READ_MARK_PREFIX, REFINEMENT_KEY,
+    LEARN_MARK_PREFIX, LEARN_RESULT_PREFIX, READ_MARK_PREFIX, REFINEMENT_KEY,
 };
 pub use rules::Rule;
 pub use store::Store;
