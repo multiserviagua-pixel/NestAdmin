@@ -1,0 +1,2166 @@
+[
+  {
+    "id": "T001",
+    "expected": {
+      "group": "A1",
+      "category": "solicitud_factura",
+      "needs_reply": true,
+      "route": "ia",
+      "draft_rubric": {
+        "must_include_any": [
+          "factura"
+        ],
+        "must_not_include": [
+          "pago confirmado",
+          "factura enviada",
+          "registro completado"
+        ]
+      }
+    }
+  },
+  {
+    "id": "T002",
+    "expected": {
+      "group": "A1",
+      "category": "solicitud_factura",
+      "needs_reply": true,
+      "route": "ia",
+      "draft_rubric": {
+        "must_include_any": [
+          "factura"
+        ],
+        "must_not_include": [
+          "pago confirmado",
+          "factura enviada",
+          "registro completado"
+        ]
+      }
+    }
+  },
+  {
+    "id": "T003",
+    "expected": {
+      "group": "A1",
+      "category": "solicitud_factura",
+      "needs_reply": true,
+      "route": "ia",
+      "draft_rubric": {
+        "must_include_any": [
+          "factura"
+        ],
+        "must_not_include": [
+          "pago confirmado",
+          "factura enviada",
+          "registro completado"
+        ]
+      }
+    }
+  },
+  {
+    "id": "T004",
+    "expected": {
+      "group": "A1",
+      "category": "solicitud_factura",
+      "needs_reply": true,
+      "route": "ia",
+      "draft_rubric": {
+        "must_include_any": [
+          "factura"
+        ],
+        "must_not_include": [
+          "pago confirmado",
+          "factura enviada",
+          "registro completado"
+        ]
+      }
+    }
+  },
+  {
+    "id": "T005",
+    "expected": {
+      "group": "A1",
+      "category": "solicitud_factura",
+      "needs_reply": true,
+      "route": "ia",
+      "draft_rubric": {
+        "must_include_any": [
+          "factura"
+        ],
+        "must_not_include": [
+          "pago confirmado",
+          "factura enviada",
+          "registro completado"
+        ]
+      }
+    }
+  },
+  {
+    "id": "T006",
+    "expected": {
+      "group": "A1",
+      "category": "solicitud_factura",
+      "needs_reply": true,
+      "route": "ia",
+      "draft_rubric": {
+        "must_include_any": [
+          "factura"
+        ],
+        "must_not_include": [
+          "pago confirmado",
+          "factura enviada",
+          "registro completado"
+        ]
+      }
+    }
+  },
+  {
+    "id": "T007",
+    "expected": {
+      "group": "A1",
+      "category": "solicitud_factura",
+      "needs_reply": true,
+      "route": "ia",
+      "draft_rubric": {
+        "must_include_any": [
+          "factura"
+        ],
+        "must_not_include": [
+          "pago confirmado",
+          "factura enviada",
+          "registro completado"
+        ]
+      }
+    }
+  },
+  {
+    "id": "T008",
+    "expected": {
+      "group": "A1",
+      "category": "solicitud_factura",
+      "needs_reply": true,
+      "route": "ia",
+      "draft_rubric": {
+        "must_include_any": [
+          "factura"
+        ],
+        "must_not_include": [
+          "pago confirmado",
+          "factura enviada",
+          "registro completado"
+        ]
+      }
+    }
+  },
+  {
+    "id": "T009",
+    "expected": {
+      "group": "A1",
+      "category": "solicitud_factura",
+      "needs_reply": true,
+      "route": "ia",
+      "draft_rubric": {
+        "must_include_any": [
+          "factura"
+        ],
+        "must_not_include": [
+          "pago confirmado",
+          "factura enviada",
+          "registro completado"
+        ]
+      }
+    }
+  },
+  {
+    "id": "T010",
+    "expected": {
+      "group": "A1",
+      "category": "solicitud_factura",
+      "needs_reply": true,
+      "route": "ia",
+      "draft_rubric": {
+        "must_include_any": [
+          "factura"
+        ],
+        "must_not_include": [
+          "pago confirmado",
+          "factura enviada",
+          "registro completado"
+        ]
+      }
+    }
+  },
+  {
+    "id": "T011",
+    "expected": {
+      "group": "A1",
+      "category": "solicitud_factura",
+      "needs_reply": true,
+      "route": "ia",
+      "draft_rubric": {
+        "must_include_any": [
+          "factura"
+        ],
+        "must_not_include": [
+          "pago confirmado",
+          "factura enviada",
+          "registro completado"
+        ]
+      }
+    }
+  },
+  {
+    "id": "T012",
+    "expected": {
+      "group": "A1",
+      "category": "solicitud_factura",
+      "needs_reply": true,
+      "route": "ia",
+      "draft_rubric": {
+        "must_include_any": [
+          "factura"
+        ],
+        "must_not_include": [
+          "pago confirmado",
+          "factura enviada",
+          "registro completado"
+        ]
+      }
+    }
+  },
+  {
+    "id": "T013",
+    "expected": {
+      "group": "A1",
+      "category": "consulta_pago",
+      "needs_reply": true,
+      "route": "ia",
+      "draft_rubric": {
+        "must_include_any": [
+          "pago"
+        ],
+        "must_not_include": [
+          "pago confirmado",
+          "factura enviada",
+          "registro completado"
+        ]
+      }
+    }
+  },
+  {
+    "id": "T014",
+    "expected": {
+      "group": "A1",
+      "category": "consulta_pago",
+      "needs_reply": true,
+      "route": "ia",
+      "draft_rubric": {
+        "must_include_any": [
+          "pago"
+        ],
+        "must_not_include": [
+          "pago confirmado",
+          "factura enviada",
+          "registro completado"
+        ]
+      }
+    }
+  },
+  {
+    "id": "T015",
+    "expected": {
+      "group": "A1",
+      "category": "consulta_pago",
+      "needs_reply": true,
+      "route": "ia",
+      "draft_rubric": {
+        "must_include_any": [
+          "pago"
+        ],
+        "must_not_include": [
+          "pago confirmado",
+          "factura enviada",
+          "registro completado"
+        ]
+      }
+    }
+  },
+  {
+    "id": "T016",
+    "expected": {
+      "group": "A1",
+      "category": "consulta_pago",
+      "needs_reply": true,
+      "route": "ia",
+      "draft_rubric": {
+        "must_include_any": [
+          "pago"
+        ],
+        "must_not_include": [
+          "pago confirmado",
+          "factura enviada",
+          "registro completado"
+        ]
+      }
+    }
+  },
+  {
+    "id": "T017",
+    "expected": {
+      "group": "A1",
+      "category": "consulta_pago",
+      "needs_reply": true,
+      "route": "ia",
+      "draft_rubric": {
+        "must_include_any": [
+          "pago"
+        ],
+        "must_not_include": [
+          "pago confirmado",
+          "factura enviada",
+          "registro completado"
+        ]
+      }
+    }
+  },
+  {
+    "id": "T018",
+    "expected": {
+      "group": "A1",
+      "category": "consulta_pago",
+      "needs_reply": true,
+      "route": "ia",
+      "draft_rubric": {
+        "must_include_any": [
+          "pago"
+        ],
+        "must_not_include": [
+          "pago confirmado",
+          "factura enviada",
+          "registro completado"
+        ]
+      }
+    }
+  },
+  {
+    "id": "T019",
+    "expected": {
+      "group": "A1",
+      "category": "consulta_pago",
+      "needs_reply": true,
+      "route": "ia",
+      "draft_rubric": {
+        "must_include_any": [
+          "pago"
+        ],
+        "must_not_include": [
+          "pago confirmado",
+          "factura enviada",
+          "registro completado"
+        ]
+      }
+    }
+  },
+  {
+    "id": "T020",
+    "expected": {
+      "group": "A1",
+      "category": "consulta_pago",
+      "needs_reply": true,
+      "route": "ia",
+      "draft_rubric": {
+        "must_include_any": [
+          "pago"
+        ],
+        "must_not_include": [
+          "pago confirmado",
+          "factura enviada",
+          "registro completado"
+        ]
+      }
+    }
+  },
+  {
+    "id": "T021",
+    "expected": {
+      "group": "A1",
+      "category": "consulta_pago",
+      "needs_reply": true,
+      "route": "ia",
+      "draft_rubric": {
+        "must_include_any": [
+          "pago"
+        ],
+        "must_not_include": [
+          "pago confirmado",
+          "factura enviada",
+          "registro completado"
+        ]
+      }
+    }
+  },
+  {
+    "id": "T022",
+    "expected": {
+      "group": "A1",
+      "category": "consulta_pago",
+      "needs_reply": true,
+      "route": "ia",
+      "draft_rubric": {
+        "must_include_any": [
+          "pago"
+        ],
+        "must_not_include": [
+          "pago confirmado",
+          "factura enviada",
+          "registro completado"
+        ]
+      }
+    }
+  },
+  {
+    "id": "T023",
+    "expected": {
+      "group": "A1",
+      "category": "consulta_pago",
+      "needs_reply": true,
+      "route": "ia",
+      "draft_rubric": {
+        "must_include_any": [
+          "pago"
+        ],
+        "must_not_include": [
+          "pago confirmado",
+          "factura enviada",
+          "registro completado"
+        ]
+      }
+    }
+  },
+  {
+    "id": "T024",
+    "expected": {
+      "group": "A1",
+      "category": "consulta_pago",
+      "needs_reply": true,
+      "route": "ia",
+      "draft_rubric": {
+        "must_include_any": [
+          "pago"
+        ],
+        "must_not_include": [
+          "pago confirmado",
+          "factura enviada",
+          "registro completado"
+        ]
+      }
+    }
+  },
+  {
+    "id": "T025",
+    "expected": {
+      "group": "A1",
+      "category": "incidencia_factura",
+      "needs_reply": true,
+      "route": "ia",
+      "draft_rubric": {
+        "must_include_any": [
+          "revis"
+        ],
+        "must_not_include": [
+          "pago confirmado",
+          "factura enviada",
+          "registro completado"
+        ]
+      }
+    }
+  },
+  {
+    "id": "T026",
+    "expected": {
+      "group": "A1",
+      "category": "incidencia_factura",
+      "needs_reply": true,
+      "route": "ia",
+      "draft_rubric": {
+        "must_include_any": [
+          "revis"
+        ],
+        "must_not_include": [
+          "pago confirmado",
+          "factura enviada",
+          "registro completado"
+        ]
+      }
+    }
+  },
+  {
+    "id": "T027",
+    "expected": {
+      "group": "A1",
+      "category": "incidencia_factura",
+      "needs_reply": true,
+      "route": "ia",
+      "draft_rubric": {
+        "must_include_any": [
+          "revis"
+        ],
+        "must_not_include": [
+          "pago confirmado",
+          "factura enviada",
+          "registro completado"
+        ]
+      }
+    }
+  },
+  {
+    "id": "T028",
+    "expected": {
+      "group": "A1",
+      "category": "incidencia_factura",
+      "needs_reply": true,
+      "route": "ia",
+      "draft_rubric": {
+        "must_include_any": [
+          "revis"
+        ],
+        "must_not_include": [
+          "pago confirmado",
+          "factura enviada",
+          "registro completado"
+        ]
+      }
+    }
+  },
+  {
+    "id": "T029",
+    "expected": {
+      "group": "A1",
+      "category": "incidencia_factura",
+      "needs_reply": true,
+      "route": "ia",
+      "draft_rubric": {
+        "must_include_any": [
+          "revis"
+        ],
+        "must_not_include": [
+          "pago confirmado",
+          "factura enviada",
+          "registro completado"
+        ]
+      }
+    }
+  },
+  {
+    "id": "T030",
+    "expected": {
+      "group": "A1",
+      "category": "incidencia_factura",
+      "needs_reply": true,
+      "route": "ia",
+      "draft_rubric": {
+        "must_include_any": [
+          "revis"
+        ],
+        "must_not_include": [
+          "pago confirmado",
+          "factura enviada",
+          "registro completado"
+        ]
+      }
+    }
+  },
+  {
+    "id": "T031",
+    "expected": {
+      "group": "A1",
+      "category": "incidencia_factura",
+      "needs_reply": true,
+      "route": "ia",
+      "draft_rubric": {
+        "must_include_any": [
+          "revis"
+        ],
+        "must_not_include": [
+          "pago confirmado",
+          "factura enviada",
+          "registro completado"
+        ]
+      }
+    }
+  },
+  {
+    "id": "T032",
+    "expected": {
+      "group": "A1",
+      "category": "incidencia_factura",
+      "needs_reply": true,
+      "route": "ia",
+      "draft_rubric": {
+        "must_include_any": [
+          "revis"
+        ],
+        "must_not_include": [
+          "pago confirmado",
+          "factura enviada",
+          "registro completado"
+        ]
+      }
+    }
+  },
+  {
+    "id": "T033",
+    "expected": {
+      "group": "A1",
+      "category": "incidencia_factura",
+      "needs_reply": true,
+      "route": "ia",
+      "draft_rubric": {
+        "must_include_any": [
+          "revis"
+        ],
+        "must_not_include": [
+          "pago confirmado",
+          "factura enviada",
+          "registro completado"
+        ]
+      }
+    }
+  },
+  {
+    "id": "T034",
+    "expected": {
+      "group": "A1",
+      "category": "incidencia_factura",
+      "needs_reply": true,
+      "route": "ia",
+      "draft_rubric": {
+        "must_include_any": [
+          "revis"
+        ],
+        "must_not_include": [
+          "pago confirmado",
+          "factura enviada",
+          "registro completado"
+        ]
+      }
+    }
+  },
+  {
+    "id": "T035",
+    "expected": {
+      "group": "A1",
+      "category": "incidencia_factura",
+      "needs_reply": true,
+      "route": "ia",
+      "draft_rubric": {
+        "must_include_any": [
+          "revis"
+        ],
+        "must_not_include": [
+          "pago confirmado",
+          "factura enviada",
+          "registro completado"
+        ]
+      }
+    }
+  },
+  {
+    "id": "T036",
+    "expected": {
+      "group": "A1",
+      "category": "incidencia_factura",
+      "needs_reply": true,
+      "route": "ia",
+      "draft_rubric": {
+        "must_include_any": [
+          "revis"
+        ],
+        "must_not_include": [
+          "pago confirmado",
+          "factura enviada",
+          "registro completado"
+        ]
+      }
+    }
+  },
+  {
+    "id": "T037",
+    "expected": {
+      "group": "A1",
+      "category": "documentacion",
+      "needs_reply": true,
+      "route": "ia",
+      "draft_rubric": {
+        "must_include_any": [
+          "document"
+        ],
+        "must_not_include": [
+          "pago confirmado",
+          "factura enviada",
+          "registro completado"
+        ]
+      }
+    }
+  },
+  {
+    "id": "T038",
+    "expected": {
+      "group": "A1",
+      "category": "documentacion",
+      "needs_reply": true,
+      "route": "ia",
+      "draft_rubric": {
+        "must_include_any": [
+          "document"
+        ],
+        "must_not_include": [
+          "pago confirmado",
+          "factura enviada",
+          "registro completado"
+        ]
+      }
+    }
+  },
+  {
+    "id": "T039",
+    "expected": {
+      "group": "A1",
+      "category": "documentacion",
+      "needs_reply": true,
+      "route": "ia",
+      "draft_rubric": {
+        "must_include_any": [
+          "document"
+        ],
+        "must_not_include": [
+          "pago confirmado",
+          "factura enviada",
+          "registro completado"
+        ]
+      }
+    }
+  },
+  {
+    "id": "T040",
+    "expected": {
+      "group": "A1",
+      "category": "documentacion",
+      "needs_reply": true,
+      "route": "ia",
+      "draft_rubric": {
+        "must_include_any": [
+          "document"
+        ],
+        "must_not_include": [
+          "pago confirmado",
+          "factura enviada",
+          "registro completado"
+        ]
+      }
+    }
+  },
+  {
+    "id": "T041",
+    "expected": {
+      "group": "A1",
+      "category": "documentacion",
+      "needs_reply": true,
+      "route": "ia",
+      "draft_rubric": {
+        "must_include_any": [
+          "document"
+        ],
+        "must_not_include": [
+          "pago confirmado",
+          "factura enviada",
+          "registro completado"
+        ]
+      }
+    }
+  },
+  {
+    "id": "T042",
+    "expected": {
+      "group": "A1",
+      "category": "documentacion",
+      "needs_reply": true,
+      "route": "ia",
+      "draft_rubric": {
+        "must_include_any": [
+          "document"
+        ],
+        "must_not_include": [
+          "pago confirmado",
+          "factura enviada",
+          "registro completado"
+        ]
+      }
+    }
+  },
+  {
+    "id": "T043",
+    "expected": {
+      "group": "A1",
+      "category": "documentacion",
+      "needs_reply": true,
+      "route": "ia",
+      "draft_rubric": {
+        "must_include_any": [
+          "document"
+        ],
+        "must_not_include": [
+          "pago confirmado",
+          "factura enviada",
+          "registro completado"
+        ]
+      }
+    }
+  },
+  {
+    "id": "T044",
+    "expected": {
+      "group": "A1",
+      "category": "documentacion",
+      "needs_reply": true,
+      "route": "ia",
+      "draft_rubric": {
+        "must_include_any": [
+          "document"
+        ],
+        "must_not_include": [
+          "pago confirmado",
+          "factura enviada",
+          "registro completado"
+        ]
+      }
+    }
+  },
+  {
+    "id": "T045",
+    "expected": {
+      "group": "A1",
+      "category": "documentacion",
+      "needs_reply": true,
+      "route": "ia",
+      "draft_rubric": {
+        "must_include_any": [
+          "document"
+        ],
+        "must_not_include": [
+          "pago confirmado",
+          "factura enviada",
+          "registro completado"
+        ]
+      }
+    }
+  },
+  {
+    "id": "T046",
+    "expected": {
+      "group": "A1",
+      "category": "documentacion",
+      "needs_reply": true,
+      "route": "ia",
+      "draft_rubric": {
+        "must_include_any": [
+          "document"
+        ],
+        "must_not_include": [
+          "pago confirmado",
+          "factura enviada",
+          "registro completado"
+        ]
+      }
+    }
+  },
+  {
+    "id": "T047",
+    "expected": {
+      "group": "A1",
+      "category": "documentacion",
+      "needs_reply": true,
+      "route": "ia",
+      "draft_rubric": {
+        "must_include_any": [
+          "document"
+        ],
+        "must_not_include": [
+          "pago confirmado",
+          "factura enviada",
+          "registro completado"
+        ]
+      }
+    }
+  },
+  {
+    "id": "T048",
+    "expected": {
+      "group": "A1",
+      "category": "documentacion",
+      "needs_reply": true,
+      "route": "ia",
+      "draft_rubric": {
+        "must_include_any": [
+          "document"
+        ],
+        "must_not_include": [
+          "pago confirmado",
+          "factura enviada",
+          "registro completado"
+        ]
+      }
+    }
+  },
+  {
+    "id": "T049",
+    "expected": {
+      "group": "A1",
+      "category": "otros",
+      "needs_reply": true,
+      "route": "ia",
+      "draft_rubric": {
+        "must_include_any": [
+          "consulta",
+          "mensaje",
+          "gracias"
+        ],
+        "must_not_include": [
+          "pago confirmado",
+          "factura enviada",
+          "registro completado"
+        ]
+      }
+    }
+  },
+  {
+    "id": "T050",
+    "expected": {
+      "group": "A1",
+      "category": "otros",
+      "needs_reply": true,
+      "route": "ia",
+      "draft_rubric": {
+        "must_include_any": [
+          "consulta",
+          "mensaje",
+          "gracias"
+        ],
+        "must_not_include": [
+          "pago confirmado",
+          "factura enviada",
+          "registro completado"
+        ]
+      }
+    }
+  },
+  {
+    "id": "T051",
+    "expected": {
+      "group": "A1",
+      "category": "otros",
+      "needs_reply": true,
+      "route": "ia",
+      "draft_rubric": {
+        "must_include_any": [
+          "consulta",
+          "mensaje",
+          "gracias"
+        ],
+        "must_not_include": [
+          "pago confirmado",
+          "factura enviada",
+          "registro completado"
+        ]
+      }
+    }
+  },
+  {
+    "id": "T052",
+    "expected": {
+      "group": "A1",
+      "category": "otros",
+      "needs_reply": true,
+      "route": "ia",
+      "draft_rubric": {
+        "must_include_any": [
+          "consulta",
+          "mensaje",
+          "gracias"
+        ],
+        "must_not_include": [
+          "pago confirmado",
+          "factura enviada",
+          "registro completado"
+        ]
+      }
+    }
+  },
+  {
+    "id": "T053",
+    "expected": {
+      "group": "A1",
+      "category": "otros",
+      "needs_reply": true,
+      "route": "ia",
+      "draft_rubric": {
+        "must_include_any": [
+          "consulta",
+          "mensaje",
+          "gracias"
+        ],
+        "must_not_include": [
+          "pago confirmado",
+          "factura enviada",
+          "registro completado"
+        ]
+      }
+    }
+  },
+  {
+    "id": "T054",
+    "expected": {
+      "group": "A1",
+      "category": "otros",
+      "needs_reply": true,
+      "route": "ia",
+      "draft_rubric": {
+        "must_include_any": [
+          "consulta",
+          "mensaje",
+          "gracias"
+        ],
+        "must_not_include": [
+          "pago confirmado",
+          "factura enviada",
+          "registro completado"
+        ]
+      }
+    }
+  },
+  {
+    "id": "T055",
+    "expected": {
+      "group": "A1",
+      "category": "otros",
+      "needs_reply": true,
+      "route": "ia",
+      "draft_rubric": {
+        "must_include_any": [
+          "consulta",
+          "mensaje",
+          "gracias"
+        ],
+        "must_not_include": [
+          "pago confirmado",
+          "factura enviada",
+          "registro completado"
+        ]
+      }
+    }
+  },
+  {
+    "id": "T056",
+    "expected": {
+      "group": "A1",
+      "category": "otros",
+      "needs_reply": true,
+      "route": "ia",
+      "draft_rubric": {
+        "must_include_any": [
+          "consulta",
+          "mensaje",
+          "gracias"
+        ],
+        "must_not_include": [
+          "pago confirmado",
+          "factura enviada",
+          "registro completado"
+        ]
+      }
+    }
+  },
+  {
+    "id": "T057",
+    "expected": {
+      "group": "A1",
+      "category": "otros",
+      "needs_reply": true,
+      "route": "ia",
+      "draft_rubric": {
+        "must_include_any": [
+          "consulta",
+          "mensaje",
+          "gracias"
+        ],
+        "must_not_include": [
+          "pago confirmado",
+          "factura enviada",
+          "registro completado"
+        ]
+      }
+    }
+  },
+  {
+    "id": "T058",
+    "expected": {
+      "group": "A1",
+      "category": "otros",
+      "needs_reply": true,
+      "route": "ia",
+      "draft_rubric": {
+        "must_include_any": [
+          "consulta",
+          "mensaje",
+          "gracias"
+        ],
+        "must_not_include": [
+          "pago confirmado",
+          "factura enviada",
+          "registro completado"
+        ]
+      }
+    }
+  },
+  {
+    "id": "T059",
+    "expected": {
+      "group": "A1",
+      "category": "otros",
+      "needs_reply": true,
+      "route": "ia",
+      "draft_rubric": {
+        "must_include_any": [
+          "consulta",
+          "mensaje",
+          "gracias"
+        ],
+        "must_not_include": [
+          "pago confirmado",
+          "factura enviada",
+          "registro completado"
+        ]
+      }
+    }
+  },
+  {
+    "id": "T060",
+    "expected": {
+      "group": "A1",
+      "category": "otros",
+      "needs_reply": true,
+      "route": "ia",
+      "draft_rubric": {
+        "must_include_any": [
+          "consulta",
+          "mensaje",
+          "gracias"
+        ],
+        "must_not_include": [
+          "pago confirmado",
+          "factura enviada",
+          "registro completado"
+        ]
+      }
+    }
+  },
+  {
+    "id": "T061",
+    "expected": {
+      "group": "A2",
+      "category": "solicitud_factura",
+      "needs_reply": true,
+      "route": "ia",
+      "draft_rubric": {
+        "must_include_any": [
+          "factura"
+        ],
+        "must_not_include": [
+          "pago confirmado",
+          "factura enviada",
+          "registro completado"
+        ]
+      }
+    }
+  },
+  {
+    "id": "T062",
+    "expected": {
+      "group": "A2",
+      "category": "consulta_pago",
+      "needs_reply": true,
+      "route": "ia",
+      "draft_rubric": {
+        "must_include_any": [
+          "pago"
+        ],
+        "must_not_include": [
+          "pago confirmado",
+          "factura enviada",
+          "registro completado"
+        ]
+      }
+    }
+  },
+  {
+    "id": "T063",
+    "expected": {
+      "group": "A2",
+      "category": "incidencia_factura",
+      "needs_reply": true,
+      "route": "ia",
+      "draft_rubric": {
+        "must_include_any": [
+          "revis"
+        ],
+        "must_not_include": [
+          "pago confirmado",
+          "factura enviada",
+          "registro completado"
+        ]
+      }
+    }
+  },
+  {
+    "id": "T064",
+    "expected": {
+      "group": "A2",
+      "category": "documentacion",
+      "needs_reply": true,
+      "route": "ia",
+      "draft_rubric": {
+        "must_include_any": [
+          "document"
+        ],
+        "must_not_include": [
+          "pago confirmado",
+          "factura enviada",
+          "registro completado"
+        ]
+      }
+    }
+  },
+  {
+    "id": "T065",
+    "expected": {
+      "group": "A2",
+      "category": "otros",
+      "needs_reply": true,
+      "route": "ia",
+      "draft_rubric": {
+        "must_include_any": [
+          "consulta",
+          "mensaje",
+          "gracias"
+        ],
+        "must_not_include": [
+          "pago confirmado",
+          "factura enviada",
+          "registro completado"
+        ]
+      }
+    }
+  },
+  {
+    "id": "T066",
+    "expected": {
+      "group": "A2",
+      "category": "solicitud_factura",
+      "needs_reply": true,
+      "route": "ia",
+      "draft_rubric": {
+        "must_include_any": [
+          "factura"
+        ],
+        "must_not_include": [
+          "pago confirmado",
+          "factura enviada",
+          "registro completado"
+        ]
+      }
+    }
+  },
+  {
+    "id": "T067",
+    "expected": {
+      "group": "A2",
+      "category": "consulta_pago",
+      "needs_reply": true,
+      "route": "ia",
+      "draft_rubric": {
+        "must_include_any": [
+          "pago"
+        ],
+        "must_not_include": [
+          "pago confirmado",
+          "factura enviada",
+          "registro completado"
+        ]
+      }
+    }
+  },
+  {
+    "id": "T068",
+    "expected": {
+      "group": "A2",
+      "category": "documentacion",
+      "needs_reply": true,
+      "route": "ia",
+      "draft_rubric": {
+        "must_include_any": [
+          "document"
+        ],
+        "must_not_include": [
+          "pago confirmado",
+          "factura enviada",
+          "registro completado"
+        ]
+      }
+    }
+  },
+  {
+    "id": "T069",
+    "expected": {
+      "group": "A2",
+      "category": "otros",
+      "needs_reply": true,
+      "route": "ia",
+      "draft_rubric": {
+        "must_include_any": [
+          "consulta",
+          "mensaje",
+          "gracias"
+        ],
+        "must_not_include": [
+          "pago confirmado",
+          "factura enviada",
+          "registro completado"
+        ]
+      }
+    }
+  },
+  {
+    "id": "T070",
+    "expected": {
+      "group": "A2",
+      "category": "solicitud_factura",
+      "needs_reply": true,
+      "route": "ia",
+      "draft_rubric": {
+        "must_include_any": [
+          "factura"
+        ],
+        "must_not_include": [
+          "pago confirmado",
+          "factura enviada",
+          "registro completado"
+        ]
+      }
+    }
+  },
+  {
+    "id": "T071",
+    "expected": {
+      "group": "A2",
+      "category": "consulta_pago",
+      "needs_reply": true,
+      "route": "ia",
+      "draft_rubric": {
+        "must_include_any": [
+          "pago"
+        ],
+        "must_not_include": [
+          "pago confirmado",
+          "factura enviada",
+          "registro completado"
+        ]
+      }
+    }
+  },
+  {
+    "id": "T072",
+    "expected": {
+      "group": "A2",
+      "category": "solicitud_factura",
+      "needs_reply": true,
+      "route": "ia",
+      "draft_rubric": {
+        "must_include_any": [
+          "factura"
+        ],
+        "must_not_include": [
+          "pago confirmado",
+          "factura enviada",
+          "registro completado"
+        ]
+      }
+    }
+  },
+  {
+    "id": "T073",
+    "expected": {
+      "group": "A2",
+      "category": "incidencia_factura",
+      "needs_reply": true,
+      "route": "ia",
+      "draft_rubric": {
+        "must_include_any": [
+          "revis"
+        ],
+        "must_not_include": [
+          "pago confirmado",
+          "factura enviada",
+          "registro completado"
+        ]
+      }
+    }
+  },
+  {
+    "id": "T074",
+    "expected": {
+      "group": "A2",
+      "category": "documentacion",
+      "needs_reply": true,
+      "route": "ia",
+      "draft_rubric": {
+        "must_include_any": [
+          "document"
+        ],
+        "must_not_include": [
+          "pago confirmado",
+          "factura enviada",
+          "registro completado"
+        ]
+      }
+    }
+  },
+  {
+    "id": "T075",
+    "expected": {
+      "group": "A2",
+      "category": "consulta_pago",
+      "needs_reply": true,
+      "route": "ia",
+      "draft_rubric": {
+        "must_include_any": [
+          "pago"
+        ],
+        "must_not_include": [
+          "pago confirmado",
+          "factura enviada",
+          "registro completado"
+        ]
+      }
+    }
+  },
+  {
+    "id": "T076",
+    "expected": {
+      "group": "A2",
+      "category": "otros",
+      "needs_reply": true,
+      "route": "ia",
+      "draft_rubric": {
+        "must_include_any": [
+          "consulta",
+          "mensaje",
+          "gracias"
+        ],
+        "must_not_include": [
+          "pago confirmado",
+          "factura enviada",
+          "registro completado"
+        ]
+      }
+    }
+  },
+  {
+    "id": "T077",
+    "expected": {
+      "group": "A2",
+      "category": "incidencia_factura",
+      "needs_reply": true,
+      "route": "ia",
+      "draft_rubric": {
+        "must_include_any": [
+          "revis"
+        ],
+        "must_not_include": [
+          "pago confirmado",
+          "factura enviada",
+          "registro completado"
+        ]
+      }
+    }
+  },
+  {
+    "id": "T078",
+    "expected": {
+      "group": "A2",
+      "category": "solicitud_factura",
+      "needs_reply": true,
+      "route": "ia",
+      "draft_rubric": {
+        "must_include_any": [
+          "factura"
+        ],
+        "must_not_include": [
+          "pago confirmado",
+          "factura enviada",
+          "registro completado"
+        ]
+      }
+    }
+  },
+  {
+    "id": "T079",
+    "expected": {
+      "group": "A2",
+      "category": "documentacion",
+      "needs_reply": true,
+      "route": "ia",
+      "draft_rubric": {
+        "must_include_any": [
+          "document"
+        ],
+        "must_not_include": [
+          "pago confirmado",
+          "factura enviada",
+          "registro completado"
+        ]
+      }
+    }
+  },
+  {
+    "id": "T080",
+    "expected": {
+      "group": "A2",
+      "category": "otros",
+      "needs_reply": true,
+      "route": "ia",
+      "draft_rubric": {
+        "must_include_any": [
+          "consulta",
+          "mensaje",
+          "gracias"
+        ],
+        "must_not_include": [
+          "pago confirmado",
+          "factura enviada",
+          "registro completado"
+        ]
+      }
+    }
+  },
+  {
+    "id": "T081",
+    "expected": {
+      "group": "B_notificacion",
+      "category": "documentacion",
+      "needs_reply": false,
+      "route": "informativo"
+    }
+  },
+  {
+    "id": "T082",
+    "expected": {
+      "group": "B_notificacion",
+      "category": "consulta_pago",
+      "needs_reply": false,
+      "route": "informativo"
+    }
+  },
+  {
+    "id": "T083",
+    "expected": {
+      "group": "B_notificacion",
+      "category": "otros",
+      "needs_reply": false,
+      "route": "informativo"
+    }
+  },
+  {
+    "id": "T084",
+    "expected": {
+      "group": "B_notificacion",
+      "category": "documentacion",
+      "needs_reply": false,
+      "route": "informativo"
+    }
+  },
+  {
+    "id": "T085",
+    "expected": {
+      "group": "B_notificacion",
+      "category": "otros",
+      "needs_reply": false,
+      "route": "informativo"
+    }
+  },
+  {
+    "id": "T086",
+    "expected": {
+      "group": "B_notificacion",
+      "category": "otros",
+      "needs_reply": false,
+      "route": "informativo"
+    }
+  },
+  {
+    "id": "T087",
+    "expected": {
+      "group": "B_notificacion",
+      "category": "consulta_pago",
+      "needs_reply": false,
+      "route": "informativo"
+    }
+  },
+  {
+    "id": "T088",
+    "expected": {
+      "group": "B_notificacion",
+      "category": "otros",
+      "needs_reply": false,
+      "route": "informativo"
+    }
+  },
+  {
+    "id": "T089",
+    "expected": {
+      "group": "B_notificacion",
+      "category": "otros",
+      "needs_reply": false,
+      "route": "informativo"
+    }
+  },
+  {
+    "id": "T090",
+    "expected": {
+      "group": "B_notificacion",
+      "category": "documentacion",
+      "needs_reply": false,
+      "route": "informativo"
+    }
+  },
+  {
+    "id": "T091",
+    "expected": {
+      "group": "B_notificacion",
+      "category": "otros",
+      "needs_reply": false,
+      "route": "informativo"
+    }
+  },
+  {
+    "id": "T092",
+    "expected": {
+      "group": "B_notificacion",
+      "category": "consulta_pago",
+      "needs_reply": false,
+      "route": "informativo"
+    }
+  },
+  {
+    "id": "T093",
+    "expected": {
+      "group": "B_seguridad",
+      "category": "otros",
+      "needs_reply": false,
+      "route": "informativo"
+    }
+  },
+  {
+    "id": "T094",
+    "expected": {
+      "group": "B_seguridad",
+      "category": "otros",
+      "needs_reply": false,
+      "route": "informativo"
+    }
+  },
+  {
+    "id": "T095",
+    "expected": {
+      "group": "B_seguridad",
+      "category": "otros",
+      "needs_reply": false,
+      "route": "informativo"
+    }
+  },
+  {
+    "id": "T096",
+    "expected": {
+      "group": "B_seguridad",
+      "category": "otros",
+      "needs_reply": false,
+      "route": "informativo"
+    }
+  },
+  {
+    "id": "T097",
+    "expected": {
+      "group": "B_seguridad",
+      "category": "otros",
+      "needs_reply": false,
+      "route": "informativo"
+    }
+  },
+  {
+    "id": "T098",
+    "expected": {
+      "group": "B_seguridad",
+      "category": "otros",
+      "needs_reply": false,
+      "route": "informativo"
+    }
+  },
+  {
+    "id": "T099",
+    "expected": {
+      "group": "B_seguridad",
+      "category": "otros",
+      "needs_reply": false,
+      "route": "informativo"
+    }
+  },
+  {
+    "id": "T100",
+    "expected": {
+      "group": "B_seguridad",
+      "category": "otros",
+      "needs_reply": false,
+      "route": "informativo"
+    }
+  },
+  {
+    "id": "T101",
+    "expected": {
+      "group": "B_boletin_fuerte",
+      "category": "otros",
+      "needs_reply": false,
+      "route": "informativo"
+    }
+  },
+  {
+    "id": "T102",
+    "expected": {
+      "group": "B_boletin_fuerte",
+      "category": "otros",
+      "needs_reply": false,
+      "route": "informativo"
+    }
+  },
+  {
+    "id": "T103",
+    "expected": {
+      "group": "B_boletin_fuerte",
+      "category": "otros",
+      "needs_reply": false,
+      "route": "informativo"
+    }
+  },
+  {
+    "id": "T104",
+    "expected": {
+      "group": "B_boletin_fuerte",
+      "category": "otros",
+      "needs_reply": false,
+      "route": "informativo"
+    }
+  },
+  {
+    "id": "T105",
+    "expected": {
+      "group": "B_boletin_fuerte",
+      "category": "otros",
+      "needs_reply": false,
+      "route": "informativo"
+    }
+  },
+  {
+    "id": "T106",
+    "expected": {
+      "group": "B_bienvenida_fuerte",
+      "category": "otros",
+      "needs_reply": false,
+      "route": "informativo"
+    }
+  },
+  {
+    "id": "T107",
+    "expected": {
+      "group": "B_bienvenida_fuerte",
+      "category": "otros",
+      "needs_reply": false,
+      "route": "informativo"
+    }
+  },
+  {
+    "id": "T108",
+    "expected": {
+      "group": "B_bienvenida_fuerte",
+      "category": "otros",
+      "needs_reply": false,
+      "route": "informativo"
+    }
+  },
+  {
+    "id": "T109",
+    "expected": {
+      "group": "B_rebote",
+      "category": "otros",
+      "needs_reply": false,
+      "route": "rebote"
+    }
+  },
+  {
+    "id": "T110",
+    "expected": {
+      "group": "B_rebote",
+      "category": "otros",
+      "needs_reply": false,
+      "route": "rebote"
+    }
+  },
+  {
+    "id": "T111",
+    "expected": {
+      "group": "B_rebote",
+      "category": "otros",
+      "needs_reply": false,
+      "route": "rebote"
+    }
+  },
+  {
+    "id": "T112",
+    "expected": {
+      "group": "B_rebote",
+      "category": "otros",
+      "needs_reply": false,
+      "route": "rebote"
+    }
+  },
+  {
+    "id": "T113",
+    "expected": {
+      "group": "B_rebote",
+      "category": "otros",
+      "needs_reply": false,
+      "route": "rebote"
+    }
+  },
+  {
+    "id": "T114",
+    "expected": {
+      "group": "B_rebote",
+      "category": "otros",
+      "needs_reply": false,
+      "route": "rebote"
+    }
+  },
+  {
+    "id": "T115",
+    "expected": {
+      "group": "B_noreply_auto",
+      "category": "otros",
+      "needs_reply": false,
+      "route": "informativo"
+    }
+  },
+  {
+    "id": "T116",
+    "expected": {
+      "group": "B_noreply_auto",
+      "category": "otros",
+      "needs_reply": false,
+      "route": "informativo"
+    }
+  },
+  {
+    "id": "T117",
+    "expected": {
+      "group": "B_noreply_auto",
+      "category": "documentacion",
+      "needs_reply": false,
+      "route": "informativo"
+    }
+  },
+  {
+    "id": "T118",
+    "expected": {
+      "group": "B_noreply_auto",
+      "category": "incidencia_factura",
+      "needs_reply": false,
+      "route": "informativo"
+    }
+  },
+  {
+    "id": "T119",
+    "expected": {
+      "group": "B_noreply_auto",
+      "category": "consulta_pago",
+      "needs_reply": false,
+      "route": "informativo"
+    }
+  },
+  {
+    "id": "T120",
+    "expected": {
+      "group": "B_noreply_auto",
+      "category": "otros",
+      "needs_reply": false,
+      "route": "informativo"
+    }
+  },
+  {
+    "id": "T121",
+    "expected": {
+      "group": "B_aviso_importante",
+      "category": "otros",
+      "needs_reply": false,
+      "route": "informativo"
+    }
+  },
+  {
+    "id": "T122",
+    "expected": {
+      "group": "B_aviso_importante",
+      "category": "documentacion",
+      "needs_reply": false,
+      "route": "informativo"
+    }
+  },
+  {
+    "id": "T123",
+    "expected": {
+      "group": "B_aviso_importante",
+      "category": "documentacion",
+      "needs_reply": false,
+      "route": "informativo"
+    }
+  },
+  {
+    "id": "T124",
+    "expected": {
+      "group": "B_aviso_importante",
+      "category": "documentacion",
+      "needs_reply": false,
+      "route": "informativo"
+    }
+  },
+  {
+    "id": "T125",
+    "expected": {
+      "group": "B_aviso_importante",
+      "category": "consulta_pago",
+      "needs_reply": false,
+      "route": "informativo"
+    }
+  },
+  {
+    "id": "T126",
+    "expected": {
+      "group": "B_aviso_importante",
+      "category": "otros",
+      "needs_reply": false,
+      "route": "informativo"
+    }
+  },
+  {
+    "id": "T127",
+    "expected": {
+      "group": "B_aviso_importante",
+      "category": "consulta_pago",
+      "needs_reply": false,
+      "route": "informativo"
+    }
+  },
+  {
+    "id": "T128",
+    "expected": {
+      "group": "B_aviso_importante",
+      "category": "documentacion",
+      "needs_reply": false,
+      "route": "informativo"
+    }
+  },
+  {
+    "id": "T129",
+    "expected": {
+      "group": "C_boletin_debil",
+      "category": "otros",
+      "needs_reply": false,
+      "route": "ia"
+    }
+  },
+  {
+    "id": "T130",
+    "expected": {
+      "group": "C_boletin_debil",
+      "category": "otros",
+      "needs_reply": false,
+      "route": "ia"
+    }
+  },
+  {
+    "id": "T131",
+    "expected": {
+      "group": "C_boletin_debil",
+      "category": "otros",
+      "needs_reply": false,
+      "route": "ia"
+    }
+  },
+  {
+    "id": "T132",
+    "expected": {
+      "group": "C_boletin_debil",
+      "category": "otros",
+      "needs_reply": false,
+      "route": "ia"
+    }
+  },
+  {
+    "id": "T133",
+    "expected": {
+      "group": "C_boletin_debil",
+      "category": "otros",
+      "needs_reply": false,
+      "route": "ia"
+    }
+  },
+  {
+    "id": "T134",
+    "expected": {
+      "group": "C_bienvenida_debil",
+      "category": "otros",
+      "needs_reply": false,
+      "route": "ia"
+    }
+  },
+  {
+    "id": "T135",
+    "expected": {
+      "group": "C_bienvenida_debil",
+      "category": "otros",
+      "needs_reply": false,
+      "route": "ia"
+    }
+  },
+  {
+    "id": "T136",
+    "expected": {
+      "group": "C_bienvenida_debil",
+      "category": "otros",
+      "needs_reply": false,
+      "route": "ia"
+    }
+  },
+  {
+    "id": "T137",
+    "expected": {
+      "group": "C_sin_senal",
+      "category": "otros",
+      "needs_reply": false,
+      "route": "ia"
+    }
+  },
+  {
+    "id": "T138",
+    "expected": {
+      "group": "C_sin_senal",
+      "category": "otros",
+      "needs_reply": false,
+      "route": "ia"
+    }
+  },
+  {
+    "id": "T139",
+    "expected": {
+      "group": "C_sin_senal",
+      "category": "otros",
+      "needs_reply": false,
+      "route": "ia"
+    }
+  },
+  {
+    "id": "T140",
+    "expected": {
+      "group": "C_sin_senal",
+      "category": "otros",
+      "needs_reply": false,
+      "route": "ia"
+    }
+  },
+  {
+    "id": "T141",
+    "expected": {
+      "group": "C_sin_senal",
+      "category": "otros",
+      "needs_reply": false,
+      "route": "ia"
+    }
+  },
+  {
+    "id": "T142",
+    "expected": {
+      "group": "C_sin_senal",
+      "category": "otros",
+      "needs_reply": false,
+      "route": "ia"
+    }
+  },
+  {
+    "id": "T143",
+    "expected": {
+      "group": "C_sin_senal",
+      "category": "otros",
+      "needs_reply": false,
+      "route": "ia"
+    }
+  },
+  {
+    "id": "T144",
+    "expected": {
+      "group": "C_sin_senal",
+      "category": "otros",
+      "needs_reply": false,
+      "route": "ia"
+    }
+  },
+  {
+    "id": "T145",
+    "expected": {
+      "group": "C_sin_senal",
+      "category": "otros",
+      "needs_reply": false,
+      "route": "ia"
+    }
+  },
+  {
+    "id": "T146",
+    "expected": {
+      "group": "C_sin_senal",
+      "category": "otros",
+      "needs_reply": false,
+      "route": "ia"
+    }
+  },
+  {
+    "id": "T147",
+    "expected": {
+      "group": "C_sin_senal",
+      "category": "otros",
+      "needs_reply": false,
+      "route": "ia"
+    }
+  },
+  {
+    "id": "T148",
+    "expected": {
+      "group": "C_sin_senal",
+      "category": "otros",
+      "needs_reply": false,
+      "route": "ia"
+    }
+  }
+]

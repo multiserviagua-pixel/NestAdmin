@@ -1,0 +1,2294 @@
+[
+  {
+    "id": "T001",
+    "kind": "triage",
+    "input": {
+      "from": "Marta Quiroga <marta@tallerlaprueba.test>",
+      "subject": "Factura de marzo",
+      "body": "Buenos días, ¿podéis enviarme la factura F-2031 de los trabajos de marzo? La necesita mi gestor.",
+      "headers": [
+        {
+          "name": "Content-Type",
+          "value": "text/plain; charset=utf-8"
+        }
+      ]
+    }
+  },
+  {
+    "id": "T002",
+    "kind": "triage",
+    "input": {
+      "from": "Iván Salcedo <ivan@clinicasol.example>",
+      "subject": "Copia de factura",
+      "body": "Hola, perdí el PDF de la factura F-2044. ¿Me la mandáis otra vez, por favor?",
+      "headers": [
+        {
+          "name": "Content-Type",
+          "value": "text/plain; charset=utf-8"
+        }
+      ]
+    }
+  },
+  {
+    "id": "T003",
+    "kind": "triage",
+    "input": {
+      "from": "Lucía Barrantes <lucia@mueblesnorte.test>",
+      "subject": "Necesito factura",
+      "body": "Hola, no me llegó la factura del pedido P-880. Agradecería que me la enviarais hoy si es posible.",
+      "headers": [
+        {
+          "name": "Content-Type",
+          "value": "text/plain; charset=utf-8"
+        }
+      ]
+    }
+  },
+  {
+    "id": "T004",
+    "kind": "triage",
+    "input": {
+      "from": "Óscar Meléndez <oscar@papeleriamar.example>",
+      "subject": "Duplicado F-2050",
+      "body": "Buenas tardes. Solicito un duplicado de la factura F-2050 con los datos fiscales de mi empresa.",
+      "headers": [
+        {
+          "name": "Content-Type",
+          "value": "text/plain; charset=utf-8"
+        }
+      ]
+    }
+  },
+  {
+    "id": "T005",
+    "kind": "triage",
+    "input": {
+      "from": "Paula Iriarte <paula@gestoriaplaza.test>",
+      "subject": "Factura a nombre de la sociedad",
+      "body": "Hola, hice el encargo como particular pero necesito la factura a nombre de Construcciones Alameda S.L. ¿Es posible emitirla?",
+      "headers": [
+        {
+          "name": "Content-Type",
+          "value": "text/plain; charset=utf-8"
+        }
+      ]
+    }
+  },
+  {
+    "id": "T006",
+    "kind": "triage",
+    "input": {
+      "from": "Rubén Cazorla <ruben@viveroverde.example>",
+      "subject": "Factura pendiente",
+      "body": "Todavía no tengo la factura del servicio de la semana pasada. ¿Cuándo me la podéis pasar?",
+      "headers": [
+        {
+          "name": "Content-Type",
+          "value": "text/plain; charset=utf-8"
+        }
+      ]
+    }
+  },
+  {
+    "id": "T007",
+    "kind": "triage",
+    "input": {
+      "from": "Elena Ugarte <elena@asesoriaeste.test>",
+      "subject": "Re: presupuesto aceptado",
+      "body": "Gracias por el presupuesto, lo acepto. Cuando esté hecho el trabajo, ¿me enviaréis la factura por correo electrónico?",
+      "headers": [
+        {
+          "name": "Content-Type",
+          "value": "text/plain; charset=utf-8"
+        }
+      ]
+    }
+  },
+  {
+    "id": "T008",
+    "kind": "triage",
+    "input": {
+      "from": "Hugo Sandoval <hugo@ferreteriaoeste.example>",
+      "subject": "Factura trimestral",
+      "body": "Hola, necesito las facturas del último trimestre para la declaración. ¿Podéis enviármelas juntas?",
+      "headers": [
+        {
+          "name": "Content-Type",
+          "value": "text/plain; charset=utf-8"
+        }
+      ]
+    }
+  },
+  {
+    "id": "T009",
+    "kind": "triage",
+    "input": {
+      "from": "Nerea Collado <nerea@tallerlaprueba.test>",
+      "subject": "pdf factura",
+      "body": "hola mandame el pdf de la F-2077 q no lo encuentro, gracias",
+      "headers": [
+        {
+          "name": "Content-Type",
+          "value": "text/plain; charset=utf-8"
+        }
+      ]
+    }
+  },
+  {
+    "id": "T010",
+    "kind": "triage",
+    "input": {
+      "from": "Tomás Villalba <tomas@clinicasol.example>",
+      "subject": "Solicitud de factura con IVA desglosado",
+      "body": "Buenos días: les ruego una factura con el IVA desglosado correspondiente a la compra del día 12.",
+      "headers": [
+        {
+          "name": "Content-Type",
+          "value": "text/plain; charset=utf-8"
+        }
+      ]
+    }
+  },
+  {
+    "id": "T011",
+    "kind": "triage",
+    "input": {
+      "from": "Carla Mendizábal <carla@mueblesnorte.test>",
+      "subject": "Factura rectificativa",
+      "body": "Buenas, ¿pueden emitirme una copia de la factura F-2091? Mi contable la reclama para cerrar el mes.",
+      "headers": [
+        {
+          "name": "Content-Type",
+          "value": "text/plain; charset=utf-8"
+        }
+      ]
+    }
+  },
+  {
+    "id": "T012",
+    "kind": "triage",
+    "input": {
+      "from": "Julián Pardo <julian@papeleriamar.example>",
+      "subject": "Factura de reparación",
+      "body": "Hola, el coche ya está recogido. ¿Me pasáis la factura de la reparación por correo? Un saludo.",
+      "headers": [
+        {
+          "name": "Content-Type",
+          "value": "text/plain; charset=utf-8"
+        }
+      ]
+    }
+  },
+  {
+    "id": "T013",
+    "kind": "triage",
+    "input": {
+      "from": "Irene Casal <irene@gestoriaplaza.test>",
+      "subject": "¿Recibido el pago?",
+      "body": "Buenas tardes, hice la transferencia de la factura F-2102 el lunes. ¿Podéis confirmarme que ya la habéis recibido?",
+      "headers": [
+        {
+          "name": "Content-Type",
+          "value": "text/plain; charset=utf-8"
+        }
+      ]
+    }
+  },
+  {
+    "id": "T014",
+    "kind": "triage",
+    "input": {
+      "from": "Sergio Valdés <sergio@viveroverde.example>",
+      "subject": "Estado del pago F-2110",
+      "body": "Hola, quería saber si consta como pagada la factura F-2110. Me reclaman el justificante.",
+      "headers": [
+        {
+          "name": "Content-Type",
+          "value": "text/plain; charset=utf-8"
+        }
+      ]
+    }
+  },
+  {
+    "id": "T015",
+    "kind": "triage",
+    "input": {
+      "from": "Alba Cifuentes <alba@asesoriaeste.test>",
+      "subject": "Pago pendiente",
+      "body": "Buenos días, ¿tenéis pendiente algún pago mío? Quisiera ponerme al día esta semana.",
+      "headers": [
+        {
+          "name": "Content-Type",
+          "value": "text/plain; charset=utf-8"
+        }
+      ]
+    }
+  },
+  {
+    "id": "T016",
+    "kind": "triage",
+    "input": {
+      "from": "Gael Montero <gael@ferreteriaoeste.example>",
+      "subject": "Transferencia realizada",
+      "body": "Les confirmo que he realizado el pago de la factura F-2118. ¿Me avisáis cuando lo veáis en la cuenta?",
+      "headers": [
+        {
+          "name": "Content-Type",
+          "value": "text/plain; charset=utf-8"
+        }
+      ]
+    }
+  },
+  {
+    "id": "T017",
+    "kind": "triage",
+    "input": {
+      "from": "Noelia Arriaga <noelia@tallerlaprueba.test>",
+      "subject": "¿Cuánto debo?",
+      "body": "Hola, ¿me podéis decir qué importe tengo pendiente de pago? Prefiero liquidarlo de una vez.",
+      "headers": [
+        {
+          "name": "Content-Type",
+          "value": "text/plain; charset=utf-8"
+        }
+      ]
+    }
+  },
+  {
+    "id": "T018",
+    "kind": "triage",
+    "input": {
+      "from": "Pablo Ledesma <pablo@clinicasol.example>",
+      "subject": "Cobro duplicado",
+      "body": "Veo en el banco dos cargos por la misma factura F-2125. ¿Podéis confirmar cuál es el correcto?",
+      "headers": [
+        {
+          "name": "Content-Type",
+          "value": "text/plain; charset=utf-8"
+        }
+      ]
+    }
+  },
+  {
+    "id": "T019",
+    "kind": "triage",
+    "input": {
+      "from": "Rocío Elizalde <rocio@mueblesnorte.test>",
+      "subject": "Fecha de vencimiento",
+      "body": "Buenas, ¿hasta qué día puedo pagar la factura F-2131 sin recargo?",
+      "headers": [
+        {
+          "name": "Content-Type",
+          "value": "text/plain; charset=utf-8"
+        }
+      ]
+    }
+  },
+  {
+    "id": "T020",
+    "kind": "triage",
+    "input": {
+      "from": "Daniel Orrantia <daniel@papeleriamar.example>",
+      "subject": "Justificante de pago",
+      "body": "Hola, ¿me enviáis un justificante del pago que hice el día 3? Lo necesito para mi contabilidad.",
+      "headers": [
+        {
+          "name": "Content-Type",
+          "value": "text/plain; charset=utf-8"
+        }
+      ]
+    }
+  },
+  {
+    "id": "T021",
+    "kind": "triage",
+    "input": {
+      "from": "Marta Quiroga <marta@gestoriaplaza.test>",
+      "subject": "Pagado o no",
+      "body": "Mi mujer dice que ya pagamos la F-2140 y yo creo que no. ¿Lo podéis comprobar?",
+      "headers": [
+        {
+          "name": "Content-Type",
+          "value": "text/plain; charset=utf-8"
+        }
+      ]
+    }
+  },
+  {
+    "id": "T022",
+    "kind": "triage",
+    "input": {
+      "from": "Iván Salcedo <ivan@viveroverde.example>",
+      "subject": "Forma de pago",
+      "body": "Buenos días. ¿Puedo pagar la factura F-2145 en dos plazos? Dime qué opciones tengo.",
+      "headers": [
+        {
+          "name": "Content-Type",
+          "value": "text/plain; charset=utf-8"
+        }
+      ]
+    }
+  },
+  {
+    "id": "T023",
+    "kind": "triage",
+    "input": {
+      "from": "Lucía Barrantes <lucia@asesoriaeste.test>",
+      "subject": "Recordatorio de pago",
+      "body": "Recibí un aviso de pago pendiente pero creo que ya lo abonamos. ¿Podéis mirarlo, por favor?",
+      "headers": [
+        {
+          "name": "Content-Type",
+          "value": "text/plain; charset=utf-8"
+        }
+      ]
+    }
+  },
+  {
+    "id": "T024",
+    "kind": "triage",
+    "input": {
+      "from": "Óscar Meléndez <oscar@ferreteriaoeste.example>",
+      "subject": "Domiciliación",
+      "body": "Hola, ¿se ha pasado ya el recibo de este mes? No veo el cargo en mi cuenta.",
+      "headers": [
+        {
+          "name": "Content-Type",
+          "value": "text/plain; charset=utf-8"
+        }
+      ]
+    }
+  },
+  {
+    "id": "T025",
+    "kind": "triage",
+    "input": {
+      "from": "Paula Iriarte <paula@tallerlaprueba.test>",
+      "subject": "Error en la factura F-2201",
+      "body": "Hola, la factura F-2201 lleva un importe distinto del presupuesto. Por favor, revisadla.",
+      "headers": [
+        {
+          "name": "Content-Type",
+          "value": "text/plain; charset=utf-8"
+        }
+      ]
+    }
+  },
+  {
+    "id": "T026",
+    "kind": "triage",
+    "input": {
+      "from": "Rubén Cazorla <ruben@clinicasol.example>",
+      "subject": "Datos fiscales incorrectos",
+      "body": "Buenas tardes, mi NIF está mal en la factura F-2208. Necesito que la corrijáis y me la reenviéis.",
+      "headers": [
+        {
+          "name": "Content-Type",
+          "value": "text/plain; charset=utf-8"
+        }
+      ]
+    }
+  },
+  {
+    "id": "T027",
+    "kind": "triage",
+    "input": {
+      "from": "Elena Ugarte <elena@mueblesnorte.test>",
+      "subject": "IVA mal aplicado",
+      "body": "Creo que habéis aplicado el 21 % de IVA donde correspondía el 10 %. ¿Podéis revisar la factura F-2215?",
+      "headers": [
+        {
+          "name": "Content-Type",
+          "value": "text/plain; charset=utf-8"
+        }
+      ]
+    }
+  },
+  {
+    "id": "T028",
+    "kind": "triage",
+    "input": {
+      "from": "Hugo Sandoval <hugo@papeleriamar.example>",
+      "subject": "Factura duplicada",
+      "body": "Me han llegado dos facturas iguales, la F-2220 y la F-2221. Una sobra, ¿no?",
+      "headers": [
+        {
+          "name": "Content-Type",
+          "value": "text/plain; charset=utf-8"
+        }
+      ]
+    }
+  },
+  {
+    "id": "T029",
+    "kind": "triage",
+    "input": {
+      "from": "Nerea Collado <nerea@gestoriaplaza.test>",
+      "subject": "Concepto erróneo",
+      "body": "El concepto de la factura F-2227 no corresponde al trabajo que hicisteis. Revisadlo, por favor.",
+      "headers": [
+        {
+          "name": "Content-Type",
+          "value": "text/plain; charset=utf-8"
+        }
+      ]
+    }
+  },
+  {
+    "id": "T030",
+    "kind": "triage",
+    "input": {
+      "from": "Tomás Villalba <tomas@viveroverde.example>",
+      "subject": "Fecha equivocada",
+      "body": "La factura F-2233 está fechada en el mes anterior al servicio. Necesito que la corrijáis.",
+      "headers": [
+        {
+          "name": "Content-Type",
+          "value": "text/plain; charset=utf-8"
+        }
+      ]
+    }
+  },
+  {
+    "id": "T031",
+    "kind": "triage",
+    "input": {
+      "from": "Carla Mendizábal <carla@asesoriaeste.test>",
+      "subject": "Cantidad incorrecta",
+      "body": "En la F-2240 cobráis diez unidades y yo solo recibí ocho. Pido que se revise.",
+      "headers": [
+        {
+          "name": "Content-Type",
+          "value": "text/plain; charset=utf-8"
+        }
+      ]
+    }
+  },
+  {
+    "id": "T032",
+    "kind": "triage",
+    "input": {
+      "from": "Julián Pardo <julian@ferreteriaoeste.example>",
+      "subject": "Nombre mal escrito",
+      "body": "Mi apellido aparece mal en la factura F-2246, falta una letra. ¿Pueden emitir una corrección?",
+      "headers": [
+        {
+          "name": "Content-Type",
+          "value": "text/plain; charset=utf-8"
+        }
+      ]
+    }
+  },
+  {
+    "id": "T033",
+    "kind": "triage",
+    "input": {
+      "from": "Irene Casal <irene@tallerlaprueba.test>",
+      "subject": "Importe no cuadra",
+      "body": "El total de la factura F-2252 no coincide con la suma de las líneas. Os agradeceré que lo reviséis.",
+      "headers": [
+        {
+          "name": "Content-Type",
+          "value": "text/plain; charset=utf-8"
+        }
+      ]
+    }
+  },
+  {
+    "id": "T034",
+    "kind": "triage",
+    "input": {
+      "from": "Sergio Valdés <sergio@clinicasol.example>",
+      "subject": "Descuento no aplicado",
+      "body": "Acordamos un descuento del 5 % y no aparece en la factura F-2259. ¿Podéis revisarla?",
+      "headers": [
+        {
+          "name": "Content-Type",
+          "value": "text/plain; charset=utf-8"
+        }
+      ]
+    }
+  },
+  {
+    "id": "T035",
+    "kind": "triage",
+    "input": {
+      "from": "Alba Cifuentes <alba@mueblesnorte.test>",
+      "subject": "Reclamación factura",
+      "body": "Quiero reclamar la factura F-2265: cobráis un desplazamiento que no hubo.",
+      "headers": [
+        {
+          "name": "Content-Type",
+          "value": "text/plain; charset=utf-8"
+        }
+      ]
+    }
+  },
+  {
+    "id": "T036",
+    "kind": "triage",
+    "input": {
+      "from": "Gael Montero <gael@papeleriamar.example>",
+      "subject": "Dirección de facturación",
+      "body": "La dirección de facturación de la F-2270 es la antigua. Por favor, corregid y reenviad.",
+      "headers": [
+        {
+          "name": "Content-Type",
+          "value": "text/plain; charset=utf-8"
+        }
+      ]
+    }
+  },
+  {
+    "id": "T037",
+    "kind": "triage",
+    "input": {
+      "from": "Noelia Arriaga <noelia@gestoriaplaza.test>",
+      "subject": "Documentación adjunta",
+      "body": "Hola, os envío la documentación que me pedisteis para dar de alta mi cuenta. Confirmad que os llega bien.",
+      "headers": [
+        {
+          "name": "Content-Type",
+          "value": "text/plain; charset=utf-8"
+        }
+      ]
+    }
+  },
+  {
+    "id": "T038",
+    "kind": "triage",
+    "input": {
+      "from": "Pablo Ledesma <pablo@viveroverde.example>",
+      "subject": "Certificado de estar al corriente",
+      "body": "Buenos días, necesito un certificado de estar al corriente de pago para presentarlo en un concurso.",
+      "headers": [
+        {
+          "name": "Content-Type",
+          "value": "text/plain; charset=utf-8"
+        }
+      ]
+    }
+  },
+  {
+    "id": "T039",
+    "kind": "triage",
+    "input": {
+      "from": "Rocío Elizalde <rocio@asesoriaeste.test>",
+      "subject": "Contrato firmado",
+      "body": "Adjunto el contrato firmado. ¿Falta algún documento más por mi parte?",
+      "headers": [
+        {
+          "name": "Content-Type",
+          "value": "text/plain; charset=utf-8"
+        }
+      ]
+    }
+  },
+  {
+    "id": "T040",
+    "kind": "triage",
+    "input": {
+      "from": "Daniel Orrantia <daniel@ferreteriaoeste.example>",
+      "subject": "Certificado de retenciones",
+      "body": "¿Me podéis facilitar el certificado de retenciones del año pasado? Lo necesito para la renta.",
+      "headers": [
+        {
+          "name": "Content-Type",
+          "value": "text/plain; charset=utf-8"
+        }
+      ]
+    }
+  },
+  {
+    "id": "T041",
+    "kind": "triage",
+    "input": {
+      "from": "Marta Quiroga <marta@tallerlaprueba.test>",
+      "subject": "Papeles de la garantía",
+      "body": "Hola, ¿qué documentos hacen falta para tramitar la garantía del equipo? Los tengo a mano.",
+      "headers": [
+        {
+          "name": "Content-Type",
+          "value": "text/plain; charset=utf-8"
+        }
+      ]
+    }
+  },
+  {
+    "id": "T042",
+    "kind": "triage",
+    "input": {
+      "from": "Iván Salcedo <ivan@clinicasol.example>",
+      "subject": "Escrituras",
+      "body": "Os mando copia de las escrituras de la sociedad, como acordamos. Decidme si es suficiente.",
+      "headers": [
+        {
+          "name": "Content-Type",
+          "value": "text/plain; charset=utf-8"
+        }
+      ]
+    }
+  },
+  {
+    "id": "T043",
+    "kind": "triage",
+    "input": {
+      "from": "Lucía Barrantes <lucia@mueblesnorte.test>",
+      "subject": "Ficha técnica",
+      "body": "Buenas tardes, ¿me podéis enviar la ficha técnica y el certificado de conformidad del producto?",
+      "headers": [
+        {
+          "name": "Content-Type",
+          "value": "text/plain; charset=utf-8"
+        }
+      ]
+    }
+  },
+  {
+    "id": "T044",
+    "kind": "triage",
+    "input": {
+      "from": "Óscar Meléndez <oscar@papeleriamar.example>",
+      "subject": "Alta de proveedor",
+      "body": "Adjunto el formulario de alta de proveedor relleno. ¿Podéis confirmar la recepción de los documentos?",
+      "headers": [
+        {
+          "name": "Content-Type",
+          "value": "text/plain; charset=utf-8"
+        }
+      ]
+    }
+  },
+  {
+    "id": "T045",
+    "kind": "triage",
+    "input": {
+      "from": "Paula Iriarte <paula@gestoriaplaza.test>",
+      "subject": "Justificante de domicilio",
+      "body": "Me piden un justificante de que soy cliente vuestro con dirección. ¿Podéis darme un documento?",
+      "headers": [
+        {
+          "name": "Content-Type",
+          "value": "text/plain; charset=utf-8"
+        }
+      ]
+    }
+  },
+  {
+    "id": "T046",
+    "kind": "triage",
+    "input": {
+      "from": "Rubén Cazorla <ruben@viveroverde.example>",
+      "subject": "Documento de identidad",
+      "body": "Os reenvío el documento que faltaba, ya escaneado correctamente. Gracias por la paciencia.",
+      "headers": [
+        {
+          "name": "Content-Type",
+          "value": "text/plain; charset=utf-8"
+        }
+      ]
+    }
+  },
+  {
+    "id": "T047",
+    "kind": "triage",
+    "input": {
+      "from": "Elena Ugarte <elena@asesoriaeste.test>",
+      "subject": "Certificado de calidad",
+      "body": "Necesitamos el certificado de calidad del lote entregado. ¿Os lo podéis pedir al fabricante?",
+      "headers": [
+        {
+          "name": "Content-Type",
+          "value": "text/plain; charset=utf-8"
+        }
+      ]
+    }
+  },
+  {
+    "id": "T048",
+    "kind": "triage",
+    "input": {
+      "from": "Hugo Sandoval <hugo@ferreteriaoeste.example>",
+      "subject": "Autorización firmada",
+      "body": "Adjunto la autorización firmada para gestionar mis trámites. ¿Me confirmáis que es válida?",
+      "headers": [
+        {
+          "name": "Content-Type",
+          "value": "text/plain; charset=utf-8"
+        }
+      ]
+    }
+  },
+  {
+    "id": "T049",
+    "kind": "triage",
+    "input": {
+      "from": "Nerea Collado <nerea@tallerlaprueba.test>",
+      "subject": "Consulta de horario",
+      "body": "Hola, ¿a qué hora cerráis los sábados? Quisiera pasarme esta semana.",
+      "headers": [
+        {
+          "name": "Content-Type",
+          "value": "text/plain; charset=utf-8"
+        }
+      ]
+    }
+  },
+  {
+    "id": "T050",
+    "kind": "triage",
+    "input": {
+      "from": "Tomás Villalba <tomas@clinicasol.example>",
+      "subject": "Presupuesto para reforma",
+      "body": "Buenas, me gustaría pedir presupuesto para una reforma pequeña. ¿Cuándo podríais venir a verlo?",
+      "headers": [
+        {
+          "name": "Content-Type",
+          "value": "text/plain; charset=utf-8"
+        }
+      ]
+    }
+  },
+  {
+    "id": "T051",
+    "kind": "triage",
+    "input": {
+      "from": "Carla Mendizábal <carla@mueblesnorte.test>",
+      "subject": "Cita",
+      "body": "Hola, ¿tenéis hueco el jueves por la tarde? Necesito que me atendáis sobre mi encargo.",
+      "headers": [
+        {
+          "name": "Content-Type",
+          "value": "text/plain; charset=utf-8"
+        }
+      ]
+    }
+  },
+  {
+    "id": "T052",
+    "kind": "triage",
+    "input": {
+      "from": "Julián Pardo <julian@papeleriamar.example>",
+      "subject": "Sugerencia",
+      "body": "Quería comentaros que el servicio fue excelente. Una cosa: ¿podríais ofrecer también entrega a domicilio?",
+      "headers": [
+        {
+          "name": "Content-Type",
+          "value": "text/plain; charset=utf-8"
+        }
+      ]
+    }
+  },
+  {
+    "id": "T053",
+    "kind": "triage",
+    "input": {
+      "from": "Irene Casal <irene@gestoriaplaza.test>",
+      "subject": "Pregunta sobre un producto",
+      "body": "Buenas tardes, ¿tenéis en stock el modelo grande? Me interesaría si el precio es razonable.",
+      "headers": [
+        {
+          "name": "Content-Type",
+          "value": "text/plain; charset=utf-8"
+        }
+      ]
+    }
+  },
+  {
+    "id": "T054",
+    "kind": "triage",
+    "input": {
+      "from": "Sergio Valdés <sergio@viveroverde.example>",
+      "subject": "Cambio de dirección",
+      "body": "Hola, me he mudado. ¿Cómo puedo actualizar mi dirección en vuestros registros?",
+      "headers": [
+        {
+          "name": "Content-Type",
+          "value": "text/plain; charset=utf-8"
+        }
+      ]
+    }
+  },
+  {
+    "id": "T055",
+    "kind": "triage",
+    "input": {
+      "from": "Alba Cifuentes <alba@asesoriaeste.test>",
+      "subject": "Colaboración",
+      "body": "Somos una asociación de comerciantes del barrio y nos gustaría hablar con vosotros sobre una colaboración.",
+      "headers": [
+        {
+          "name": "Content-Type",
+          "value": "text/plain; charset=utf-8"
+        }
+      ]
+    }
+  },
+  {
+    "id": "T056",
+    "kind": "triage",
+    "input": {
+      "from": "Gael Montero <gael@ferreteriaoeste.example>",
+      "subject": "¿Hacéis envíos?",
+      "body": "Hola, ¿hacéis envíos a otra provincia? Y si es así, ¿cuánto tardan?",
+      "headers": [
+        {
+          "name": "Content-Type",
+          "value": "text/plain; charset=utf-8"
+        }
+      ]
+    }
+  },
+  {
+    "id": "T057",
+    "kind": "triage",
+    "input": {
+      "from": "Noelia Arriaga <noelia@tallerlaprueba.test>",
+      "subject": "Baja del servicio",
+      "body": "Buenos días, quiero darme de baja del servicio a final de mes. ¿Qué tengo que hacer?",
+      "headers": [
+        {
+          "name": "Content-Type",
+          "value": "text/plain; charset=utf-8"
+        }
+      ]
+    }
+  },
+  {
+    "id": "T058",
+    "kind": "triage",
+    "input": {
+      "from": "Pablo Ledesma <pablo@clinicasol.example>",
+      "subject": "Queja por retraso",
+      "body": "Llevamos tres semanas esperando el pedido y nadie responde al teléfono. Exijo una respuesta.",
+      "headers": [
+        {
+          "name": "Content-Type",
+          "value": "text/plain; charset=utf-8"
+        }
+      ]
+    }
+  },
+  {
+    "id": "T059",
+    "kind": "triage",
+    "input": {
+      "from": "Rocío Elizalde <rocio@mueblesnorte.test>",
+      "subject": "Pregunta de plazos",
+      "body": "¿Cuánto tarda normalmente un encargo como el que hablamos? Tengo que planificar la obra.",
+      "headers": [
+        {
+          "name": "Content-Type",
+          "value": "text/plain; charset=utf-8"
+        }
+      ]
+    }
+  },
+  {
+    "id": "T060",
+    "kind": "triage",
+    "input": {
+      "from": "Daniel Orrantia <daniel@papeleriamar.example>",
+      "subject": "Mensaje personal",
+      "body": "Hola, soy Carlos, el sobrino de Pilar. Me dijo que os escribiera para preguntar por su pedido.",
+      "headers": [
+        {
+          "name": "Content-Type",
+          "value": "text/plain; charset=utf-8"
+        }
+      ]
+    }
+  },
+  {
+    "id": "T061",
+    "kind": "triage",
+    "input": {
+      "from": "Ventas Taller Ruiz <ventas@tallerruiz.example>",
+      "subject": "Factura de la reparación",
+      "body": "Hola, desde nuestro CRM os escribo: ¿podéis enviarnos la factura F-3001? Es de la reparación del 4.",
+      "headers": [
+        {
+          "name": "List-Unsubscribe",
+          "value": "<mailto:baja@tallerruiz.example>"
+        }
+      ]
+    }
+  },
+  {
+    "id": "T062",
+    "kind": "triage",
+    "input": {
+      "from": "Administración Bar Ancla <admin@baranclax.test>",
+      "subject": "Pago de la F-3010",
+      "body": "Buenos días, hemos pagado la factura F-3010 por transferencia. ¿Podéis confirmar que ya está recibida?",
+      "headers": [
+        {
+          "name": "List-Unsubscribe",
+          "value": "<https://crm.baranclax.test/baja?u=1>"
+        },
+        {
+          "name": "List-Unsubscribe-Post",
+          "value": "List-Unsubscribe=One-Click"
+        }
+      ]
+    }
+  },
+  {
+    "id": "T063",
+    "kind": "triage",
+    "input": {
+      "from": "Compras Hostal Olmo <compras@hostalolmo.example>",
+      "subject": "Error en importe",
+      "body": "La factura F-3022 muestra 480,00 € y el albarán decía 408,00 €. Por favor, revisadlo.",
+      "headers": [
+        {
+          "name": "X-Mailer",
+          "value": "Zoho CRM"
+        },
+        {
+          "name": "List-Unsubscribe",
+          "value": "<mailto:unsub@hostalolmo.example>"
+        }
+      ]
+    }
+  },
+  {
+    "id": "T064",
+    "kind": "triage",
+    "input": {
+      "from": "Lola Peñalver <lola@pelucacasa.test>",
+      "subject": "Certificado",
+      "body": "Hola, necesito un certificado de que soy clienta desde 2019. ¿Podéis hacerlo?",
+      "headers": [
+        {
+          "name": "List-Id",
+          "value": "<clientes.pelucacasa.test>"
+        }
+      ]
+    }
+  },
+  {
+    "id": "T065",
+    "kind": "triage",
+    "input": {
+      "from": "Gestión Cooperativa Vega <gestion@coopvega.test>",
+      "subject": "Consulta de condiciones",
+      "body": "Somos una cooperativa y escribimos desde el buzón compartido del grupo. ¿Podéis enviarnos vuestras condiciones de servicio?",
+      "headers": [
+        {
+          "name": "List-Id",
+          "value": "<gestion.coopvega.test>"
+        },
+        {
+          "name": "Precedence",
+          "value": "list"
+        }
+      ]
+    }
+  },
+  {
+    "id": "T066",
+    "kind": "triage",
+    "input": {
+      "from": "Contabilidad Óptica Dalmau <conta@opticadalmau.example>",
+      "subject": "Factura F-3040",
+      "body": "Hola, enviadnos la factura F-3040 con la referencia del pedido, por favor.",
+      "headers": [
+        {
+          "name": "Precedence",
+          "value": "bulk"
+        },
+        {
+          "name": "X-Mailer",
+          "value": "Mailchimp Transactional"
+        }
+      ]
+    }
+  },
+  {
+    "id": "T067",
+    "kind": "triage",
+    "input": {
+      "from": "Rafael Prieto <rafael@prietoreformas.test>",
+      "subject": "¿Está pagada la F-3055?",
+      "body": "Rafa aquí. Mi software de contabilidad me manda copias; ¿está pagada la F-3055? Dímelo cuando puedas.",
+      "headers": [
+        {
+          "name": "List-Unsubscribe",
+          "value": "<mailto:x@prietoreformas.test>"
+        }
+      ]
+    }
+  },
+  {
+    "id": "T068",
+    "kind": "triage",
+    "input": {
+      "from": "Soporte Imprenta Lara <soporte@imprentalara.example>",
+      "subject": "Documento fiscal",
+      "body": "Buenos días, os enviamos el certificado de residencia fiscal que pedisteis y necesitamos el vuestro. ¿Me lo mandáis?",
+      "headers": [
+        {
+          "name": "List-Unsubscribe",
+          "value": "<https://lara.example/u/9>"
+        }
+      ]
+    }
+  },
+  {
+    "id": "T069",
+    "kind": "triage",
+    "input": {
+      "from": "Silvia Nogal <silvia@nogalinteriores.test>",
+      "subject": "Mensaje desde formulario",
+      "body": "Hola, os escribo desde el formulario de mi web de empresa. Quiero que me llaméis para hablar de un proyecto.",
+      "headers": [
+        {
+          "name": "Precedence",
+          "value": "bulk"
+        }
+      ]
+    }
+  },
+  {
+    "id": "T070",
+    "kind": "triage",
+    "input": {
+      "from": "Dirección Colegio San Telmo <direccion@sanTelmo.example>",
+      "subject": "Factura del curso",
+      "body": "Solicitamos copia de la factura del curso de formación, referencia F-3071, para justificar la subvención.",
+      "headers": [
+        {
+          "name": "List-Id",
+          "value": "<direccion.santelmo.example>"
+        },
+        {
+          "name": "List-Unsubscribe",
+          "value": "<mailto:l@santelmo.example>"
+        },
+        {
+          "name": "Precedence",
+          "value": "bulk"
+        }
+      ]
+    }
+  },
+  {
+    "id": "T071",
+    "kind": "triage",
+    "input": {
+      "from": "Inc. Noreplyinc <noreplyinc@empresa.test>",
+      "subject": "Pago de la F-3080",
+      "body": "Nuestra dirección contiene una palabra parecida a un buzón automático, pero somos personas. ¿Habéis recibido el pago de la F-3080?",
+      "headers": [
+        {
+          "name": "Content-Type",
+          "value": "text/plain; charset=utf-8"
+        }
+      ]
+    }
+  },
+  {
+    "id": "T072",
+    "kind": "triage",
+    "input": {
+      "from": "Arnold Pons <arnold@pons.test>",
+      "subject": "Factura de enero",
+      "body": "Hola, ¿podéis enviarme la factura de enero? Gracias.",
+      "headers": [
+        {
+          "name": "Content-Type",
+          "value": "text/plain; charset=utf-8"
+        }
+      ]
+    }
+  },
+  {
+    "id": "T073",
+    "kind": "triage",
+    "input": {
+      "from": "Honor Reply <honoreply@honor.test>",
+      "subject": "Incidencia con factura",
+      "body": "La factura F-3092 tiene el nombre mal escrito. ¿La revisáis?",
+      "headers": [
+        {
+          "name": "Content-Type",
+          "value": "text/plain; charset=utf-8"
+        }
+      ]
+    }
+  },
+  {
+    "id": "T074",
+    "kind": "triage",
+    "input": {
+      "from": "Mario Soto <mario@sotoyhijos.test>",
+      "subject": "Documento pendiente",
+      "body": "Cuando podáis, ¿me decís qué documentos faltan para el alta? Gracias.",
+      "headers": [
+        {
+          "name": "Auto-Submitted",
+          "value": "no"
+        }
+      ]
+    }
+  },
+  {
+    "id": "T075",
+    "kind": "triage",
+    "input": {
+      "from": "Teresa Bellido <teresa@bellidoyasociados.example>",
+      "subject": "Pago de la F-3101",
+      "body": "Hola, os confirmo que pagué la F-3101. ¿Me contestáis cuando lo veáis?",
+      "headers": [
+        {
+          "name": "Auto-Submitted",
+          "value": "no (enviado por una persona)"
+        }
+      ]
+    }
+  },
+  {
+    "id": "T076",
+    "kind": "triage",
+    "input": {
+      "from": "Joaquín Ferrer <joaquin@ferrerobras.test>",
+      "subject": "Presupuesto",
+      "body": "Necesito presupuesto para una instalación. Llamadme si queréis aclarar cualquier cosa.",
+      "headers": [
+        {
+          "name": "Precedence",
+          "value": "first-class"
+        }
+      ]
+    }
+  },
+  {
+    "id": "T077",
+    "kind": "triage",
+    "input": {
+      "from": "Ana Belén Cortés <ab@cortesyasoc.example>",
+      "subject": "Reclamación de factura",
+      "body": "Veo en la factura F-3115 un recargo que no esperaba. Os pido que lo revisemos.",
+      "headers": [
+        {
+          "name": "Return-Path",
+          "value": "<ab@cortesyasoc.example>"
+        }
+      ]
+    }
+  },
+  {
+    "id": "T078",
+    "kind": "triage",
+    "input": {
+      "from": "Hermanos Ibáñez <info@hermanosibanez.test>",
+      "subject": "Copia de factura",
+      "body": "Buenas, nos podéis reenviar la factura F-3120? Muchas gracias.",
+      "headers": [
+        {
+          "name": "X-Mailer",
+          "value": "Outlook"
+        },
+        {
+          "name": "List-Unsubscribe",
+          "value": ""
+        }
+      ]
+    }
+  },
+  {
+    "id": "T079",
+    "kind": "triage",
+    "input": {
+      "from": "Ángela Rojas <angela@rojaslogistica.test>",
+      "subject": "Autorización",
+      "body": "Os mando la autorización firmada por el administrador. Confirmad que la documentación es correcta.",
+      "headers": [
+        {
+          "name": "Precedence",
+          "value": "list"
+        }
+      ]
+    }
+  },
+  {
+    "id": "T080",
+    "kind": "triage",
+    "input": {
+      "from": "Federico Alonso <fede@alonsoyfaus.example>",
+      "subject": "Retraso",
+      "body": "Mi pedido lleva retraso y necesito saber la fecha prevista de entrega.",
+      "headers": [
+        {
+          "name": "List-Id",
+          "value": "<pedidos.alonsoyfaus.example>"
+        }
+      ]
+    }
+  },
+  {
+    "id": "T081",
+    "kind": "triage",
+    "input": {
+      "from": "Facturación Servicios Luz <no-reply@serviciosluz.example>",
+      "subject": "Su factura F-4001 está disponible",
+      "body": "Su factura F-4001 ya está disponible en su área de cliente. Este mensaje es automático; no responda a este correo.",
+      "headers": [
+        {
+          "name": "Auto-Submitted",
+          "value": "auto-generated"
+        }
+      ]
+    }
+  },
+  {
+    "id": "T082",
+    "kind": "triage",
+    "input": {
+      "from": "Pagos Fácil <noreply@pagosfacil.test>",
+      "subject": "Hemos recibido su pago",
+      "body": "Hemos recibido su pago de 120,00 € correspondiente al recibo R-77. Gracias por usar nuestro servicio.",
+      "headers": [
+        {
+          "name": "Auto-Submitted",
+          "value": "auto-generated"
+        }
+      ]
+    }
+  },
+  {
+    "id": "T083",
+    "kind": "triage",
+    "input": {
+      "from": "Tienda Rápida <no_reply@tiendarapida.example>",
+      "subject": "Pedido enviado",
+      "body": "Su pedido PD-5532 ha salido de nuestro almacén. Seguimiento disponible en su cuenta.",
+      "headers": []
+    }
+  },
+  {
+    "id": "T084",
+    "kind": "triage",
+    "input": {
+      "from": "Gestor Documental <donotreply@gestordoc.test>",
+      "subject": "Documento firmado",
+      "body": "El documento 'Contrato de servicios' ha sido firmado por todas las partes. Puede descargarlo desde la plataforma.",
+      "headers": []
+    }
+  },
+  {
+    "id": "T085",
+    "kind": "triage",
+    "input": {
+      "from": "Soporte Nube <no.reply@soportenube.example>",
+      "subject": "Ticket 4482 actualizado",
+      "body": "Su ticket 4482 ha cambiado de estado a 'en curso'. Responda desde el portal, no por correo.",
+      "headers": [
+        {
+          "name": "Auto-Submitted",
+          "value": "auto-replied"
+        }
+      ]
+    }
+  },
+  {
+    "id": "T086",
+    "kind": "triage",
+    "input": {
+      "from": "Agenda Online <noresponder@agendaonline.test>",
+      "subject": "Recordatorio de cita",
+      "body": "Le recordamos su cita de mañana a las 10:00. Si desea cambiarla, use el enlace de su cuenta.",
+      "headers": []
+    }
+  },
+  {
+    "id": "T087",
+    "kind": "triage",
+    "input": {
+      "from": "Banco Ficticio Notificaciones <no-reply@bancoficticio.example>",
+      "subject": "Cargo en su cuenta",
+      "body": "Se ha realizado un cargo de 45,30 € en su cuenta terminada en 0000. Mensaje informativo.",
+      "headers": [
+        {
+          "name": "Auto-Submitted",
+          "value": "auto-generated"
+        }
+      ]
+    }
+  },
+  {
+    "id": "T088",
+    "kind": "triage",
+    "input": {
+      "from": "Mensajería Veloz <do-not-reply@mensajeriaveloz.test>",
+      "subject": "Entrega prevista hoy",
+      "body": "Su paquete se entregará hoy entre las 14:00 y las 18:00. No es necesario que responda.",
+      "headers": []
+    }
+  },
+  {
+    "id": "T089",
+    "kind": "triage",
+    "input": {
+      "from": "Alertas Calendario <calendario-noreply@alertas.example>",
+      "subject": "Invitación: reunión de equipo",
+      "body": "Reunión de equipo, viernes a las 9:00. Mensaje generado automáticamente.",
+      "headers": [
+        {
+          "name": "Auto-Submitted",
+          "value": "auto-generated"
+        }
+      ]
+    }
+  },
+  {
+    "id": "T090",
+    "kind": "triage",
+    "input": {
+      "from": "Sistema de Contabilidad <system@contabilidadpro.test>",
+      "subject": "Informe mensual generado",
+      "body": "Su informe mensual de contabilidad se ha generado automáticamente y está disponible para descarga.",
+      "headers": [
+        {
+          "name": "Auto-Submitted",
+          "value": "auto-generated; type=report"
+        }
+      ]
+    }
+  },
+  {
+    "id": "T091",
+    "kind": "triage",
+    "input": {
+      "from": "Respuesta automática <laura@asesoriaeste.test>",
+      "subject": "Respuesta automática: estoy fuera de la oficina",
+      "body": "Estaré fuera de la oficina hasta el día 20. Para asuntos urgentes, contacte con recepción.",
+      "headers": [
+        {
+          "name": "Auto-Submitted",
+          "value": "auto-replied"
+        }
+      ]
+    }
+  },
+  {
+    "id": "T092",
+    "kind": "triage",
+    "input": {
+      "from": "Cobros Recurrentes <accounts.noreply@cobrosrec.example>",
+      "subject": "Cobro de suscripción realizado",
+      "body": "Se ha cobrado su suscripción mensual. Puede consultar el recibo en su cuenta.",
+      "headers": []
+    }
+  },
+  {
+    "id": "T093",
+    "kind": "triage",
+    "input": {
+      "from": "Seguridad Cuenta <security-noreply@cuentasegura.example>",
+      "subject": "Nuevo inicio de sesión en su cuenta",
+      "body": "Se ha iniciado sesión desde un dispositivo nuevo en Madrid. Si no fue usted, cambie su contraseña.",
+      "headers": [
+        {
+          "name": "Auto-Submitted",
+          "value": "auto-generated"
+        }
+      ]
+    }
+  },
+  {
+    "id": "T094",
+    "kind": "triage",
+    "input": {
+      "from": "Verificación <no-reply@verificacion.test>",
+      "subject": "Su código de verificación",
+      "body": "Su código de verificación es 000000 y caduca en 10 minutos. No lo comparta con nadie.",
+      "headers": [
+        {
+          "name": "Auto-Submitted",
+          "value": "auto-generated"
+        }
+      ]
+    }
+  },
+  {
+    "id": "T095",
+    "kind": "triage",
+    "input": {
+      "from": "Acceso Seguro <noreply@accesoseguro.example>",
+      "subject": "Cambio de contraseña",
+      "body": "La contraseña de su cuenta se ha cambiado hace unos minutos. Si no fue usted, contacte con soporte.",
+      "headers": [
+        {
+          "name": "Auto-Submitted",
+          "value": "auto-generated"
+        }
+      ]
+    }
+  },
+  {
+    "id": "T096",
+    "kind": "triage",
+    "input": {
+      "from": "Banco Ficticio Seguridad <no-reply@bancoficticio.example>",
+      "subject": "Alerta de seguridad",
+      "body": "Hemos detectado un intento de acceso inusual. Nunca le pediremos su clave por correo.",
+      "headers": [
+        {
+          "name": "Auto-Submitted",
+          "value": "auto-generated"
+        }
+      ]
+    }
+  },
+  {
+    "id": "T097",
+    "kind": "triage",
+    "input": {
+      "from": "Protección Cuenta <no-reply@proteccioncuenta.test>",
+      "subject": "Confirme su dirección de correo",
+      "body": "Haga clic en el enlace para confirmar su dirección de correo. El enlace caduca en 24 horas.",
+      "headers": [
+        {
+          "name": "Auto-Submitted",
+          "value": "auto-generated"
+        }
+      ]
+    }
+  },
+  {
+    "id": "T098",
+    "kind": "triage",
+    "input": {
+      "from": "Autenticación <donotreply@autenticacion.example>",
+      "subject": "Autenticación en dos pasos activada",
+      "body": "Ha activado la verificación en dos pasos. Guarde sus códigos de recuperación en un lugar seguro.",
+      "headers": [
+        {
+          "name": "Auto-Submitted",
+          "value": "auto-generated"
+        }
+      ]
+    }
+  },
+  {
+    "id": "T099",
+    "kind": "triage",
+    "input": {
+      "from": "Seguridad Nube <noreply@seguridadnube.test>",
+      "subject": "Dispositivo nuevo conectado",
+      "body": "Un nuevo dispositivo se ha conectado a su cuenta. Revise su actividad reciente.",
+      "headers": [
+        {
+          "name": "Auto-Submitted",
+          "value": "auto-generated"
+        }
+      ]
+    }
+  },
+  {
+    "id": "T100",
+    "kind": "triage",
+    "input": {
+      "from": "Alertas Seguridad <alerts-no-reply@alertas.example>",
+      "subject": "Contraseña a punto de caducar",
+      "body": "Su contraseña caducará en 3 días. Cámbiela desde la configuración de su cuenta.",
+      "headers": [
+        {
+          "name": "Auto-Submitted",
+          "value": "auto-generated"
+        }
+      ]
+    }
+  },
+  {
+    "id": "T101",
+    "kind": "triage",
+    "input": {
+      "from": "Novedades Papel <no-reply@novedadespapel.example>",
+      "subject": "Las novedades de otoño",
+      "body": "Descubra nuestra nueva colección de otoño. Para darse de baja, use el enlace del pie.",
+      "headers": [
+        {
+          "name": "List-Unsubscribe",
+          "value": "<https://boletin.test/baja>"
+        },
+        {
+          "name": "List-Id",
+          "value": "<novedades.boletin.test>"
+        },
+        {
+          "name": "Precedence",
+          "value": "bulk"
+        }
+      ]
+    }
+  },
+  {
+    "id": "T102",
+    "kind": "triage",
+    "input": {
+      "from": "Boletín Asesores <noreply@boletinasesores.test>",
+      "subject": "Resumen fiscal del trimestre",
+      "body": "Resumen de las novedades fiscales del trimestre. Gracias por leernos.",
+      "headers": [
+        {
+          "name": "List-Unsubscribe",
+          "value": "<https://boletin.test/baja>"
+        },
+        {
+          "name": "List-Id",
+          "value": "<novedades.boletin.test>"
+        },
+        {
+          "name": "Precedence",
+          "value": "bulk"
+        }
+      ]
+    }
+  },
+  {
+    "id": "T103",
+    "kind": "triage",
+    "input": {
+      "from": "Club Cliente <no-reply@clubcliente.example>",
+      "subject": "Ofertas de la semana",
+      "body": "Hasta un 30 % en artículos seleccionados. Oferta válida hasta fin de mes.",
+      "headers": [
+        {
+          "name": "List-Unsubscribe",
+          "value": "<https://boletin.test/baja>"
+        },
+        {
+          "name": "List-Id",
+          "value": "<novedades.boletin.test>"
+        },
+        {
+          "name": "Precedence",
+          "value": "bulk"
+        }
+      ]
+    }
+  },
+  {
+    "id": "T104",
+    "kind": "triage",
+    "input": {
+      "from": "Tecnología Hoy <noreply@tecnologiahoy.test>",
+      "subject": "Las 5 noticias de la semana",
+      "body": "Cinco historias sobre tecnología para empezar la semana.",
+      "headers": [
+        {
+          "name": "List-Unsubscribe",
+          "value": "<https://boletin.test/baja>"
+        },
+        {
+          "name": "List-Id",
+          "value": "<novedades.boletin.test>"
+        },
+        {
+          "name": "Precedence",
+          "value": "bulk"
+        }
+      ]
+    }
+  },
+  {
+    "id": "T105",
+    "kind": "triage",
+    "input": {
+      "from": "Cursos Online <donotreply@cursosonline.example>",
+      "subject": "Nuevo curso disponible",
+      "body": "Ya puede matricularse en el nuevo curso de contabilidad básica.",
+      "headers": [
+        {
+          "name": "List-Unsubscribe",
+          "value": "<https://boletin.test/baja>"
+        },
+        {
+          "name": "List-Id",
+          "value": "<novedades.boletin.test>"
+        },
+        {
+          "name": "Precedence",
+          "value": "bulk"
+        }
+      ]
+    }
+  },
+  {
+    "id": "T106",
+    "kind": "triage",
+    "input": {
+      "from": "Plataforma Facturas <no-reply@plataformafacturas.example>",
+      "subject": "Bienvenido a Plataforma Facturas",
+      "body": "Gracias por registrarse. Su cuenta ya está activa; empiece configurando su empresa.",
+      "headers": [
+        {
+          "name": "Auto-Submitted",
+          "value": "auto-generated"
+        }
+      ]
+    }
+  },
+  {
+    "id": "T107",
+    "kind": "triage",
+    "input": {
+      "from": "Almacén en la Nube <noreply@almacennube.test>",
+      "subject": "Su cuenta ha sido creada",
+      "body": "Bienvenido. Hemos creado su cuenta con el correo que nos indicó.",
+      "headers": [
+        {
+          "name": "Auto-Submitted",
+          "value": "auto-generated"
+        }
+      ]
+    }
+  },
+  {
+    "id": "T108",
+    "kind": "triage",
+    "input": {
+      "from": "Comunidad de Clientes <no-reply@comunidadclientes.example>",
+      "subject": "Bienvenida a la comunidad",
+      "body": "Nos alegra que se una a nuestra comunidad. Explore los recursos disponibles.",
+      "headers": [
+        {
+          "name": "Auto-Submitted",
+          "value": "auto-generated"
+        }
+      ]
+    }
+  },
+  {
+    "id": "T109",
+    "kind": "triage",
+    "input": {
+      "from": "Mail Delivery Subsystem <mailer-daemon@googlemail.test>",
+      "subject": "Delivery Status Notification (Failure)",
+      "body": "No se ha podido entregar su mensaje a clienta@dominioinexistente.test. La dirección no existe.",
+      "headers": [
+        {
+          "name": "Return-Path",
+          "value": "<>"
+        },
+        {
+          "name": "Auto-Submitted",
+          "value": "auto-replied"
+        }
+      ]
+    }
+  },
+  {
+    "id": "T110",
+    "kind": "triage",
+    "input": {
+      "from": "MAILER-DAEMON <MAILER-DAEMON@correo-saliente.example>",
+      "subject": "Undelivered Mail Returned to Sender",
+      "body": "Su mensaje no pudo ser entregado: buzón lleno. Se intentó durante 3 días.",
+      "headers": [
+        {
+          "name": "Auto-Submitted",
+          "value": "auto-generated"
+        }
+      ]
+    }
+  },
+  {
+    "id": "T111",
+    "kind": "triage",
+    "input": {
+      "from": "Mail Delivery System <mailer-daemon@outlook-ficticio.test>",
+      "subject": "No se pudo entregar: buzón no disponible",
+      "body": "El destinatario no puede recibir mensajes en este momento. Error 550.",
+      "headers": [
+        {
+          "name": "Return-Path",
+          "value": "<>"
+        }
+      ]
+    }
+  },
+  {
+    "id": "T112",
+    "kind": "triage",
+    "input": {
+      "from": "Mail Delivery Subsystem <mailer-daemon@googlemail.test>",
+      "subject": "Aviso de retraso en la entrega",
+      "body": "Su mensaje aún no se ha entregado. Seguiremos intentándolo durante 24 horas.",
+      "headers": []
+    }
+  },
+  {
+    "id": "T113",
+    "kind": "triage",
+    "input": {
+      "from": "Postmaster <mailer-daemon@servidor.example>",
+      "subject": "Rechazado: mensaje demasiado grande",
+      "body": "Su mensaje superaba el tamaño máximo admitido por el servidor del destinatario.",
+      "headers": [
+        {
+          "name": "Return-Path",
+          "value": "<>"
+        }
+      ]
+    }
+  },
+  {
+    "id": "T114",
+    "kind": "triage",
+    "input": {
+      "from": "Mail Delivery Subsystem <mailer-daemon@googlemail.test>",
+      "subject": "Delivery Status Notification (Failure)",
+      "body": "Dirección de destino rechazada tras una comprobación de seguridad del dominio receptor.",
+      "headers": [
+        {
+          "name": "Auto-Submitted",
+          "value": "auto-replied"
+        }
+      ]
+    }
+  },
+  {
+    "id": "T115",
+    "kind": "triage",
+    "input": {
+      "from": "Equipo Atención <no-reply@atencioncliente.example>",
+      "subject": "Gracias por su consulta",
+      "body": "Hola. Hemos recibido su consulta y la estudiaremos. Este buzón no recibe respuestas.",
+      "headers": [
+        {
+          "name": "Auto-Submitted",
+          "value": "auto-replied"
+        }
+      ]
+    }
+  },
+  {
+    "id": "T116",
+    "kind": "triage",
+    "input": {
+      "from": "Encuesta Servicio <noreply@encuestaservicio.test>",
+      "subject": "¿Cómo valora nuestra atención?",
+      "body": "Valore del 1 al 5 la atención recibida. Gracias por su tiempo.",
+      "headers": []
+    }
+  },
+  {
+    "id": "T117",
+    "kind": "triage",
+    "input": {
+      "from": "Registro de Entradas <no-reply@registro.example>",
+      "subject": "Acuse de recibo",
+      "body": "Su escrito ha quedado registrado con el número R-12345. Este es un acuse automático.",
+      "headers": [
+        {
+          "name": "Auto-Submitted",
+          "value": "auto-generated"
+        }
+      ]
+    }
+  },
+  {
+    "id": "T118",
+    "kind": "triage",
+    "input": {
+      "from": "Hoja de Reclamaciones <noreply@hojareclamaciones.test>",
+      "subject": "Su reclamación ha sido recibida",
+      "body": "Hemos registrado su reclamación. Recibirá noticias por este medio.",
+      "headers": [
+        {
+          "name": "Auto-Submitted",
+          "value": "auto-generated"
+        }
+      ]
+    }
+  },
+  {
+    "id": "T119",
+    "kind": "triage",
+    "input": {
+      "from": "Agencia Pagos <do_not_reply@agenciapagos.example>",
+      "subject": "Confirmación de transferencia",
+      "body": "Su transferencia de 200,00 € se ha ejecutado correctamente.",
+      "headers": []
+    }
+  },
+  {
+    "id": "T120",
+    "kind": "triage",
+    "input": {
+      "from": "Sistema de Citas <noresponder@citas.test>",
+      "subject": "Cita confirmada",
+      "body": "Su cita queda confirmada para el día 14 a las 11:30.",
+      "headers": [
+        {
+          "name": "Auto-Submitted",
+          "value": "auto-generated"
+        }
+      ]
+    }
+  },
+  {
+    "id": "T121",
+    "kind": "triage",
+    "input": {
+      "from": "Banco Ficticio <no-reply@bancoficticio.example>",
+      "subject": "Aviso importante: cambio en las condiciones de su cuenta",
+      "body": "A partir del 1 de diciembre cambian las comisiones de mantenimiento. Puede consultar las nuevas condiciones en su banca online.",
+      "headers": [
+        {
+          "name": "Auto-Submitted",
+          "value": "auto-generated"
+        }
+      ]
+    }
+  },
+  {
+    "id": "T122",
+    "kind": "triage",
+    "input": {
+      "from": "Administración de la Comunidad <no-reply@comunidadvecinos.test>",
+      "subject": "Convocatoria de junta extraordinaria",
+      "body": "Se convoca junta extraordinaria el día 5 a las 19:00 en el local social. Orden del día adjunto.",
+      "headers": [
+        {
+          "name": "Auto-Submitted",
+          "value": "auto-generated"
+        }
+      ]
+    }
+  },
+  {
+    "id": "T123",
+    "kind": "triage",
+    "input": {
+      "from": "Agencia Tributaria Ficticia <noreply@agenciatributaria.example>",
+      "subject": "Notificación disponible en su carpeta",
+      "body": "Tiene una notificación pendiente de lectura. Acceda a su sede electrónica antes de 10 días.",
+      "headers": [
+        {
+          "name": "Auto-Submitted",
+          "value": "auto-generated"
+        }
+      ]
+    }
+  },
+  {
+    "id": "T124",
+    "kind": "triage",
+    "input": {
+      "from": "Seguros Ficticios <no-reply@segurosficticios.example>",
+      "subject": "Vencimiento de su póliza",
+      "body": "Su póliza vence el día 30. Se renovará automáticamente salvo que indique lo contrario desde su área privada.",
+      "headers": [
+        {
+          "name": "Auto-Submitted",
+          "value": "auto-generated"
+        }
+      ]
+    }
+  },
+  {
+    "id": "T125",
+    "kind": "triage",
+    "input": {
+      "from": "Banco Ficticio <no-reply@bancoficticio.example>",
+      "subject": "Importante: devolución de recibo",
+      "body": "Se ha devuelto un recibo de su cuenta por falta de saldo. Por favor, revise su cuenta.",
+      "headers": [
+        {
+          "name": "Auto-Submitted",
+          "value": "auto-generated"
+        }
+      ]
+    }
+  },
+  {
+    "id": "T126",
+    "kind": "triage",
+    "input": {
+      "from": "Administración Edificio Sol <no-reply@edificiosol.test>",
+      "subject": "Corte de agua programado",
+      "body": "El próximo martes habrá corte de agua de 9:00 a 13:00 por obras en la red general.",
+      "headers": [
+        {
+          "name": "Auto-Submitted",
+          "value": "auto-generated"
+        }
+      ]
+    }
+  },
+  {
+    "id": "T127",
+    "kind": "triage",
+    "input": {
+      "from": "Hacienda Municipal Ficticia <noreply@haciendamunicipal.example>",
+      "subject": "Recibo del impuesto de circulación",
+      "body": "Su recibo del impuesto de circulación está disponible y se cargará en la cuenta indicada el día 20.",
+      "headers": [
+        {
+          "name": "Auto-Submitted",
+          "value": "auto-generated"
+        }
+      ]
+    }
+  },
+  {
+    "id": "T128",
+    "kind": "triage",
+    "input": {
+      "from": "Mutua Salud <no-reply@mutuasalud.test>",
+      "subject": "Cambio en su cuadro médico",
+      "body": "Le informamos de modificaciones en el cuadro médico de su póliza a partir del próximo mes.",
+      "headers": [
+        {
+          "name": "Auto-Submitted",
+          "value": "auto-generated"
+        }
+      ]
+    }
+  },
+  {
+    "id": "T129",
+    "kind": "triage",
+    "input": {
+      "from": "Novedades Ferretería <info@ferreteriaoeste.example>",
+      "subject": "Ofertas de herramientas",
+      "body": "Esta semana, descuentos en taladros y atornilladores. Consulte nuestro catálogo.",
+      "headers": [
+        {
+          "name": "List-Unsubscribe",
+          "value": "<mailto:baja@lista.test>"
+        },
+        {
+          "name": "List-Id",
+          "value": "<boletin.lista.test>"
+        },
+        {
+          "name": "Precedence",
+          "value": "bulk"
+        }
+      ]
+    }
+  },
+  {
+    "id": "T130",
+    "kind": "triage",
+    "input": {
+      "from": "La Gaceta del Comercio <boletin@gacetacomercio.test>",
+      "subject": "Boletín de octubre",
+      "body": "En este número: ayudas para pymes y calendario de ferias del sector.",
+      "headers": [
+        {
+          "name": "List-Unsubscribe",
+          "value": "<mailto:baja@lista.test>"
+        },
+        {
+          "name": "List-Id",
+          "value": "<boletin.lista.test>"
+        },
+        {
+          "name": "Precedence",
+          "value": "bulk"
+        }
+      ]
+    }
+  },
+  {
+    "id": "T131",
+    "kind": "triage",
+    "input": {
+      "from": "Vivero Verde <hola@viveroverde.example>",
+      "subject": "Plantas de temporada",
+      "body": "Llegan las plantas de temporada. Visítenos este fin de semana.",
+      "headers": [
+        {
+          "name": "List-Unsubscribe",
+          "value": "<mailto:baja@lista.test>"
+        },
+        {
+          "name": "List-Id",
+          "value": "<boletin.lista.test>"
+        },
+        {
+          "name": "Precedence",
+          "value": "bulk"
+        }
+      ]
+    }
+  },
+  {
+    "id": "T132",
+    "kind": "triage",
+    "input": {
+      "from": "Asesoría Este <novedades@asesoriaeste.test>",
+      "subject": "Circular fiscal 14/2026",
+      "body": "Le informamos de las novedades en la declaración de IVA. No es necesario que responda.",
+      "headers": [
+        {
+          "name": "List-Unsubscribe",
+          "value": "<mailto:baja@lista.test>"
+        },
+        {
+          "name": "List-Id",
+          "value": "<boletin.lista.test>"
+        },
+        {
+          "name": "Precedence",
+          "value": "bulk"
+        }
+      ]
+    }
+  },
+  {
+    "id": "T133",
+    "kind": "triage",
+    "input": {
+      "from": "Papelería Mar <promo@papeleriamar.example>",
+      "subject": "Vuelta al cole",
+      "body": "Mochilas, cuadernos y material escolar con descuento. Oferta limitada.",
+      "headers": [
+        {
+          "name": "List-Unsubscribe",
+          "value": "<mailto:baja@lista.test>"
+        },
+        {
+          "name": "List-Id",
+          "value": "<boletin.lista.test>"
+        },
+        {
+          "name": "Precedence",
+          "value": "bulk"
+        }
+      ]
+    }
+  },
+  {
+    "id": "T134",
+    "kind": "triage",
+    "input": {
+      "from": "Equipo Gimnasio <hola@gimnasioforma.example>",
+      "subject": "Te damos la bienvenida",
+      "body": "Gracias por apuntarte. Tu primera clase de prueba es gratis esta semana.",
+      "headers": [
+        {
+          "name": "List-Unsubscribe",
+          "value": "<mailto:baja@lista.test>"
+        }
+      ]
+    }
+  },
+  {
+    "id": "T135",
+    "kind": "triage",
+    "input": {
+      "from": "Academia Idiomas <bienvenida@academiaidiomas.test>",
+      "subject": "Bienvenido a la academia",
+      "body": "Ya formas parte de nuestra comunidad. Encuentra tu horario en el calendario adjunto.",
+      "headers": [
+        {
+          "name": "List-Unsubscribe",
+          "value": "<mailto:baja@lista.test>"
+        }
+      ]
+    }
+  },
+  {
+    "id": "T136",
+    "kind": "triage",
+    "input": {
+      "from": "Cafetería Luna <info@cafelunatest.example>",
+      "subject": "Gracias por suscribirte",
+      "body": "Recibirás nuestras ofertas una vez al mes. Puedes darte de baja cuando quieras.",
+      "headers": [
+        {
+          "name": "List-Unsubscribe",
+          "value": "<mailto:baja@lista.test>"
+        }
+      ]
+    }
+  },
+  {
+    "id": "T137",
+    "kind": "triage",
+    "input": {
+      "from": "Marta Quiroga <marta@tallerlaprueba.test>",
+      "subject": "Re: factura",
+      "body": "Gracias, recibido.",
+      "headers": [
+        {
+          "name": "Content-Type",
+          "value": "text/plain; charset=utf-8"
+        }
+      ]
+    }
+  },
+  {
+    "id": "T138",
+    "kind": "triage",
+    "input": {
+      "from": "Iván Salcedo <ivan@clinicasol.example>",
+      "subject": "Re: documentación",
+      "body": "Perfecto, ya tengo todo. Muchas gracias.",
+      "headers": [
+        {
+          "name": "Content-Type",
+          "value": "text/plain; charset=utf-8"
+        }
+      ]
+    }
+  },
+  {
+    "id": "T139",
+    "kind": "triage",
+    "input": {
+      "from": "Lucía Barrantes <lucia@mueblesnorte.test>",
+      "subject": "Re: pago",
+      "body": "OK, gracias por confirmarlo.",
+      "headers": [
+        {
+          "name": "Content-Type",
+          "value": "text/plain; charset=utf-8"
+        }
+      ]
+    }
+  },
+  {
+    "id": "T140",
+    "kind": "triage",
+    "input": {
+      "from": "Óscar Meléndez <oscar@papeleriamar.example>",
+      "subject": "Re: presupuesto",
+      "body": "Recibido, lo reviso y no hace falta que contestes.",
+      "headers": [
+        {
+          "name": "Content-Type",
+          "value": "text/plain; charset=utf-8"
+        }
+      ]
+    }
+  },
+  {
+    "id": "T141",
+    "kind": "triage",
+    "input": {
+      "from": "Paula Iriarte <paula@gestoriaplaza.test>",
+      "subject": "Re: factura F-5002",
+      "body": "Genial, ya llegó. Un saludo.",
+      "headers": [
+        {
+          "name": "Content-Type",
+          "value": "text/plain; charset=utf-8"
+        }
+      ]
+    }
+  },
+  {
+    "id": "T142",
+    "kind": "triage",
+    "input": {
+      "from": "Rubén Cazorla <ruben@viveroverde.example>",
+      "subject": "Re: cita",
+      "body": "Gracias, quedamos entonces. Hasta el jueves.",
+      "headers": [
+        {
+          "name": "Content-Type",
+          "value": "text/plain; charset=utf-8"
+        }
+      ]
+    }
+  },
+  {
+    "id": "T143",
+    "kind": "triage",
+    "input": {
+      "from": "Elena Ugarte <elena@asesoriaeste.test>",
+      "subject": "Re: certificado",
+      "body": "Recibido el certificado, todo correcto. Gracias.",
+      "headers": [
+        {
+          "name": "Content-Type",
+          "value": "text/plain; charset=utf-8"
+        }
+      ]
+    }
+  },
+  {
+    "id": "T144",
+    "kind": "triage",
+    "input": {
+      "from": "Hugo Sandoval <hugo@ferreteriaoeste.example>",
+      "subject": "Re: incidencia",
+      "body": "Entendido, muchas gracias por solucionarlo tan rápido.",
+      "headers": [
+        {
+          "name": "Content-Type",
+          "value": "text/plain; charset=utf-8"
+        }
+      ]
+    }
+  },
+  {
+    "id": "T145",
+    "kind": "triage",
+    "input": {
+      "from": "Nerea Collado <nerea@tallerlaprueba.test>",
+      "subject": "Re: envío",
+      "body": "Ya me ha llegado el paquete. Gracias.",
+      "headers": [
+        {
+          "name": "Content-Type",
+          "value": "text/plain; charset=utf-8"
+        }
+      ]
+    }
+  },
+  {
+    "id": "T146",
+    "kind": "triage",
+    "input": {
+      "from": "Tomás Villalba <tomas@clinicasol.example>",
+      "subject": "Re: documentos",
+      "body": "👍",
+      "headers": [
+        {
+          "name": "Content-Type",
+          "value": "text/plain; charset=utf-8"
+        }
+      ]
+    }
+  },
+  {
+    "id": "T147",
+    "kind": "triage",
+    "input": {
+      "from": "Carla Mendizábal <carla@mueblesnorte.test>",
+      "subject": "Re: presupuesto",
+      "body": "Vale, gracias. No necesito nada más por ahora.",
+      "headers": [
+        {
+          "name": "Content-Type",
+          "value": "text/plain; charset=utf-8"
+        }
+      ]
+    }
+  },
+  {
+    "id": "T148",
+    "kind": "triage",
+    "input": {
+      "from": "Julián Pardo <julian@papeleriamar.example>",
+      "subject": "Re: Re: pedido",
+      "body": "Perfecto, nos vemos entonces. Un abrazo.",
+      "headers": [
+        {
+          "name": "Content-Type",
+          "value": "text/plain; charset=utf-8"
+        }
+      ]
+    }
+  }
+]
