@@ -434,6 +434,11 @@ h3 {
   background: var(--error-soft);
 }
 
+.notice.info {
+  border-color: var(--info);
+  background: var(--info-soft);
+}
+
 .notice.warn,
 .banner {
   border-color: var(--warn);
@@ -1192,6 +1197,15 @@ h2 + .section {
 .account .row-actions {
   flex-shrink: 0;
   max-width: 50%;
+}
+
+/* Primera lectura (E5): la tarjeta de una cuenta o carpeta ocupa todo el ancho. */
+.read-card .account-main {
+  flex: 1;
+}
+
+.read-card .buttons {
+  margin: var(--s2) 0;
 }
 
 /* ---- Proveedor de IA (D100–D102, D122) ---- */

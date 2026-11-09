@@ -85,6 +85,13 @@ test("las marcas no se repiten y los duplicados citan la tarea", () => {
   assert.match(flags.find((f) => f.label === "Posible duplicado").why, /tarea 7/);
 });
 
+test("un duplicado que solo se leyó en la primera lectura lo dice: no se registró y no está en Tareas", () => {
+  const flags = invoiceFlags({ issues: ["possible_duplicate"], duplicates: [{ existing_id: "7" }, { existing_id: "9" }], duplicates_initial_read: ["7"] });
+  const why = flags.find((f) => f.label === "Posible duplicado").why;
+  assert.match(why, /tarea 7 \(solo leída en la primera lectura; no se registró\), tarea 9\./);
+  assert.match(why, /No se ha descartado; decida usted/);
+});
+
 test("duplicados sin incidencia también se marcan", () => {
   assert.deepEqual(labels(invoiceFlags({ duplicates: [{ existing_id: "7" }] })), ["Posible duplicado"]);
 });

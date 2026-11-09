@@ -114,7 +114,10 @@ export function invoiceFlags(result: Record<string, any> | null): Flag[] {
   }
   const duplicates = (r.duplicates ?? []) as Array<{ existing_id: string }>;
   if (duplicates.length) {
-    const why = `Se parece a: ${duplicates.map((d) => `tarea ${d.existing_id}`).join(", ")}. No se ha descartado; decida usted.`;
+    // Una factura que solo se leyó en la primera lectura no se registró nunca y no está en Tareas: se dice.
+    const readOnly = new Set((r.duplicates_initial_read ?? []) as string[]);
+    const named = duplicates.map((d) => (readOnly.has(d.existing_id) ? `tarea ${d.existing_id} (solo leída en la primera lectura; no se registró)` : `tarea ${d.existing_id}`));
+    const why = `Se parece a: ${named.join(", ")}. No se ha descartado; decida usted.`;
     const existing = flags.find((f) => f.label === "Posible duplicado");
     if (existing) existing.why = why;
     else add({ label: "Posible duplicado", tone: "warn", why });

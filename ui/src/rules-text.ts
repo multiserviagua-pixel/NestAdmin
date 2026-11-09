@@ -595,6 +595,8 @@ export interface SimulationLike {
     explanation: string;
     overlapping_rules: string[];
   }>;
+  /** Lo mismo para las facturas solo leídas en la primera lectura (aparte, sin listarlas). */
+  from_read?: { considered: number; would_automate: number; truncated: boolean; limit: number } | null;
 }
 
 export interface ReviewGroup {
@@ -657,6 +659,12 @@ export function simulationSummary(sim: SimulationLike, actionKind: string): Simu
     notes.push(
       `${sim.skipped_without_result} ${sim.skipped_without_result === 1 ? "tarea no tiene" : "tareas no tienen"} resultado todavía (fallidas o sin procesar) y no se han contado.`,
     );
+  if (sim.from_read && sim.from_read.considered > 0) {
+    const r = sim.from_read;
+    notes.push(
+      `Aparte: de ${r.considered} ${plural(r.considered, "factura que solo se leyó", "facturas que solo se leyeron")} en la primera lectura${r.truncated ? ` (las últimas ${r.limit})` : ""}, la regla habría registrado ${r.would_automate}. No son tareas suyas: no están en Tareas ni se registraron.`,
+    );
+  }
   const empty = sim.considered === 0;
   const reviewCount = groups.reduce((n, g) => n + g.count, 0);
   const headline = empty
@@ -1205,6 +1213,9 @@ export interface OriginLike {
   count?: number;
   threshold?: number;
   limit_source?: string;
+  /** De `count`, aprobaciones de la persona y facturas solo vistas en la primera lectura (E5). */
+  approved?: number;
+  seen?: number;
 }
 
 /** De dónde sale una regla creada al unificar; `null` si no tiene origen. */
@@ -1212,7 +1223,16 @@ export function originText(origin: OriginLike | null | undefined, nameOf: NameOf
   if (origin?.kind === "suggestion" && typeof origin.count === "number") {
     const min = typeof origin.threshold === "number" ? ` (el mínimo era ${origin.threshold})` : "";
     const proposedByAi = origin.limit_source === "model" ? " El límite lo propuso la IA y usted lo eligió." : "";
-    return `Creada desde una sugerencia, con ${origin.count} ${plural(origin.count, "observación", "observaciones")}${min}.${proposedByAi}`;
+    // Con facturas solo vistas, el origen lo dice: no hubo aprobación que lo sostuviera.
+    const seen = typeof origin.seen === "number" ? origin.seen : 0;
+    const approved = typeof origin.approved === "number" ? origin.approved : origin.count - seen;
+    const split =
+      seen > 0
+        ? approved === 0
+          ? `: ${seen} ${plural(seen, "factura vista", "facturas vistas")} en la primera lectura, ninguna aprobada por usted`
+          : `: ${approved} ${plural(approved, "aprobada", "aprobadas")} por usted y ${seen} ${plural(seen, "vista", "vistas")} en la primera lectura sin aprobar`
+        : "";
+    return `Creada desde una sugerencia, con ${origin.count} ${plural(origin.count, "observación", "observaciones")}${split}${min}.${proposedByAi}`;
   }
   if (!origin || origin.kind !== "merge" || !origin.sources?.length) return null;
   const list = origin.sources.map((s) => `«${nameOf(s.id)}» (versión ${s.version})`);
@@ -1288,12 +1308,16 @@ export interface SuggestionEvidenceLike {
   count: number;
   threshold: number;
   earlier_breaks: number;
+  /** De `count`: aprobaciones de la persona y facturas solo vistas en la primera lectura (E5). */
+  approved?: number;
+  seen?: number;
   last_at: number;
   amounts: string[];
   limit: string | null;
   amount_min?: string | null;
   amount_second?: string | null;
   limit_outlier?: boolean;
+  needs_limit?: boolean;
   reappeared: { at_discard: number; new_since: number; needed_new: number } | null;
 }
 
@@ -1312,6 +1336,8 @@ export interface ProgressLike {
   subject: string;
   category: string | null;
   count: number;
+  approved?: number;
+  seen?: number;
   needed: number;
   missing: number;
 }
@@ -1327,16 +1353,30 @@ export interface SuggestionsLike {
   candidates: SuggestionLike[];
   progress: ProgressLike[];
   observed: number;
+  /** Decisiones de la persona y facturas vistas en la primera lectura, entre las señales válidas. */
+  decisions?: number;
+  seen?: number;
   counted: number;
-  hidden: { covered: number; discarded: number; accepted: number; invalid: number; not_suggested?: number };
+  hidden: { covered: number; discarded: number; accepted: number; invalid: number; not_suggested?: number; seen_invalidated?: number };
   thresholds: ThresholdsLike;
 }
 
+/** Mínimo de facturas del mismo proveedor solo vistas en la primera lectura (el mayor de esto y del umbral de facturas). Igual que `SEEN_INVOICE_MIN` del backend. */
+export const SEEN_INVOICE_MIN = 5;
+
+export function seenNeeded(invoiceThreshold: number): number {
+  return Math.max(invoiceThreshold, SEEN_INVOICE_MIN);
+}
+
 export const SUGGESTION_HELP = {
+  seen:
+    "«Vistas» son facturas que NestAdmin leyó en la primera lectura de su correo o de una carpeta: muestran que un proveedor se repite, pero usted no las ha aprobado ni nadie comprobó que las cifras estén bien leídas. Por eso se exigen más (como mínimo " +
+    SEEN_INVOICE_MIN +
+    ") que con sus aprobaciones, y la sugerencia lo indica. Nunca sirven para sugerir respuestas por correo.",
   evidence:
-    "Solo cuentan aprobaciones suyas ya ejecutadas. Reinician el recuento: una edición del borrador, un rechazo, una aprobación sin clasificar (por ejemplo, tras confirmar que un envío no se hizo) y, en facturas, una aprobación con incidencias. No cuentan ni reinician: las partes de una factura separada, lo que ya hizo una regla, los documentos repetidos (mismo contenido), los reintentos de una misma tarea y las facturas marcadas solo como posible duplicada. Lo que no conste en este equipo (por ejemplo, lo que hizo fuera de la aplicación) no se puede contar.",
+    "Cuentan sus aprobaciones ya ejecutadas y, solo en facturas, las facturas vistas en la primera lectura (que no son aprobaciones suyas). Reinician el recuento: una edición del borrador, un rechazo, una aprobación sin clasificar (por ejemplo, tras confirmar que un envío no se hizo) y, en facturas, una aprobación con incidencias. No cuentan ni reinician: las partes de una factura separada, lo que ya hizo una regla, los documentos repetidos (mismo contenido), los reintentos de una misma tarea y las facturas marcadas solo como posible duplicada. Lo que no conste en este equipo (por ejemplo, lo que hizo fuera de la aplicación) no se puede contar.",
   limit:
-    "El límite sale de los importes de las facturas aprobadas: es el mayor de ellos. Es una propuesta, no una garantía: puede cambiarlo al revisar la regla. Por sí sola, la regla no cubriría las facturas de más importe. La regla reconoce al proveedor solo por su nombre tal como aparece en la factura.",
+    "El límite sale de los importes de las facturas observadas (aprobadas por usted o solo vistas en la primera lectura): es el mayor de ellos. Es una propuesta, no una garantía: puede cambiarlo al revisar la regla. Por sí sola, la regla no cubriría las facturas de más importe. La regla reconoce al proveedor solo por su nombre tal como aparece en la factura.",
   create: "Crea la regla inactiva: no actúa hasta que usted la pruebe y la active. La encontrará en Mis reglas.",
   discard: "Oculta la sugerencia. Solo vuelve a aparecer si, tras descartarla, se acumula el doble de observaciones nuevas que las que había.",
   thresholds:
@@ -1344,7 +1384,7 @@ export const SUGGESTION_HELP = {
 } as const;
 
 export const SUGGESTION_INTRO =
-  "Estas sugerencias salen de lo que usted aprueba en Pendientes. Se calculan en este equipo, sin IA, y ninguna se crea ni se activa sin su aceptación. Una IA puede afinarlas (ordenarlas, proponer ocultar las poco útiles, preguntar por proveedores parecidos o proponer otro límite), pero nunca crea ni activa reglas ni pone las cifras.";
+  "Estas sugerencias salen de lo que usted aprueba en Pendientes y, solo para facturas, de la repetición observada en la primera lectura (que no es una aprobación). Se calculan en este equipo, sin IA, y ninguna se crea ni se activa sin su aceptación. Una IA puede afinarlas (ordenarlas, proponer ocultar las poco útiles, preguntar por proveedores parecidos o proponer otro límite), pero nunca crea ni activa reglas ni pone las cifras.";
 
 export const SUGGESTION_INACTIVE_NOTICE = "Si la crea, nacerá inactiva: no actuará hasta que usted la pruebe y la active.";
 
@@ -1378,7 +1418,16 @@ export function suggestionWhy(c: SuggestionLike): string {
   const cuts = e.earlier_breaks;
   const before = (what: string) => (cuts === 1 ? ` Antes consta 1 corte (${what}) que reinició el recuento.` : cuts > 1 ? ` Antes constan ${cuts} cortes (${what}) que reiniciaron el recuento.` : "");
   if (c.action_kind === "register_invoice") {
-    return `Constan ${n} ${plural(n, "factura aprobada", "facturas aprobadas")} de ${c.subject} sin incidencias; la última, el ${last}.${before("una factura con incidencias, rechazada o sin clasificar")}`;
+    const seen = e.seen ?? 0;
+    const approved = e.approved ?? n - seen;
+    const cutsText = before("una factura con incidencias, rechazada o sin clasificar");
+    // La primera lectura no es una aprobación: el texto separa lo que usted aprobó de lo que solo se vio.
+    // «La última» de lo visto es la fecha de lectura, no la de la factura.
+    if (seen > 0 && approved === 0)
+      return `Se observaron ${n} ${plural(n, "factura", "facturas")} de ${c.subject} en la primera lectura; usted no ha aprobado ninguna de ${n === 1 ? "ella" : "ellas"} y nadie ha revisado su contenido. La última se leyó el ${last}.${cutsText}`;
+    if (seen > 0)
+      return `Constan ${approved} ${plural(approved, "factura aprobada", "facturas aprobadas")} por usted y ${seen} ${plural(seen, "vista", "vistas")} en la primera lectura sin aprobar, de ${c.subject}. La última observación es del ${last} (fecha de lectura o de aprobación, no de la factura).${cutsText}`;
+    return `Constan ${n} ${plural(n, "factura aprobada", "facturas aprobadas")} de ${c.subject} sin incidencias; la última, el ${last}.${cutsText}`;
   }
   const cat = c.category ? categoryLabel(c.category) : "sin categoría";
   return `Constan ${n} ${plural(n, "respuesta aprobada", "respuestas aprobadas")} sin cambios a ${c.subject} clasificadas como ${cat}; la última, el ${last}.${before("con cambios, rechazo o sin clasificar")}`;
@@ -1387,11 +1436,20 @@ export function suggestionWhy(c: SuggestionLike): string {
 /** De dónde sale el límite propuesto (solo facturas): el mayor, el rango y el segundo mayor. */
 export function suggestionLimitText(c: SuggestionLike): string | null {
   const e = c.evidence;
+  if (c.action_kind === "register_invoice" && e.needs_limit)
+    return "No hay límite propuesto: estas facturas no las ha aprobado usted y un límite no sale de lo que solo se ha visto. Escriba usted el límite al crear la regla.";
   if (c.action_kind !== "register_invoice" || !e.limit) return null;
   const parts = [`el mayor de los ${e.amounts.length} importes aprobados`];
   if (e.amount_min && e.amount_second) parts.push(`de ${formatAmount(e.amount_min)} a ${formatAmount(e.limit)}; el segundo mayor es ${formatAmount(e.amount_second)}`);
   const list = e.amounts.length <= 5 ? ` Importes: ${e.amounts.map(formatAmount).join(", ")}.` : "";
   return `Límite propuesto: ${formatAmount(e.limit)}, ${parts[0]}${parts[1] ? ` (${parts[1]})` : ""}.${list}`;
+}
+
+/** Aviso visible de lo que solo se leyó: nadie lo ha revisado. */
+export const SEEN_WARNING = "Estas facturas solo se han leído; nadie las ha revisado y un tercero puede haberlas enviado.";
+
+export function suggestionSeenWarning(c: SuggestionLike): string | null {
+  return c.action_kind === "register_invoice" && (c.evidence.seen ?? 0) > 0 ? SEEN_WARNING : null;
 }
 
 /** Aviso visible si el mayor importe se aleja mucho del resto, o `null`. */
@@ -1417,7 +1475,15 @@ export function suggestionReappeared(c: SuggestionLike): string | null {
 
 function progressLine(p: ProgressLike): string {
   const missing = p.missing === 1 ? "falta 1" : `faltan ${p.missing}`;
-  if (p.action_kind === "register_invoice") return `${p.subject}: ${p.count} de ${p.needed} facturas sin incidencias (${missing})`;
+  if (p.action_kind === "register_invoice") {
+    const seen = p.seen ?? 0;
+    if (seen > 0) {
+      const approved = p.approved ?? p.count - seen;
+      const mine = approved === 0 ? "ninguna aprobada por usted" : `${approved} ${plural(approved, "aprobada", "aprobadas")} por usted`;
+      return `${p.subject}: ${p.count} de ${p.needed} facturas sin incidencias, ${seen} ${plural(seen, "vista", "vistas")} en la primera lectura y ${mine} (${missing})`;
+    }
+    return `${p.subject}: ${p.count} de ${p.needed} facturas sin incidencias (${missing})`;
+  }
   const cat = p.category ? ` (${categoryLabel(p.category)})` : "";
   return `${p.subject}${cat}: ${p.count} de ${p.needed} respuestas aprobadas sin cambios (${missing})`;
 }
@@ -1436,6 +1502,10 @@ export function suggestionsHidden(h: SuggestionsLike["hidden"]): string | null {
   if (h.discarded) parts.push(`${h.discarded} ${plural(h.discarded, "descartada", "descartadas")}`);
   if (h.accepted) parts.push(`${h.accepted} ya ${plural(h.accepted, "aceptada", "aceptadas")}`);
   if (h.invalid) parts.push(`${h.invalid} sin datos válidos para una regla`);
+  if (h.seen_invalidated)
+    parts.push(
+      `${h.seen_invalidated} ${plural(h.seen_invalidated, "proveedor con facturas solo leídas no se sugiere", "proveedores con facturas solo leídas no se sugieren")}: basta una factura con incidencias, posiblemente enviada por un tercero, para que ninguna de las leídas cuente; sus aprobaciones, si las hay, se conservan`,
+    );
   if (h.not_suggested) parts.push(`${h.not_suggested} de la categoría «Otros», que no se sugiere (puede crear la regla a mano)`);
   return parts.length ? `No se muestran: ${parts.join("; ")}.` : null;
 }
@@ -1443,15 +1513,20 @@ export function suggestionsHidden(h: SuggestionsLike["hidden"]): string | null {
 /** Estado vacío explícito, contando con lo que se oculta: nunca afirma que no hay nada si hay algo oculto. */
 export function suggestionsEmpty(s: SuggestionsLike): SuggestionsEmpty {
   const t = s.thresholds;
-  const needs = `Se necesitan ${t.invoice} facturas sin incidencias del mismo proveedor, o ${t.reply} respuestas aprobadas sin cambios al mismo remitente.`;
+  const needs = `Se necesitan ${t.invoice} facturas sin incidencias del mismo proveedor aprobadas por usted (o ${seenNeeded(t.invoice)} si solo se vieron en la primera lectura), o ${t.reply} respuestas aprobadas sin cambios al mismo remitente.`;
+  const seen = s.seen ?? 0;
+  const decisions = s.decisions ?? s.observed - seen;
   if (s.counted === 0) {
-    return s.observed === 0
-      ? { title: "Aún no hay datos para sugerir reglas", hint: `No hay observaciones que cuenten. ${needs}`, lines: [] }
-      : {
-          title: "Aún no hay observaciones que cuenten",
-          hint: `Constan ${s.observed} ${plural(s.observed, "decisión", "decisiones")}, pero ninguna cuenta como evidencia ahora (por ejemplo, una edición, un rechazo o una aprobación sin clasificar reinician el recuento). ${needs}`,
-          lines: [],
-        };
+    if (s.observed === 0) return { title: "Aún no hay datos para sugerir reglas", hint: `No hay observaciones que cuenten. ${needs}`, lines: [] };
+    const what = [
+      decisions ? `${decisions} ${plural(decisions, "decisión", "decisiones")}` : null,
+      seen ? `${seen} ${plural(seen, "factura vista", "facturas vistas")} en la primera lectura` : null,
+    ].filter(Boolean);
+    return {
+      title: "Aún no hay observaciones que cuenten",
+      hint: `Constan ${what.join(" y ")}, pero ninguna cuenta como evidencia ahora (por ejemplo, una edición, un rechazo, una factura con incidencias o una aprobación sin clasificar reinician el recuento). ${needs}`,
+      lines: [],
+    };
   }
   const lines = s.progress.map(progressLine);
   if (lines.length) return { title: "Aún no hay sugerencias, pero hay datos", hint: "Lo más cerca de sugerirse:", lines };
@@ -1546,6 +1621,7 @@ export interface RefinePreviewLike {
     category: string | null;
     sender_domain: string | null;
     count: number;
+    seen?: number;
     earlier_breaks: number;
     discarded_before: boolean;
     amount_min: string | null;
@@ -1771,7 +1847,8 @@ export function refinePreviewLines(p: RefinePreviewLike): { destination: string;
     const why = c.withheld ? ` (no se envía: ${WITHHELD_TEXT[c.withheld] ?? "dato personal"})` : "";
     const breaks = c.earlier_breaks === 0 ? "sin cortes anteriores de la serie" : `${c.earlier_breaks} ${plural(c.earlier_breaks, "corte anterior", "cortes anteriores")} de la serie (ediciones, rechazos o incidencias)`;
     const back = c.discarded_before ? "la descartó antes y vuelve a aparecer" : "no descartada antes";
-    return `${c.id}: ${sentSubject(c)}${why}, ${c.count} ${plural(c.count, "observación", "observaciones")}${range}, ${breaks}, ${back}`;
+    const seen = c.seen ? ` (${c.seen === c.count ? "todas" : c.seen} solo ${plural(c.seen, "vista", "vistas")} en la primera lectura, sin aprobar)` : "";
+    return `${c.id}: ${sentSubject(c)}${why}, ${c.count} ${plural(c.count, "observación", "observaciones")}${seen}${range}, ${breaks}, ${back}`;
   });
   if (p.discarded_by_user) items.push(`Sugerencias que usted descartó: ${p.discarded_by_user}`);
   const notes = [PERSONAL_DATA_NOTE, EXACT_AMOUNTS_NOTE];
@@ -1880,6 +1957,7 @@ const DROPPED_TEXT: Record<string, string> = {
   simulation_failed: "no se pudo simular",
   simulation_no_effect: "en la simulación no habría registrado ninguna factura",
   simulation_blocks_other: "en la simulación dejaría sin actuar a otra regla activa",
+  no_approved_amounts: "no hay importes aprobados por usted de los que partir: un límite no sale de lo que solo se ha visto",
 };
 
 /** Qué propuesta de la IA se descartó y por qué (sin contenido del modelo). */

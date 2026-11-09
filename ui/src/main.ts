@@ -5,6 +5,9 @@ import type {
   DocumentOrigin,
   FetchReport,
   FieldSource,
+  FolderPreview,
+  InitialReadOverview,
+  InitialReadStatus,
   MailOrigin,
   MailAccount,
   MailProviderKind,
@@ -13,6 +16,7 @@ import type {
   MergePreview,
   ProviderChoice,
   ProviderInfo,
+  SeenInvoice,
   LimitProposal,
   RefinePreview,
   RefinementView,
@@ -31,6 +35,35 @@ import type {
   Task,
   ThresholdSettings,
 } from "./types";
+import {
+  READ_HELP,
+  recentMailWarning,
+  SUGGESTIONS_GLOBAL_NOTE,
+  WAITING_UNKNOWN,
+  byProviderText,
+  canStartRead,
+  canStopRead,
+  confirmReadLines,
+  connectDetails,
+  connectNotice,
+  continueButtonLabel,
+  folderLabel,
+  heldText,
+  readButtonLabel,
+  readDestination,
+  readEffectsLine,
+  readStateTone,
+  waitingReadsNotice,
+  readFailureLine,
+  readNotes,
+  readProblems,
+  readRemaining,
+  readStartedWith,
+  readStateLabel,
+  readSummary,
+  readVolumeText,
+  volumeProblem,
+} from "./read-text";
 import {
   ANY_SENDER_CONFIRMATION,
   APPROVED_BY_PERSON,
@@ -103,6 +136,9 @@ import {
   HIDDEN_BLOCK_NOTE,
   suggestionLimitText,
   suggestionOutlierWarning,
+  suggestionSeenWarning,
+  normalizeAmount,
+  formatAmount as formatEuro,
   suggestionSupplierNote,
   suggestionsTabCount,
   suggestionReappeared,
@@ -218,6 +254,18 @@ const state = {
   wizardStep: "choose" as "choose" | "cloud" | "other",
   wizardOther: "openai_compatible" as "openai_compatible" | "anthropic",
   mail: null as MailView | null,
+  // Primera lectura (E5, D133): lo que dice el backend, su error si no se pudo leer, el volumen
+  // escrito por fuente, la lectura que se está confirmando y las que están en marcha.
+  read: null as InitialReadOverview | null,
+  readError: null as string | null,
+  readVolume: {} as Record<string, string>,
+  readConfirm: null as null | { source: string; kind: "account" | "folder"; target: string },
+  readBusy: {} as Record<string, boolean>,
+  readFolder: null as FolderPreview | null,
+  // Sugerencias de facturas solo vistas: formulario del límite (obligatorio, lo escribe la persona) y
+  // lista de las facturas leídas de la serie.
+  limitForm: {} as Record<string, { open: boolean; text: string }>,
+  seenList: {} as Record<string, { status: "loading" | "done" | "error"; items?: SeenInvoice[]; error?: string }>,
   // Dirección del inicio de sesión en curso, por si el navegador no se abrió solo.
   signInUrl: null as string | null,
   notice: null as { kind: "ok" | "error" | "warn"; text: string; task?: number } | null,
@@ -385,7 +433,8 @@ async function refresh(background = false) {
     let findingsError: string | null = null;
     let suggestionsError: string | null = null;
     let refineError: string | null = null;
-    const [tasks, rules, findings, suggestions, refinement, refinePreview, audit, settings, mail] = await Promise.all([
+    let readError: string | null = null;
+    const [tasks, rules, findings, suggestions, refinement, refinePreview, audit, settings, mail, read] = await Promise.all([
       api.tasks(),
       api.ruleViews(),
       api.ruleFindings().catch((error) => {
@@ -407,8 +456,12 @@ async function refresh(background = false) {
       api.auditLog(),
       api.settings(),
       api.mailAccounts(),
+      api.initialReadOverview().catch((error) => {
+        readError = String(error);
+        return null;
+      }),
     ]);
-    Object.assign(state, { tasks, rules, findings, findingsError, suggestions, suggestionsError, refinement, refinePreview, refineError, audit, settings, mail });
+    Object.assign(state, { tasks, rules, findings, findingsError, suggestions, suggestionsError, refinement, refinePreview, refineError, audit, settings, mail, read, readError });
     announceDoubtfulAmounts();
   } catch (error) {
     state.notice = { kind: "error", text: String(error) };
@@ -2292,17 +2345,108 @@ function suggestionCard(c: Suggestion, extra: { proposal?: LimitProposal; hidden
   const supplierNote = suggestionSupplierNote(c);
   const risk = ruleRisk({ id: "", version: 0, action_kind: c.action_kind, conditions: c.conditions, active: false });
   const again = suggestionReappeared(c);
-  const create = h(
-    "button",
-    {
-      class: "primary",
-      type: "button",
-      "data-focus-key": `sugg:${c.fingerprint}:create`,
-      disabled: busy,
-      onclick: () => resolveSuggestion(c.fingerprint, async () => suggestionAccepted((await api.acceptSuggestion(c.fingerprint, c.shown, null)).name)),
+  const seenWarning = suggestionSeenWarning(c);
+  const form = state.limitForm[c.fingerprint] ?? { open: false, text: "" };
+  const typed = normalizeAmount(form.text);
+  // Solo vistas: la regla no se crea con un clic ni sin límite; se abre el formulario con el proveedor y el límite vacío y obligatorio.
+  const create = c.evidence.needs_limit
+    ? h(
+        "button",
+        {
+          class: "primary",
+          type: "button",
+          "data-focus-key": `sugg:${c.fingerprint}:open-limit`,
+          disabled: busy,
+          onclick: () => {
+            state.limitForm[c.fingerprint] = { open: !form.open, text: form.text };
+            render();
+          },
+        },
+        "Crear regla con un límite…",
+      )
+    : h(
+        "button",
+        {
+          class: "primary",
+          type: "button",
+          "data-focus-key": `sugg:${c.fingerprint}:create`,
+          disabled: busy,
+          onclick: () => resolveSuggestion(c.fingerprint, async () => suggestionAccepted((await api.acceptSuggestion(c.fingerprint, c.shown, null)).name)),
+        },
+        "Crear regla (inactiva)",
+      );
+  const limitInput = h("input", {
+    type: "text",
+    inputmode: "decimal",
+    placeholder: "p. ej. 500,00",
+    value: form.text,
+    "aria-required": "true",
+    oninput: (e: Event) => {
+      state.limitForm[c.fingerprint] = { open: true, text: (e.target as HTMLInputElement).value };
     },
-    "Crear regla (inactiva)",
-  );
+  }) as HTMLInputElement;
+  const limitForm =
+    c.evidence.needs_limit && form.open
+      ? h(
+          "div",
+          { class: "confirm", role: "group", "aria-label": "Límite de la regla" },
+          h("p", {}, h("strong", {}, "Proveedor: "), c.subject),
+          field("Límite (obligatorio)", limitInput, "Importe máximo en euros de una factura de este proveedor que se registraría sin revisión. No sale de las facturas leídas: lo decide usted."),
+          form.text.trim() && !typed.ok ? h("p", { class: "meta warn", role: "alert" }, typed.message) : null,
+          h(
+            "div",
+            { class: "buttons" },
+            h(
+              "button",
+              {
+                type: "button",
+                class: "primary",
+                "data-focus-key": `sugg:${c.fingerprint}:create-limit`,
+                disabled: busy || !typed.ok,
+                onclick: () => {
+                  if (!typed.ok) return;
+                  const value = typed.value;
+                  resolveSuggestion(c.fingerprint, async () => suggestionAccepted((await api.acceptSuggestion(c.fingerprint, c.shown, null, null, value)).name));
+                },
+              },
+              "Crear regla (inactiva)",
+            ),
+          ),
+        )
+      : null;
+  const seenCount = c.evidence.seen ?? 0;
+  const seenState = state.seenList[c.fingerprint];
+  const seenDetails =
+    seenCount > 0
+      ? h(
+          "details",
+          { class: "sim-examples" },
+          h(
+            "summary",
+            {
+              "data-focus-key": `sugg:${c.fingerprint}:seen`,
+              onclick: () => {
+                if (seenState) return;
+                state.seenList[c.fingerprint] = { status: "loading" };
+                void api.seenInvoices(c.fingerprint).then(
+                  (items) => ((state.seenList[c.fingerprint] = { status: "done", items }), render()),
+                  (error) => ((state.seenList[c.fingerprint] = { status: "error", error: String(error) }), render()),
+                );
+              },
+            },
+            `Ver las facturas leídas (${seenCount})`,
+          ),
+          !seenState || seenState.status === "loading"
+            ? h("p", { class: "meta" }, "Cargando…")
+            : seenState.status === "error"
+              ? h("p", { class: "meta warn", role: "alert" }, `No se pudieron cargar: ${seenState.error}`)
+              : h(
+                  "ul",
+                  {},
+                  ...(seenState.items ?? []).map((i) => h("li", {}, `${i.document ?? "documento sin nombre"} · fecha de la factura: ${i.date ?? "no consta"} · importe: ${i.amount ? formatEuro(i.amount) : "no consta"}`)),
+                ),
+        )
+      : null;
   const createWithModelLimit = proposal
     ? h(
         "button",
@@ -2352,6 +2496,8 @@ function suggestionCard(c: Suggestion, extra: { proposal?: LimitProposal; hidden
     { class: "finding-card", "aria-label": suggestionSentence(c), "data-focus-key": `sugg:${c.fingerprint}` },
     h("header", { class: "finding-head" }, h("h4", { class: "finding-title" }, suggestionSentence(c)), statusChip(c.evidence.reappeared ? "Vuelve a aparecer" : "Sugerida", c.evidence.reappeared ? "warn" : "info")),
     h("p", {}, h("span", { class: "finding-label" }, "Por qué: "), suggestionWhy(c), " ", helpTip(SUGGESTION_HELP.evidence, "Ayuda sobre qué cuenta como evidencia")),
+    seenWarning ? h("p", { class: "warn-text", role: "alert" }, seenWarning, " ", helpTip(SUGGESTION_HELP.seen, "Ayuda sobre las facturas solo vistas")) : null,
+    seenDetails,
     limit ? h("p", {}, limit, " ", helpTip(SUGGESTION_HELP.limit, "Ayuda sobre el límite propuesto")) : null,
     outlier ? h("p", { class: "warn-text", role: "alert" }, outlier) : null,
     supplierNote ? h("p", { class: "meta" }, supplierNote) : null,
@@ -2361,6 +2507,7 @@ function suggestionCard(c: Suggestion, extra: { proposal?: LimitProposal; hidden
     activationFindings(c.overlaps),
     h("p", { class: "rule-risk" }, "Aviso: ", risk),
     h("p", { class: "meta" }, SUGGESTION_INACTIVE_NOTICE),
+    limitForm,
     h("div", { class: "buttons finding-actions" }, create, createWithModelLimit, helpTip(SUGGESTION_HELP.create, "Ayuda sobre crear la regla"), discard, helpTip(SUGGESTION_HELP.discard, "Ayuda sobre descartar"), restore),
   );
 }
@@ -3119,7 +3266,10 @@ function signIn(provider: MailProviderKind, label: string, account?: MailAccount
   render();
   void act(async () => {
     try {
-      const done = await api.mailSignIn(provider, label, account?.id);
+      // Lo mostrado antes de conectar: si falta o cambia, la lectura no arranca sola.
+      const o = state.read;
+      const shown = !account && o && o.mode === "automatic" && o.limits.fixed !== null ? { provider: o.provider.provider, model: o.provider.model, host: o.host ?? "", volume: o.limits.fixed } : null;
+      const done = await api.mailSignIn(provider, label, account?.id, shown);
       state.notice = { kind: "ok", text: account ? `Sesión renovada en «${done.label}»` : `Cuenta «${done.label}» conectada` };
     } finally {
       state.signInUrl = null;
@@ -3176,6 +3326,260 @@ function accountRow(a: MailAccount, m: MailView, busy: boolean) {
   );
 }
 
+// ---- Primera lectura (E5, D133) ----
+
+/** Lanza una lectura una sola vez por fuente: un doble clic no repite la llamada (el backend tampoco la repetiría). */
+function runRead(source: string, work: () => Promise<InitialReadStatus>) {
+  if (state.readBusy[source]) return;
+  state.readBusy[source] = true;
+  state.readConfirm = null;
+  render();
+  void work()
+    .then(
+      (status) => {
+        const kind = status.state === "waiting" || status.state === "listing_failed" ? "warn" : "ok";
+        state.notice = { kind, text: status.state === "waiting" ? (status.waiting_message ?? "La lectura espera un proveedor de IA confirmado") : status.listing_error ? "No se pudo listar. Puede reanudar la lectura." : `Primera lectura: ${readStateLabel(status.state).toLowerCase()}` };
+      },
+      (error) => {
+        state.notice = { kind: "error", text: String(error) };
+      },
+    )
+    .finally(() => {
+      delete state.readBusy[source];
+      void refresh();
+    });
+}
+
+/** Lo que la persona ve antes de pedir la lectura: se le devuelve al backend, que rechaza si algo cambió. */
+function expectation(o: InitialReadOverview, volume: number) {
+  return { provider: o.provider.provider, model: o.provider.model, host: o.host ?? "", volume };
+}
+
+function readStatusBlock(o: InitialReadOverview, status: InitialReadStatus): HTMLElement {
+  const lines: HTMLElement[] = [];
+  const effects = readEffectsLine(status);
+  const remaining = readRemaining(status);
+  const summary = readSummary(status, o.suggestions);
+  if (status.tasks.total > 0 || status.emails_unclassified > 0 || status.state === "waiting" || status.documents_sent > 0)
+    lines.push(h("p", {}, summary, " ", helpTip(SUGGESTIONS_GLOBAL_NOTE, "Ayuda sobre las sugerencias")));
+  const held = heldText(status);
+  if (held) lines.push(h("p", { class: "meta warn", role: "status" }, held));
+  const providers = byProviderText(status);
+  if (providers) lines.push(h("p", { class: "meta" }, providers));
+  if (status.waiting_message) lines.push(h("p", { class: "meta warn", role: "status" }, status.waiting_message));
+  if (effects) lines.push(h("p", { class: status.actions === 0 ? "meta" : "meta warn" }, effects));
+  if (remaining) lines.push(h("p", { class: "meta" }, remaining));
+  for (const problem of readProblems(status)) lines.push(h("p", { class: "meta warn", role: "alert" }, problem));
+  if (status.failures.length)
+    lines.push(h("ul", { class: "sim-list" }, ...status.failures.slice(0, 8).map((f) => h("li", {}, readFailureLine(f))), status.failures.length > 8 ? h("li", { class: "meta" }, `y ${status.failures.length - 8} más`) : null));
+  for (const note of readNotes(status)) lines.push(h("p", { class: "meta" }, note));
+  const started = readStartedWith(status);
+  if (started) lines.push(h("p", { class: "meta" }, started));
+  return h("div", {}, ...lines);
+}
+
+/** Una cuenta o carpeta: estado, resumen y, según el modo, el botón con su aviso previo. */
+function readCard(o: InitialReadOverview, src: { source: string; label: string; address: string | null; status: InitialReadStatus }, kind: "account" | "folder", target: string): HTMLElement {
+  const status = src.status;
+  const busy = Boolean(state.readBusy[src.source]);
+  const onDemand = o.mode === "on_demand";
+  const volumeText = state.readVolume[src.source] ?? String(status.volume ?? o.limits.default);
+  const problem = volumeProblem(volumeText, o.limits);
+  const body: Array<HTMLElement | null> = [readStatusBlock(o, status)];
+  const accountId = target;
+  const startable = canStartRead(status) && (onDemand || status.state !== "not_started");
+  if (startable) {
+    const volume = h("input", {
+      type: "number",
+      min: String(o.limits.min),
+      max: String(o.limits.max),
+      step: "1",
+      value: volumeText,
+      disabled: busy || status.state !== "not_started",
+      oninput: (e: Event) => {
+        state.readVolume[src.source] = (e.target as HTMLInputElement).value;
+      },
+    }) as HTMLInputElement;
+    const choosing = onDemand && status.state === "not_started";
+    body.push(
+      onDemand ? field(`Cuántos ${kind === "account" ? "mensajes" : "archivos"} leer`, volume, READ_HELP.volume) : null,
+      problem && choosing ? h("p", { class: "meta warn", role: "alert" }, problem) : null,
+      h(
+        "div",
+        { class: "buttons" },
+        h(
+          "button",
+          {
+            type: "button",
+            class: "primary",
+            "data-focus-key": `read:ask:${src.source}`,
+            disabled: busy || Boolean(o.blocked) || (problem !== null && choosing),
+            onclick: () => {
+              state.readConfirm = { source: src.source, kind, target };
+              render();
+            },
+          },
+          readButtonLabel(status),
+        ),
+      ),
+      o.blocked ? h("p", { class: "meta warn", role: "status" }, `${o.blocked_message ?? "Falta configurar la IA"}. No se puede leer hasta entonces.`) : null,
+    );
+    if (state.readConfirm?.source === src.source) {
+      const volumeNumber = choosing ? Number(volumeText) : (status.volume ?? o.limits.fixed ?? Number(volumeText));
+      const c = confirmReadLines(o, volumeNumber, kind === "account" ? `la cuenta ${src.label}` : `la carpeta ${folderLabel(src.label)}`);
+      body.push(
+        h(
+          "div",
+          { class: "confirm", role: "group", "aria-label": "Qué se enviará a la IA" },
+          h("p", {}, h("strong", {}, `${c.heading}. `), c.lines[0]),
+          h("p", { class: "meta" }, c.lines[1]),
+          h("p", { class: "meta" }, "Qué se envía:"),
+          h("ul", { class: "sim-list" }, ...c.sends.map((item) => h("li", {}, item))),
+          h("p", { class: "meta" }, READ_HELP.sends),
+          h("p", { class: "meta" }, c.never),
+          h(
+            "div",
+            { class: "buttons" },
+            h(
+              "button",
+              {
+                type: "button",
+                class: "primary",
+                "data-focus-key": `read:send:${src.source}`,
+                onclick: () =>
+                  runRead(src.source, () =>
+                    kind === "account"
+                      ? api.startInitialRead(accountId, o.limits.fixed === null ? volumeNumber : null, expectation(o, volumeNumber))
+                      : api.startInitialReadFolder(target, volumeNumber, expectation(o, volumeNumber)),
+                  ),
+              },
+              "Enviar y leer",
+            ),
+            h(
+              "button",
+              {
+                type: "button",
+                "data-focus-key": `read:cancel:${src.source}`,
+                onclick: () => {
+                  state.readConfirm = null;
+                  render();
+                },
+              },
+              "Cancelar",
+            ),
+          ),
+        ),
+      );
+    }
+  } else if (!onDemand && status.state === "not_started") {
+    body.push(h("p", { class: "meta" }, "No se ha leído: en esta versión la primera lectura se hace al conectar una cuenta nueva."));
+  }
+  if (canStopRead(status) && status.state !== "held" && status.state !== "interrupted") {
+    body.push(
+      h(
+        "div",
+        { class: "buttons" },
+        h("button", { type: "button", "data-focus-key": `read:stop:${src.source}`, disabled: busy, onclick: () => runRead(src.source, () => api.stopInitialRead(src.source)) }, "Detener lectura"),
+        helpTip(READ_HELP.stop, "Ayuda sobre detener la lectura"),
+      ),
+    );
+  }
+  if (status.held && status.held.reason !== "removed") {
+    const volumeNow = status.volume ?? o.limits.fixed ?? o.limits.default;
+    body.push(
+      h(
+        "div",
+        { class: "buttons" },
+        h(
+          "button",
+          { type: "button", class: "primary", "data-focus-key": `read:continue:${src.source}`, disabled: busy || Boolean(o.blocked), onclick: () => runRead(src.source, () => api.continueInitialRead(src.source, expectation(o, volumeNow))) },
+          continueButtonLabel(status),
+        ),
+      ),
+    );
+  }
+  if ((status.tasks.failed > 0 && status.failures.some((f) => f.recoverable)) || status.attachment_failures.length > 0) {
+    body.push(
+      h(
+        "div",
+        { class: "buttons" },
+        h(
+          "button",
+          { type: "button", "data-focus-key": `read:retry:${src.source}`, disabled: busy, onclick: () => runRead(src.source, async () => (await api.retryInitialRead(src.source), readStatusNow(src.source))) },
+          `Reintentar los errores (${status.failures.filter((f) => f.recoverable).length + status.attachment_failures.length})`,
+        ),
+        helpTip(READ_HELP.retry, "Ayuda sobre reintentar"),
+      ),
+    );
+  }
+  return h(
+    "li",
+    { class: "account read-card" },
+    h("div", { class: "account-main" }, h("div", { class: "account-name" }, h("strong", {}, src.label), statusChip(readStateLabel(status.state), readStateTone(status.state))), src.address ? h("div", { class: "meta" }, src.address) : null, ...body),
+  );
+}
+
+/** Estado actual de una fuente, para devolverlo tras un reintento. */
+async function readStatusNow(source: string): Promise<InitialReadStatus> {
+  const overview = await api.initialReadOverview();
+  const found = [...overview.accounts, ...overview.folders].find((x) => x.source === source);
+  if (!found) throw "La lectura ya no consta";
+  return found.status;
+}
+
+async function chooseReadFolder() {
+  try {
+    const path = await api.pickReadFolder();
+    if (!path) return;
+    state.readFolder = await api.initialReadFolderPreview(path);
+    render();
+  } catch (error) {
+    state.notice = { kind: "error", text: String(error) };
+    render();
+  }
+}
+
+/** Sección «Primera lectura» de Cuentas de correo: qué hace, a quién se envía, y el estado de cada fuente. */
+function readSection(): HTMLElement {
+  if (state.readError)
+    return h("section", { class: "section" }, sectionHeader("Primera lectura"), h("p", { class: "meta warn", role: "alert" }, `No se pudo leer el estado de la primera lectura: ${state.readError}`));
+  const o = state.read;
+  if (!o) return h("section", { class: "section" }, sectionHeader("Primera lectura"), h("p", { class: "meta" }, "Cargando…"));
+  const accounts = o.accounts.map((a) => readCard(o, a, "account", a.target));
+  const removedCards = o.removed.map((a) => readCard(o, a, "account", a.target));
+  const folderPreview = state.readFolder;
+  const folders = o.folders.map((f) => readCard(o, f, "folder", f.label));
+  const previewSource = folderPreview && !o.folders.some((f) => f.source === folderPreview.source) ? folderPreview : null;
+  return h(
+    "section",
+    { class: "section", "aria-label": "Primera lectura" },
+    sectionHeader("Primera lectura", helpTip(READ_HELP.apart, "Ayuda sobre la primera lectura")),
+    h("p", { class: "intro" }, `Se lee ${readVolumeText(o)}. Solo salen los documentos que parecen una factura, completos; en esta lectura no sale ningún correo.`),
+    h("p", { class: "meta" }, o.blocked ? `No hay proveedor de IA confirmado (${o.blocked_message ?? "falta configurar la IA"}): no se enviará nada hasta que lo haya.` : readDestination(o)),
+    h("p", { class: "meta warn" }, recentMailWarning(o)),
+    h("details", { class: "sim-examples" }, h("summary", { "data-focus-key": "read:detail" }, "Ver el detalle de lo que sale y lo que no"), ...connectDetails(o).map((line) => h("p", { class: "meta" }, line)), h("p", { class: "meta" }, READ_HELP.sends)),
+    o.accounts.length ? h("ul", { class: "accounts" }, ...accounts) : h("p", { class: "meta" }, "No hay cuentas conectadas: no hay nada que leer."),
+    removedCards.length ? h("div", {}, sectionHeader("Cuentas desconectadas"), h("p", { class: "meta" }, "Su lectura se canceló al desconectarlas; lo ya leído sigue constando."), h("ul", { class: "accounts" }, ...removedCards)) : null,
+    o.mode === "on_demand"
+      ? h(
+          "div",
+          {},
+          sectionHeader("Carpeta de archivos"),
+          h("p", { class: "meta" }, `Lee ${readVolumeText(o, "folder")}. Una carpeta se lee una sola vez; los archivos que ya conoce NestAdmin (por su contenido) no se vuelven a leer.`),
+          h("div", { class: "buttons" }, h("button", { type: "button", "data-focus-key": "read:folder", onclick: () => void chooseReadFolder() }, "Elegir carpeta…")),
+          previewSource
+            ? h(
+                "ul",
+                { class: "accounts" },
+                readCard(o, { source: previewSource.source, label: previewSource.path, address: `${previewSource.files} ${previewSource.files === 1 ? "archivo admitido" : "archivos admitidos"} en la carpeta`, status: previewSource.status }, "folder", previewSource.path),
+              )
+            : null,
+          folders.length ? h("ul", { class: "accounts" }, ...folders) : null,
+        )
+      : null,
+  );
+}
+
 function mailView() {
   const m = state.mail;
   if (!m) return h("section", { class: "page" }, h("p", {}, "Cargando…"));
@@ -3220,6 +3624,16 @@ function mailView() {
         { class: "intro" },
         "Se abrirá el navegador para que inicie sesión y conceda permiso de lectura, borradores y envío. NestAdmin espera la respuesta en este equipo (dirección de bucle local: localhost o 127.0.0.1) durante 5 minutos.",
       ),
+      h(
+        "div",
+        { class: state.read ? "notice info" : "notice warn", role: "note", "aria-label": "Qué pasará al conectar" },
+        h(
+          "span",
+          {},
+          ...connectNotice(state.read, state.readError).flatMap((line, i) => [i ? h("br", {}) : null, line]),
+          state.read ? h("details", {}, h("summary", { "data-focus-key": "mail:notice-detail" }, "Ver el detalle"), ...connectDetails(state.read).map((line) => h("p", { class: "meta" }, line))) : null,
+        ),
+      ),
       h("div", { class: "row" }, h("label", {}, "Nombre de la cuenta (opcional)", label)),
       h(
         "div",
@@ -3251,6 +3665,7 @@ function mailView() {
           )
         : null,
     ),
+    readSection(),
     h(
       "section",
       { class: "section" },
@@ -3687,6 +4102,15 @@ function fallbackStateText(s: SettingsView): string {
   return s.local_fallback ? "Activado." : "Desactivado.";
 }
 
+/** Aviso a quien confirma un proveedor mientras hay lecturas en espera: qué arrancará, con qué volumen y datos. */
+function waitingReadsBox(): HTMLElement | null {
+  const o = state.read;
+  // Sin el resumen tampoco se sabe si hay lecturas en espera: se dice, no se calla.
+  if (!o) return state.readError ? h("div", { class: "notice warn", role: "note" }, h("span", {}, WAITING_UNKNOWN)) : null;
+  const text = waitingReadsNotice(o, o.accounts.filter((a) => a.status.state === "waiting").length);
+  return text ? h("div", { class: "notice info", role: "note" }, h("span", {}, text)) : null;
+}
+
 function settingsView() {
   const s = state.settings;
   if (!s) return h("section", { class: "page" }, h("p", {}, "Cargando…"));
@@ -3696,6 +4120,7 @@ function settingsView() {
     "section",
     { class: "page" },
     h("h2", {}, "Configuración"),
+    waitingReadsBox(),
     h(
       "section",
       { class: "section" },
@@ -3807,6 +4232,7 @@ function wizardView() {
     "div",
     {},
     h("h2", {}, "Configure la IA de NestAdmin"),
+    waitingReadsBox(),
     h(
       "p",
       { class: "intro" },

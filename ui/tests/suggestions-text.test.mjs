@@ -14,7 +14,9 @@ import {
   suggestionLimitText,
   suggestionOutlierWarning,
   suggestionReappeared,
+  simulationSummary,
   suggestionSentence,
+  suggestionSeenWarning,
   suggestionSupplierNote,
   suggestionWhy,
   suggestionsEmpty,
@@ -300,4 +302,63 @@ test("el aviso de solapamiento de una sugerencia habla de «esta regla», no de 
   assert.match(all, /«Alfa libre»/);
   assert.match(t.timing, /Ahora no ocurre: «Alfa libre» está inactiva/);
   assert.equal(t.tasks, null, "sin recuento no se afirma ninguna tarea afectada");
+});
+
+// ---- E5: la primera lectura no es una aprobación ----
+
+const seenInvoice = (evidence = {}) =>
+  invoice({ count: 5, threshold: 5, approved: 0, seen: 5, amounts: ["121.00", "121.00", "242.00", "363.00", "484.00"], limit: "484.00", amount_min: "121.00", amount_second: "363.00", ...evidence });
+
+test("una sugerencia solo de facturas vistas no afirma aprobaciones ni validación, y no propone límite", () => {
+  const e = { needs_limit: true, limit: null, amounts: [], amount_min: null, amount_second: null };
+  const text = suggestionWhy(seenInvoice(e));
+  assert.match(text, /^Se observaron 5 facturas de Alfa SL en la primera lectura; usted no ha aprobado ninguna de ellas y nadie ha revisado su contenido\. La última se leyó el /);
+  assert.doesNotMatch(text, /aprobadas de|Constan|Ninguna tenía incidencias|sin incidencias/, "no afirma aprobaciones ni validación");
+  assert.match(suggestionLimitText(seenInvoice(e)), /No hay límite propuesto.*un límite no sale de lo que solo se ha visto.*Escriba usted el límite/);
+  assert.equal(suggestionOutlierWarning(seenInvoice(e)), null);
+  assert.equal(suggestionSeenWarning(seenInvoice(e)), "Estas facturas solo se han leído; nadie las ha revisado y un tercero puede haberlas enviado.");
+  assert.equal(suggestionSeenWarning(invoice()), null);
+  assert.match(SUGGESTION_HELP.evidence, /Cuentan sus aprobaciones ya ejecutadas y, solo en facturas, las facturas vistas/);
+  assert.doesNotMatch(SUGGESTION_HELP.evidence, /Solo cuentan aprobaciones suyas/);
+});
+
+test("con aprobaciones y vistas mezcladas el texto separa unas de otras y el límite sale de lo aprobado", () => {
+  const text = suggestionWhy(seenInvoice({ count: 5, approved: 2, seen: 3 }));
+  assert.match(text, /2 facturas aprobadas por usted y 3 vistas en la primera lectura sin aprobar/);
+  assert.match(text, /fecha de lectura o de aprobación, no de la factura/);
+  assert.match(suggestionLimitText(seenInvoice({ approved: 2, seen: 3 })), /importes aprobados/);
+  assert.match(suggestionWhy(invoice()), /Constan 3 facturas aprobadas de Alfa SL/);
+});
+
+test("el origen de la regla dice que las facturas eran solo vistas", () => {
+  const nameOf = () => "";
+  assert.match(originText({ kind: "suggestion", count: 5, threshold: 5, approved: 0, seen: 5 }, nameOf), /5 facturas vistas en la primera lectura, ninguna aprobada por usted/);
+  assert.match(originText({ kind: "suggestion", count: 5, threshold: 3, approved: 3, seen: 2 }, nameOf), /3 aprobadas por usted y 2 vistas en la primera lectura sin aprobar/);
+  assert.doesNotMatch(originText({ kind: "suggestion", count: 3, threshold: 3 }, nameOf), /primera lectura/);
+});
+
+test("el estado vacío cuenta las facturas vistas aparte de las decisiones y pide más repetición", () => {
+  const only = suggestionsEmpty(empty({ observed: 4, seen: 4, decisions: 0, counted: 0 }));
+  assert.match(only.hint, /Constan 4 facturas vistas en la primera lectura, pero ninguna cuenta/);
+  assert.doesNotMatch(only.hint, /decisiones/);
+  assert.match(only.hint, /5 si solo se vieron en la primera lectura/);
+  const raised = suggestionsEmpty(empty({ thresholds: { invoice: 8, reply: 5, min: 2, max: 50 } }));
+  assert.match(raised.hint, /8 si solo se vieron/, "subir el umbral sube también el mínimo de vistas");
+  assert.match(SUGGESTION_HELP.seen, /no las ha aprobado/);
+  assert.match(SUGGESTION_HELP.seen, /Nunca sirven para sugerir respuestas por correo/);
+});
+
+test("la simulación cuenta aparte lo que solo se leyó y no lo presenta como tareas", () => {
+  const sim = { considered: 3, truncated: false, limit: 200, skipped_without_result: 0, without_currency_check: 0, would_automate: 2, would_review: {}, overlaps: 0, no_match: 1, would_block_other: [], items: [], from_read: { considered: 5, would_automate: 4, truncated: false, limit: 200 } };
+  const summary = simulationSummary(sim, "register_invoice");
+  assert.match(summary.notes.join(" "), /Aparte: de 5 facturas que solo se leyeron en la primera lectura.*habría registrado 4\. No son tareas suyas: no están en Tareas ni se registraron/);
+  assert.match(summary.headline, /De las últimas 3 /);
+  assert.doesNotMatch(simulationSummary({ ...sim, from_read: null }, "register_invoice").notes.join(" "), /Aparte/);
+});
+
+test("lo ocultado por una factura vista con incidencias se dice, sin silencio", () => {
+  const h = suggestionsHidden({ covered: 0, discarded: 0, accepted: 0, invalid: 0, seen_invalidated: 2 });
+  assert.match(h, /2 proveedores con facturas solo leídas no se sugieren: basta una factura con incidencias, posiblemente enviada por un tercero, para que ninguna de las leídas cuente; sus aprobaciones, si las hay, se conservan/);
+  assert.match(suggestionsHidden({ covered: 0, discarded: 0, accepted: 0, invalid: 0, seen_invalidated: 1 }), /1 proveedor con facturas solo leídas no se sugiere/);
+  assert.equal(suggestionsHidden({ covered: 0, discarded: 0, accepted: 0, invalid: 0, seen_invalidated: 0 }), null);
 });

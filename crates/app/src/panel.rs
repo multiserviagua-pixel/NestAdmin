@@ -110,6 +110,30 @@ pub struct Simulation {
     /// (D130). Una regla nueva sin guardar aparece como `(simulada)`.
     pub findings: Vec<RuleFinding>,
     pub items: Vec<SimulationItem>,
+    /// Lo mismo para las facturas que solo se leyeron en la primera lectura (D133), aparte: no
+    /// desplazan a las tareas reales del tope y no se listan por tarea (no son visibles).
+    pub from_read: Option<Box<Simulation>>,
+}
+
+impl Simulation {
+    fn empty(action_kind: &str, limit: usize) -> Self {
+        Self {
+            action_kind: action_kind.into(),
+            limit,
+            considered: 0,
+            truncated: false,
+            skipped_without_result: 0,
+            without_currency_check: 0,
+            would_automate: 0,
+            would_review: BTreeMap::new(),
+            overlaps: 0,
+            no_match: 0,
+            would_block_other: Vec::new(),
+            findings: Vec::new(),
+            items: Vec::new(),
+            from_read: None,
+        }
+    }
 }
 
 /// Lo que la interfaz necesita para revisar una unificación: las reglas de hoy, las
@@ -466,9 +490,14 @@ impl App {
             .store
             .all_tasks()?
             .into_iter()
-            .filter(|t| t.kind == task_kind)
+            // Un correo de la primera lectura no tiene remitente ni borrador: no dice nada sobre
+            // una regla de envío (D133). Sus facturas se simulan aparte, sin desplazar las reales.
+            .filter(|t| t.kind == task_kind && !(t.kind == EMAIL && crate::task_is_initial_read(t)))
             .collect();
-        let truncated = of_kind.len() > limit;
+        let (real, read): (Vec<Task>, Vec<Task>) = of_kind
+            .into_iter()
+            .partition(|t| !crate::task_is_initial_read(t));
+        let truncated = real.len() > limit;
         let mut sim = Simulation {
             action_kind: action_kind.into(),
             limit,
@@ -483,70 +512,74 @@ impl App {
             would_block_other: Vec::new(),
             findings: Vec::new(),
             items: Vec::new(),
+            from_read: None,
         };
-        let mut blocked: BTreeMap<String, Vec<i64>> = BTreeMap::new();
-        for task in of_kind.into_iter().take(limit) {
-            let Some(result) = task.result.as_ref().filter(|r| r.is_object()) else {
-                sim.skipped_without_result += 1;
-                continue;
-            };
-            sim.considered += 1;
-            if action_kind == REGISTER_INVOICE && crate::rules::foreign_currencies(result).is_none()
-            {
-                sim.without_currency_check += 1;
-            }
-            let label = if task_kind == INVOICE {
-                result["document"].as_str()
-            } else {
-                result["message"]["subject"].as_str()
-            }
-            .map(str::to_owned);
-            let before = evaluate_result(&rules, &any_sender, action_kind, result);
-            let after = evaluate_result(&with_hypothetical, &any_sender, action_kind, result);
-            // Si la regla coincide con los datos se mira sin los atajos previos a las reglas
-            // (importe dudoso, factura separada), que mandan la tarea a revisión aunque
-            // coincida cualquier regla.
-            let raw = evaluate_with(&with_hypothetical, &any_sender, action_kind, result);
-            let mine = raw
-                .explanation
-                .candidates
-                .iter()
-                .find(|c| c.id == SIMULATED);
-            let code = after.explanation.code;
-            let shortcut = matches!(code, ReasonCode::AmountReview | ReasonCode::SplitInvoice);
-            let item = match mine {
-                None => review_item(&mut sim, task.id, label, &after),
-                Some(check) if check.matches && shortcut => {
-                    review_item(&mut sim, task.id, label, &after)
+        let run = |tasks: Vec<Task>,
+                   sim: &mut Simulation,
+                   blocked: &mut BTreeMap<String, Vec<i64>>| {
+            for task in tasks.into_iter().take(limit) {
+                let Some(result) = task.result.as_ref().filter(|r| r.is_object()) else {
+                    sim.skipped_without_result += 1;
+                    continue;
+                };
+                sim.considered += 1;
+                if action_kind == REGISTER_INVOICE
+                    && crate::rules::foreign_currencies(result).is_none()
+                {
+                    sim.without_currency_check += 1;
                 }
-                Some(check) if check.matches => match (&after.decision, code) {
-                    (RuleDecision::Automate { rule_id, .. }, _) if rule_id == SIMULATED => {
-                        sim.would_automate += 1;
-                        SimulationItem {
-                            task_id: task.id,
-                            label,
-                            outcome: SimulationOutcome::Automate,
-                            reason_code: Some(ReasonCode::Automated),
-                            explanation: "la regla la automatizaría".into(),
-                            overlapping_rules: Vec::new(),
-                        }
+                let label = if task_kind == INVOICE {
+                    result["document"].as_str()
+                } else {
+                    result["message"]["subject"].as_str()
+                }
+                .map(str::to_owned);
+                let before = evaluate_result(&rules, &any_sender, action_kind, result);
+                let after = evaluate_result(&with_hypothetical, &any_sender, action_kind, result);
+                // Si la regla coincide con los datos se mira sin los atajos previos a las reglas
+                // (importe dudoso, factura separada), que mandan la tarea a revisión aunque
+                // coincida cualquier regla.
+                let raw = evaluate_with(&with_hypothetical, &any_sender, action_kind, result);
+                let mine = raw
+                    .explanation
+                    .candidates
+                    .iter()
+                    .find(|c| c.id == SIMULATED);
+                let code = after.explanation.code;
+                let shortcut = matches!(code, ReasonCode::AmountReview | ReasonCode::SplitInvoice);
+                let item = match mine {
+                    None => review_item(sim, task.id, label, &after),
+                    Some(check) if check.matches && shortcut => {
+                        review_item(sim, task.id, label, &after)
                     }
-                    (_, ReasonCode::SeveralRulesMatch) => {
-                        let others: Vec<String> = after.explanation.facts["rule_ids"]
-                            .as_array()
-                            .into_iter()
-                            .flatten()
-                            .filter_map(Value::as_str)
-                            .filter(|id| *id != SIMULATED)
-                            .map(str::to_owned)
-                            .collect();
-                        if let RuleDecision::Automate { rule_id, .. } = &before.decision {
-                            if others.contains(rule_id) {
-                                blocked.entry(rule_id.clone()).or_default().push(task.id);
+                    Some(check) if check.matches => match (&after.decision, code) {
+                        (RuleDecision::Automate { rule_id, .. }, _) if rule_id == SIMULATED => {
+                            sim.would_automate += 1;
+                            SimulationItem {
+                                task_id: task.id,
+                                label,
+                                outcome: SimulationOutcome::Automate,
+                                reason_code: Some(ReasonCode::Automated),
+                                explanation: "la regla la automatizaría".into(),
+                                overlapping_rules: Vec::new(),
                             }
                         }
-                        sim.overlaps += 1;
-                        SimulationItem {
+                        (_, ReasonCode::SeveralRulesMatch) => {
+                            let others: Vec<String> = after.explanation.facts["rule_ids"]
+                                .as_array()
+                                .into_iter()
+                                .flatten()
+                                .filter_map(Value::as_str)
+                                .filter(|id| *id != SIMULATED)
+                                .map(str::to_owned)
+                                .collect();
+                            if let RuleDecision::Automate { rule_id, .. } = &before.decision {
+                                if others.contains(rule_id) {
+                                    blocked.entry(rule_id.clone()).or_default().push(task.id);
+                                }
+                            }
+                            sim.overlaps += 1;
+                            SimulationItem {
                             task_id: task.id,
                             label,
                             outcome: SimulationOutcome::Overlap,
@@ -557,36 +590,39 @@ impl App {
                             ),
                             overlapping_rules: others,
                         }
+                        }
+                        _ => review_item(sim, task.id, label, &after),
+                    },
+                    Some(check) if check.sender_required => {
+                        *sim.would_review
+                            .entry(reason_key(ReasonCode::SenderRequired))
+                            .or_default() += 1;
+                        SimulationItem {
+                            task_id: task.id,
+                            label,
+                            outcome: SimulationOutcome::Review,
+                            reason_code: Some(ReasonCode::SenderRequired),
+                            explanation: check.mismatch.clone().unwrap_or_default(),
+                            overlapping_rules: Vec::new(),
+                        }
                     }
-                    _ => review_item(&mut sim, task.id, label, &after),
-                },
-                Some(check) if check.sender_required => {
-                    *sim.would_review
-                        .entry(reason_key(ReasonCode::SenderRequired))
-                        .or_default() += 1;
-                    SimulationItem {
-                        task_id: task.id,
-                        label,
-                        outcome: SimulationOutcome::Review,
-                        reason_code: Some(ReasonCode::SenderRequired),
-                        explanation: check.mismatch.clone().unwrap_or_default(),
-                        overlapping_rules: Vec::new(),
+                    Some(check) => {
+                        sim.no_match += 1;
+                        SimulationItem {
+                            task_id: task.id,
+                            label,
+                            outcome: SimulationOutcome::NoMatch,
+                            reason_code: None,
+                            explanation: check.mismatch.clone().unwrap_or_default(),
+                            overlapping_rules: Vec::new(),
+                        }
                     }
-                }
-                Some(check) => {
-                    sim.no_match += 1;
-                    SimulationItem {
-                        task_id: task.id,
-                        label,
-                        outcome: SimulationOutcome::NoMatch,
-                        reason_code: None,
-                        explanation: check.mismatch.clone().unwrap_or_default(),
-                        overlapping_rules: Vec::new(),
-                    }
-                }
-            };
-            sim.items.push(item);
-        }
+                };
+                sim.items.push(item);
+            }
+        };
+        let mut blocked: BTreeMap<String, Vec<i64>> = BTreeMap::new();
+        run(real, &mut sim, &mut blocked);
         sim.would_block_other = blocked
             .into_iter()
             .map(|(rule_id, task_ids)| BlockedRule { rule_id, task_ids })
@@ -596,6 +632,18 @@ impl App {
             &any_sender,
             exclude_rule_id.and_then(|id| self.store.rule(id).ok().flatten()),
         );
+        if !read.is_empty() {
+            let mut from_read = Simulation {
+                truncated: read.len() > limit,
+                findings: Vec::new(),
+                would_block_other: Vec::new(),
+                ..Simulation::empty(action_kind, limit)
+            };
+            let mut unused = BTreeMap::new();
+            run(read, &mut from_read, &mut unused);
+            from_read.items.clear();
+            sim.from_read = Some(Box::new(from_read));
+        }
         Ok(sim)
     }
 
@@ -701,7 +749,13 @@ impl App {
         let invalid = |e: MergeError| AppError::Invalid(e.to_string());
         let before = merge_before(&rules, &marks, ids).map_err(invalid)?;
         let options = merge_options(&rules, &marks, ids).map_err(invalid)?;
-        let tasks = self.store.all_tasks()?;
+        let tasks: Vec<Task> = self
+            .store
+            .all_tasks()?
+            .into_iter()
+            // Lo que solo se leyó (D133) no es una tarea que la persona vea: no entra en el plan.
+            .filter(|t| !crate::task_is_initial_read(t))
+            .collect();
         let plan = match merge_plan(&rules, &marks, ids, chosen, &tasks) {
             Ok(plan) => Some(plan),
             Err(MergeError::ChoiceRequired(_)) => None,

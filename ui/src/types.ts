@@ -79,6 +79,8 @@ export interface Simulation {
   /** Contradicciones que la regla crearía al activarse, con su explicación (D130). */
   findings: RuleFinding[];
   items: SimulationItem[];
+  /** Lo mismo para las facturas solo leídas en la primera lectura, aparte y sin listarlas por tarea. */
+  from_read?: Simulation | null;
 }
 
 /** Una contradicción entre reglas (D130). El texto lo redacta `rules-text.ts`. */
@@ -380,6 +382,9 @@ export interface SuggestionEvidence {
   threshold: number;
   /** Veces que la serie se cortó antes (edición, rechazo, sin clasificar o factura con incidencias). */
   earlier_breaks: number;
+  /** De `count`: aprobaciones de la persona y facturas que solo se vieron en la primera lectura (E5, D133). */
+  approved: number;
+  seen: number;
   /** Cuándo se guardó la última observación (ms). */
   last_at: number;
   task_ids: number[];
@@ -387,6 +392,8 @@ export interface SuggestionEvidence {
   amounts: string[];
   /** Facturas: límite propuesto, el mayor de los importes observados. */
   limit: string | null;
+  /** Facturas sin ninguna aprobada: la persona debe escribir el límite (D133). */
+  needs_limit: boolean;
   /** Facturas: el menor y el segundo mayor de los importes observados. */
   amount_min: string | null;
   amount_second: string | null;
@@ -414,6 +421,8 @@ export interface SuggestionProgress {
   subject: string;
   category: string | null;
   count: number;
+  approved: number;
+  seen: number;
   needed: number;
   missing: number;
 }
@@ -432,9 +441,12 @@ export interface Suggestions {
   progress: SuggestionProgress[];
   /** Señales válidas que se miraron. Cero: aún no hay datos. */
   observed: number;
+  /** De ellas, decisiones de la persona (aprobar, editar o rechazar) y facturas vistas en la primera lectura. */
+  decisions: number;
+  seen: number;
   /** Observaciones que cuentan como evidencia en las series actuales, se muestren o no. */
   counted: number;
-  hidden: { covered: number; discarded: number; accepted: number; invalid: number; not_suggested: number };
+  hidden: { covered: number; discarded: number; accepted: number; invalid: number; not_suggested: number; seen_invalidated: number };
   thresholds: ThresholdSettings;
   watermark: number;
 }
@@ -522,6 +534,8 @@ export interface RefineSentCandidate {
   category: string | null;
   sender_domain: string | null;
   count: number;
+  /** De `count`, las que solo se vieron en la primera lectura y la persona nunca aprobó. */
+  seen: number;
   earlier_breaks: number;
   amount_min: string | null;
   amount_max: string | null;
@@ -558,4 +572,126 @@ export interface RuleSeed {
   limit_from_this_invoice: boolean;
   /** Facturas: por qué no se precargó el límite (solo el proveedor). */
   limit_skipped: { code: string; currencies: string[] } | null;
+}
+
+// ---- Primera lectura (E5, D133) ----
+
+/** Estado de la lectura de una fuente (`account:<proveedor>:<dirección>` o `folder:<huella>`), calculado con los datos. */
+export type ReadState = "not_started" | "waiting" | "pending" | "interrupted" | "listing_failed" | "stopped" | "held" | "reading" | "done_with_errors" | "done";
+
+export interface ReadFailure {
+  task_id: number;
+  kind: string;
+  /** Nombre del documento. */
+  name: string | null;
+  code: string;
+  message: string;
+  recoverable: boolean;
+}
+
+export interface ReadIssue {
+  code: string;
+  message: string;
+}
+
+export interface ReadDestination {
+  provider: string;
+  model: string;
+  host: string | null;
+}
+
+export interface InitialReadStatus {
+  source: string;
+  kind: "account" | "folder";
+  state: ReadState;
+  volume: number | null;
+  started_at: number | null;
+  provider: string | null;
+  model: string | null;
+  host: string | null;
+  listed: number;
+  already_known: number;
+  /** Correos de los últimos días o sin fecha legible: siguen el flujo normal. */
+  recent_left_out: number;
+  /** Correos que quedaron sin clasificar: no se envían. */
+  emails_unclassified: number;
+  /** Documentos enviados al proveedor, omitidos por no parecer factura y no leídos por el tope. */
+  documents_sent: number;
+  documents_skipped: number;
+  over_cap: number;
+  tasks: { total: number; queued: number; running: number; completed: number; failed: number; cancelled: number };
+  by_provider: Array<{ provider: string; model: string; host: string | null; documents: number }>;
+  failures: ReadFailure[];
+  attachment_failures: Array<{ name: string; code: string; message: string }>;
+  skipped_attachments: number;
+  listing_error: ReadIssue | null;
+  scan_capped: boolean;
+  remaining: number;
+  fallback_used: number;
+  /** Envíos o registros hechos por las tareas de esta lectura: debe ser 0. */
+  actions: number;
+  waiting_message: string | null;
+  /** Lo pendiente no sale: detenida, destino cambiado o cuenta quitada. */
+  held: { reason: "stopped" | "destination_changed" | "removed"; authorized: ReadDestination | null; now: ReadDestination } | null;
+  removed: boolean;
+}
+
+export interface ReadSource {
+  source: string;
+  /** Identificador de la cuenta o ruta de la carpeta. */
+  target: string;
+  label: string;
+  address: string | null;
+  status: InitialReadStatus;
+}
+
+export interface ReadSuggestions {
+  seen_documents: number;
+  ready: number;
+  closest: number;
+  needed: number;
+  error: string | null;
+}
+
+export interface InitialReadOverview {
+  mode: RefineMode;
+  limits: { min: number; max: number; fixed: number | null; default: number };
+  recent_days: number;
+  documents_cap: number;
+  provider: { provider: string; model: string };
+  host: string | null;
+  external: boolean;
+  local_fallback: boolean;
+  blocked: string | null;
+  blocked_message: string | null;
+  sends: string[];
+  never_sent: string[];
+  accounts: ReadSource[];
+  removed: ReadSource[];
+  folders: ReadSource[];
+  suggestions: ReadSuggestions;
+}
+
+/** Una factura que solo se leyó en la primera lectura. */
+export interface SeenInvoice {
+  task_id: number;
+  document: string | null;
+  date: string | null;
+  amount: string | null;
+  read_at: number;
+}
+
+export interface FolderPreview {
+  source: string;
+  path: string;
+  files: number;
+  status: InitialReadStatus;
+}
+
+/** Lo que la persona vio antes de pedir la lectura: si algo cambia, el backend no lee. */
+export interface ReadExpectation {
+  provider: string;
+  model: string;
+  host: string;
+  volume: number;
 }

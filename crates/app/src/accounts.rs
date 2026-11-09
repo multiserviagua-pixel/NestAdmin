@@ -36,7 +36,7 @@ pub enum MailProviderKind {
 }
 
 impl MailProviderKind {
-    fn prefix(self) -> &'static str {
+    pub(crate) fn prefix(self) -> &'static str {
         match self {
             Self::Simulator => SIMULATOR,
             Self::Google => "google",
@@ -667,10 +667,20 @@ impl Accounts {
 
     /// Los mensajes más recientes de una cuenta, como mucho `limit`, con IDs de cuenta.
     fn recent(&self, account: &str) -> Result<Vec<Message>, ConnectorError> {
+        self.recent_limited(account, self.limit)
+    }
+
+    /// Como `recent`, con un máximo propio: la primera lectura (E5) pide su volumen sin cambiar
+    /// el límite de las consultas normales.
+    pub(crate) fn recent_limited(
+        &self,
+        account: &str,
+        limit: usize,
+    ) -> Result<Vec<Message>, ConnectorError> {
         let connector = self.connector(account)?;
         let mut all = Vec::new();
         let mut cursor: Option<String> = None;
-        while all.len() < self.limit {
+        while all.len() < limit {
             let page = connector.list_messages(cursor.as_deref())?;
             all.extend(page.messages);
             match page.next_cursor {
@@ -678,11 +688,34 @@ impl Accounts {
                 None => break,
             }
         }
-        all.truncate(self.limit);
+        all.truncate(limit);
         for message in &mut all {
             message.id = join_id(account, &message.id);
         }
         Ok(all)
+    }
+
+    /// Una página del buzón de una cuenta (más recientes primero según el proveedor), con IDs de
+    /// cuenta, y el cursor de la siguiente. La primera lectura (E5) la recorre paso a paso, sin
+    /// retener el cerrojo de la aplicación entre páginas.
+    pub(crate) fn list_page(
+        &self,
+        account: &str,
+        cursor: Option<&str>,
+    ) -> Result<(Vec<Message>, Option<String>), ConnectorError> {
+        let page = self.connector(account)?.list_messages(cursor)?;
+        let mut messages = page.messages;
+        for message in &mut messages {
+            message.id = join_id(account, &message.id);
+        }
+        Ok((messages, page.next_cursor))
+    }
+
+    /// Proveedor y dirección conocida de una cuenta: con ellos, y no con el identificador (que se
+    /// reutiliza al quitar y volver a añadir cuentas), se reconoce «el mismo buzón» (D133).
+    pub(crate) fn identity(&self, id: &str) -> Option<(MailProviderKind, Option<String>)> {
+        let account = self.list.iter().find(|a| a.record.id == id)?;
+        Some((account.record.provider, account.record.address.clone()))
     }
 
     /// Lee cada cuenta por separado; el error de una no impide leer las demás.

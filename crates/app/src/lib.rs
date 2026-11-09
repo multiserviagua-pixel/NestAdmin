@@ -8,6 +8,7 @@
 //! aplica reglas y deja la tarea completada, en revisión o fallida.
 
 pub mod accounts;
+pub mod initial_read;
 pub mod panel;
 pub mod refine;
 pub mod rules;
@@ -28,7 +29,8 @@ use nestadmin_core::{
     Rule, Store, Task, TaskError, TaskState,
 };
 use nestadmin_documents::{
-    process_invoice, DuplicateRegistry, Evidenced, Invoice, Issue, RawInvoice, RecoveryReason,
+    looks_like_invoice, process_invoice, DuplicateRegistry, Evidenced, Invoice, Issue, RawInvoice,
+    RecoveryReason,
 };
 use nestadmin_extract::{Extraction, Extractor};
 use nestadmin_mail::{OAuthConfig, Tokens};
@@ -174,6 +176,13 @@ pub struct App {
     key_fixed: bool,
     /// Cómo se afinan las sugerencias según el canal (D134): bajo demanda o por lotes.
     refine_mode: refine::RefineMode,
+    /// Primeras lecturas que están avanzando en este proceso (D133): una marca en fase de encolar
+    /// que no esté aquí se cortó (se cerró la aplicación) y se muestra como interrumpida.
+    reads_active: HashSet<String>,
+    /// Fuentes de la primera lectura cuyas tareas no deben salir ahora (detenidas, canceladas o con
+    /// el destino cambiado). Se comparte con las tareas en curso, que lo comprueban justo antes de
+    /// llamar al proveedor (D133).
+    read_gate: Arc<Mutex<HashSet<String>>>,
 }
 
 /// Si se puede instalar una actualización sin cortar trabajo (actualizaciones.md, paso 5).
@@ -206,6 +215,12 @@ enum Prepared {
 enum Outcome {
     Generated(GenerateResult),
     Resumed(Value),
+    /// Primera lectura: el documento no parece una factura según la comprobación local y no se
+    /// envía a ningún proveedor (E5, D133). Lleva el código del motivo.
+    Skipped(&'static str),
+    /// La lectura se detuvo, se desconectó o cambió de destino mientras la tarea estaba en curso:
+    /// no se llamó al proveedor y la tarea vuelve a la cola retenida (D133).
+    Held,
 }
 
 /// Estado de los intentos anteriores de la acción de una tarea (D50).
@@ -220,6 +235,19 @@ enum Previous {
     },
     /// Un intento no se pudo comprobar: el conector falló o el borrador ya no existe.
     Unknown { version: i64, error: ConnectorError },
+}
+
+/// Una tarea de la primera lectura (E5, D133): su entrada lleva `initial_read: true`. Solo
+/// clasifica y alimenta las sugerencias; nunca crea acciones ni pendientes.
+pub(crate) fn is_initial_read(input: &Value) -> bool {
+    input["initial_read"].as_bool() == Some(true)
+}
+
+/// Lo mismo, a partir del texto de la entrada de una tarea.
+pub(crate) fn task_is_initial_read(task: &Task) -> bool {
+    serde_json::from_str::<Value>(&task.input_ref)
+        .map(|input| is_initial_read(&input))
+        .unwrap_or(false)
 }
 
 /// Campos ya extraídos de una factura separada de un documento con varias (D68).
@@ -252,6 +280,10 @@ const MISSING_REASON: &str = "el borrador del intento anterior ya no existe y no
 pub struct Job {
     pub task: Task,
     provider: Arc<dyn Provider>,
+    /// Servidor al que saldrían los datos de esta tarea (`None` con la IA local).
+    destination: Option<String>,
+    /// Compuerta de la primera lectura (D133): se comprueba justo antes de llamar al proveedor.
+    gate: Arc<Mutex<HashSet<String>>>,
     fallback: Option<LocalFallback>,
     fallback_until: Arc<Mutex<Option<Instant>>>,
     extractor: Arc<Extractor>,
@@ -269,6 +301,8 @@ pub struct Completed {
     ai_unauthorized: bool,
     /// `{from, reason}` si la respuesta la dio el respaldo local (D101).
     fallback: Option<Value>,
+    /// Servidor al que se envió la petición; `None` con la IA local o si la atendió el respaldo.
+    destination: Option<String>,
 }
 
 /// Resultado de pedir la generación, con el respaldo local si procede.
@@ -398,11 +432,17 @@ impl Job {
         let Job {
             task,
             provider,
+            destination,
+            gate,
             fallback,
             fallback_until,
             extractor,
             prepared,
         } = self;
+        let read_source: Option<String> = serde_json::from_str::<Value>(&task.input_ref)
+            .ok()
+            .filter(is_initial_read)
+            .and_then(|i| i["read_source"].as_str().map(str::to_owned));
         let mut extracted = None;
         let mut ai_unauthorized = false;
         let mut used_fallback = None;
@@ -418,23 +458,47 @@ impl Job {
                     let extraction = extractor
                         .extract(&path)
                         .map_err(|e| task_error(e.code(), e.to_string(), e.recoverable()))?;
+                    // Primera lectura: solo sale lo que parece una factura según el texto ya
+                    // extraído en el equipo, sin IA (E5, D133). Si la extracción falló, ya se
+                    // devolvió el error de arriba y no sale nada.
+                    let initial = serde_json::from_str::<Value>(&task.input_ref)
+                        .is_ok_and(|i| is_initial_read(&i));
+                    if initial {
+                        if let Err(why) = looks_like_invoice(&extraction.text) {
+                            extracted = Some(extraction);
+                            return Ok(Outcome::Skipped(why.code()));
+                        }
+                    }
                     let request = extraction_request(&task.id.to_string(), &extraction.text);
                     extracted = Some(extraction);
                     request
                 }
             };
+            // Última comprobación antes de que salga nada: la lectura pudo detenerse, desconectarse
+            // o cambiar de destino durante el OCR.
+            if let Some(source) = &read_source {
+                if gate.lock().map_or(true, |held| held.contains(source)) {
+                    return Ok(Outcome::Held);
+                }
+            }
             let attempt =
                 generate_with_fallback(&*provider, fallback.as_ref(), &fallback_until, &request);
             ai_unauthorized = attempt.unauthorized;
             used_fallback = attempt.fallback;
             attempt.result.map(Outcome::Generated)
         });
+        let destination = if used_fallback.is_some() {
+            None
+        } else {
+            destination
+        };
         Completed {
             task,
             outcome,
             extraction: extracted,
             ai_unauthorized,
             fallback: used_fallback,
+            destination,
         }
     }
 }
@@ -485,6 +549,8 @@ impl App {
             retry_obsolete: None,
             key_fixed: false,
             refine_mode: refine::RefineMode::of_build(),
+            reads_active: HashSet::new(),
+            read_gate: Arc::new(Mutex::new(HashSet::new())),
         };
         app.store.recover()?;
         app.store.reconcile_actions(SEND_DRAFT, &app.mail)?;
@@ -672,7 +738,12 @@ impl App {
         let mut tasks = self.store.all_tasks()?;
         tasks.reverse();
         for task in tasks.iter().filter(|t| t.kind == INVOICE) {
-            if let Some(fields) = task.result.as_ref().map(|r| &r["fields"]) {
+            if let Some(fields) = task
+                .result
+                .as_ref()
+                .map(|r| &r["fields"])
+                .filter(|f| f.is_object())
+            {
                 let invoice = Invoice::from_raw(&raw_from_fields(fields));
                 self.registry.check_and_add(task.id.to_string(), &invoice);
             }
@@ -691,6 +762,8 @@ impl App {
     pub fn select_provider(&mut self, provider: Arc<dyn Provider>) {
         self.provider = provider;
         self.key_fixed = true;
+        // Lo que está en cola o en curso de una primera lectura no sigue hacia el destino nuevo.
+        self.refresh_read_gate();
         // El consentimiento del afinado automático es de un destino concreto (D134).
         self.drop_consent_if_destination_changed();
         self.expire_fallback_period();
@@ -739,7 +812,7 @@ impl App {
             return Err(AppError::Invalid("el documento está vacío".into()));
         }
         let origin = json!({ "kind": "file", "name": name, "original_path": null });
-        self.store_document(name, "txt", text.as_bytes(), origin)
+        self.store_document(name, "txt", text.as_bytes(), origin, None)
     }
 
     /// Encola un archivo `.txt` o `.pdf` del que no se conoce la ruta original.
@@ -782,7 +855,7 @@ impl App {
             // selector que no la facilita).
             "original_path": original.map(|p| p.display().to_string()),
         });
-        self.store_document(name, &extension, bytes, origin)
+        self.store_document(name, &extension, bytes, origin, None)
     }
 
     /// Encola un adjunto de un correo ya recibido (`message_task`, la tarea de ese correo).
@@ -834,7 +907,12 @@ impl App {
             origin["attachment_key"] = json!(attachment_key);
             origin["attachment_id"] = json!(attachment_id);
         }
-        self.store_document(name, &extension, bytes, origin)
+        // Un adjunto de un correo de la primera lectura lo es también: se hereda la marca y la
+        // fuente, de modo que ni la primera lectura ni una consulta posterior del buzón lo
+        // convierten en un pendiente (E5).
+        let read =
+            is_initial_read(&input).then(|| input["read_source"].as_str().unwrap_or("").to_owned());
+        self.store_document(name, &extension, bytes, origin, read.as_deref())
     }
 
     /// Guarda la copia y encola la tarea. `origin` dice de dónde vino; aquí se añaden la
@@ -845,6 +923,7 @@ impl App {
         extension: &str,
         bytes: &[u8],
         mut origin: Value,
+        initial_read: Option<&str>,
     ) -> AppResult<Task> {
         let now = SystemTime::now().duration_since(UNIX_EPOCH).ok();
         let stamp = now.map(|d| d.as_nanos()).unwrap_or(0);
@@ -853,7 +932,11 @@ impl App {
         origin["imported_at"] = json!(now.map(|d| d.as_secs()));
         origin["sha256"] = json!(hex(&Sha256::digest(bytes)));
         origin["size"] = json!(bytes.len());
-        let input = json!({ "document": name, "path": path, "origin": origin });
+        let mut input = json!({ "document": name, "path": path, "origin": origin });
+        if let Some(source) = initial_read {
+            input["initial_read"] = json!(true);
+            input["read_source"] = json!(source);
+        }
         Ok(self.store.enqueue(INVOICE, &input.to_string())?)
     }
 
@@ -893,6 +976,7 @@ impl App {
     pub fn fetch_mail(&mut self) -> AppResult<FetchReport> {
         // Mensajes con tarea (ID con cuenta → tarea) y adjuntos ya importados.
         let mut known: HashMap<String, i64> = HashMap::new();
+        let mut read_tasks: HashSet<i64> = HashSet::new();
         let mut imported: HashSet<String> = HashSet::new();
         for task in self.store.all_tasks()? {
             let input: Value = serde_json::from_str(&task.input_ref).unwrap_or(Value::Null);
@@ -901,6 +985,9 @@ impl App {
                     if let Some(id) = input["message_id"].as_str() {
                         let (account, inner) = split_id(id);
                         known.insert(accounts::join_id(account, inner), task.id);
+                        if is_initial_read(&input) {
+                            read_tasks.insert(task.id);
+                        }
                     }
                 }
                 INVOICE => {
@@ -937,7 +1024,18 @@ impl App {
                                 task.id
                             }
                         };
-                        self.import_attachments(task_id, message, &mut imported, &mut attachments)?;
+                        // Los adjuntos de un correo de la primera lectura son cosa de esa lectura
+                        // (con su tope y su comprobación): una consulta no los importa (D133).
+                        if read_tasks.contains(&task_id) {
+                            continue;
+                        }
+                        self.import_attachments(
+                            task_id,
+                            message,
+                            &mut imported,
+                            &mut attachments,
+                            None,
+                        )?;
                     }
                     AccountFetch {
                         account,
@@ -966,12 +1064,16 @@ impl App {
     /// La clave de un adjunto es el mensaje, su nombre y su tamaño, que no cambian entre
     /// consultas (el identificador de Gmail sí puede cambiar). Un fallo de descarga queda en
     /// el informe y se reintenta en la consulta siguiente; nunca se pierde en silencio.
+    ///
+    /// Con `cap = Some((presupuesto, omitidos))` (primera lectura, D133) no se importa más de los
+    /// documentos que quedan en el presupuesto; los que sobran se cuentan en `omitidos`.
     fn import_attachments(
         &mut self,
         message_task: i64,
         message: &Message,
         imported: &mut HashSet<String>,
         report: &mut AttachmentFetch,
+        mut cap: Option<(&mut usize, &mut usize)>,
     ) -> AppResult<()> {
         for attachment in &message.attachments {
             let name = attachment_name(attachment);
@@ -987,6 +1089,12 @@ impl App {
             if !supported_document(&name) {
                 report.skipped.push(name);
                 continue;
+            }
+            if let Some((budget, over)) = cap.as_mut() {
+                if **budget == 0 {
+                    **over += 1;
+                    continue;
+                }
             }
             let fail = |code: &str, message: String| AttachmentIssue {
                 name: name.clone(),
@@ -1017,6 +1125,9 @@ impl App {
                 Ok(_) => {
                     imported.insert(key);
                     report.imported += 1;
+                    if let Some((budget, _)) = cap.as_mut() {
+                        **budget = budget.saturating_sub(1);
+                    }
                 }
                 Err(AppError::Invalid(reason)) => report.failed.push(fail("invalid_input", reason)),
                 Err(other) => return Err(other),
@@ -1040,8 +1151,11 @@ impl App {
         if self.paused {
             return Ok(None);
         }
+        self.refresh_read_gate();
         let claimed = if self.ai_wait.is_none() {
-            self.store.claim_next()?
+            // Las tareas de la primera lectura esperan a las normales: una lectura de cientos
+            // de mensajes no retrasa el correo nuevo (E5).
+            self.claim_normal_first()?
         } else {
             // Sin IA utilizable solo avanzan las tareas que no la necesitan: reanudar una
             // acción ya intentada (D50) o una factura ya separada (D68).
@@ -1063,10 +1177,19 @@ impl App {
         };
         let input: Value = serde_json::from_str(&task.input_ref).unwrap_or(Value::Null);
         let id = task.id.to_string();
-        if let Some(result) = self.attempted_result(&task)? {
+        let initial = is_initial_read(&input);
+        // Una tarea de la primera lectura no tiene acción que reanudar (E5).
+        let attempted = if initial {
+            None
+        } else {
+            self.attempted_result(&task)?
+        };
+        if let Some(result) = attempted {
             return Ok(Some(Job {
                 task,
                 provider: Arc::clone(&self.provider),
+                destination: self.provider.destination(),
+                gate: Arc::clone(&self.read_gate),
                 fallback: self.fallback.clone(),
                 fallback_until: Arc::clone(&self.fallback_until),
                 extractor: Arc::clone(&self.extractor),
@@ -1102,7 +1225,17 @@ impl App {
                             Some(subject) => format!("Asunto: {subject}\n\n{body}"),
                             None => body,
                         };
-                        Ok(Prepared::Request(email_request(&id, &text)))
+                        if initial {
+                            // La primera lectura no envía ningún correo a un proveedor (D133):
+                            // `claim_normal_first` no los toma, y si uno llegara aquí falla.
+                            Err(task_error(
+                                "invalid_input",
+                                "la primera lectura no envía correos a ningún proveedor",
+                                false,
+                            ))
+                        } else {
+                            Ok(Prepared::Request(email_request(&id, &text)))
+                        }
                     }
                     Some(_) => Err(task_error(
                         "empty_message",
@@ -1121,6 +1254,8 @@ impl App {
         Ok(Some(Job {
             task,
             provider: Arc::clone(&self.provider),
+            destination: self.provider.destination(),
+            gate: Arc::clone(&self.read_gate),
             fallback: self.fallback.clone(),
             fallback_until: Arc::clone(&self.fallback_until),
             extractor: Arc::clone(&self.extractor),
@@ -1128,9 +1263,20 @@ impl App {
         }))
     }
 
-    /// Valida la respuesta, aplica reglas y deja la tarea en su estado siguiente.
+    /// Valida la respuesta, aplica reglas y deja la tarea en su estado siguiente. Al cerrar la
+    /// última tarea de una primera lectura deja su entrada agregada en el Historial (D133).
     pub fn finish(&mut self, completed: Completed) -> AppResult<Task> {
+        let initial = task_is_initial_read(&completed.task);
+        let done = self.finish_task(completed)?;
+        if initial {
+            self.after_initial_task(&done);
+        }
+        Ok(done)
+    }
+
+    fn finish_task(&mut self, completed: Completed) -> AppResult<Task> {
         let task = completed.task;
+        let destination = completed.destination;
         let fallback = completed.fallback;
         if completed.ai_unauthorized {
             // La clave no sirve: la tarea vuelve a la cola sin gastar intento ni fallar y la
@@ -1140,11 +1286,30 @@ impl App {
         }
         let generated = match completed.outcome {
             Ok(Outcome::Generated(generated)) => generated,
-            Ok(Outcome::Resumed(result)) => return self.resume(task, result),
+            Ok(Outcome::Resumed(mut result)) => {
+                if task_is_initial_read(&task) {
+                    // Nunca se reanuda una acción en la primera lectura: se completa sin ella.
+                    if let Some(fields) = result.as_object_mut() {
+                        fields.remove("action");
+                    }
+                    return Ok(self.store.complete(task.id, &result)?);
+                }
+                return self.resume(task, result);
+            }
+            Ok(Outcome::Held) => {
+                return Ok(self
+                    .store
+                    .release(task.id, "lectura retenida: no se envió nada")?)
+            }
+            Ok(Outcome::Skipped(code)) => {
+                return self.finish_skipped(&task, code, completed.extraction.as_ref())
+            }
             Err(error) => return Ok(self.store.fail(task.id, &error)?),
         };
-        if let Some(note) = &fallback {
-            // Solo el proveedor de origen y el motivo: ni contenido ni secretos (D101).
+        let initial = task_is_initial_read(&task);
+        if let Some(note) = fallback.as_ref().filter(|_| !initial) {
+            // Solo el proveedor de origen y el motivo: ni contenido ni secretos (D101). En la
+            // primera lectura no se escribe en el Historial: el respaldo consta en el resultado.
             self.store
                 .record_event(task.id, "ai_fallback", "used", note)?;
         }
@@ -1163,6 +1328,9 @@ impl App {
             if let Err(error) = self.enqueue_other_invoices(&task, &generated, &mut result) {
                 return Ok(self.store.fail(task.id, &error)?);
             }
+        }
+        if initial {
+            return self.finish_initial_read(&task, result, destination);
         }
         let kind = action_kind(&task);
         // Un importe dudoso o una factura separada de un documento con varias nunca se
@@ -1319,6 +1487,17 @@ impl App {
             (None, None) => "documento sin nombre".to_owned(),
         };
         let amount_review = amount_review(&document, &report, &fields);
+        // Las facturas parecidas que solo se leyeron en la primera lectura no se registraron
+        // nunca ni la persona las ve en Tareas: se dice (E5, D133).
+        let duplicates_initial_read: Vec<String> = report
+            .duplicates
+            .iter()
+            .filter_map(|d| {
+                let id = d.existing_id.parse::<i64>().ok()?;
+                let existing = self.store.task_by_id(id).ok().flatten()?;
+                task_is_initial_read(&existing).then(|| d.existing_id.clone())
+            })
+            .collect();
         let pages = extraction.and_then(|e| serde_json::to_value(&e.pages).ok());
         // Moneda buscada en el texto local ya extraído (D127). Sin extracción no consta, y
         // las reglas lo tratan como fallo cerrado.
@@ -1355,6 +1534,7 @@ impl App {
             "sources": sources,
             "issues": report.issues.iter().map(|i| i.as_str()).collect::<Vec<_>>(),
             "duplicates": report.duplicates,
+            "duplicates_initial_read": duplicates_initial_read,
             "unreadable": report.unreadable,
             "recovered": report.recovered,
             "amount_review": amount_review,
@@ -1364,6 +1544,103 @@ impl App {
             "latency_ms": generated.latency_ms,
             "action": { "kind": REGISTER_INVOICE, "payload": payload },
         }))
+    }
+
+    /// Cierra una tarea de la primera lectura (E5, D133): se completa sin `action`, sin evaluar
+    /// reglas, sin crear acciones ni pendientes y sin escribir en el Historial. Una regla activa
+    /// que coincidiría no actúa. Una factura deja una observación («vista», no aprobada) que
+    /// solo alimenta las sugerencias de facturas. Reprocesar la tarea no añade nada más: la
+    /// observación es única por tarea y versión.
+    fn finish_initial_read(
+        &mut self,
+        task: &Task,
+        mut result: Value,
+        destination: Option<String>,
+    ) -> AppResult<Task> {
+        if let Some(fields) = result.as_object_mut() {
+            fields.remove("action");
+        }
+        result["initial_read"] = json!(true);
+        // A qué servidor se enviaron los datos de esta tarea (`null`: la IA local), para el
+        // recuento por proveedor del final de la lectura.
+        result["host"] = json!(destination);
+        if task.kind == INVOICE {
+            let draft = panel::signal_for(task, &result, "observed");
+            if let Err(error) = self.record_signal("observed", draft) {
+                result["evidence_error"] = json!(format!("no se guardó la observación: {error}"));
+            }
+        }
+        Ok(self.store.complete(task.id, &result)?)
+    }
+
+    /// Cierra un documento de la primera lectura que no parece una factura: no se envió a ningún
+    /// proveedor y queda como omitido, sin campos ni observación (D133).
+    fn finish_skipped(
+        &mut self,
+        task: &Task,
+        code: &str,
+        extraction: Option<&Extraction>,
+    ) -> AppResult<Task> {
+        let input: Value = serde_json::from_str(&task.input_ref).unwrap_or(Value::Null);
+        // Lo que no parece una factura no se queda copiado en la carpeta de documentos (D133).
+        // `copy_removed` refleja el borrado real: si la copia no existía ya o se borró, `true`;
+        // si el borrado falló, `false` con el motivo (la tarea no se queda con un dato falso).
+        let mut copy_removed = true;
+        let mut copy_error = None;
+        if let Some(path) = input["path"].as_str().map(PathBuf::from) {
+            if path.starts_with(&self.documents) {
+                match fs::remove_file(&path) {
+                    Ok(()) => {}
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(e) => {
+                        copy_removed = false;
+                        copy_error = Some(e.to_string());
+                    }
+                }
+            }
+        }
+        let result = json!({
+            "type": INVOICE,
+            "version": 1,
+            "initial_read": true,
+            "copy_removed": copy_removed,
+            "copy_remove_error": copy_error,
+            "document": input["document"],
+            "origin": input["origin"],
+            "pages": extraction.and_then(|e| serde_json::to_value(&e.pages).ok()),
+            "skipped": { "reason": code },
+        });
+        Ok(self.store.complete(task.id, &result)?)
+    }
+
+    /// Toma la tarea en cola más antigua que no sea de la primera lectura; si solo quedan de
+    /// esas, la más antigua de ellas que se pueda enviar: no los correos (no se envían), ni las
+    /// de una lectura detenida o cuyo destino cambió desde que se mostró (D133).
+    fn claim_normal_first(&mut self) -> AppResult<Option<Task>> {
+        let held = self.held_read_sources()?;
+        let queued: Vec<Task> = self
+            .store
+            .tasks_in(TaskState::Queued)?
+            .into_iter()
+            .filter(|t| {
+                let Ok(input) = serde_json::from_str::<Value>(&t.input_ref) else {
+                    return true;
+                };
+                !is_initial_read(&input)
+                    || (t.kind != EMAIL
+                        && !input["read_source"]
+                            .as_str()
+                            .is_some_and(|s| held.contains(s)))
+            })
+            .collect();
+        let next = queued
+            .iter()
+            .find(|t| !task_is_initial_read(t))
+            .or_else(|| queued.first());
+        match next {
+            Some(task) => Ok(Some(self.store.claim(task.id)?)),
+            None => Ok(None),
+        }
     }
 
     fn email_result(
@@ -1684,8 +1961,15 @@ impl App {
         Ok(self.store.retry(task_id)?)
     }
 
+    /// Las tareas que ve la persona. Las de la primera lectura (E5) no están: se ven aparte,
+    /// con `initial_read_status`, para no ensuciar Pendientes, Tareas ni el recuento de trabajo.
     pub fn tasks(&self) -> AppResult<Vec<Task>> {
-        Ok(self.store.all_tasks()?)
+        Ok(self
+            .store
+            .all_tasks()?
+            .into_iter()
+            .filter(|t| !task_is_initial_read(t))
+            .collect())
     }
 
     pub fn audit_log(&self) -> AppResult<Vec<AuditEntry>> {
@@ -1781,12 +2065,16 @@ impl App {
         label: &str,
         tokens: &Tokens,
     ) -> AppResult<AccountView> {
-        Ok(self.mail.add(provider, label, tokens)?)
+        let view = self.mail.add(provider, label, tokens)?;
+        self.clear_removed_read(&view.id)?;
+        Ok(view)
     }
 
     /// Guarda tokens nuevos para una cuenta existente.
     pub fn reconnect_mail_account(&mut self, id: &str, tokens: &Tokens) -> AppResult<AccountView> {
-        Ok(self.mail.reconnect(id, tokens)?)
+        let view = self.mail.reconnect(id, tokens)?;
+        self.clear_removed_read(&view.id)?;
+        Ok(view)
     }
 
     /// Cambia el nombre visible de una cuenta; vacío vuelve al predeterminado. Las tareas ya
@@ -1797,13 +2085,25 @@ impl App {
 
     /// Vuelve a añadir la cuenta simulada si se había quitado.
     pub fn add_simulated_mail_account(&mut self) -> AppResult<AccountView> {
-        Ok(self.mail.add_simulator()?)
+        let view = self.mail.add_simulator()?;
+        self.clear_removed_read(&view.id)?;
+        Ok(view)
     }
 
     /// Desconecta una cuenta: borra sus tokens y la quita de la lista. Las tareas ya
-    /// encoladas de esa cuenta siguen visibles; enviar desde ellas falla con el motivo.
+    /// encoladas de esa cuenta siguen visibles; enviar desde ellas falla con el motivo. Las
+    /// tareas pendientes de su primera lectura se cancelan.
     pub fn remove_mail_account(&mut self, id: &str) -> AppResult<()> {
-        Ok(self.mail.remove(id)?)
+        // Se resuelve antes de quitarla (migra una marca guardada por identificador si ya consta la
+        // dirección) y se buscan también las marcas que apunten a este identificador.
+        let sources = self.account_read_sources(id)?;
+        self.mail.remove(id)?;
+        // Las tareas pendientes de su primera lectura no siguen enviando datos (D133); lo ya
+        // leído sigue visible.
+        for source in sources {
+            self.cancel_initial_read(&source)?;
+        }
+        Ok(())
     }
 }
 
@@ -2181,6 +2481,7 @@ mod tests {
                 extraction: None,
                 ai_unauthorized: false,
                 fallback: None,
+                destination: None,
             })
             .unwrap();
         assert_eq!(failed.state, TaskState::Failed);

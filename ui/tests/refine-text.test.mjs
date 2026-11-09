@@ -354,15 +354,17 @@ test("el origen de una regla dice que el límite lo propuso la IA solo si es ver
 
 test("cada campo que viaja tiene su texto visible en la vista previa", () => {
   // Los campos son exactamente los que envía la petición (la prueba de Rust fija la misma lista).
-  const sent = { id: "c1", kind: "invoice", supplier: "Alfa SL", category: "solicitud_factura", sender_domain: "ejemplo.test", count: 7, earlier_breaks: 2, amount_min: "100.00", amount_max: "250.00", discarded_before: true, withheld: null };
+  const sent = { id: "c1", kind: "invoice", supplier: "Alfa SL", category: "solicitud_factura", sender_domain: "ejemplo.test", count: 7, seen: 3, earlier_breaks: 2, amount_min: "100.00", amount_max: "250.00", discarded_before: true, withheld: null };
   const fields = Object.keys(sent).sort();
-  assert.deepEqual(fields, ["amount_max", "amount_min", "category", "count", "discarded_before", "earlier_breaks", "id", "kind", "sender_domain", "supplier", "withheld"]);
+  assert.deepEqual(fields, ["amount_max", "amount_min", "category", "count", "discarded_before", "earlier_breaks", "id", "kind", "seen", "sender_domain", "supplier", "withheld"]);
   const line = (c) => refinePreviewLines(previewOf({ candidates: [c], candidates_total: 1 })).items[0];
   const visible = {
     id: [line(sent), /^c1:/],
     kind: [line(sent), /facturas de/],
     supplier: [line(sent), /«Alfa SL»/],
     count: [line(sent), /7 observaciones/],
+    // Lo que solo se vio en la primera lectura se dice aparte: no es una aprobación.
+    seen: [line(sent), /3 solo vistas en la primera lectura, sin aprobar/],
     earlier_breaks: [line(sent), /2 cortes anteriores de la serie/],
     amount_min: [line(sent), /100,00 €/],
     amount_max: [line(sent), /250,00 €/],

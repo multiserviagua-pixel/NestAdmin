@@ -11,8 +11,10 @@
 # - Solo puede haber una instancia: si la versión instalada está abierta, ciérrela antes desde el
 #   icono del área de notificación («Salir de NestAdmin por completo»).
 # - Es un canal de prueba: activa la feature de Cargo `lectura-bajo-demanda` (D133, D134), de modo que
-#   la IA solo afina las sugerencias de reglas (y, más adelante, lee la bandeja) cuando usted lo pide,
-#   tras ver a qué proveedor se envía y qué datos. La versión final no la lleva y trabaja por lotes.
+#   la IA solo afina las sugerencias de reglas y hace la primera lectura de la bandeja o de una
+#   carpeta (D133) cuando usted lo pide, tras ver a qué proveedor se envía, con qué modelo y servidor y
+#   cuánto se lee (de 25 a 500). La versión final no la lleva: lee 100 mensajes al conectar una cuenta
+#   y afina por lotes.
 # - Compila sin optimizar: los tiempos y la memoria no valen para T12 (use scripts\t12-medir.ps1).
 param([string]$Datos = (Join-Path $env:USERPROFILE 'NestAdmin-pruebas'))
 $ErrorActionPreference = 'Stop'

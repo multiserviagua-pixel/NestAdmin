@@ -98,6 +98,9 @@ pub struct SuggestionRow {
 /// de condiciones (esas son hexadecimales), de modo que no puede coincidir con una sugerencia.
 pub const REFINEMENT_KEY: &str = "(afinado)";
 
+/// Prefijo de las claves de `rule_settings` que guardan las marcas de primera lectura.
+pub const READ_MARK_PREFIX: &str = "initial_read:";
+
 /// Contadores de una regla.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct RuleStats {
@@ -608,6 +611,51 @@ impl Store {
         }
         tx.commit()?;
         Ok(removed)
+    }
+
+    /// Marca de la primera lectura de una fuente (E5, D133), o `None` si nunca se empezó. Vive
+    /// en `rule_settings` bajo `initial_read:<fuente>`, sin entrada en el historial: la lectura
+    /// no ensucia el Historial. Solo ids, cifras y códigos; nunca contenido.
+    pub fn read_mark(&self, source: &str) -> Result<Option<Value>> {
+        Ok(self
+            .rule_setting(&format!("{READ_MARK_PREFIX}{source}"))?
+            .and_then(|text| serde_json::from_str(&text).ok()))
+    }
+
+    /// Guarda (o sustituye) la marca de una fuente. Idempotente; sin entrada en el historial.
+    pub fn set_read_mark(&mut self, source: &str, mark: &Value) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO rule_settings (key, value) VALUES (?1, ?2)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params![format!("{READ_MARK_PREFIX}{source}"), mark.to_string()],
+        )?;
+        Ok(())
+    }
+
+    /// Todas las marcas de primera lectura, por fuente, en orden estable.
+    pub fn read_marks(&self) -> Result<Vec<(String, Value)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT key, value FROM rule_settings WHERE substr(key, 1, ?1) = ?2 ORDER BY key",
+        )?;
+        let rows = stmt.query_map(
+            params![READ_MARK_PREFIX.len() as i64, READ_MARK_PREFIX],
+            |r| {
+                let key: String = r.get(0)?;
+                let value: String = r.get(1)?;
+                Ok((key, value))
+            },
+        )?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (key, value) = row?;
+            if let (Some(source), Ok(mark)) = (
+                key.strip_prefix(READ_MARK_PREFIX),
+                serde_json::from_str::<Value>(&value),
+            ) {
+                out.push((source.to_owned(), mark));
+            }
+        }
+        Ok(out)
     }
 
     /// Autorización y estado de la última entrada del historial que confirmó o reconcilió la

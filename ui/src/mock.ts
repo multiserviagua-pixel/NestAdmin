@@ -2,12 +2,17 @@
 // reales con datos sintéticos (dominio .test); no decide nada que la capa Rust no decida.
 
 import type {
+  SeenInvoice,
   AccountFetch,
   AiWait,
   AuditEntry,
   DocumentOrigin,
   MailOrigin,
   FetchReport,
+  FolderPreview,
+  InitialReadOverview,
+  InitialReadStatus,
+  ReadExpectation,
   MailAccount,
   MailProviderKind,
   MailView,
@@ -198,7 +203,7 @@ function nextAccountId(provider: MailProviderKind) {
   return `${provider}-${Math.max(0, ...used) + 1}`;
 }
 
-function signIn(provider: MailProviderKind, label: string, account: string | null): Promise<MailAccount> {
+function signIn(provider: MailProviderKind, label: string, account: string | null, expect: ReadExpectation | null = null): Promise<MailAccount> {
   if (signingIn) return Promise.reject("ya hay un inicio de sesión en curso");
   if (provider === "simulator" || !clientsConfigured)
     return Promise.reject(`unavailable: esta instalación no tiene configurado el cliente OAuth de ${provider === "google" ? "Google" : "Microsoft"}`);
@@ -227,6 +232,8 @@ function signIn(provider: MailProviderKind, label: string, account: string | nul
         last_fetch: null,
       };
       mailAccounts.push(created);
+      // Conectar una cuenta nueva inicia su primera lectura en la versión final (D133).
+      beginReadOnConnect(id, expect);
       changed();
       resolve(structuredClone(created));
     }, 2500);
@@ -1144,16 +1151,19 @@ const mockThresholdSettings = (): ThresholdSettings => ({
   default_reply: 5,
 });
 
-const mockEvidence = (count: number, threshold: number, daysAgo: number, amounts: string[] = []): Suggestion["evidence"] => {
+const mockEvidence = (count: number, threshold: number, daysAgo: number, amounts: string[] = [], seen = 0): Suggestion["evidence"] => {
   const sorted = amounts.map(Number).sort((x, y) => y - x);
   return {
     count,
     threshold,
     earlier_breaks: 0,
+    approved: count - seen,
+    seen,
     last_at: now() - daysAgo * 24 * 3600 * 1000,
     task_ids: [],
     amounts,
-    limit: amounts.length ? sorted[0]!.toFixed(2) : null,
+    limit: amounts.length && count - seen > 0 ? sorted[0]!.toFixed(2) : null,
+    needs_limit: count - seen === 0,
     amount_min: amounts.length ? sorted[sorted.length - 1]!.toFixed(2) : null,
     amount_second: amounts.length > 1 ? sorted[1]!.toFixed(2) : null,
     limit_outlier: amounts.length > 1 && sorted[0]! >= 3 * sorted[1]!,
@@ -1193,6 +1203,16 @@ function mockSuggestions(): Suggestions {
       evidence: mockEvidence(4, mockThresholds.invoice, 3, ["121.00", "242.00", "363.00", "605.00"]),
     },
     {
+      // Solo vistas en la primera lectura: ninguna aprobada (E5).
+      fingerprint: "mock-factura-sigma",
+      action_kind: "register_invoice",
+      name: "Facturas de Sigma SL",
+      conditions: { supplier: "Sigma SL" },
+      subject: "Sigma SL",
+      category: null,
+      evidence: mockEvidence(5, 5, 1, ["121.00", "121.00", "242.00", "363.00", "484.00"], 5),
+    },
+    {
       fingerprint: "mock-respuesta-pedidos",
       action_kind: "send_draft",
       name: "Respuestas a pedidos@ejemplo.test (solicitud_factura)",
@@ -1212,7 +1232,7 @@ function mockSuggestions(): Suggestions {
       evidence: mockEvidence(5, mockThresholds.reply, 6),
     },
   ];
-  const hidden = { covered: 0, discarded: 0, accepted: 0, invalid: 0, not_suggested: 0 };
+  const hidden = { covered: 0, discarded: 0, accepted: 0, invalid: 0, not_suggested: 0, seen_invalidated: 1 };
   const candidates: Suggestion[] = [];
   for (const c of base) {
     if (c.evidence.count < c.evidence.threshold) continue;
@@ -1241,8 +1261,13 @@ function mockSuggestions(): Suggestions {
   }
   return {
     candidates,
-    progress: [{ action_kind: "register_invoice", subject: "Beta SA", category: null, count: 2, needed: mockThresholds.invoice, missing: Math.max(0, mockThresholds.invoice - 2) }].filter((p) => p.missing > 0),
-    observed: 24,
+    progress: [
+      { action_kind: "register_invoice", subject: "Beta SA", category: null, count: 2, approved: 2, seen: 0, needed: mockThresholds.invoice, missing: Math.max(0, mockThresholds.invoice - 2) },
+      { action_kind: "register_invoice", subject: "Kappa SL", category: null, count: 4, approved: 0, seen: 4, needed: 5, missing: 1 },
+    ].filter((p) => p.missing > 0),
+    observed: 29,
+    decisions: 24,
+    seen: 5,
     counted: 24,
     hidden,
     thresholds: mockThresholdSettings(),
@@ -1329,7 +1354,224 @@ function mockRefinementView(): RefinementView {
   };
 }
 
+// ---- Primera lectura (E5, D133): estado simulado ----
+// `?refine=auto` simula la versión final (al conectar, volumen fijo); `?refine=blocked`, sin proveedor
+// confirmado; `?read=` precarga el estado de la cuenta simulada: `reading`, `interrupted`,
+// `listing_failed`, `stopped`, `held` (cambió el destino), `waiting`, `pending` o `done_errors`.
+
+const readSources = new Map<string, InitialReadStatus>();
+let readFolderPath: string | null = null;
+const mockReadScenario = new URLSearchParams(location.search).get("read") ?? "";
+
+const emptyReadStatus = (source: string): InitialReadStatus => ({
+  source,
+  kind: source.startsWith("folder:") ? "folder" : "account",
+  state: "not_started",
+  volume: null,
+  started_at: null,
+  provider: null,
+  model: null,
+  host: null,
+  listed: 0,
+  already_known: 0,
+  recent_left_out: 0,
+  emails_unclassified: 0,
+  documents_sent: 0,
+  documents_skipped: 0,
+  over_cap: 0,
+  tasks: { total: 0, queued: 0, running: 0, completed: 0, failed: 0, cancelled: 0 },
+  by_provider: [],
+  failures: [],
+  attachment_failures: [],
+  skipped_attachments: 0,
+  listing_error: null,
+  scan_capped: false,
+  remaining: 0,
+  fallback_used: 0,
+  actions: 0,
+  waiting_message: null,
+  held: null,
+  removed: false,
+});
+
+const mockDest = { provider: "ollama_cloud", model: "gemma4:31b", host: "ollama.com" as string | null };
+
+/** Una lectura con resultados de ejemplo, en el estado pedido. */
+function sampleRead(source: string, state: InitialReadStatus["state"], volume: number): InitialReadStatus {
+  const base: InitialReadStatus = {
+    ...emptyReadStatus(source),
+    state,
+    volume,
+    started_at: now(),
+    provider: mockDest.provider,
+    model: mockDest.model,
+    host: mockDest.host,
+    listed: 40,
+    already_known: 2,
+    recent_left_out: 6,
+    emails_unclassified: 18,
+    documents_sent: 7,
+    documents_skipped: 3,
+    over_cap: 0,
+    tasks: { total: 28, queued: 0, running: 0, completed: 28, failed: 0, cancelled: 0 },
+    by_provider: [{ ...mockDest, documents: 7 }],
+    skipped_attachments: 1,
+  };
+  if (state === "reading") return { ...base, tasks: { ...base.tasks, queued: 6, completed: 22 }, documents_sent: 4, remaining: 6, by_provider: [{ ...mockDest, documents: 4 }] };
+  if (state === "interrupted") return { ...base, tasks: { ...base.tasks, queued: 0, completed: 10, total: 10 }, documents_sent: 0, by_provider: [], emails_unclassified: 10 };
+  if (state === "listing_failed")
+    return { ...base, tasks: emptyReadStatus(source).tasks, documents_sent: 0, emails_unclassified: 0, by_provider: [], listing_error: { code: "unavailable", message: "el servicio no respondió" } };
+  if (state === "stopped")
+    return { ...base, tasks: { ...base.tasks, queued: 5, completed: 23 }, remaining: 5, documents_sent: 5, by_provider: [{ ...mockDest, documents: 5 }], held: { reason: "stopped", authorized: mockDest, now: mockDest } };
+  if (state === "held")
+    return {
+      ...base,
+      tasks: { ...base.tasks, queued: 5, completed: 23 },
+      remaining: 5,
+      documents_sent: 5,
+      by_provider: [{ ...mockDest, documents: 5 }],
+      held: { reason: "destination_changed", authorized: mockDest, now: { provider: "ollama", model: "qwen3:8b", host: null } },
+    };
+  if (state === "done_with_errors")
+    return {
+      ...base,
+      tasks: { ...base.tasks, failed: 1, completed: 27 },
+      remaining: 1,
+      failures: [{ task_id: 901, kind: "invoice", name: "factura-escaneada.pdf", code: "ocr_unavailable", message: "sin OCR", recoverable: true }],
+      attachment_failures: [{ name: "factura-grande.pdf", code: "unavailable", message: "no se pudo descargar" }],
+    };
+  return base;
+}
+
+const preloaded = (id: string) => {
+  const source = `account:${id}`;
+  const map: Record<string, InitialReadStatus["state"]> = { reading: "reading", interrupted: "interrupted", listing_failed: "listing_failed", stopped: "stopped", held: "held", done_errors: "done_with_errors" };
+  if (id === "simulador" && map[mockReadScenario]) return sampleRead(source, map[mockReadScenario]!, mockAuto ? 100 : 50);
+  if (id === "simulador" && mockReadScenario === "waiting") return { ...emptyReadStatus(source), state: "waiting" as const, volume: 100, waiting_message: "Falta configurar la IA: guarde la clave del proveedor en Configuración" };
+  if (id === "simulador" && mockReadScenario === "pending") return { ...emptyReadStatus(source), state: "pending" as const, volume: 100 };
+  return emptyReadStatus(source);
+};
+
+const readStatus = (source: string) => structuredClone(readSources.get(source) ?? (source.startsWith("account:") ? preloaded(source.slice(8)) : emptyReadStatus(source)));
+
+function readOverview(): InitialReadOverview {
+  const blocked = mockScenario === "blocked";
+  return {
+    mode: mockAuto ? "automatic" : "on_demand",
+    limits: { min: 25, max: 500, fixed: mockAuto ? 100 : null, default: 100 },
+    recent_days: 7,
+    documents_cap: 100,
+    provider: { provider: mockDest.provider, model: mockDest.model },
+    host: mockDest.host,
+    external: true,
+    local_fallback: true,
+    blocked: blocked ? "needs_key" : null,
+    blocked_message: blocked ? "Falta configurar la IA: guarde la clave del proveedor en Configuración" : null,
+    sends: [
+      "El texto completo de cada documento adjunto o de la carpeta que parece una factura según una comprobación local, ya extraído en este equipo (el OCR y la extracción de texto son locales), para leer proveedor, número, fechas e importes",
+    ],
+    never_sent: [
+      "el cuerpo ni el asunto de ningún correo: los correos no se envían y quedan sin clasificar",
+      "los documentos que no parecen una factura (se cuentan como omitidos) ni los que superan el tope",
+      "los archivos originales, las imágenes ni las huellas",
+      "claves, credenciales ni el historial de acciones y decisiones",
+      "las direcciones de sus buzones ni los nombres de cuenta, salvo que estén escritos en el texto de un documento que sí se envía, que sale completo (D102)",
+    ],
+    accounts: mailAccounts.map((a) => ({ source: `account:${a.id}`, target: a.id, label: a.label, address: a.address, status: readStatus(`account:${a.id}`) })),
+    removed: [],
+    folders: [...readSources.values()]
+      .filter((st) => st.source.startsWith("folder:"))
+      .map((st) => ({ source: st.source, target: readFolderPath ?? "carpeta", label: readFolderPath ?? "carpeta", address: null, status: structuredClone(st) })),
+    suggestions: { seen_documents: 5, ready: 1, closest: 1, needed: 5, error: null },
+  };
+}
+
+function matchesShown(expect: ReadExpectation | null, fixed: number | null): boolean {
+  return Boolean(expect && expect.provider === mockDest.provider && expect.model === mockDest.model && expect.host === (mockDest.host ?? "") && (fixed === null || expect.volume === fixed));
+}
+
+function startRead(source: string, volume: number | null, expect: ReadExpectation | null): InitialReadStatus {
+  const o = readOverview();
+  const existing = readStatus(source);
+  if (["reading", "done", "done_with_errors"].includes(existing.state)) return existing;
+  const fixed = o.limits.fixed;
+  const chosen = fixed ?? volume;
+  if (chosen === null || chosen < 25 || chosen > 500) throw "El volumen debe estar entre 25 y 500.";
+  if (!matchesShown(expect, fixed) || (fixed === null && expect?.volume !== chosen)) throw "El proveedor, el modelo, el servidor o el volumen han cambiado desde que vio el aviso: revíselo de nuevo antes de leer.";
+  if (o.blocked) {
+    if (fixed === null) throw `${o.blocked_message}. No se ha leído ni enviado nada.`;
+    const waiting = { ...emptyReadStatus(source), state: "waiting" as const, volume: chosen, waiting_message: o.blocked_message };
+    readSources.set(source, waiting);
+    return structuredClone(waiting);
+  }
+  const status = sampleRead(source, "done", chosen);
+  readSources.set(source, status);
+  return structuredClone(status);
+}
+
+/** Al conectar una cuenta nueva (versión final): empieza si lo mostrado sigue siendo cierto, espera sin proveedor y queda pendiente si no se mostró nada. */
+function beginReadOnConnect(id: string, expect: ReadExpectation | null) {
+  if (!mockAuto) return;
+  const source = `account:${id}`;
+  const o = readOverview();
+  if (o.blocked) readSources.set(source, { ...emptyReadStatus(source), state: "waiting", volume: 100, waiting_message: o.blocked_message });
+  else if (!matchesShown(expect, 100)) readSources.set(source, { ...emptyReadStatus(source), state: "pending", volume: 100 });
+  else {
+    readSources.set(source, sampleRead(source, "reading", 100));
+    setTimeout(() => {
+      readSources.set(source, sampleRead(source, "done", 100));
+      changed();
+    }, 4000);
+  }
+}
+
 const handlers: Record<string, (a: any, options?: any) => unknown> = {
+  initial_read_overview: (): InitialReadOverview => {
+    if (mockScenario === "broken") throw "no se pudo abrir la base de datos de ejemplo";
+    return readOverview();
+  },
+  initial_read_folder_preview: ({ path }): FolderPreview => {
+    const source = "folder:" + String(path).toLowerCase();
+    return { source, path: String(path), files: 12, status: readStatus(source) };
+  },
+  pick_read_folder: (): string | null => "C:\\Facturas de ejemplo\\Octubre",
+  start_initial_read: ({ account, volume, expect }): InitialReadStatus => startRead(`account:${account}`, volume ?? null, expect ?? null),
+  start_initial_read_folder: ({ path, volume, expect }): InitialReadStatus => {
+    readFolderPath = String(path);
+    return startRead("folder:" + String(path).toLowerCase(), volume ?? null, expect ?? null);
+  },
+  stop_initial_read: ({ source }): InitialReadStatus => {
+    const status = readStatus(String(source));
+    status.state = "stopped";
+    status.held = { reason: "stopped", authorized: mockDest, now: mockDest };
+    readSources.set(String(source), status);
+    return structuredClone(status);
+  },
+  continue_initial_read: ({ source, expect }): InitialReadStatus => {
+    if (!matchesShown(expect ?? null, null)) throw "El proveedor, el modelo o el servidor han cambiado desde que vio el aviso: revíselo de nuevo antes de continuar.";
+    const status = sampleRead(String(source), "done", 100);
+    readSources.set(String(source), status);
+    return structuredClone(status);
+  },
+  seen_invoices: ({ fingerprint }): SeenInvoice[] => {
+    if (!mockSuggestions().candidates.some((c) => c.fingerprint === fingerprint)) throw "La sugerencia ya no está vigente: los datos cambiaron o ya se resolvió. Actualice la lista.";
+    return [
+      { task_id: 801, document: "factura-sigma-0910.pdf", date: "2026-09-10", amount: "121.00", read_at: now() },
+      { task_id: 802, document: "factura-sigma-1005.pdf", date: "2026-10-05", amount: "242.00", read_at: now() },
+      { task_id: 803, document: "factura-sigma-1021.pdf", date: "2026-10-21", amount: "484.00", read_at: now() },
+    ];
+  },
+  retry_initial_read: ({ source }): number => {
+    const status = readStatus(String(source));
+    const retried = status.failures.filter((f) => f.recoverable).length;
+    status.failures = [];
+    status.attachment_failures = [];
+    status.tasks = { ...status.tasks, failed: 0, completed: status.tasks.total };
+    status.remaining = 0;
+    status.state = "done";
+    readSources.set(String(source), status);
+    return retried;
+  },
   tasks: () => structuredClone(tasks),
   import_file: (bytes: Uint8Array, options?: { headers: Record<string, string> }) => {
     const name = decodeURIComponent(options?.headers["x-nestadmin-name"] ?? "");
@@ -1354,7 +1596,7 @@ const handlers: Record<string, (a: any, options?: any) => unknown> = {
     if (!Number.isInteger(limit) || limit < 1 || limit > 500) throw "el límite de mensajes debe estar entre 1 y 500";
     mailLimit = limit;
   },
-  mail_sign_in: ({ provider, label, account }) => signIn(provider, String(label ?? ""), account ?? null),
+  mail_sign_in: ({ provider, label, account, expect }) => signIn(provider, String(label ?? ""), account ?? null, expect ?? null),
   mail_sign_in_cancel: () => {
     if (signingIn) signingIn.cancelled = true;
   },
@@ -1658,6 +1900,7 @@ const handlers: Record<string, (a: any, options?: any) => unknown> = {
         category: c.category,
         sender_domain: c.action_kind === "register_invoice" ? null : (c.subject.split("@")[1] ?? null),
         count: c.evidence.count,
+        seen: c.evidence.seen,
         earlier_breaks: c.evidence.earlier_breaks,
         amount_min: c.evidence.amount_min,
         amount_max: c.evidence.limit,
@@ -1697,13 +1940,17 @@ const handlers: Record<string, (a: any, options?: any) => unknown> = {
     }
     return mockRefinementView();
   },
-  accept_suggestion: ({ fingerprint, shown, name, modelLimit }) => {
+  accept_suggestion: ({ fingerprint, shown, name, modelLimit, userLimit }) => {
     const known = mockAccepted.get(String(fingerprint));
     if (known) return ruleView(latest().find((r) => r.id === known)!);
     const c = mockSuggestions().candidates.find((x) => x.fingerprint === fingerprint);
     if (!c) throw "La sugerencia ya no está vigente: los datos cambiaron o ya se resolvió. Actualice la lista.";
     let conditions = c.conditions;
-    if (modelLimit) {
+    if (c.evidence.needs_limit) {
+      // Solo vistas: la regla no se crea sin el límite que escribe la persona.
+      if (!userLimit || !(Number(userLimit) > 0)) throw "Estas facturas solo se han leído: indique usted el límite de la regla; no se crea sin él.";
+      conditions = { ...c.conditions, max_total: Number(userLimit).toFixed(2) };
+    } else if (modelLimit) {
       const proposal = mockRefinementView().limits.find((l) => l.fingerprint === fingerprint && l.max_total === modelLimit);
       if (!proposal) throw "La propuesta de límite de la IA ya no está vigente: los datos cambiaron. Actualice la lista.";
       if (proposal.shown !== shown) throw "La sugerencia ha cambiado desde que la vio (otro límite u otros datos): revise la tarjeta de nuevo antes de crear la regla.";
