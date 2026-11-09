@@ -16,8 +16,8 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
 use crate::rules::{
-    analyze, compare, evaluate_result, foreign_currencies, is_email_address, shows_euro,
-    FindingKind, Marks, Relation, RuleDecision, RuleFinding, Side,
+    analyze, compare, evaluate_result, foreign_currencies, is_email_address, is_public_mail_domain,
+    shows_euro, FindingKind, Marks, Relation, RuleDecision, RuleFinding, Side,
 };
 use crate::{check_rule, App, AppError, AppResult, EMAIL, INVOICE, REGISTER_INVOICE, SEND_DRAFT};
 
@@ -27,10 +27,21 @@ pub const SUGGESTED: &str = "(sugerida)";
 /// Ajustes en `rule_settings`.
 pub const SETTING_INVOICE_MIN: &str = "suggest_invoice_min";
 pub const SETTING_REPLY_MIN: &str = "suggest_reply_min";
+pub const SETTING_LEARNED_REPLY_MIN: &str = "suggest_learned_reply_min";
 /// Facturas limpias del mismo proveedor que hacen falta por defecto.
 pub const DEFAULT_INVOICE_MIN: u32 = 3;
 /// Respuestas aprobadas sin edición, por remitente y categoría, por defecto.
 pub const DEFAULT_REPLY_MIN: u32 = 5;
+/// Pares aprendidos en la primera carga (D172) con la misma dirección y categoría, por defecto.
+/// Es un umbral propio: lo aprendido no se mezcla con las aprobaciones.
+pub const DEFAULT_LEARNED_REPLY_MIN: u32 = 3;
+/// Pares y direcciones mínimas para proponer una regla por dominio desde lo aprendido: el
+/// umbral `learned_reply` nunca la baja de aquí (D172).
+pub const DOMAIN_MIN_PAIRS: u32 = 3;
+pub const DOMAIN_MIN_ADDRESSES: usize = 2;
+/// Origen de una candidata: aprobaciones de la persona o pares aprendidos en la primera carga.
+pub const ORIGIN_APPROVED: &str = "approved";
+pub const ORIGIN_LEARNED: &str = "learned";
 /// Observaciones mínimas de facturas que solo se *vieron* en la primera lectura (E5, D133) para
 /// sugerir una regla cuando la persona no ha aprobado suficientes: sin una aprobación humana que
 /// confirme que el modelo leyó bien las cifras, se exige más repetición que con aprobaciones.
@@ -53,6 +64,8 @@ pub struct Thresholds {
     pub invoice: u32,
     /// Respuestas aprobadas sin edición por remitente y categoría.
     pub reply: u32,
+    /// Pares aprendidos en la primera carga por remitente y categoría (D172).
+    pub learned_reply: u32,
 }
 
 impl Default for Thresholds {
@@ -60,6 +73,7 @@ impl Default for Thresholds {
         Self {
             invoice: DEFAULT_INVOICE_MIN,
             reply: DEFAULT_REPLY_MIN,
+            learned_reply: DEFAULT_LEARNED_REPLY_MIN,
         }
     }
 }
@@ -69,10 +83,12 @@ impl Default for Thresholds {
 pub struct ThresholdSettings {
     pub invoice: u32,
     pub reply: u32,
+    pub learned_reply: u32,
     pub min: u32,
     pub max: u32,
     pub default_invoice: u32,
     pub default_reply: u32,
+    pub default_learned_reply: u32,
 }
 
 /// Una señal de aprendizaje (D129) con lo que `suggest` necesita. Sin cuerpo ni asunto.
@@ -82,15 +98,17 @@ pub struct Signal {
     pub id: i64,
     /// Momento en que se guardó (ms); solo se muestra, nunca ordena ni decide.
     pub at: i64,
-    /// `approved`, `edited` o `rejected`.
+    /// `approved`, `edited`, `rejected`, `observed` o `learned` (D172: un par aprendido en la
+    /// primera carga, sin tarea).
     pub kind: String,
     pub action_kind: String,
     /// Factura: proveedor recortado y en minúsculas. Correo: `categoría|remitente`.
     pub subject_key: String,
     /// `unedited`, `edited` o `unknown`.
     pub edit_state: String,
+    /// Tarea de la señal; 0 en las `learned`, que no tienen.
     pub task_id: i64,
-    /// SHA-256 del documento de una factura.
+    /// SHA-256 del documento de una factura; en `learned`, la fuente y el id del correo recibido.
     pub source_key: Option<String>,
     /// `valid`, `pending` o `void`. Solo cuentan las `valid`.
     pub state: String,
@@ -154,7 +172,15 @@ pub struct Evidence {
     pub limit: Option<String>,
     /// Facturas sin ninguna aprobada: la persona debe escribir el límite; no se crea con un clic.
     pub needs_limit: bool,
-    /// Cuántas de las `count` son aprobaciones de la persona (ya ejecutadas).
+    /// `approved` (aprobaciones de la persona) o `learned` (pares de la primera carga, D172). Una
+    /// candidata nunca mezcla las dos series.
+    pub origin: &'static str,
+    /// Cuántas de las `count` son pares aprendidos (solo con origen `learned`; si no, cero).
+    pub learned: u32,
+    /// Direcciones distintas de la serie (una, salvo en las reglas por dominio aprendidas).
+    pub addresses: u32,
+    /// Cuántas de las `count` son aprobaciones de la persona (ya ejecutadas). Con origen
+    /// `learned` es cero y `seen` también.
     pub approved: u32,
     /// Cuántas de las `count` solo se vieron en la primera lectura (E5): facturas existentes que
     /// la persona nunca aprobó. `approved + seen == count`.
@@ -191,6 +217,8 @@ pub struct Candidate {
 /// Lo que falta para que algo se sugiera.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Progress {
+    /// `approved` o `learned`.
+    pub origin: &'static str,
     pub action_kind: String,
     pub subject: String,
     pub category: Option<String>,
@@ -229,6 +257,8 @@ pub struct Suggestions {
     pub decisions: u32,
     /// De ellas, facturas vistas en la primera lectura (E5): no son decisiones de nadie.
     pub seen: u32,
+    /// Señales `learned` válidas (D172): ni cuentan en `observed` ni son decisiones.
+    pub learned: u32,
     /// Observaciones que cuentan como evidencia en las series actuales (de todos los sujetos,
     /// se muestren o no).
     pub counted: u32,
@@ -299,7 +329,8 @@ fn series<'a>(group: &[&'a Signal], invoice: bool) -> Series<'a> {
     let mut break_tasks: HashSet<i64> = HashSet::new();
     let mut decided_sources: HashSet<&str> = HashSet::new();
     for &s in group {
-        if s.kind == "observed" {
+        // `learned` tiene su propia serie (`learned_series`): no suma ni corta la de aprobaciones.
+        if matches!(s.kind.as_str(), "observed" | "learned") {
             continue;
         }
         if let Some(k) = s.source_key.as_deref() {
@@ -366,6 +397,163 @@ fn series<'a>(group: &[&'a Signal], invoice: bool) -> Series<'a> {
     }
 }
 
+/// Una serie lista para convertirse en candidata, de aprobaciones o aprendida.
+struct Unit<'a> {
+    action_kind: &'a str,
+    series: Series<'a>,
+    approved: u32,
+    seen: u32,
+    needed: u32,
+    draft: Draft,
+    origin: &'static str,
+    addresses: u32,
+}
+
+/// Serie de pares aprendidos de un sujeto (D172), en orden de llegada. Cada correo recibido cuenta
+/// una vez. Una aprobación sin edición posterior no la toca (es otra serie y no se mezcla); una
+/// edición, un rechazo o una aprobación «sin clasificar» del mismo sujeto la **reinician**, igual
+/// que reinician la de aprobaciones.
+fn learned_series<'a>(group: &[&'a Signal]) -> Series<'a> {
+    let mut items: Vec<&Signal> = Vec::new();
+    let mut seen_sources: HashSet<&str> = HashSet::new();
+    let mut breaks = 0;
+    let mut break_tasks: HashSet<i64> = HashSet::new();
+    for &s in group {
+        match s.kind.as_str() {
+            "learned" => {
+                if s.source_key
+                    .as_deref()
+                    .is_none_or(|k| seen_sources.insert(k))
+                {
+                    items.push(s);
+                }
+            }
+            "approved" if s.edit_state == "unedited" => {}
+            "approved" | "edited" | "rejected" => {
+                items.clear();
+                if break_tasks.insert(s.task_id) {
+                    breaks += 1;
+                }
+            }
+            _ => {}
+        }
+    }
+    items.sort_by_key(|s| s.id);
+    Series {
+        items,
+        breaks,
+        seen_blocked: false,
+    }
+}
+
+/// Unidad aprendida por dirección exacta y categoría (D172). Sin pares aprendidos, `None`.
+fn learned_address_unit<'a>(
+    subject_key: &str,
+    group: &[&'a Signal],
+    thresholds: Thresholds,
+) -> Option<Unit<'a>> {
+    if !group.iter().any(|s| s.kind == "learned") {
+        return None;
+    }
+    // Nunca «otros»: lo aprendido tampoco lo sugiere (D132).
+    if subject_key
+        .split_once('|')
+        .is_none_or(|(c, _)| c == "otros")
+    {
+        return None;
+    }
+    let series = learned_series(group);
+    if series.items.is_empty() {
+        return None;
+    }
+    let mut draft = draft_of(SEND_DRAFT, subject_key, &series)?;
+    // Los pares aprendidos no tienen tarea que citar en el origen de la regla.
+    draft.items = Vec::new();
+    Some(Unit {
+        action_kind: SEND_DRAFT,
+        series,
+        approved: 0,
+        seen: 0,
+        needed: thresholds.learned_reply,
+        draft,
+        origin: ORIGIN_LEARNED,
+        addresses: 1,
+    })
+}
+
+/// Unidades aprendidas por dominio (D172): un dominio **no público**, con al menos
+/// [`DOMAIN_MIN_ADDRESSES`] direcciones distintas y [`DOMAIN_MIN_PAIRS`] pares (el umbral
+/// `learned_reply`, si es mayor). Una edición o un rechazo de cualquier dirección del dominio en
+/// esa categoría reinicia la serie. Nunca «cualquier remitente» ni `otros`.
+fn learned_domain_units<'a>(valid: &[&'a Signal], thresholds: Thresholds) -> Vec<Unit<'a>> {
+    // (categoría, dominio) -> señales de envío de ese dominio, en orden de llegada.
+    let mut by_domain: BTreeMap<(&str, &str), Vec<&'a Signal>> = BTreeMap::new();
+    for &s in valid.iter().filter(|s| s.action_kind == SEND_DRAFT) {
+        let Some((category, sender)) = s.subject_key.split_once('|') else {
+            continue;
+        };
+        if category.is_empty()
+            || category == "otros"
+            || !is_email_address(sender)
+            || sender != sender.to_ascii_lowercase()
+        {
+            continue;
+        }
+        let Some((_, domain)) = sender.rsplit_once('@') else {
+            continue;
+        };
+        if is_public_mail_domain(domain) {
+            continue;
+        }
+        by_domain.entry((category, domain)).or_default().push(s);
+    }
+    let needed = thresholds.learned_reply.max(DOMAIN_MIN_PAIRS);
+    let mut out = Vec::new();
+    for ((category, domain), group) in by_domain {
+        if !group.iter().any(|s| s.kind == "learned") {
+            continue;
+        }
+        let series = learned_series(&group);
+        let addresses: HashSet<&str> = series
+            .items
+            .iter()
+            .filter_map(|s| s.subject_key.split_once('|').map(|(_, a)| a))
+            .collect();
+        // Con menos direcciones de las debidas no es una sugerencia ni «falta poco»: una sola
+        // dirección ya la cubre la regla exacta.
+        if series.items.is_empty() || addresses.len() < DOMAIN_MIN_ADDRESSES {
+            continue;
+        }
+        let conditions = json!({ "category": category, "sender_domain": domain });
+        let draft = Draft {
+            fingerprint: fingerprint_of(&[
+                SEND_DRAFT,
+                "category",
+                category,
+                "sender_domain",
+                domain,
+            ]),
+            name: sanitize_name(&format!("Respuestas a @{domain} ({category})")),
+            conditions_no_limit: conditions.clone(),
+            conditions,
+            subject: format!("@{domain}"),
+            category: Some(category.to_owned()),
+            items: Vec::new(),
+        };
+        out.push(Unit {
+            action_kind: SEND_DRAFT,
+            series,
+            approved: 0,
+            seen: 0,
+            needed,
+            draft,
+            origin: ORIGIN_LEARNED,
+            addresses: u32::try_from(addresses.len()).unwrap_or(u32::MAX),
+        });
+    }
+    out
+}
+
 /// Un importe canónico («1200.00») es positivo: no es cero ni negativo (rectificativas).
 pub(crate) fn is_positive_amount(amount: &str) -> bool {
     !amount.starts_with('-') && amount.chars().any(|c| c.is_ascii_digit() && c != '0')
@@ -430,6 +618,7 @@ pub fn suggest(
     let thresholds = Thresholds {
         invoice: thresholds.invoice.clamp(MIN_THRESHOLD, MAX_THRESHOLD),
         reply: thresholds.reply.clamp(MIN_THRESHOLD, MAX_THRESHOLD),
+        learned_reply: thresholds.learned_reply.clamp(MIN_THRESHOLD, MAX_THRESHOLD),
     };
     let mut out = Suggestions {
         candidates: Vec::new(),
@@ -437,22 +626,27 @@ pub fn suggest(
         observed: 0,
         decisions: 0,
         seen: 0,
+        learned: 0,
         counted: 0,
         hidden: Hidden::default(),
         thresholds: ThresholdSettings {
             invoice: thresholds.invoice,
             reply: thresholds.reply,
+            learned_reply: thresholds.learned_reply,
             min: MIN_THRESHOLD,
             max: MAX_THRESHOLD,
             default_invoice: DEFAULT_INVOICE_MIN,
             default_reply: DEFAULT_REPLY_MIN,
+            default_learned_reply: DEFAULT_LEARNED_REPLY_MIN,
         },
         watermark: signals.iter().map(|s| s.id).max().unwrap_or(0),
     };
 
     let mut valid: Vec<&Signal> = signals.iter().filter(|s| s.state == "valid").collect();
     valid.sort_by_key(|s| s.id);
-    out.observed = u32::try_from(valid.len()).unwrap_or(u32::MAX);
+    out.learned =
+        u32::try_from(valid.iter().filter(|s| s.kind == "learned").count()).unwrap_or(u32::MAX);
+    out.observed = u32::try_from(valid.len()).unwrap_or(u32::MAX) - out.learned;
     out.seen =
         u32::try_from(valid.iter().filter(|s| s.kind == "observed").count()).unwrap_or(u32::MAX);
     out.decisions = out.observed - out.seen;
@@ -477,33 +671,78 @@ pub fn suggest(
         .map(|d| (d.fingerprint.as_str(), d))
         .collect();
 
-    for ((action_kind, subject_key), group) in groups {
+    // Primera pasada: una unidad por serie con evidencia. Las de aprobaciones y facturas primero;
+    // después las aprendidas (D172), que nunca se mezclan con ellas.
+    let mut units: Vec<Unit<'_>> = Vec::new();
+    let mut learned_units: Vec<Unit<'_>> = Vec::new();
+    for ((action_kind, subject_key), group) in &groups {
+        let (action_kind, subject_key) = (*action_kind, *subject_key);
         let invoice = action_kind == REGISTER_INVOICE;
-        let series = series(&group, invoice);
-        if series.seen_blocked {
-            out.hidden.seen_invalidated += 1;
+        'approved: {
+            let series = series(group, invoice);
+            if series.seen_blocked {
+                out.hidden.seen_invalidated += 1;
+            }
+            let (approved, seen) = (series.approved(), series.seen());
+            let needed = needed_for(invoice, approved, seen, thresholds);
+            let count = u32::try_from(series.items.len()).unwrap_or(u32::MAX);
+            out.counted = out.counted.saturating_add(count);
+            if count == 0 {
+                break 'approved;
+            }
+            // Un correo manipulado puede dirigir la clasificación hacia «otros»: no se sugiere
+            // contestar sin revisión en esa categoría (se puede crear a mano).
+            if !invoice
+                && subject_key
+                    .split_once("|")
+                    .is_some_and(|(c, _)| c == "otros")
+            {
+                out.hidden.not_suggested += 1;
+                break 'approved;
+            }
+            let Some(draft) = draft_of(action_kind, subject_key, &series) else {
+                out.hidden.invalid += 1;
+                break 'approved;
+            };
+            units.push(Unit {
+                action_kind,
+                series,
+                approved,
+                seen,
+                needed,
+                draft,
+                origin: ORIGIN_APPROVED,
+                addresses: 1,
+            });
         }
-        let (approved, seen) = (series.approved(), series.seen());
-        let needed = needed_for(invoice, approved, seen, thresholds);
+        if action_kind == SEND_DRAFT {
+            if let Some(unit) = learned_address_unit(subject_key, group, thresholds) {
+                learned_units.push(unit);
+            }
+        }
+    }
+    learned_units.extend(learned_domain_units(&valid, thresholds));
+    units.extend(learned_units);
+
+    let mut emitted: HashSet<String> = HashSet::new();
+    for unit in units {
+        let Unit {
+            action_kind,
+            series,
+            approved,
+            seen,
+            needed,
+            draft,
+            origin,
+            addresses,
+        } = unit;
+        let invoice = action_kind == REGISTER_INVOICE;
+        let learned = origin == ORIGIN_LEARNED;
         let count = u32::try_from(series.items.len()).unwrap_or(u32::MAX);
-        out.counted = out.counted.saturating_add(count);
-        if count == 0 {
+        // La misma regla (mismas condiciones) ya sugerida por sus aprobaciones: una sola tarjeta.
+        if learned && emitted.contains(&draft.fingerprint) {
             continue;
         }
-        // Un correo manipulado puede dirigir la clasificación hacia «otros»: no se sugiere
-        // contestar sin revisión en esa categoría (se puede crear a mano).
-        if !invoice
-            && subject_key
-                .split_once("|")
-                .is_some_and(|(c, _)| c == "otros")
-        {
-            out.hidden.not_suggested += 1;
-            continue;
-        }
-        let Some(draft) = draft_of(action_kind, subject_key, &series) else {
-            out.hidden.invalid += 1;
-            continue;
-        };
         // Cubierta: una regla (activa o no) con las mismas condiciones, o una regla **activa**
         // que la contiene. Esta última ya automatiza lo mismo, y la candidata, al activarse,
         // haría que esas tareas coincidieran con dos reglas y fueran a revisión. Una regla
@@ -531,6 +770,7 @@ pub fn suggest(
                     Some(d) if d.kind == DecisionKind::Accepted => out.hidden.accepted += 1,
                     Some(_) => out.hidden.discarded += 1,
                     None => out.progress.push(Progress {
+                        origin,
                         action_kind: action_kind.into(),
                         subject: draft.subject.clone(),
                         category: draft.category.clone(),
@@ -605,6 +845,7 @@ pub fn suggest(
             })
             .collect()
         };
+        emitted.insert(draft.fingerprint.clone());
         out.candidates.push(Candidate {
             shown,
             fingerprint: draft.fingerprint,
@@ -617,6 +858,9 @@ pub fn suggest(
                 count,
                 threshold: needed,
                 earlier_breaks: series.breaks,
+                origin,
+                learned: if learned { count } else { 0 },
+                addresses,
                 approved,
                 seen,
                 last_at: last.map_or(0, |s| s.at),
@@ -642,6 +886,14 @@ pub fn suggest(
             .then_with(|| a.category.cmp(&b.category))
             .then_with(|| a.fingerprint.cmp(&b.fingerprint))
     });
+    // Una serie aprendida que ya es una tarjeta no promete además «faltan N» por sus aprobaciones.
+    let shown: HashSet<(&str, &Option<String>, &str)> = out
+        .candidates
+        .iter()
+        .map(|c| (c.action_kind.as_str(), &c.category, c.subject.as_str()))
+        .collect();
+    out.progress
+        .retain(|p| !shown.contains(&(p.action_kind.as_str(), &p.category, p.subject.as_str())));
     out.progress.sort_by(|a, b| {
         a.missing
             .cmp(&b.missing)
@@ -789,7 +1041,7 @@ impl App {
                     && r.state == "valid"
                     && matches!(r.kind.as_str(), "approved" | "rejected" | "observed")
             })
-            .map(|r| r.task_id)
+            .filter_map(|r| r.task_id)
             .collect();
         ids.sort_unstable();
         ids.dedup();
@@ -808,7 +1060,8 @@ impl App {
                 action_kind: row.action_kind,
                 subject_key: row.subject_key,
                 edit_state: row.edit_state,
-                task_id: row.task_id,
+                // Las `learned` no tienen tarea (D172).
+                task_id: row.task_id.unwrap_or(0),
                 source_key: row.source_key,
                 state: row.state,
                 display: None,
@@ -852,14 +1105,16 @@ impl App {
         Ok(ThresholdSettings {
             invoice: read(SETTING_INVOICE_MIN, DEFAULT_INVOICE_MIN)?,
             reply: read(SETTING_REPLY_MIN, DEFAULT_REPLY_MIN)?,
+            learned_reply: read(SETTING_LEARNED_REPLY_MIN, DEFAULT_LEARNED_REPLY_MIN)?,
             min: MIN_THRESHOLD,
             max: MAX_THRESHOLD,
             default_invoice: DEFAULT_INVOICE_MIN,
             default_reply: DEFAULT_REPLY_MIN,
+            default_learned_reply: DEFAULT_LEARNED_REPLY_MIN,
         })
     }
 
-    /// Cambia un umbral (`invoice` o `reply`). Se valida aquí, no solo en la interfaz: entre
+    /// Cambia un umbral (`invoice`, `reply` o `learned_reply`). Se valida aquí, no solo en la interfaz: entre
     /// `MIN_THRESHOLD` y `MAX_THRESHOLD`. Queda en el historial. Bajar un umbral no activa ni
     /// crea nada: solo puede hacer que aparezcan sugerencias, que siguen necesitando aceptación.
     pub fn set_suggestion_threshold(
@@ -870,9 +1125,10 @@ impl App {
         let (key, label) = match which {
             "invoice" => (SETTING_INVOICE_MIN, "facturas"),
             "reply" => (SETTING_REPLY_MIN, "respuestas"),
+            "learned_reply" => (SETTING_LEARNED_REPLY_MIN, "respuestas aprendidas"),
             other => {
                 return Err(AppError::Invalid(format!(
-                    "umbral desconocido: {other}; use «invoice» o «reply»"
+                    "umbral desconocido: {other}; use «invoice», «reply» o «learned_reply»"
                 )))
             }
         };
@@ -885,10 +1141,10 @@ impl App {
                 ))
             })?;
         let current = self.suggestion_thresholds()?;
-        let before = if which == "invoice" {
-            current.invoice
-        } else {
-            current.reply
+        let before = match which {
+            "invoice" => current.invoice,
+            "learned_reply" => current.learned_reply,
+            _ => current.reply,
         };
         if before != valid {
             self.store.set_rule_setting(
@@ -913,6 +1169,7 @@ impl App {
             Thresholds {
                 invoice: t.invoice,
                 reply: t.reply,
+                learned_reply: t.learned_reply,
             },
         ))
     }
@@ -1104,6 +1361,10 @@ impl App {
             "count": c.evidence.count,
             "threshold": c.evidence.threshold,
             "earlier_breaks": c.evidence.earlier_breaks,
+            // `learned`: aprendida en la primera carga (D172); si no, aprobaciones de la persona.
+            "evidence_origin": c.evidence.origin,
+            "learned": c.evidence.learned,
+            "addresses": c.evidence.addresses,
             "approved": c.evidence.approved,
             "seen": c.evidence.seen,
             "limit": conditions["max_total"].as_str().or(c.evidence.limit.as_deref()),
@@ -1672,6 +1933,7 @@ mod tests {
             Thresholds {
                 invoice: 0,
                 reply: 1,
+                learned_reply: 0,
             },
         );
         assert!(
@@ -1876,6 +2138,7 @@ mod tests {
             Thresholds {
                 invoice: 2,
                 reply: 5,
+                learned_reply: 3,
             },
         );
         assert!(low.candidates.is_empty());
@@ -1887,6 +2150,7 @@ mod tests {
             Thresholds {
                 invoice: 8,
                 reply: 5,
+                learned_reply: 3,
             },
         );
         assert!(high.candidates.is_empty());
@@ -2160,5 +2424,299 @@ mod tests {
             Thresholds::default(),
         );
         assert_eq!(s.progress.len(), 1);
+    }
+
+    // ---- Evidencia `learned` (D172) ----
+
+    fn learned(id: i64, key: &str, message: &str) -> Signal {
+        Signal {
+            id,
+            at: 1_000 + id,
+            kind: "learned".into(),
+            action_kind: SEND_DRAFT.into(),
+            subject_key: key.into(),
+            edit_state: "unknown".into(),
+            task_id: 0,
+            source_key: Some(format!("learned|account:a|{message}")),
+            state: "valid".into(),
+            display: None,
+            amount: None,
+            clean: false,
+            neutral: false,
+        }
+    }
+
+    fn decision(id: i64, task: i64, key: &str, kind: &str, edit: &str) -> Signal {
+        Signal {
+            kind: kind.into(),
+            subject_key: key.into(),
+            edit_state: edit.into(),
+            ..reply(id, task, "x", edit)
+        }
+    }
+
+    const ANA: &str = "consulta_pago|ana@alfa.test";
+
+    #[test]
+    fn three_learned_pairs_of_one_address_and_category_suggest_a_rule_with_learned_origin() {
+        let two = [learned(1, ANA, "m1"), learned(2, ANA, "m2")];
+        let s = run(&two);
+        assert!(s.candidates.is_empty());
+        assert_eq!((s.learned, s.observed, s.decisions), (2, 0, 0));
+        assert_eq!(s.progress.len(), 1);
+        assert_eq!(
+            (
+                s.progress[0].origin,
+                s.progress[0].needed,
+                s.progress[0].missing
+            ),
+            ("learned", 3, 1)
+        );
+        let s = run(&[two[0].clone(), two[1].clone(), learned(3, ANA, "m3")]);
+        assert_eq!(s.candidates.len(), 1);
+        let c = &s.candidates[0];
+        assert_eq!(
+            c.conditions,
+            json!({ "category": "consulta_pago", "sender": "ana@alfa.test" })
+        );
+        let e = &c.evidence;
+        assert_eq!(
+            (e.origin, e.learned, e.count, e.threshold),
+            ("learned", 3, 3, 3)
+        );
+        assert_eq!((e.approved, e.seen, e.addresses), (0, 0, 1));
+        assert!(e.task_ids.is_empty(), "no hay tareas que citar");
+        assert!(
+            s.progress.is_empty(),
+            "una tarjeta no promete además «faltan N»"
+        );
+    }
+
+    #[test]
+    fn a_repeated_source_counts_once() {
+        let s = run(&[
+            learned(1, ANA, "m1"),
+            learned(2, ANA, "m1"),
+            learned(3, ANA, "m2"),
+        ]);
+        assert!(s.candidates.is_empty());
+        assert_eq!(s.progress[0].count, 2);
+    }
+
+    #[test]
+    fn learned_threshold_defaults_to_three_and_never_goes_below_two() {
+        let pairs = [learned(1, ANA, "m1"), learned(2, ANA, "m2")];
+        let at = |learned_reply| {
+            suggest(
+                &pairs,
+                &[],
+                &Marks::default(),
+                &[],
+                Thresholds {
+                    learned_reply,
+                    ..Thresholds::default()
+                },
+            )
+        };
+        assert_eq!(Thresholds::default().learned_reply, 3);
+        assert!(run(&pairs).candidates.is_empty());
+        assert_eq!(at(2).candidates.len(), 1);
+        let s = at(0);
+        assert_eq!(s.thresholds.learned_reply, MIN_THRESHOLD);
+        assert_eq!(s.candidates.len(), 1);
+        assert!(run(&pairs[..1]).candidates.is_empty());
+        assert!(at(1).candidates[0].evidence.count >= 2);
+    }
+
+    #[test]
+    fn the_other_category_is_never_suggested_from_learned_pairs() {
+        let key = "otros|ana@alfa.test";
+        let s = run(&[
+            learned(1, key, "a"),
+            learned(2, key, "b"),
+            learned(3, key, "c"),
+        ]);
+        assert!(s.candidates.is_empty() && s.progress.is_empty());
+    }
+
+    #[test]
+    fn an_edit_or_a_rejection_after_the_pairs_breaks_the_learned_series() {
+        for (kind, edit) in [
+            ("edited", "edited"),
+            ("rejected", "unedited"),
+            ("approved", "unknown"),
+        ] {
+            let mut signals = vec![
+                learned(1, ANA, "m1"),
+                learned(2, ANA, "m2"),
+                learned(3, ANA, "m3"),
+                decision(4, 40, ANA, kind, edit),
+            ];
+            let s = run(&signals);
+            assert!(s.candidates.is_empty(), "{kind}");
+            assert_eq!(s.progress.len(), 0, "{kind}: la serie quedó vacía");
+            // Tres pares nuevos después del corte vuelven a sostenerla.
+            signals.extend([
+                learned(5, ANA, "m5"),
+                learned(6, ANA, "m6"),
+                learned(7, ANA, "m7"),
+            ]);
+            let s = run(&signals);
+            assert_eq!(s.candidates.len(), 1, "{kind}");
+            assert_eq!(s.candidates[0].evidence.earlier_breaks, 1, "{kind}");
+        }
+    }
+
+    #[test]
+    fn learned_pairs_never_mix_with_approved_ones() {
+        let approved = |id: i64| {
+            let mut s = reply(id, id, "ana@alfa.test", "unedited");
+            s.subject_key = ANA.into();
+            s
+        };
+        // Cuatro aprobaciones sin edición (umbral 5) y tres pares aprendidos: la tarjeta es solo de
+        // lo aprendido, y las aprobaciones no suman a sus recuentos ni a la inversa.
+        let mut signals: Vec<Signal> = (1..=4).map(approved).collect();
+        signals.extend([
+            learned(10, ANA, "a"),
+            learned(11, ANA, "b"),
+            learned(12, ANA, "c"),
+        ]);
+        let s = run(&signals);
+        assert_eq!(s.candidates.len(), 1);
+        let e = &s.candidates[0].evidence;
+        assert_eq!(
+            (e.origin, e.count, e.learned, e.approved),
+            ("learned", 3, 3, 0)
+        );
+        assert_eq!((s.observed, s.decisions, s.learned), (4, 4, 3));
+        // Con la quinta aprobación sale la de aprobaciones: una sola tarjeta para esas condiciones.
+        signals.push(approved(13));
+        let s = run(&signals);
+        assert_eq!(s.candidates.len(), 1);
+        let e = &s.candidates[0].evidence;
+        assert_eq!(
+            (e.origin, e.count, e.learned, e.approved),
+            ("approved", 5, 0, 5)
+        );
+    }
+
+    #[test]
+    fn an_unedited_approval_does_not_cut_the_learned_series() {
+        let mut approved = reply(4, 4, "ana@alfa.test", "unedited");
+        approved.subject_key = ANA.into();
+        let s = run(&[
+            learned(1, ANA, "m1"),
+            learned(2, ANA, "m2"),
+            approved,
+            learned(5, ANA, "m3"),
+        ]);
+        assert_eq!(s.candidates[0].evidence.learned, 3);
+    }
+
+    fn pairs_of(addresses: &[&str], category: &str) -> Vec<Signal> {
+        addresses
+            .iter()
+            .enumerate()
+            .map(|(i, a)| learned(i as i64 + 1, &format!("{category}|{a}"), &format!("m{i}")))
+            .collect()
+    }
+
+    fn domain_candidates(s: &Suggestions) -> Vec<&Candidate> {
+        s.candidates
+            .iter()
+            .filter(|c| c.conditions.get("sender_domain").is_some())
+            .collect()
+    }
+
+    #[test]
+    fn a_domain_rule_needs_two_addresses_and_three_pairs_of_a_non_public_domain() {
+        // Tres pares de dos direcciones: sale la de dominio.
+        let s = run(&pairs_of(
+            &["ana@alfa.test", "luis@alfa.test", "ana@alfa.test"],
+            "consulta_pago",
+        ));
+        let domain = domain_candidates(&s);
+        assert_eq!(domain.len(), 1);
+        assert_eq!(
+            domain[0].conditions,
+            json!({ "category": "consulta_pago", "sender_domain": "alfa.test" })
+        );
+        let e = &domain[0].evidence;
+        assert_eq!((e.origin, e.addresses, e.count), ("learned", 2, 3));
+        // Dos pares de dos direcciones no bastan.
+        let s = run(&pairs_of(
+            &["ana@alfa.test", "luis@alfa.test"],
+            "consulta_pago",
+        ));
+        assert!(s.candidates.is_empty());
+        // Tres pares de una sola dirección: solo la regla de dirección exacta.
+        let s = run(&pairs_of(
+            &["ana@alfa.test", "ana@alfa.test", "ana@alfa.test"],
+            "consulta_pago",
+        ));
+        assert!(domain_candidates(&s).is_empty());
+        assert_eq!(s.candidates.len(), 1);
+        // El umbral por dominio nunca baja de tres pares aunque `learned_reply` sea 2.
+        let s = suggest(
+            &pairs_of(&["ana@alfa.test", "luis@alfa.test"], "consulta_pago"),
+            &[],
+            &Marks::default(),
+            &[],
+            Thresholds {
+                learned_reply: 2,
+                ..Thresholds::default()
+            },
+        );
+        assert!(domain_candidates(&s).is_empty());
+    }
+
+    #[test]
+    fn a_public_domain_gets_no_domain_rule_but_an_exact_address_rule_is_fine() {
+        let s = run(&pairs_of(
+            &[
+                "ana@gmail.com",
+                "luis@gmail.com",
+                "marta@gmail.com",
+                "ana@gmail.com",
+            ],
+            "consulta_pago",
+        ));
+        assert!(domain_candidates(&s).is_empty());
+        let s = run(&pairs_of(
+            &["ana@gmail.com", "ana@gmail.com", "ana@gmail.com"],
+            "consulta_pago",
+        ));
+        assert_eq!(s.candidates.len(), 1);
+        assert_eq!(
+            s.candidates[0].conditions,
+            json!({ "category": "consulta_pago", "sender": "ana@gmail.com" })
+        );
+    }
+
+    #[test]
+    fn a_rejection_of_any_address_of_the_domain_breaks_the_domain_series() {
+        let mut signals = pairs_of(
+            &["ana@alfa.test", "luis@alfa.test", "marta@alfa.test"],
+            "consulta_pago",
+        );
+        assert_eq!(domain_candidates(&run(&signals)).len(), 1);
+        signals.push(decision(
+            9,
+            90,
+            "consulta_pago|luis@alfa.test",
+            "rejected",
+            "unedited",
+        ));
+        assert!(run(&signals).candidates.is_empty());
+    }
+
+    #[test]
+    fn learned_never_produces_an_any_sender_rule() {
+        let s = run(&pairs_of(
+            &["ana@alfa.test", "luis@beta.test", "marta@gamma.test"],
+            "consulta_pago",
+        ));
+        assert!(s.candidates.is_empty());
     }
 }

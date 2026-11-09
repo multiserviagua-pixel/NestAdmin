@@ -43,6 +43,7 @@ import type {
   ProfileConsentView,
   ProfileFinding,
   ProfilePreview,
+  LearnedProfileProposal,
   ProfileSaved,
   ProfileView,
   RefinePreview,
@@ -1594,16 +1595,18 @@ function mockPlan(members: Rule[], chosen: string): MergePlan {
 
 // ---- Sugerencias (D132): datos sintéticos fijos ----
 
-const mockThresholds = { invoice: 3, reply: 5 };
+const mockThresholds = { invoice: 3, reply: 5, learned_reply: 3 };
 const mockDiscarded = new Set<string>();
 const mockAccepted = new Map<string, string>();
 const mockThresholdSettings = (): ThresholdSettings => ({
   invoice: mockThresholds.invoice,
   reply: mockThresholds.reply,
+  learned_reply: mockThresholds.learned_reply,
   min: 2,
   max: 50,
   default_invoice: 3,
   default_reply: 5,
+  default_learned_reply: 3,
 });
 
 const mockEvidence = (count: number, threshold: number, daysAgo: number, amounts: string[] = [], seen = 0): Suggestion["evidence"] => {
@@ -1612,6 +1615,9 @@ const mockEvidence = (count: number, threshold: number, daysAgo: number, amounts
     count,
     threshold,
     earlier_breaks: 0,
+    origin: "approved",
+    learned: 0,
+    addresses: 1,
     approved: count - seen,
     seen,
     last_at: now() - daysAgo * 24 * 3600 * 1000,
@@ -1717,12 +1723,13 @@ function mockSuggestions(): Suggestions {
   return {
     candidates,
     progress: [
-      { action_kind: "register_invoice", subject: "Beta SA", category: null, count: 2, approved: 2, seen: 0, needed: mockThresholds.invoice, missing: Math.max(0, mockThresholds.invoice - 2) },
-      { action_kind: "register_invoice", subject: "Kappa SL", category: null, count: 4, approved: 0, seen: 4, needed: 5, missing: 1 },
+      { origin: "approved" as const, action_kind: "register_invoice", subject: "Beta SA", category: null, count: 2, approved: 2, seen: 0, needed: mockThresholds.invoice, missing: Math.max(0, mockThresholds.invoice - 2) },
+      { origin: "approved" as const, action_kind: "register_invoice", subject: "Kappa SL", category: null, count: 4, approved: 0, seen: 4, needed: 5, missing: 1 },
     ].filter((p) => p.missing > 0),
     observed: 29,
     decisions: 24,
     seen: 5,
+    learned: 0,
     counted: 24,
     hidden,
     thresholds: mockThresholdSettings(),
@@ -1797,6 +1804,29 @@ function mockProfileFp(): string | null {
   let h = 5381;
   for (const c of block) h = ((h << 5) + h + c.charCodeAt(0)) | 0;
   return (h >>> 0).toString(16).padStart(8, "0").repeat(2);
+}
+
+const mockLearnedProfileDecision = new Map<string, "accepted" | "dismissed">();
+
+/** Espejo del texto fijo del tono aprendido: palabras por enum y saludo y despedida tal cual. */
+function mockLearnedProposal(account: string): LearnedProfileProposal | null {
+  if (learningStatus(account).state !== "done" || mockLearnedProfileDecision.has(account)) return null;
+  const before = mockProfileView().profile;
+  const tone = "formal, breve. Saludo habitual: «Buenos días,». Despedida habitual: «Un saludo».";
+  if (before.tone.trim() === tone) return null;
+  const after = { ...before, tone };
+  return {
+    account,
+    input_fp: mockLearnFp,
+    fp: `${profileLength(before)}-${profileLength(after)}-${[...tone].length}`,
+    before,
+    after,
+    changed: ["tone"],
+    chars_after: profileLength(after),
+    max_chars: 2000,
+    blocking: mockProfileBlocks(after).length ? [{ field: "total", code: "too_long" }] : [],
+    warnings: [],
+  };
 }
 
 function mockProfileView(): ProfileView {
@@ -2679,6 +2709,24 @@ const handlers: Record<string, (a: any, options?: any) => unknown> = {
     }
     return { view: mockProfileView(), warnings, consent_withdrawn: withdrawn };
   },
+  // Propuesta de perfil aprendida (D171): estilo sintético fijo; solo se ofrece con el aprendizaje terminado.
+  learned_profile_proposal: ({ account }): LearnedProfileProposal | null => mockLearnedProposal(String(account)),
+  accept_learned_profile: ({ account, fp }): ProfileSaved => {
+    const proposal = mockLearnedProposal(String(account));
+    if (!proposal) throw "No hay una propuesta de perfil vigente para esta cuenta.";
+    if (proposal.fp !== fp) throw "El perfil ha cambiado desde que vio la propuesta: revise el antes y el después de nuevo.";
+    if (proposal.blocking.length) throw "El perfil propuesto no pasa el examen del contenido.";
+    const saved = handlers.save_business_profile({ profile: proposal.after }) as ProfileSaved;
+    mockLearnedProfileDecision.set(String(account), "accepted");
+    audit.push({ task_id: null, action: "rule_setting", status: "changed", authorization: null, detail: "propuesta de perfil aprendida aceptada: campos tone" });
+    return saved;
+  },
+  dismiss_learned_profile: ({ account }) => {
+    if (!mockLearnedProfileDecision.has(String(account))) {
+      mockLearnedProfileDecision.set(String(account), "dismissed");
+      audit.push({ task_id: null, action: "rule_setting", status: "changed", authorization: null, detail: "propuesta de perfil aprendida descartada" });
+    }
+  },
   clear_business_profile: (): ProfileSaved => {
     const had = mockProfile !== null;
     mockProfile = null;
@@ -2803,12 +2851,12 @@ const handlers: Record<string, (a: any, options?: any) => unknown> = {
   },
   suggestion_thresholds: (): ThresholdSettings => mockThresholdSettings(),
   set_suggestion_threshold: ({ which, value }): ThresholdSettings => {
-    if (which !== "invoice" && which !== "reply") throw `umbral desconocido: ${which}; use «invoice» o «reply»`;
+    if (which !== "invoice" && which !== "reply" && which !== "learned_reply") throw `umbral desconocido: ${which}; use «invoice», «reply» o «learned_reply»`;
     if (!Number.isInteger(value) || value < 2 || value > 50)
       throw "el umbral debe estar entre 2 y 50: con una sola observación no se sugiere nada";
-    if (mockThresholds[which as "invoice" | "reply"] !== value) {
-      audit.push({ task_id: null, action: "rule_setting", status: "changed", authorization: null, detail: `umbral para sugerir reglas (${which}): ${mockThresholds[which as "invoice" | "reply"]} -> ${value}` });
-      mockThresholds[which as "invoice" | "reply"] = value;
+    if (mockThresholds[which as "invoice" | "reply" | "learned_reply"] !== value) {
+      audit.push({ task_id: null, action: "rule_setting", status: "changed", authorization: null, detail: `umbral para sugerir reglas (${which}): ${mockThresholds[which as "invoice" | "reply" | "learned_reply"]} -> ${value}` });
+      mockThresholds[which as "invoice" | "reply" | "learned_reply"] = value;
     }
     return mockThresholdSettings();
   },
@@ -2987,6 +3035,8 @@ function startup(): Startup {
 
 const mutating = new Set([
   "save_business_profile",
+  "accept_learned_profile",
+  "dismiss_learned_profile",
   "clear_business_profile",
   "grant_profile_consent",
   "withdraw_profile_consent",

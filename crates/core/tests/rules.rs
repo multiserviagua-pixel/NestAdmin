@@ -427,3 +427,53 @@ fn old_actions_are_read_strictly_and_the_rest_is_unclassified() {
         (1, Some(7), 4)
     );
 }
+
+// ---- Evidencia aprendida (D171, D172) ----
+
+#[test]
+fn learned_evidence_is_saved_with_the_result_once_and_saving_again_never_duplicates_it() {
+    use nestadmin_core::{LearnedEvidence, LearnedSignal};
+    let mut store = Store::open_in_memory().unwrap();
+    let evidence = LearnedEvidence {
+        signals: vec![
+            LearnedSignal {
+                subject_key: "solicitud_factura|ana@alfa.test".into(),
+                source_key: "learned|account:a|m1".into(),
+            },
+            LearnedSignal {
+                subject_key: "solicitud_factura|ana@alfa.test".into(),
+                source_key: "learned|account:a|m2".into(),
+            },
+        ],
+        reply_style: vec![
+            ("solicitud_factura".into(), "confirm".into()),
+            ("solicitud_factura".into(), "confirm".into()),
+            ("otros".into(), "inform".into()),
+        ],
+    };
+    let mark = json!({ "phase": "done" });
+    let result = json!({ "pairs": [] });
+    for _ in 0..3 {
+        store
+            .save_learning("account:a", &mark, Some(&result), None, Some(&evidence))
+            .unwrap();
+    }
+    let signals = store.rule_signals().unwrap();
+    assert_eq!(signals.len(), 2);
+    assert!(signals
+        .iter()
+        .all(|s| s.kind == "learned" && s.task_id.is_none() && s.state == "valid"));
+    assert_eq!(
+        store.reply_style_rows().unwrap(),
+        vec![
+            ("otros".to_owned(), "inform".to_owned(), 1),
+            ("solicitud_factura".to_owned(), "confirm".to_owned(), 2),
+        ],
+        "los recuentos solo se suman la primera vez que se guarda el resultado"
+    );
+    // Sin evidencia (por ejemplo, un cambio de marca) no se toca nada.
+    store
+        .save_learning("account:a", &mark, None, None, None)
+        .unwrap();
+    assert_eq!(store.rule_signals().unwrap().len(), 2);
+}

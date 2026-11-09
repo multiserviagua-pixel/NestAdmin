@@ -76,11 +76,31 @@ pub struct SignalRow {
     pub action_kind: String,
     pub subject_key: String,
     pub edit_state: String,
-    pub task_id: i64,
+    /// `None` solo en las señales `learned`: nacen del aprendizaje y no de una tarea (D172).
+    pub task_id: Option<i64>,
     pub content_version: i64,
     pub source_key: Option<String>,
     /// `valid`, `pending` o `void`. Las sugerencias solo usan las `valid`.
     pub state: String,
+}
+
+/// Una señal `learned` por guardar (D172): un correo recibido que la persona ya contestó antes de
+/// instalar NestAdmin. Solo la clave de señal y la del mensaje; nunca texto.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LearnedSignal {
+    /// `categoría|remitente`, la misma clave que las aprobaciones de correo.
+    pub subject_key: String,
+    /// Fuente y id del mensaje recibido: única por correo.
+    pub source_key: String,
+}
+
+/// Lo que se guarda al terminar de aprender, en la misma transacción que el resultado (D171,
+/// D172): señales `learned` y, por cada par que pedía respuesta, el enum `(categoría, reply_kind)`
+/// que alimenta `reply_style`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LearnedEvidence {
+    pub signals: Vec<LearnedSignal>,
+    pub reply_style: Vec<(String, String)>,
 }
 
 /// Una decisión sobre una sugerencia (D132): descartada o aceptada, con la evidencia que
@@ -658,12 +678,17 @@ impl Store {
     /// Guarda en **una** transacción la marca de aprendizaje, lo aprendido (si lo hay) y, si se
     /// pide, una entrada agregada del historial `(acción, estado, detalle)`. Sustituir una marca no
     /// escribe nada en el historial; solo la nota explícita. Idempotente.
+    ///
+    /// Con `evidence`, en esa misma transacción: las señales `learned` (únicas por correo recibido:
+    /// repetirlo no duplica filas) y los recuentos de `reply_style`, que solo se suman la primera
+    /// vez que se guarda el resultado de esa fuente (no hay resultado previo).
     pub fn save_learning(
         &mut self,
         source: &str,
         mark: &Value,
         result: Option<&Value>,
         note: Option<(&str, &str, &Value)>,
+        evidence: Option<&LearnedEvidence>,
     ) -> Result<()> {
         let tx = self.conn.transaction()?;
         let upsert = "INSERT INTO rule_settings (key, value) VALUES (?1, ?2)
@@ -672,11 +697,37 @@ impl Store {
             upsert,
             params![format!("{LEARN_MARK_PREFIX}{source}"), mark.to_string()],
         )?;
+        let result_key = format!("{LEARN_RESULT_PREFIX}{source}");
+        let first_result = tx
+            .query_row(
+                "SELECT 1 FROM rule_settings WHERE key = ?1",
+                [&result_key],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_none();
         if let Some(result) = result {
-            tx.execute(
-                upsert,
-                params![format!("{LEARN_RESULT_PREFIX}{source}"), result.to_string()],
-            )?;
+            tx.execute(upsert, params![result_key, result.to_string()])?;
+        }
+        if let Some(evidence) = evidence {
+            let now = now_ms();
+            for s in &evidence.signals {
+                tx.execute(
+                    "INSERT OR IGNORE INTO rule_signals
+                     (kind, action_kind, subject_key, edit_state, task_id, content_version, source_key, at, state)
+                     VALUES ('learned', 'send_draft', ?1, 'unknown', NULL, 0, ?2, ?3, 'valid')",
+                    params![s.subject_key, s.source_key, now],
+                )?;
+            }
+            if first_result {
+                for (category, kind) in &evidence.reply_style {
+                    tx.execute(
+                        "INSERT INTO reply_style (category, reply_kind, n) VALUES (?1, ?2, 1)
+                         ON CONFLICT(category, reply_kind) DO UPDATE SET n = n + 1",
+                        params![category, kind],
+                    )?;
+                }
+            }
         }
         if let Some((action, status, detail)) = note {
             tx.execute(
@@ -686,6 +737,15 @@ impl Store {
         }
         tx.commit()?;
         Ok(())
+    }
+
+    /// Recuentos de `reply_style`: `(categoría, reply_kind, n)`, en orden estable.
+    pub fn reply_style_rows(&self) -> Result<Vec<(String, String, i64)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT category, reply_kind, n FROM reply_style ORDER BY category, reply_kind",
+        )?;
+        let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
     /// Todas las marcas de aprendizaje, por fuente, en orden estable.

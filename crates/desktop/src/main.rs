@@ -29,7 +29,9 @@ use nestadmin_app::learn_state::{
 use nestadmin_app::panel::{MergePreview, NewRule, RuleView, Simulation};
 use nestadmin_app::pipelines::{PipelineOverview, RunView};
 use nestadmin_app::preferences::PreferenceChange;
-use nestadmin_app::profile::{ProfileConsentView, ProfilePreview, ProfileSaved, ProfileView};
+use nestadmin_app::profile::{
+    LearnedProfileProposal, ProfileConsentView, ProfilePreview, ProfileSaved, ProfileView,
+};
 use nestadmin_app::refine::{
     ConsentView, RefineExpectation, RefineMode, RefinePreview, RefineTrigger, RefinementView,
 };
@@ -876,6 +878,51 @@ fn save_business_profile<R: Runtime>(
     Ok(saved)
 }
 
+/// Propuesta de perfil con el estilo aprendido en la primera carga, con su antes y después (D171).
+/// Solo lectura: nada se guarda ni sale del equipo.
+#[tauri::command]
+fn learned_profile_proposal(
+    shared: State<'_, SharedState>,
+    account: String,
+) -> CmdResult<Option<LearnedProfileProposal>> {
+    shared
+        .app()?
+        .learned_profile_proposal(&account)
+        .map_err(text)
+}
+
+/// Acepta la propuesta que la persona vio por el guardado normal del perfil (D171): mismos
+/// bloqueos y tope, y retira el consentimiento del perfil si cambia lo que saldría (D163).
+#[tauri::command]
+fn accept_learned_profile<R: Runtime>(
+    shared: State<'_, SharedState>,
+    handle: AppHandle<R>,
+    account: String,
+    fp: String,
+) -> CmdResult<ProfileSaved> {
+    let saved = shared
+        .app()?
+        .accept_learned_profile(&account, &fp)
+        .map_err(text)?;
+    changed(&handle);
+    Ok(saved)
+}
+
+/// Descarta la propuesta de perfil: queda registrado, sin contenido (D171).
+#[tauri::command]
+fn dismiss_learned_profile<R: Runtime>(
+    shared: State<'_, SharedState>,
+    handle: AppHandle<R>,
+    account: String,
+) -> CmdResult<()> {
+    shared
+        .app()?
+        .dismiss_learned_profile(&account)
+        .map_err(text)?;
+    changed(&handle);
+    Ok(())
+}
+
 /// Borra el perfil del negocio y retira el consentimiento (D163).
 #[tauri::command]
 fn clear_business_profile<R: Runtime>(
@@ -1392,7 +1439,7 @@ fn suggestion_thresholds(shared: State<'_, SharedState>) -> CmdResult<ThresholdS
     shared.app()?.suggestion_thresholds().map_err(text)
 }
 
-/// Cambia un umbral («invoice» o «reply»); el backend rechaza lo que no esté entre el mínimo
+/// Cambia un umbral («invoice», «reply» o «learned_reply»); el backend rechaza lo que no esté entre el mínimo
 /// y el máximo y deja el cambio en el historial.
 #[tauri::command]
 fn set_suggestion_threshold<R: Runtime>(
@@ -2485,6 +2532,9 @@ fn configure<R: Runtime>(builder: Builder<R>, prepare_only: bool) -> Builder<R> 
             business_profile,
             business_profile_prefill,
             save_business_profile,
+            learned_profile_proposal,
+            accept_learned_profile,
+            dismiss_learned_profile,
             clear_business_profile,
             business_profile_preview,
             grant_profile_consent,

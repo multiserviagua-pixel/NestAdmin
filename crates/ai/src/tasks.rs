@@ -247,12 +247,49 @@ datos de contacto, horarios y precios que puedes usar):\n{profile}"
     ))
 }
 
+/// Línea de confianza de la redacción (D171): cómo suele responder el negocio en la categoría.
+/// Texto fijo por valor de `reply_kind` (`confirm`, `inform`, `schedule`, `quote`, `decline`); ningún
+/// texto aprendido entra aquí, solo el enum. `other` y cualquier otro valor no dicen nada y no
+/// producen línea.
+pub fn reply_habit_line(reply_kind: &str) -> Option<&'static str> {
+    Some(match reply_kind {
+        "confirm" => "Respuesta habitual del negocio en esta categoría: confirmar.",
+        "inform" => "Respuesta habitual del negocio en esta categoría: informar.",
+        "schedule" => {
+            "Respuesta habitual del negocio en esta categoría: proponer una fecha o una cita."
+        }
+        "quote" => "Respuesta habitual del negocio en esta categoría: enviar un presupuesto.",
+        "decline" => "Respuesta habitual del negocio en esta categoría: declinar con amabilidad.",
+        _ => return None,
+    })
+}
+
 /// Borrador (D158). El perfil es de confianza y viaja en las instrucciones, nunca mezclado con
 /// el correo; sin perfil (o en blanco) no aparece nada.
 pub fn draft_request(request_id: &str, text: &str, profile: Option<&str>) -> GenerateRequest {
+    draft_request_with_habit(request_id, text, profile, None)
+}
+
+/// Como [`draft_request`], con la línea de confianza de la respuesta habitual (D171) si hay un
+/// `reply_kind` dominante para la categoría. Va en las instrucciones, fuera de los delimitadores
+/// del correo, y solo como texto fijo por enum.
+pub fn draft_request_with_habit(
+    request_id: &str,
+    text: &str,
+    profile: Option<&str>,
+    habit: Option<&str>,
+) -> GenerateRequest {
     let mut instructions = DRAFT_INSTRUCTIONS.to_owned();
     if let Some(section) = profile.and_then(profile_section) {
         instructions.push_str(&section);
+    }
+    if let Some(line) = habit.and_then(reply_habit_line) {
+        instructions.push_str(
+            "
+
+",
+        );
+        instructions.push_str(line);
     }
     GenerateRequest {
         request_id: request_id.to_owned(),

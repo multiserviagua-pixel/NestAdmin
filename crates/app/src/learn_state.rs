@@ -45,6 +45,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use nestadmin_ai::ProviderKind;
+use nestadmin_core::LearnedEvidence;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -356,8 +357,22 @@ impl App {
         result: Option<&Value>,
         note: Option<(&str, &str, &Value)>,
     ) -> AppResult<()> {
+        self.save_learn_with(source, mark, result, note, None)
+    }
+
+    /// Como `save_learn`; con `evidence` guarda en la misma transacción las señales `learned` y
+    /// `reply_style` (D171, D172).
+    fn save_learn_with(
+        &mut self,
+        source: &str,
+        mark: &LearnMark,
+        result: Option<&Value>,
+        note: Option<(&str, &str, &Value)>,
+        evidence: Option<&LearnedEvidence>,
+    ) -> AppResult<()> {
         let value = serde_json::to_value(mark).map_err(|e| AppError::Invalid(e.to_string()))?;
-        self.store.save_learning(source, &value, result, note)?;
+        self.store
+            .save_learning(source, &value, result, note, evidence)?;
         Ok(())
     }
 
@@ -1001,11 +1016,14 @@ impl App {
                 let detail = done_note(&mark, stored.pairs.len());
                 let result =
                     serde_json::to_value(&stored).map_err(|e| AppError::Invalid(e.to_string()))?;
-                self.save_learn(
+                // La evidencia `learned` y `reply_style` van en la misma transacción (D171, D172).
+                let evidence = crate::learn_evidence::learned_evidence(&source, &stored.pairs);
+                self.save_learn_with(
                     &source,
                     &mark,
                     Some(&result),
                     Some((AUDIT_ACTION, DONE, &Value::String(detail))),
+                    Some(&evidence),
                 )?;
                 self.learning.cache.remove(&source);
             }

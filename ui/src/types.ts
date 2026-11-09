@@ -468,6 +468,12 @@ export interface SuggestionEvidence {
   threshold: number;
   /** Veces que la serie se cortó antes (edición, rechazo, sin clasificar o factura con incidencias). */
   earlier_breaks: number;
+  /** `approved` (aprobaciones de la persona) o `learned` (pares de la primera carga, D172); nunca mezcla las dos. */
+  origin: "approved" | "learned";
+  /** Con origen `learned`: pares aprendidos (= `count`); si no, cero. */
+  learned: number;
+  /** Direcciones distintas de la serie (una, salvo en las reglas por dominio aprendidas). */
+  addresses: number;
   /** De `count`: aprobaciones de la persona y facturas que solo se vieron en la primera lectura (E5, D133). */
   approved: number;
   seen: number;
@@ -503,6 +509,7 @@ export interface Suggestion {
 }
 
 export interface SuggestionProgress {
+  origin: "approved" | "learned";
   action_kind: string;
   subject: string;
   category: string | null;
@@ -516,10 +523,13 @@ export interface SuggestionProgress {
 export interface ThresholdSettings {
   invoice: number;
   reply: number;
+  /** Pares aprendidos en la primera carga por remitente y categoría (D172). */
+  learned_reply: number;
   min: number;
   max: number;
   default_invoice: number;
   default_reply: number;
+  default_learned_reply: number;
 }
 
 export interface Suggestions {
@@ -530,6 +540,8 @@ export interface Suggestions {
   /** De ellas, decisiones de la persona (aprobar, editar o rechazar) y facturas vistas en la primera lectura. */
   decisions: number;
   seen: number;
+  /** Señales `learned` válidas (D172): no cuentan en `observed` ni son decisiones. */
+  learned: number;
   /** Observaciones que cuentan como evidencia en las series actuales, se muestren o no. */
   counted: number;
   hidden: { covered: number; discarded: number; accepted: number; invalid: number; not_suggested: number; seen_invalidated: number };
@@ -833,6 +845,22 @@ export interface ProfileSaved {
   warnings: ProfileFinding[];
   /** El consentimiento se retiró porque cambió lo que saldría. */
   consent_withdrawn: boolean;
+}
+
+/** Propuesta de perfil con el estilo aprendido en la primera carga, con su antes y después (D171). Solo toca el tono. */
+export interface LearnedProfileProposal {
+  account: string;
+  input_fp: string;
+  /** Huella de antes y después: aceptar exige la misma. */
+  fp: string;
+  before: BusinessProfile;
+  after: BusinessProfile;
+  changed: Array<keyof BusinessProfile>;
+  chars_after: number;
+  max_chars: number;
+  /** Hallazgos que impedirían guardar el «después» (`iban`, `card`, `secret`, `too_long`). */
+  blocking: ProfileFinding[];
+  warnings: ProfileFinding[];
 }
 
 /** Consentimiento del perfil: ligado a proveedor, modelo, servidor y contenido; no hace falta con la IA local. */

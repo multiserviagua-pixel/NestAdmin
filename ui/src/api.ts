@@ -25,6 +25,7 @@ import type {
   MergePreview,
   ProfileConsentView,
   ProfilePreview,
+  LearnedProfileProposal,
   ProfileSaved,
   ProfileView,
   RefinePreview,
@@ -202,6 +203,12 @@ export const api = {
   /** Guarda el perfil. Bloquea IBAN, tarjetas y claves; avisa de teléfono y correo; retira el consentimiento si cambia lo que saldría. */
   saveBusinessProfile: (profile: BusinessProfile) => invoke<ProfileSaved>("save_business_profile", { profile }),
   clearBusinessProfile: () => invoke<ProfileSaved>("clear_business_profile"),
+  /** Propuesta de perfil con el estilo aprendido (D171), con su antes y después. Solo lectura; `null` si no hay. */
+  learnedProfileProposal: (account: string) => invoke<LearnedProfileProposal | null>("learned_profile_proposal", { account }),
+  /** Acepta la propuesta que la persona vio (`fp`) por el guardado normal del perfil: mismos bloqueos y tope; retira el consentimiento del perfil si cambia lo que saldría. */
+  acceptLearnedProfile: (account: string, fp: string) => invoke<ProfileSaved>("accept_learned_profile", { account, fp }),
+  /** Descarta la propuesta: queda registrado sin contenido y no vuelve a ofrecerse. */
+  dismissLearnedProfile: (account: string) => invoke<void>("dismiss_learned_profile", { account }),
   /** El bloque literal que saldría en la redacción y a qué destino. Solo lectura. */
   businessProfilePreview: () => invoke<ProfilePreview>("business_profile_preview"),
   /** Consiente a lo que la persona vio: proveedor, modelo, servidor y huella del bloque. Se rechaza si algo cambió. */
@@ -251,7 +258,7 @@ export const api = {
   discardSuggestion: (fingerprint: string) => invoke<void>("discard_suggestion", { fingerprint }),
   suggestionThresholds: () => invoke<ThresholdSettings>("suggestion_thresholds"),
   /** `which`: `invoice` o `reply`. El backend rechaza lo que no esté entre el mínimo y el máximo. */
-  setSuggestionThreshold: (which: "invoice" | "reply", value: number) => invoke<ThresholdSettings>("set_suggestion_threshold", { which, value }),
+  setSuggestionThreshold: (which: "invoice" | "reply" | "learned_reply", value: number) => invoke<ThresholdSettings>("set_suggestion_threshold", { which, value }),
   /** Datos para precargar una regla desde una revisión (solo lectura). */
   ruleSeedForTask: (taskId: number) => invoke<RuleSeed>("rule_seed_for_task", { taskId }),
   /** Revisa una unificación sin cambiar nada: antes, opciones y, con la elección hecha, el plan. */

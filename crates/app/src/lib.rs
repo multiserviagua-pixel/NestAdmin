@@ -11,6 +11,7 @@ pub mod accounts;
 pub mod initial_read;
 pub mod learn;
 pub mod learn_consent;
+pub mod learn_evidence;
 pub mod learn_state;
 pub mod panel;
 pub mod pipelines;
@@ -27,8 +28,8 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use nestadmin_ai::tasks::{
-    draft_flags_allowing, draft_leaks_internals, draft_request, extraction_request, parse_draft,
-    parse_extraction, parse_other_invoices, parse_triage, triage_request,
+    draft_flags_allowing, draft_leaks_internals, draft_request_with_habit, extraction_request,
+    parse_draft, parse_extraction, parse_other_invoices, parse_triage, triage_request,
 };
 use nestadmin_ai::{
     AiError, GenerateRequest, GenerateResult, ModelUnavailableCause, Provider, ProviderKind,
@@ -356,6 +357,8 @@ enum Prepared {
     Redraft {
         id: String,
         text: String,
+        /// Categoría del correo de origen, para la línea de respuesta habitual (D171).
+        category: Option<String>,
     },
 }
 
@@ -461,6 +464,9 @@ pub struct Job {
     extractor: Arc<Extractor>,
     /// Perfil del negocio para la redacción de esta tarea, ya comprobado el consentimiento (D163).
     profile: Option<profile::ProfileUse>,
+    /// Recuentos de `reply_style` (categoría, tipo, n) para la línea de respuesta habitual de la
+    /// redacción (D171). Solo enums y cifras; vacío fuera de la redacción.
+    reply_style: Vec<(String, String, i64)>,
     prepared: Result<Prepared, TaskError>,
 }
 
@@ -672,6 +678,7 @@ impl Job {
             fallback_until,
             extractor,
             profile,
+            reply_style,
             prepared,
         } = self;
         let read_source: Option<String> = serde_json::from_str::<Value>(&task.input_ref)
@@ -710,8 +717,13 @@ impl Job {
                             profile_text: None,
                         }));
                     }
-                    let (request, local_request) =
-                        draft_requests(&format!("{id}/draft"), &text, profile.as_ref());
+                    let habit = learn_evidence::dominant_reply_kind(&reply_style, &category);
+                    let (request, local_request) = draft_requests(
+                        &format!("{id}/draft"),
+                        &text,
+                        profile.as_ref(),
+                        habit.as_deref(),
+                    );
                     // Si la clasificación la atendió el respaldo local (o el periodo de respaldo
                     // sigue abierto), la redacción se queda en local: el mismo correo nunca vuelve
                     // al proveedor externo (D101).
@@ -745,9 +757,16 @@ impl Job {
                         profile_text,
                     }));
                 }
-                Prepared::Redraft { id, text } => {
-                    let (request, local_request) =
-                        draft_requests(&format!("{id}/draft"), &text, profile.as_ref());
+                Prepared::Redraft { id, text, category } => {
+                    let habit = category
+                        .as_deref()
+                        .and_then(|c| learn_evidence::dominant_reply_kind(&reply_style, c));
+                    let (request, local_request) = draft_requests(
+                        &format!("{id}/draft"),
+                        &text,
+                        profile.as_ref(),
+                        habit.as_deref(),
+                    );
                     let attempt = generate_with_fallback_split(
                         &*provider,
                         fallback.as_ref(),
@@ -828,12 +847,13 @@ fn draft_requests(
     id: &str,
     text: &str,
     profile: Option<&profile::ProfileUse>,
+    habit: Option<&str>,
 ) -> (GenerateRequest, GenerateRequest) {
     let primary = profile.filter(|p| p.primary_ok).map(|p| p.text.as_str());
     let local = profile.map(|p| p.text.as_str());
     (
-        draft_request(id, text, primary),
-        draft_request(id, text, local),
+        draft_request_with_habit(id, text, primary, habit),
+        draft_request_with_habit(id, text, local, habit),
     )
 }
 
@@ -1706,6 +1726,7 @@ impl App {
                 fallback_until: Arc::clone(&self.fallback_until),
                 extractor: Arc::clone(&self.extractor),
                 profile: None,
+                reply_style: Vec::new(),
                 prepared: Ok(Prepared::Resume(result)),
             }));
         }
@@ -1753,11 +1774,20 @@ impl App {
                                 "la primera lectura no envía correos a ningún proveedor",
                                 false,
                             ))
-                        } else if input["redraft_of"].as_i64().is_some() {
+                        } else if let Some(origin) = input["redraft_of"].as_i64() {
                             // «Redactar respuesta» (D159): solo la redacción; no se clasifica otra vez.
+                            // La categoría es la del correo de origen (si consta).
+                            let category = self
+                                .store
+                                .task_by_id(origin)
+                                .ok()
+                                .flatten()
+                                .and_then(|t| t.result)
+                                .and_then(|r| r["category"].as_str().map(str::to_owned));
                             Ok(Prepared::Redraft {
                                 id: id.clone(),
                                 text,
+                                category,
                             })
                         } else {
                             Ok(Prepared::Email { id: id.clone(), text })
@@ -1790,6 +1820,14 @@ impl App {
             profile: match &prepared {
                 Ok(Prepared::Email { .. } | Prepared::Redraft { .. }) => self.profile_for_draft(),
                 _ => None,
+            },
+            // Solo la redacción lleva la línea de respuesta habitual (D171). Un fallo de lectura
+            // equivale a no tener datos: la línea no aparece.
+            reply_style: match &prepared {
+                Ok(Prepared::Email { .. } | Prepared::Redraft { .. }) => {
+                    self.store.reply_style_rows().unwrap_or_default()
+                }
+                _ => Vec::new(),
             },
             prepared,
         }))

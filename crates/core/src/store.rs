@@ -77,6 +77,8 @@ CREATE TABLE rules (
     include_str!("migrations/007_business_profile.sql"),
     // Plantillas de pipeline y sus ejecuciones (D148); ver pipeline.rs.
     include_str!("migrations/008_pipelines.sql"),
+    // Evidencia `learned` y `reply_style` de «Aprender a responder» (D171, D172).
+    include_str!("migrations/009_learned.sql"),
 ];
 
 /// Base de datos local. Cada operación pública se confirma en una transacción,

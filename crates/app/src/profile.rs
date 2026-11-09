@@ -20,7 +20,12 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sha2::{Digest, Sha256};
 
+use crate::learn_state::LearnedStyle;
 use crate::{App, AppError, AppResult, ProviderInfo};
+
+/// Prefijo de las claves de `rule_settings` con la decisión sobre la propuesta de perfil aprendida
+/// (D171): `learned_profile:<cuenta>` guarda `{status, input_fp, at}`, nunca texto.
+const LEARNED_PROFILE_PREFIX: &str = "learned_profile:";
 
 /// Ajuste (`rule_settings`) con el consentimiento del perfil.
 const CONSENT_KEY: &str = "business_profile_consent";
@@ -123,6 +128,102 @@ pub(crate) struct ProfileUse {
     pub fp: String,
     /// El proveedor elegido puede recibirlo: es local o hay consentimiento vigente.
     pub primary_ok: bool,
+}
+
+// ---- Propuesta de perfil aprendida (D171) ----
+
+/// Propuesta de edición del perfil a partir del estilo aprendido en la primera carga, con su vista
+/// de antes y después. Solo toca el campo `tone`; la firma nunca se propone (no salió del equipo y
+/// no se tiene).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct LearnedProfileProposal {
+    pub account: String,
+    /// Huella del resultado aprendido del que sale.
+    pub input_fp: String,
+    /// Huella de antes y después: aceptar exige la misma (si el perfil cambió, hay que revisarla).
+    pub fp: String,
+    pub before: BusinessProfile,
+    pub after: BusinessProfile,
+    /// Campos que cambian, con su nombre estable.
+    pub changed: Vec<&'static str>,
+    pub chars_after: usize,
+    pub max_chars: usize,
+    /// Hallazgos que impedirían guardar el «después» (IBAN, tarjeta, clave o exceso de tamaño).
+    pub blocking: Vec<ProfileFinding>,
+    pub warnings: Vec<ProfileFinding>,
+}
+
+/// Una línea del estilo aprendido (saludo o despedida), en una sola línea y sin invisibles.
+fn one_line(text: &str) -> String {
+    clean(text).split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// Texto del campo «tono» para un estilo aprendido: palabras fijas por enum («formal», «cercano»,
+/// «neutro», «breve», «detallado») y, tal cual, el saludo y la despedida ya confirmados en local.
+/// `None` si el estilo no aporta nada.
+pub fn learned_tone_text(style: &LearnedStyle) -> Option<String> {
+    let tone = match style.tone.as_deref() {
+        Some("formal") => Some("formal"),
+        Some("cercano") => Some("cercano"),
+        Some("neutro") => Some("neutro"),
+        _ => None,
+    };
+    let length = match style.length.as_deref() {
+        Some("breve") => Some("breve"),
+        Some("detallado") => Some("detallado"),
+        _ => None,
+    };
+    let mut text = [tone, length]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>()
+        .join(", ");
+    for (label, line) in [
+        ("Saludo habitual", &style.greeting),
+        ("Despedida habitual", &style.closing),
+    ] {
+        if let Some(line) = line.as_deref().map(one_line).filter(|l| !l.is_empty()) {
+            if !text.is_empty() {
+                text.push_str(". ");
+            }
+            text.push_str(&format!("{label}: «{line}»"));
+        }
+    }
+    if text.is_empty() {
+        return None;
+    }
+    if !text.ends_with('.') {
+        text.push('.');
+    }
+    Some(text)
+}
+
+/// Perfil «después»: el de antes con el campo `tone` del estilo aprendido. La firma, el horario,
+/// las políticas y el nombre no se tocan. `None` si no hay nada que proponer o no cambia nada.
+pub fn propose_profile(style: &LearnedStyle, before: &BusinessProfile) -> Option<BusinessProfile> {
+    let tone = learned_tone_text(style)?;
+    if before.tone.trim() == tone {
+        return None;
+    }
+    Some(BusinessProfile {
+        tone,
+        ..before.clone()
+    })
+}
+
+/// Huella de la propuesta: el «antes» y el «después» exactos.
+fn proposal_fingerprint(before: &BusinessProfile, after: &BusinessProfile) -> String {
+    let mut text = String::new();
+    for p in [before, after] {
+        for (field, value) in p.fields() {
+            text.push_str(field);
+            text.push('\u{1f}');
+            text.push_str(value);
+            text.push('\u{1e}');
+        }
+        text.push('\u{1d}');
+    }
+    fingerprint(&text)
 }
 
 // ---- Examen del contenido ----
@@ -674,6 +775,126 @@ impl App {
                 "consentimiento del perfil del negocio retirado: cambió el perfil",
             )
             .unwrap_or(false)
+    }
+
+    /// Decisión guardada sobre la propuesta de una cuenta: `(estado, input_fp)`.
+    fn learned_profile_decision(&self, account: &str) -> AppResult<Option<(String, String)>> {
+        Ok(self
+            .store
+            .rule_setting(&format!("{LEARNED_PROFILE_PREFIX}{account}"))?
+            .and_then(|json| serde_json::from_str::<serde_json::Value>(&json).ok())
+            .and_then(|v| {
+                Some((
+                    v["status"].as_str()?.to_owned(),
+                    v["input_fp"].as_str()?.to_owned(),
+                ))
+            }))
+    }
+
+    /// Propuesta de perfil de lo aprendido en una cuenta (D171). Solo lectura. `None` si no hay
+    /// aprendizaje terminado, si no aporta un estilo nuevo o si la persona ya la aceptó o la
+    /// descartó. Nada de lo que se muestra sale del equipo.
+    pub fn learned_profile_proposal(
+        &self,
+        account: &str,
+    ) -> AppResult<Option<LearnedProfileProposal>> {
+        let Some(learned) = self.learned_result(account)? else {
+            return Ok(None);
+        };
+        if self
+            .learned_profile_decision(account)?
+            .is_some_and(|(_, fp)| fp == learned.input_fp)
+        {
+            return Ok(None);
+        }
+        let before = self.business_profile()?.profile;
+        let Some(after) = propose_profile(&learned.style, &before) else {
+            return Ok(None);
+        };
+        let changed = before
+            .fields()
+            .iter()
+            .zip(after.fields())
+            .filter(|((_, a), (_, b))| a.trim() != b.trim())
+            .map(|((field, _), _)| *field)
+            .collect();
+        Ok(Some(LearnedProfileProposal {
+            account: account.to_owned(),
+            input_fp: learned.input_fp,
+            fp: proposal_fingerprint(&before, &after),
+            blocking: blocking_findings(&after),
+            warnings: warning_findings(&after),
+            chars_after: after.chars(),
+            max_chars: MAX_PROFILE_CHARS,
+            changed,
+            before,
+            after,
+        }))
+    }
+
+    /// Acepta la propuesta que la persona vio (`fp`) por el guardado normal del perfil: mismos
+    /// bloqueos (IBAN, tarjeta, clave), mismo tope de 2.000 caracteres y misma retirada del
+    /// consentimiento del perfil si cambia lo que saldría (D163). Si el perfil cambió desde que la
+    /// vio, se rechaza. Repetirlo tras aceptarla no cambia nada.
+    pub fn accept_learned_profile(&mut self, account: &str, fp: &str) -> AppResult<ProfileSaved> {
+        let Some(proposal) = self.learned_profile_proposal(account)? else {
+            let accepted = match self.learned_result(account)? {
+                Some(l) => self
+                    .learned_profile_decision(account)?
+                    .is_some_and(|(status, input)| status == "accepted" && input == l.input_fp),
+                None => false,
+            };
+            if accepted {
+                return Ok(ProfileSaved {
+                    view: self.business_profile()?,
+                    warnings: Vec::new(),
+                    consent_withdrawn: false,
+                });
+            }
+            return Err(AppError::Invalid(
+                "No hay una propuesta de perfil vigente para esta cuenta.".into(),
+            ));
+        };
+        if proposal.fp != fp {
+            return Err(AppError::Invalid(
+                "El perfil ha cambiado desde que vio la propuesta: revise el antes y el después de nuevo."
+                    .into(),
+            ));
+        }
+        let saved = self.save_business_profile(proposal.after)?;
+        self.store.set_rule_setting(
+            &format!("{LEARNED_PROFILE_PREFIX}{account}"),
+            &json!({ "status": "accepted", "input_fp": proposal.input_fp, "at": now_ms() })
+                .to_string(),
+            &format!(
+                "propuesta de perfil aprendida aceptada: campos {}",
+                proposal.changed.join(", ")
+            ),
+        )?;
+        Ok(saved)
+    }
+
+    /// Descarta la propuesta: queda registrado, sin contenido, y no vuelve a ofrecerse para ese
+    /// aprendizaje. Descartar dos veces no cambia nada.
+    pub fn dismiss_learned_profile(&mut self, account: &str) -> AppResult<()> {
+        let Some(learned) = self.learned_result(account)? else {
+            return Err(AppError::Invalid(
+                "Esta cuenta no tiene nada aprendido que proponer.".into(),
+            ));
+        };
+        if self
+            .learned_profile_decision(account)?
+            .is_some_and(|(_, fp)| fp == learned.input_fp)
+        {
+            return Ok(());
+        }
+        self.store.set_rule_setting(
+            &format!("{LEARNED_PROFILE_PREFIX}{account}"),
+            &json!({ "status": "dismissed", "input_fp": learned.input_fp, "at": now_ms() })
+                .to_string(),
+            "propuesta de perfil aprendida descartada",
+        )?;
+        Ok(())
     }
 
     /// Perfil para la redacción de la tarea que se toma ahora. Fallo cerrado: sin perfil, con un
