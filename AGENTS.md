@@ -6,7 +6,7 @@
 - Evite efectos duplicados al recuperar trabajos y cubra los fallos de modelos, OCR, red y credenciales. La ausencia de datos debe ser explícita.
 - Ejecute `python scripts/check.py` al modificar la documentación. Ejecute además las pruebas y comprobaciones pertinentes del código que se implemente. El verificador documental no acredita que exista o funcione la aplicación.
 - No marque criterios de aceptación como cumplidos sin evidencia reproducible. Las pruebas de instalador, escritorio y rendimiento requieren Windows y, cuando corresponda, el hardware objetivo.
-- Construya el instalador (`scripts/build-clean.ps1`, `tauri build`, NSIS) solo cuando el flujo de trabajo lo necesite: al cerrar una etapa, para una prueba de instalación o cuando una prueba concreta dependa de él. Está autorizado en esos casos sin pedir confirmación; no lo compile para validar cambios corrientes, que se comprueban con pruebas, clippy, formato y `check.py`. Esta regla vale para todos los agentes y subagentes.
+- Las pruebas manuales se hacen sobre `tauri dev`, no sobre un instalador. Construya el instalador (`scripts/build-clean.ps1`, `tauri build`, NSIS) solo si una prueba exige instalar (instalador, empaquetado o comportamiento de la aplicación instalada) o si el usuario lo pide expresamente; en esos casos está autorizado sin pedir confirmación. Cerrar una etapa no basta como motivo, y no lo proponga solo para incluir commits nuevos. Los cambios corrientes se comprueban con pruebas, clippy, formato y `check.py`. Esta regla vale para todos los agentes y subagentes.
 - Desarrollo solo en local (desde el 2026-11-07, hasta nuevo aviso del usuario): se permiten commits, ramas y merges en el repositorio local, pero no `git push`, ni abrir, actualizar o fusionar PR, ni relanzar o esperar el CI de GitHub (`gh pr`, `gh run`). La verificación es local: pruebas, clippy, formato y `check.py`. Esta regla vale para todos los agentes y subagentes.
 
 ## Enrutado de modelos (ahorro de créditos)
@@ -23,7 +23,7 @@ La sesión principal usa Opus para coordinar y decidir; el trabajo mecánico se 
 - Delegue las lecturas amplias y las ejecuciones de pruebas en lugar de hacerlas en la sesión principal.
 - No asigne Opus a un subagente salvo para diseño o revisión.
 - Workflows: como máximo unos 5 agentes salvo petición expresa. `/code-review` en nivel `low` o `medium` por defecto.
-- Todo brief a un subagente repite la regla del instalador: solo cuando el flujo lo necesite.
+- Todo brief a un subagente repite la regla del instalador: pruebas manuales sobre `tauri dev`; instalador solo si una prueba exige instalar o el usuario lo pide.
 
 ### Flujo automático
 
@@ -33,6 +33,6 @@ La sesión principal encadena los agentes sin pedir confirmación entre pasos:
 2. `implementador` aplica el cambio con un brief concreto.
 3. `verificador` ejecuta las comprobaciones. Si fallan, vuelve a `implementador` con la salida literal (como máximo 3 ciclos); después se informa al usuario.
 4. `arquitecto` revisa solo si el cambio toca alcance, credenciales, OAuth, envío o registro automáticos.
-5. Si el flujo cierra una etapa o requiere una prueba de instalación, se construye el instalador.
+5. Para la prueba manual se usa `tauri dev`. Solo si una prueba exige instalar, o el usuario lo pide, se construye el instalador.
 
 La automatización del flujo de desarrollo no cambia las reglas de la aplicación: el único respaldo automático de IA es del proveedor externo elegido a la IA local (D101), nunca hacia otro proveedor externo ni de local a externo, y los envíos y registros requieren revisión salvo regla expresa activa.

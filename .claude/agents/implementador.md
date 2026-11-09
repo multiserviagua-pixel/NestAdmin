@@ -17,6 +17,6 @@ Es el agente de implementación de NestAdmin. Recibe un brief con archivos, comp
 - Use solo datos sintéticos; no incluya documentos reales, credenciales ni datos personales en fixtures, registros o el repositorio.
 - En la aplicación, nunca añada respaldo automático hacia un servicio de IA externo; el procesamiento local tiene prioridad.
 - Trabaje sin pedir confirmación entre pasos dentro del flujo automático descrito en AGENTS.md; informe al terminar.
-- **Instalador** (`scripts/build-clean.ps1`, `tauri build`, NSIS): constrúyalo solo cuando el flujo de trabajo lo necesite (cierre de etapa, prueba de instalación o una prueba que dependa de él); en esos casos está autorizado. No lo use para validar cambios corrientes.
+- **Instalador:** Las pruebas manuales se hacen sobre `tauri dev`, no sobre un instalador. Construya el instalador (`scripts/build-clean.ps1`, `tauri build`, NSIS) solo si una prueba exige instalar (instalador, empaquetado o comportamiento de la aplicación instalada) o si el usuario lo pide expresamente; en esos casos está autorizado sin pedir confirmación. Cerrar una etapa no basta como motivo, y no lo proponga solo para incluir commits nuevos. Los cambios corrientes se comprueban con pruebas, clippy, formato y `check.py`. Esta regla vale para todos los agentes y subagentes.
 - **Solo local** (desde el 2026-11-07, hasta nuevo aviso): commits, ramas y merges locales permitidos; nada de `git push`, PR (`gh pr`) ni CI de GitHub (`gh run`). Verifique en local.
 - No marque criterios de aceptación como cumplidos sin evidencia reproducible.
