@@ -326,13 +326,101 @@ pub(crate) fn has_compact_iban(text: &str) -> bool {
         .map(|c| c.to_ascii_uppercase())
         .collect();
     (0..compact.len()).any(|i| {
-        compact.get(i..i + 4).is_some_and(|head| {
-            head[..2].iter().all(char::is_ascii_uppercase)
-                && head[2..].iter().all(char::is_ascii_digit)
-        }) && (15..=34)
-            .filter(|len| i + len <= compact.len())
-            .any(|len| iban_mod97(&compact[i..i + len]))
+        let Some(head) = compact.get(i..i + 4) else {
+            return false;
+        };
+        let country: String = head[..2].iter().collect();
+        head[..2].iter().all(char::is_ascii_uppercase)
+            && head[2..].iter().all(char::is_ascii_digit)
+            && iban_length(&country)
+                .is_some_and(|len| i + len <= compact.len() && iban_mod97(&compact[i..i + len]))
     })
+}
+
+/// Longitud total del IBAN de un país (código ISO de dos letras mayúsculas), o `None` si ese país
+/// no emite IBAN.
+pub(crate) fn iban_length(country: &str) -> Option<usize> {
+    const LENGTHS: [(&str, usize); 78] = [
+        ("AD", 24),
+        ("AE", 23),
+        ("AL", 28),
+        ("AT", 20),
+        ("AZ", 28),
+        ("BA", 20),
+        ("BE", 16),
+        ("BG", 22),
+        ("BH", 22),
+        ("BR", 29),
+        ("BY", 28),
+        ("CH", 21),
+        ("CR", 22),
+        ("CY", 28),
+        ("CZ", 24),
+        ("DE", 22),
+        ("DK", 18),
+        ("DO", 28),
+        ("EE", 20),
+        ("EG", 29),
+        ("ES", 24),
+        ("FI", 18),
+        ("FO", 18),
+        ("FR", 27),
+        ("GB", 22),
+        ("GE", 22),
+        ("GI", 23),
+        ("GL", 18),
+        ("GR", 27),
+        ("GT", 28),
+        ("HR", 21),
+        ("HU", 28),
+        ("IE", 22),
+        ("IL", 23),
+        ("IQ", 23),
+        ("IS", 26),
+        ("IT", 27),
+        ("JO", 30),
+        ("KW", 30),
+        ("KZ", 20),
+        ("LB", 28),
+        ("LC", 32),
+        ("LI", 21),
+        ("LT", 20),
+        ("LU", 20),
+        ("LV", 21),
+        ("LY", 25),
+        ("MC", 27),
+        ("MD", 24),
+        ("ME", 22),
+        ("MK", 19),
+        ("MR", 27),
+        ("MT", 31),
+        ("MU", 30),
+        ("NL", 18),
+        ("NO", 15),
+        ("PK", 24),
+        ("PL", 28),
+        ("PS", 29),
+        ("PT", 25),
+        ("QA", 29),
+        ("RO", 24),
+        ("RS", 22),
+        ("SA", 24),
+        ("SC", 31),
+        ("SE", 24),
+        ("SI", 19),
+        ("SK", 24),
+        ("SM", 27),
+        ("ST", 25),
+        ("SV", 28),
+        ("TL", 23),
+        ("TN", 24),
+        ("TR", 26),
+        ("UA", 29),
+        ("VA", 22),
+        ("VG", 24),
+        ("XK", 20),
+    ];
+    LENGTHS.iter().find(|(c, _)| *c == country).map(|&(_, l)| l)
 }
 
 pub(crate) fn iban_mod97(window: &[char]) -> bool {

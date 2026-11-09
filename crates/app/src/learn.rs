@@ -29,7 +29,9 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::accounts::{split_id, Accounts};
-use crate::profile::{examined, has_card_number, has_compact_iban, looks_like_secret, luhn};
+use crate::profile::{
+    examined, has_card_number, has_compact_iban, iban_length, looks_like_secret, luhn,
+};
 
 /// Recibidos recientes que se recorren como mucho.
 pub const SCAN_MAX: usize = 300;
@@ -505,20 +507,62 @@ fn long_lines(text: &str) -> HashSet<String> {
         .collect()
 }
 
-/// ¿Repite la respuesta (ya sin cita) el asunto o una línea larga del recibido? Es un indicio de
-/// cita no reconocida (por ejemplo, el texto original pegado sin marcas).
-fn repeats_received(reply: &str, subject: &str, received: &str) -> bool {
-    let reply = squash(reply);
-    let mut subject = squash(subject);
+/// Etiquetas de asunto de una cabecera de cita, en minúsculas.
+const SUBJECT_LABELS: [&str; 8] = [
+    "asunto",
+    "assumpte",
+    "subject",
+    "objet",
+    "betreff",
+    "oggetto",
+    "assunto",
+    "onderwerp",
+];
+
+/// Quita los prefijos de respuesta o reenvío («Re:», «RV:»…) de un asunto ya compactado.
+fn strip_subject_prefixes(subject: &str) -> String {
+    let mut subject = subject.trim().to_owned();
     while let Some(rest) = ["re:", "rv:", "fwd:", "fw:", "r:"]
         .iter()
         .find_map(|p| subject.strip_prefix(p))
     {
         subject = rest.trim().to_owned();
     }
-    if subject.chars().count() >= 12 && reply.contains(&subject) {
+    subject
+}
+
+/// ¿Repite la respuesta (ya sin cita) el asunto como cabecera de cita? Solo cuenta el asunto en una
+/// línea propia o tras una etiqueta de asunto («Asunto:», «Subject:», «Objet:»…); dentro de una
+/// frase es lo normal en una respuesta y no es una cita.
+fn repeats_subject_header(reply: &str, subject: &str) -> bool {
+    let subject = strip_subject_prefixes(&squash(subject));
+    if subject.chars().count() < 12 {
+        return false;
+    }
+    let trim = |t: &str| {
+        t.trim_matches(|c: char| c.is_whitespace() || ".,;:!?\"'«»*_".contains(c))
+            .to_owned()
+    };
+    reply.lines().any(|line| {
+        let line = squash(line);
+        let after_label = field_name(&line)
+            .filter(|f| SUBJECT_LABELS.contains(&f.as_str()))
+            .and_then(|_| line.split_once(':'))
+            .map(|(_, rest)| trim(&strip_subject_prefixes(rest)));
+        match after_label {
+            Some(rest) => rest.starts_with(&subject),
+            None => trim(&strip_subject_prefixes(&line)) == subject,
+        }
+    })
+}
+
+/// ¿Repite la respuesta (ya sin cita) una cabecera de asunto o una línea larga del recibido? Es un
+/// indicio de cita no reconocida (por ejemplo, el texto original pegado sin marcas).
+fn repeats_received(reply: &str, subject: &str, received: &str) -> bool {
+    if repeats_subject_header(reply, subject) {
         return true;
     }
+    let reply = squash(reply);
     received
         .lines()
         .map(squash)
@@ -1083,7 +1127,14 @@ fn mask_ibans(text: &str) -> String {
         let len = e - s;
         let head = len >= 4
             && chars[s..s + 2].iter().all(char::is_ascii_alphabetic)
-            && chars[s + 2..s + 4].iter().all(char::is_ascii_digit);
+            && chars[s + 2..s + 4].iter().all(char::is_ascii_digit)
+            && iban_length(
+                &chars[s..s + 2]
+                    .iter()
+                    .collect::<String>()
+                    .to_ascii_uppercase(),
+            )
+            .is_some();
         if head {
             let (mut total, mut last) = (len, t);
             while total < 34 && last + 1 < tokens.len() {
@@ -1138,6 +1189,10 @@ fn is_id_token(token: &[char]) -> bool {
 fn is_split_id_shape(chars: &[char], group: &[(usize, usize)]) -> bool {
     let tok = |&(s, e): &(usize, usize)| &chars[s..e];
     let single_upper = |t: &[char]| t.len() == 1 && t[0].is_alphabetic() && t[0].is_uppercase();
+    // CIF con la letra separada de las ocho cifras finales («B-12345678»).
+    if group.len() == 2 && single_upper(tok(&group[0])) && group[1].1 - group[1].0 == 8 {
+        return true;
+    }
     let last = tok(&group[group.len() - 1]);
     if !(single_upper(last) || (last.len() == 1 && last[0].is_ascii_digit())) {
         return false;
@@ -2311,11 +2366,70 @@ mod tests {
         });
         assert_eq!((c.pairs.len(), c.counts.quote_dropped), (0, 1));
         // El asunto repetido en la respuesta.
-        let subject = "Sobre Presupuesto de la reforma del local: adjunto.";
-        let c = build_pairs(select_candidates(vec![m]), true, |_, _| {
+        let subject = "Hola.\nAsunto: Re: Presupuesto de la reforma del local\nAdjunto.";
+        let c = build_pairs(select_candidates(vec![m.clone()]), true, |_, _| {
             Ok(Some(own(subject)))
         });
         assert_eq!((c.pairs.len(), c.counts.quote_dropped), (0, 1));
+        // El asunto en una línea propia.
+        let c = build_pairs(select_candidates(vec![m.clone()]), true, |_, _| {
+            Ok(Some(own(
+                "Hola.\nPresupuesto de la reforma del local\nAdjunto.",
+            )))
+        });
+        assert_eq!((c.pairs.len(), c.counts.quote_dropped), (0, 1));
+        // El asunto dentro de una frase es una respuesta normal.
+        let c = build_pairs(select_candidates(vec![m]), true, |_, _| {
+            Ok(Some(own(
+                "Sí, el presupuesto de la reforma del local va adjunto y es el definitivo.",
+            )))
+        });
+        assert_eq!((c.pairs.len(), c.counts.quote_dropped), (1, 0));
+    }
+
+    #[test]
+    fn subject_header_detection_ignores_sentences() {
+        let s = "Pago de la factura F-2031";
+        assert!(!repeats_subject_header(
+            "Sí, el pago de la factura F-2031 consta como recibido.",
+            s
+        ));
+        assert!(repeats_subject_header(
+            "Subject: RE: Pago de la factura F-2031",
+            s
+        ));
+        assert!(repeats_subject_header(
+            "Hola\nObjet : Pago de la factura F-2031",
+            s
+        ));
+        assert!(!repeats_subject_header(
+            "Asunto: otra cosa distinta aquí",
+            s
+        ));
+    }
+
+    #[test]
+    fn dashed_cif_and_strict_iban() {
+        for t in ["B-12345678", "B 12345678", "B.12345678"] {
+            let text = format!("CIF {t} ok");
+            assert_eq!(mask(&text), "CIF [ID] ok", "{t}");
+            assert!(has_id(&text), "{t}");
+        }
+        for t in [
+            "Quedamos nosotros 10:00 y luego algo más largo para llenar la línea 123",
+            "Please confirm if the invoice was received? F-3310 and then more text here ok",
+            "Son a 1.250 euros más IVA, según lo acordado con ustedes ayer por la tarde",
+            "Hola R10, R100, R1234 y R99",
+        ] {
+            assert!(is_masked(t), "{t}");
+            assert_eq!(mask(t), t);
+        }
+        assert!(!is_masked("Cuenta ES91 2100 0418 4502 0005 1332"));
+        assert_eq!(
+            mask("Cuenta ES91 2100 0418 4502 0005 1332"),
+            "Cuenta [IBAN]"
+        );
+        assert!(!is_masked("IBAN ES9121000418450200051332"));
     }
 
     /// El recibido trae una línea larga idéntica a una respuesta propia (la de su par o la de

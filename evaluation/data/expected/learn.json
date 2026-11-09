@@ -1785,5 +1785,49 @@
         }
       ]
     }
+  },
+  {
+    "id": "L048",
+    "expected": {
+      "group": "normal",
+      "discard": null,
+      "category": "consulta_pago",
+      "needs_reply": true,
+      "reply_kind": "confirm",
+      "forbidden": [
+        {
+          "kind": "name",
+          "text": "Nora Bellido"
+        },
+        {
+          "kind": "name",
+          "text": "Nora"
+        },
+        {
+          "kind": "name",
+          "text": "Bellido"
+        },
+        {
+          "kind": "email",
+          "text": "nora.bellido@tallerlaprueba.test"
+        },
+        {
+          "kind": "signature",
+          "text": "Elena Duarte"
+        },
+        {
+          "kind": "signature",
+          "text": "Administración · Taller Ficticio S.L."
+        },
+        {
+          "kind": "phone",
+          "text": "900000111"
+        },
+        {
+          "kind": "signature",
+          "text": "tallerficticio.test"
+        }
+      ]
+    }
   }
 ]

@@ -1213,5 +1213,31 @@
         "body": "Hola Dani,\n\nMuchas gracias a ti por decírnoslo, nos alegra mucho.\n\nUn saludo,\nElena Duarte\nAdministración · Taller Ficticio S.L.\nTel. 900 000 111\nhttps://tallerficticio.test"
       }
     }
+  },
+  {
+    "id": "L048",
+    "kind": "learn",
+    "input": {
+      "from": "Nora Bellido <nora.bellido@tallerlaprueba.test>",
+      "to": [
+        "administracion@tallerficticio.test"
+      ],
+      "date": "2026-10-22T09:15:00Z",
+      "subject": "Pago de la factura F-2031",
+      "body": "Buenos días, ¿podéis confirmar si habéis recibido el pago de la factura F-2031? Lo hicimos ayer por la tarde.",
+      "headers": [
+        {
+          "name": "Content-Type",
+          "value": "text/plain; charset=utf-8"
+        }
+      ],
+      "thread_key": "hilo-L048",
+      "own_reply": {
+        "to": [
+          "Nora Bellido <nora.bellido@tallerlaprueba.test>"
+        ],
+        "body": "Hola Nora,\n\nSí, el pago de la factura F-2031 consta como recibido. Gracias por avisar.\n\nUn saludo,\nElena Duarte\nAdministración · Taller Ficticio S.L.\nTel. 900 000 111\nhttps://tallerficticio.test"
+      }
+    }
   }
 ]
