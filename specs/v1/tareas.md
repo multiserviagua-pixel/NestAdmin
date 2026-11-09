@@ -46,8 +46,8 @@ Plan por etapas; cada una acaba con pruebas, clippy, formato y `check.py`. La pr
 Plan por etapas; cada una acaba con `cargo fmt`, clippy, `cargo test --workspace`, `npm test` y `check.py`, y un commit local en `main`. La prueba manual es en `tauri dev`. `arquitecto` revisa E3 y E6, con la skill `revisar-envio-reglas` antes de cerrarlas.
 
 1. **E0** (hecha) Reserva del bloque en `numeracion.md`, decisiones, R30, T33, contratos, tareas y `PLAN.md`.
-2. **E1** Enviados en conectores (`crates/mail/src/{mailbox,gmail,graph}.rs`), en el simulador y pares sintéticos (T33a).
-3. **E2** `crates/app/src/learn.rs`: recogida, filtro con `mail_signals::decide`, emparejado, recorte de citas, firma local, enmascarado, topes e `input_fp`; pruebas unitarias puras.
+2. **E1** (hecha) Enviados en conectores (`crates/mail/src/{mailbox,gmail,graph}.rs`), en el simulador y pares sintéticos (T33a).
+3. **E2** (hecha) `crates/app/src/learn.rs`: recogida, filtro con `mail_signals::decide`, emparejado, recorte de citas, firma local, enmascarado, topes e `input_fp`; pruebas unitarias puras.
 4. **E3** `crates/ai/src/learn.rs`: `Task::LearnReplies`, validador, vista previa y consentimiento (reutilizando `refine.rs`) y respaldo local (T33b, T33c, T33h).
 5. **E4** Estado en la marca, reanudación, «nada que aprender» y arranque tras `finish_initial_read` y en `resume_initial_reads` (T33d, T33e; las pruebas D133 siguen en verde).
 6. **E5** Evidencia `learned`, umbral `learned_reply` en `suggest.rs`, propuesta de perfil, migración `reply_style` y línea en `draft_request`.

@@ -369,6 +369,25 @@ impl Accounts {
         Ok(accounts)
     }
 
+    /// Para pruebas: añade una cuenta con un conector propio (por ejemplo, uno sin Enviados).
+    #[cfg(test)]
+    pub(crate) fn insert_test_connector(
+        &mut self,
+        id: &str,
+        connector: Box<dyn MailConnector + Send>,
+    ) {
+        self.list.push(Account {
+            record: AccountRecord {
+                id: id.into(),
+                provider: MailProviderKind::Simulator,
+                label: id.into(),
+                address: Some(SIMULATOR_ADDRESS.into()),
+            },
+            connector: Ok(connector),
+            last_fetch: None,
+        });
+    }
+
     pub(crate) fn simulator(&self) -> &MailSimulator {
         &self.simulator
     }
@@ -771,14 +790,12 @@ impl Accounts {
     }
 
     /// Si el conector de la cuenta lee Enviados (D168).
-    #[allow(dead_code)] // lo usa la fase de aprendizaje (E2)
     pub(crate) fn supports_sent(&self, account: &str) -> Result<bool, ConnectorError> {
         Ok(self.connector(account)?.supports_sent())
     }
 
     /// Primera respuesta propia del hilo posterior a `after_id` (ID del conector, sin prefijo de
     /// cuenta) en la cuenta indicada (D168). Solo lectura.
-    #[allow(dead_code)] // lo usa la fase de aprendizaje (E2)
     pub(crate) fn own_reply_in_thread(
         &self,
         account: &str,

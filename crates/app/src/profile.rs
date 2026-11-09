@@ -204,7 +204,7 @@ fn block_message(findings: &[ProfileFinding]) -> String {
 /// El texto tal como se examina: el que saldría (sin caracteres invisibles de formato) y, además,
 /// con las letras y cifras de ancho completo pasadas a ASCII y los espacios no separables como
 /// espacios, para que ninguna de esas escrituras esquive el examen.
-fn examined(text: &str) -> String {
+pub(crate) fn examined(text: &str) -> String {
     clean(text)
         .chars()
         .map(|c| match c {
@@ -218,7 +218,7 @@ fn examined(text: &str) -> String {
 /// Un IBAN escrito con cualquier separación («ES 91 2100…», con guiones o puntos): dos letras, dos
 /// cifras y hasta 30 caracteres más que cumplen el control módulo 97, buscados sobre el texto sin
 /// separadores. El control evita confundirlo con texto corriente.
-fn has_compact_iban(text: &str) -> bool {
+pub(crate) fn has_compact_iban(text: &str) -> bool {
     let compact: Vec<char> = text
         .chars()
         .filter(char::is_ascii_alphanumeric)
@@ -234,7 +234,7 @@ fn has_compact_iban(text: &str) -> bool {
     })
 }
 
-fn iban_mod97(window: &[char]) -> bool {
+pub(crate) fn iban_mod97(window: &[char]) -> bool {
     let rotated = window[4..].iter().chain(&window[..4]);
     let mut rest: u32 = 0;
     for c in rotated {
@@ -253,7 +253,7 @@ fn iban_mod97(window: &[char]) -> bool {
 /// Un número de tarjeta: 13 a 19 cifras seguidas, o en grupos de al menos cuatro separados por
 /// espacios, puntos o guiones (hasta tres caracteres), que cumplen la comprobación de Luhn. Un teléfono («600 123 123») o una fecha
 /// («2026-10-01») no son grupos de cuatro y no cuentan.
-fn has_card_number(text: &str) -> bool {
+pub(crate) fn has_card_number(text: &str) -> bool {
     let chars: Vec<char> = text.chars().collect();
     let mut i = 0;
     while i < chars.len() {
@@ -300,7 +300,7 @@ fn has_card_number(text: &str) -> bool {
     false
 }
 
-fn luhn(digits: &str) -> bool {
+pub(crate) fn luhn(digits: &str) -> bool {
     let mut sum = 0;
     for (i, c) in digits.chars().rev().enumerate() {
         let Some(mut d) = c.to_digit(10) else {
@@ -320,7 +320,7 @@ fn luhn(digits: &str) -> bool {
 /// Algo que parece una clave, un token o una contraseña: prefijos conocidos, claves privadas,
 /// «clave: valor» y palabras largas de letras y cifras mezcladas. Es conservador: ante la duda
 /// bloquea, y la persona puede acortar o reescribir.
-fn looks_like_secret(text: &str) -> bool {
+pub(crate) fn looks_like_secret(text: &str) -> bool {
     // Sin caracteres invisibles que partan un prefijo: `examined` ya los quitó en quien llama.
     let lower = text.to_lowercase();
     if lower.contains("-----begin") || lower.contains("bearer ") {

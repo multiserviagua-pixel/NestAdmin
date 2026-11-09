@@ -9,6 +9,7 @@
 
 pub mod accounts;
 pub mod initial_read;
+pub mod learn;
 pub mod panel;
 pub mod pipelines;
 pub mod preferences;

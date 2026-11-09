@@ -583,7 +583,7 @@ fn replace_whole_word(text: &str, word: &str) -> String {
 
 /// Secuencias de cifras con separadores (como en `has_phone`): inicio y fin en bytes y las cifras
 /// solas.
-fn phone_runs(text: &str) -> Vec<(usize, usize, String)> {
+pub fn phone_runs(text: &str) -> Vec<(usize, usize, String)> {
     let mut runs = Vec::new();
     let mut digits = String::new();
     let (mut start, mut end) = (0, 0);
