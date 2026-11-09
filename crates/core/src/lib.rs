@@ -4,6 +4,7 @@
 pub mod actions;
 pub mod error;
 pub mod mail_signals;
+pub mod preferences;
 pub mod queue;
 pub mod rule_panel;
 pub mod rules;
@@ -15,6 +16,7 @@ pub use actions::{
     ConnectorError,
 };
 pub use error::{CoreError, Result};
+pub use preferences::{normalize_key, PreferenceScope, SenderPreference};
 pub use queue::{Task, TaskError, TaskState};
 pub use rule_panel::{
     EvaluationRecord, EvaluationRow, RuleMeta, RuleStats, SignalRecord, SignalRow, SuggestionRow,

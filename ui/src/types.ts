@@ -712,3 +712,24 @@ export interface ReadExpectation {
   host: string;
   volume: number;
 }
+
+/** Preferencia por remitente (D161): fijada por la persona, por dirección o dominio. */
+export interface SenderPreference {
+  scope: "address" | "domain";
+  key: string;
+  route: "review" | "informative";
+  updated_at: number;
+}
+
+/** Regla activa de envío que una preferencia deja sin efecto para ese remitente. */
+export interface PreferenceWarning {
+  rule_id: string;
+  rule_name: string;
+}
+
+export interface PreferenceChange {
+  preference: SenderPreference;
+  /** `false` si ya estaba así. */
+  changed: boolean;
+  warnings: PreferenceWarning[];
+}

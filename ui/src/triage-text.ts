@@ -70,8 +70,15 @@ export function strongCodes(result: Record<string, any> | null): string[] {
   return STRONG_ORDER.filter((c) => codes.includes(c));
 }
 
+export const REPLIED_REASON = "Ya respondió en este hilo";
+export const PREFERENCE_REASON = "Usted lo marcó: este remitente va siempre a Informativos";
+export const PREFERENCE_DOMAIN_REASON = "Usted lo marcó: este dominio va siempre a Informativos";
+
 /** Motivo legible por el que un correo es informativo. Sin motivo conocido, se dice. */
 export function informativeReason(result: Record<string, any> | null): string {
+  // El hilo y la preferencia van antes que las señales (D161): son lo que decidió.
+  if (result?.triage?.source === "thread" || result?.triage?.already_replied === true) return REPLIED_REASON;
+  if (result?.triage?.source === "preference") return result.triage.preference_scope === "domain" ? PREFERENCE_DOMAIN_REASON : PREFERENCE_REASON;
   const strong = strongCodes(result);
   return strong.length ? strong.map((c) => STRONG_REASON[c]).join(" · ") : "Motivo no consta";
 }

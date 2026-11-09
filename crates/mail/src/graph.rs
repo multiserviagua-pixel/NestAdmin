@@ -1,5 +1,11 @@
 //! Microsoft 365 / Outlook mediante Microsoft Graph v1.0 (D30). Se piden IDs inmutables,
 //! que no cambian al enviar el borrador, y el cuerpo en texto.
+//!
+//! Estado del hilo (D162): `MailProvider::last_message_is_ours` queda en su valor por defecto,
+//! `None` (desconocido). Hacerlo bien exige filtrar `/me/messages` por `conversationId`, ordenar
+//! por fecha y decidir qué es «propio» (dirección del buzón o carpeta de enviados, con
+//! borradores) y esas llamadas no se han podido comprobar contra un buzón real; un valor
+//! inventado ocultaría correo. Con desconocido el correo sigue el flujo normal y no se oculta.
 
 use base64::engine::general_purpose::STANDARD;
 use base64::Engine;

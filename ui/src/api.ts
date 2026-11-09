@@ -13,6 +13,7 @@ import type {
   MailView,
   LaunchView,
   ProviderChoice,
+  PreferenceChange,
   ProviderInfo,
   ReadExpectation,
   ConsentView,
@@ -25,6 +26,7 @@ import type {
   RuleSeed,
   RuleStats,
   RuleView,
+  SenderPreference,
   SettingsView,
   Simulation,
   Suggestions,
@@ -112,6 +114,12 @@ export const api = {
   /** Crea la tarea que solo redacta la respuesta a un informativo, un rebote o un correo sin respuesta necesaria (D159). */
   redraft: (id: number) => invoke<Task>("redraft", { id }),
   retry: (id: number) => invoke<Task>("retry", { id }),
+  /** Preferencias por remitente (D161). Solo lectura. */
+  senderPreferences: () => invoke<SenderPreference[]>("sender_preferences"),
+  /** «Siempre a Informativos» (`informative`) o «Siempre a Pendientes» (`review`) para una dirección o un dominio. El backend normaliza la clave, rechaza los dominios de correo público y avisa si contradice una regla activa. Solo afecta a los correos nuevos. */
+  setSenderPreference: (scope: SenderPreference["scope"], key: string, route: SenderPreference["route"]) =>
+    invoke<PreferenceChange>("set_sender_preference", { scope, key, route }),
+  removeSenderPreference: (scope: SenderPreference["scope"], key: string) => invoke<boolean>("remove_sender_preference", { scope, key }),
   rules: () => invoke<Rule[]>("rules"),
   ruleViews: () => invoke<RuleView[]>("rule_views"),
   /** `id` puede ser `null` (se genera del nombre). `acknowledgeAnySender` no tiene valor por

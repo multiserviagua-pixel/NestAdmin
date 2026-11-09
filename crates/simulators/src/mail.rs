@@ -1,6 +1,7 @@
 //! Simulador de correo: mensajes de ejemplo, borradores y envíos con idempotencia.
 //! No envía nada fuera del proceso; un "envío" es un recibo guardado en su estado.
 
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -120,6 +121,15 @@ pub struct MailSimulator {
     page_size: usize,
     /// Fallo forzado solo en la descarga de adjuntos (la lista sigue respondiendo).
     attachment_failure: Mutex<Option<FailureMode>>,
+    /// Estado de los hilos para `last_message_is_ours` (D162); sin entrada, desconocido.
+    threads: Mutex<ThreadStates>,
+}
+
+/// Lo que responde el simulador sobre el último mensaje de un hilo, y las consultas recibidas.
+#[derive(Default)]
+struct ThreadStates {
+    last_own: HashMap<String, Result<Option<bool>, FailureMode>>,
+    lookups: Vec<String>,
 }
 
 const DEFAULT_PAGE_SIZE: usize = 20;
@@ -136,12 +146,36 @@ impl MailSimulator {
             state: SimState::in_memory(MailState::new(messages)),
             page_size: DEFAULT_PAGE_SIZE,
             attachment_failure: Mutex::new(None),
+            threads: Mutex::new(ThreadStates::default()),
         }
     }
 
     /// Para pruebas: la descarga de adjuntos falla con ese modo mientras esté activo.
     pub fn set_attachment_failure(&self, failure: Option<FailureMode>) {
         *self.attachment_failure.lock().expect("mutex") = failure;
+    }
+
+    /// Para pruebas: lo que responde `last_message_is_ours` para un hilo (`None` = desconocido).
+    pub fn set_thread_last_own(&self, thread_key: &str, own: Option<bool>) {
+        self.threads
+            .lock()
+            .expect("mutex")
+            .last_own
+            .insert(thread_key.to_owned(), Ok(own));
+    }
+
+    /// Para pruebas: la consulta del último mensaje de ese hilo falla con ese modo.
+    pub fn set_thread_failure(&self, thread_key: &str, failure: FailureMode) {
+        self.threads
+            .lock()
+            .expect("mutex")
+            .last_own
+            .insert(thread_key.to_owned(), Err(failure));
+    }
+
+    /// Claves de hilo consultadas hasta ahora (espía: solo la clave, nunca contenido).
+    pub fn thread_lookups(&self) -> Vec<String> {
+        self.threads.lock().expect("mutex").lookups.clone()
     }
 
     /// Añade un adjunto sintético a un mensaje existente y devuelve su identificador.
@@ -166,6 +200,7 @@ impl MailSimulator {
             state: SimState::open(path, || MailState::new(sample_messages()))?,
             page_size: DEFAULT_PAGE_SIZE,
             attachment_failure: Mutex::new(None),
+            threads: Mutex::new(ThreadStates::default()),
         };
         simulator.state.mutate(|s| Ok(((), s.refresh_samples())))?;
         Ok(simulator)
@@ -281,6 +316,16 @@ impl MailConnector for MailSimulator {
                     )
                 })
         })
+    }
+
+    fn last_message_is_ours(&self, thread_key: &str) -> SimResult<Option<bool>> {
+        let mut threads = self.threads.lock().expect("mutex");
+        threads.lookups.push(thread_key.to_owned());
+        match threads.last_own.get(thread_key) {
+            None => Ok(None),
+            Some(Ok(own)) => Ok(*own),
+            Some(Err(mode)) => Err(error(mode.code(), "fallo simulado al consultar el hilo")),
+        }
     }
 
     /// Envía un borrador una sola vez. La misma clave para el mismo borrador devuelve el

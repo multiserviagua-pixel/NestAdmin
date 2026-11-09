@@ -23,13 +23,14 @@ use nestadmin_app::initial_read::{
     FolderPreview, InitialReadOverview, InitialReadStatus, ReadExpectation, ReadStep,
 };
 use nestadmin_app::panel::{MergePreview, NewRule, RuleView, Simulation};
+use nestadmin_app::preferences::PreferenceChange;
 use nestadmin_app::refine::{
     ConsentView, RefineExpectation, RefineMode, RefinePreview, RefineTrigger, RefinementView,
 };
 use nestadmin_app::rules::RuleFinding;
 use nestadmin_app::suggest::{RuleSeed, SeenInvoice, Suggestions, ThresholdSettings};
 use nestadmin_app::{AiWait, App, AppPaths, LocalFallback, ProviderInfo};
-use nestadmin_core::{AuditEntry, Rule, RuleStats, Task};
+use nestadmin_core::{AuditEntry, Rule, RuleStats, SenderPreference, Task};
 use nestadmin_extract::{Extractor, Tesseract};
 use nestadmin_mail::PendingAuthorization;
 use nestadmin_setup::{Cancel, Report, Setup, SetupError, Startup, Status, WindowsSystem};
@@ -554,6 +555,47 @@ fn archive<R: Runtime>(
     let task = shared.app()?.archive(id).map_err(text)?;
     changed(&handle);
     Ok(task)
+}
+
+/// Preferencias por remitente (D161). Solo lectura.
+#[tauri::command]
+fn sender_preferences(shared: State<'_, SharedState>) -> CmdResult<Vec<SenderPreference>> {
+    shared.app()?.sender_preferences().map_err(text)
+}
+
+/// Fija «Siempre a Informativos» o «Siempre a Pendientes» para una dirección o un dominio
+/// (D161). El backend normaliza la clave, rechaza los dominios de correo público y deja el
+/// cambio en el historial; avisa si contradice una regla activa.
+#[tauri::command]
+fn set_sender_preference<R: Runtime>(
+    shared: State<'_, SharedState>,
+    handle: AppHandle<R>,
+    scope: String,
+    key: String,
+    route: String,
+) -> CmdResult<PreferenceChange> {
+    let change = shared
+        .app()?
+        .set_sender_preference(&scope, &key, &route)
+        .map_err(text)?;
+    changed(&handle);
+    Ok(change)
+}
+
+/// Quita una preferencia por remitente (D161).
+#[tauri::command]
+fn remove_sender_preference<R: Runtime>(
+    shared: State<'_, SharedState>,
+    handle: AppHandle<R>,
+    scope: String,
+    key: String,
+) -> CmdResult<bool> {
+    let removed = shared
+        .app()?
+        .remove_sender_preference(&scope, &key)
+        .map_err(text)?;
+    changed(&handle);
+    Ok(removed)
 }
 
 /// Redactar respuesta (D159): crea la tarea que solo redacta y la pone en marcha.
@@ -2087,6 +2129,9 @@ fn configure<R: Runtime>(builder: Builder<R>, prepare_only: bool) -> Builder<R> 
             edit_draft,
             reject,
             archive,
+            sender_preferences,
+            set_sender_preference,
+            remove_sender_preference,
             redraft,
             retry,
             rules,

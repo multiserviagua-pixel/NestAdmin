@@ -10,6 +10,7 @@
 pub mod accounts;
 pub mod initial_read;
 pub mod panel;
+pub mod preferences;
 pub mod refine;
 pub mod rules;
 pub mod suggest;
@@ -27,7 +28,7 @@ use nestadmin_ai::tasks::{
 use nestadmin_ai::{
     AiError, GenerateRequest, GenerateResult, ModelUnavailableCause, Provider, ProviderKind,
 };
-use nestadmin_core::mail_signals::{route_of_message, Route, Signal};
+use nestadmin_core::mail_signals::{route_of_message, Route, Signal, TriageDecision};
 use nestadmin_core::{
     ActionRecord, ActionRequest, AuditEntry, Authorization, Connector, ConnectorError, CoreError,
     Rule, Store, Task, TaskError, TaskState,
@@ -1309,6 +1310,9 @@ impl App {
                 _ => {}
             }
         }
+        // Preferencias por remitente (D161), leídas una vez por consulta.
+        let preference_index =
+            preferences::PreferenceIndex::from_rows(&self.store.sender_preferences()?);
         let mut report = FetchReport {
             added: 0,
             limit: self.mail.limit(),
@@ -1331,10 +1335,23 @@ impl App {
                                     "message": message,
                                 });
                                 let origin = input["origin"].clone();
-                                let (route, found) = route_of_message(
+                                let (_, found) = route_of_message(
                                     message.from.as_deref(),
                                     message.signals.as_deref(),
                                 );
+                                // Precedencia de D161: rebote, hilo propio (solo metadatos,
+                                // D162), preferencia, señal fuerte, IA. Un fallo al mirar el
+                                // hilo es «no se sabe» y no oculta nada.
+                                let (decision, scope) = preferences::decide_new_mail(
+                                    &preference_index,
+                                    message.from.as_deref(),
+                                    &found,
+                                    || {
+                                        let key = message.thread_key.as_deref()?;
+                                        self.mail.last_message_is_ours(&account, key).ok().flatten()
+                                    },
+                                );
+                                let route = decision.route;
                                 let input = input.to_string();
                                 // La ruta local (D157) se decide aquí, sin IA y de una vez: el
                                 // informativo y el rebote nacen ya cerrados o en revisión, en una
@@ -1343,13 +1360,17 @@ impl App {
                                     Route::Informativo => self.store.enqueue_closed(
                                         EMAIL,
                                         &input,
-                                        &triaged_result(message, origin, route, &found, false),
+                                        &triaged_result(
+                                            message, origin, &decision, scope, &found, false,
+                                        ),
                                         "correo informativo",
                                     )?,
                                     Route::Rebote => self.store.enqueue_review(
                                         EMAIL,
                                         &input,
-                                        &triaged_result(message, origin, route, &found, true),
+                                        &triaged_result(
+                                            message, origin, &decision, scope, &found, true,
+                                        ),
                                         "posible fallo de entrega",
                                     )?,
                                     Route::Ia => self.store.enqueue(EMAIL, &input)?,
@@ -2622,20 +2643,28 @@ fn archived_result(result: &mut Value) {
 fn triaged_result(
     message: &Message,
     origin: Value,
-    route: Route,
+    decision: &TriageDecision,
+    preference_scope: Option<nestadmin_core::PreferenceScope>,
     signals: &[Signal],
     review: bool,
 ) -> Value {
+    let mut triage = json!({
+        "route": decision.route.as_str(),
+        "codes": nestadmin_core::mail_signals::codes(signals),
+        "source": decision.source.as_str(),
+    });
+    if decision.already_replied {
+        triage["already_replied"] = json!(true);
+    }
+    if let Some(scope) = preference_scope {
+        triage["preference_scope"] = json!(scope.as_str());
+    }
     let mut result = json!({
         "type": EMAIL,
         "version": 1,
         "origin": origin,
         "message": message,
-        "triage": {
-            "route": route.as_str(),
-            "codes": nestadmin_core::mail_signals::codes(signals),
-            "source": "local",
-        },
+        "triage": triage,
     });
     if review {
         result["needs_reply"] = json!(false);

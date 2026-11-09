@@ -1,6 +1,7 @@
 // Servidor simulado para ver la interfaz en un navegador sin Tauri. Imita los comandos
 // reales con datos sintéticos (dominio .test); no decide nada que la capa Rust no decida.
 
+import { isPublicDomain, senderParts } from "./preferences-text";
 import type {
   SeenInvoice,
   AccountFetch,
@@ -28,6 +29,8 @@ import type {
   RuleSeed,
   RuleStats,
   RuleView,
+  SenderPreference,
+  PreferenceChange,
   SettingsView,
   Simulation,
   ConsentView,
@@ -53,6 +56,7 @@ let nextId = 1;
 const tasks: Task[] = [];
 const rules: Rule[] = [];
 const audit: AuditEntry[] = [];
+const mockPrefs: SenderPreference[] = [];
 // Escenarios de IA (D100–D102, D122) por la URL, como `?sin-cuentas` en el correo:
 // - sin parámetros: Ollama cloud con clave y destino confirmados;
 // - `?sin-ia`: instalación nueva (sin clave ni confirmación): abre el asistente de primer uso;
@@ -734,6 +738,20 @@ task("email", { message_id: "google-1:18c2-sintetico-9", account: "google-1" }, 
   ];
   for (const [id, account, from, subject, body, codes, date] of informatives) {
     task("email", { message_id: id, account }, "completed", { ...triaged(id, account, from, subject, body, codes, date), triage: { route: "informativo", codes, source: "local" } });
+  }
+  // Informativos que decidió el hilo (D162) o una preferencia (D161), no las señales.
+  {
+    const repliedId = "google-1:info-hilo";
+    task("email", { message_id: repliedId, account: "google-1" }, "completed", {
+      ...triaged(repliedId, "google-1", "luis.mora@cliente-omega.test", "Re: Presupuesto de mantenimiento", "Perfecto, quedamos así.", [], "2026-11-08T15:00:00Z"),
+      triage: { route: "informativo", codes: [], source: "thread", already_replied: true },
+    });
+    const preferredId = "microsoft-1:info-pref";
+    task("email", { message_id: preferredId, account: "microsoft-1" }, "completed", {
+      ...triaged(preferredId, "microsoft-1", "novedades@revista-sigma.test", "Novedades de noviembre", "Resumen mensual de la revista.", ["list_id"], "2026-11-08T16:00:00Z"),
+      triage: { route: "informativo", codes: ["list_id"], source: "preference", preference_scope: "address" },
+    });
+    mockPrefs.push({ scope: "address", key: "novedades@revista-sigma.test", route: "informative", updated_at: now() });
   }
   // `?muchos`: más de 50 informativos para probar «Ver más».
   if (new URLSearchParams(location.search).has("muchos")) {
@@ -1720,7 +1738,52 @@ function beginReadOnConnect(id: string, expect: ReadExpectation | null) {
   }
 }
 
+function preferenceWarnings(scope: string, key: string) {
+  const domain = scope === "domain" ? key : key.split("@")[1];
+  return latest()
+    .filter((r) => r.active && r.action_kind === "send_draft" && !metaOf(r.id).archived_at)
+    .filter((r) => {
+      const sender = senderParts(r.conditions.sender);
+      const ruleDomain = (r.conditions.sender_domain ?? "").trim().replace(/^@/, "").toLowerCase();
+      const byDomain = ruleDomain !== "" && ruleDomain === domain;
+      return scope === "domain" ? byDomain || sender?.domain === key : byDomain || sender?.address === key;
+    })
+    .map((r) => ({ rule_id: r.id, rule_name: metaOf(r.id).name ?? r.id }));
+}
+
 const handlers: Record<string, (a: any, options?: any) => unknown> = {
+  // Preferencias por remitente (D161): normaliza, rechaza dominios públicos y deja el evento del historial.
+  sender_preferences: () => [...mockPrefs].sort((a, b) => (a.scope + a.key < b.scope + b.key ? -1 : 1)),
+  set_sender_preference: ({ scope, key, route }): PreferenceChange => {
+    if (scope !== "address" && scope !== "domain") throw "ámbito desconocido: use «address» o «domain»";
+    if (route !== "review" && route !== "informative") throw "ruta desconocida: use «review» o «informative»";
+    const parts = senderParts(scope === "domain" && !String(key).includes("@") ? `x@${String(key).replace(/^@/, "")}` : key);
+    if (!parts) throw "la dirección o el dominio no es válido";
+    const normalized = scope === "address" ? parts.address : parts.domain;
+    if (scope === "domain" && isPublicDomain(normalized))
+      throw `${normalized} es un servicio de correo público: una preferencia por dominio abarcaría a cualquiera que lo use. Fíjela para una dirección concreta`;
+    const existing = mockPrefs.find((p) => p.scope === scope && p.key === normalized);
+    const changed = existing?.route !== route;
+    let preference: SenderPreference;
+    if (existing) {
+      preference = existing;
+      if (changed) Object.assign(existing, { route, updated_at: now() });
+    } else {
+      preference = { scope, key: normalized, route, updated_at: now() };
+      mockPrefs.push(preference);
+    }
+    if (changed) audit.push({ task_id: null, action: "sender_preference", status: "set", authorization: null, detail: JSON.stringify({ scope, key: normalized, route, previous: existing?.route ?? null }) });
+    return { preference, changed, warnings: route === "informative" ? preferenceWarnings(scope, normalized) : [] };
+  },
+  remove_sender_preference: ({ scope, key }) => {
+    const parts = senderParts(scope === "domain" && !String(key).includes("@") ? `x@${String(key).replace(/^@/, "")}` : key);
+    const normalized = parts ? (scope === "address" ? parts.address : parts.domain) : "";
+    const at = mockPrefs.findIndex((p) => p.scope === scope && p.key === normalized);
+    if (at < 0) return false;
+    const [removed] = mockPrefs.splice(at, 1);
+    audit.push({ task_id: null, action: "sender_preference", status: "removed", authorization: null, detail: JSON.stringify({ scope, key: normalized, previous: removed!.route }) });
+    return true;
+  },
   initial_read_overview: (): InitialReadOverview => {
     if (mockScenario === "broken") throw "no se pudo abrir la base de datos de ejemplo";
     return readOverview();
@@ -2401,6 +2464,8 @@ function startup(): Startup {
 }
 
 const mutating = new Set([
+  "set_sender_preference",
+  "remove_sender_preference",
   "import_file",
   "fetch_mail",
   "approve",

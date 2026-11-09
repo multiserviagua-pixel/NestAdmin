@@ -71,6 +71,8 @@ CREATE TABLE rules (
     include_str!("migrations/004_rules_panel.sql"),
     // Redactar respuesta: un solo borrador vivo por correo de origen (D159).
     include_str!("migrations/005_redraft.sql"),
+    // Preferencias por remitente (D161).
+    include_str!("migrations/006_sender_preferences.sql"),
 ];
 
 /// Base de datos local. Cada operación pública se confirma en una transacción,

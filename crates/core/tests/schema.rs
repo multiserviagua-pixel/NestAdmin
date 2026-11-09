@@ -28,7 +28,7 @@ const DROP_SALES: &str = "DROP TABLE received_delivery_notes; DROP TABLE payment
 
 /// Quita lo que añadió la migración 4 (panel de reglas), como si la base la hubiera creado
 /// la versión anterior.
-const DROP_PANEL: &str = "DROP TABLE rule_settings; DROP TABLE rule_suggestions; DROP TABLE rule_signals; DROP TABLE rule_evaluations; DROP TABLE rule_meta; ALTER TABLE actions DROP COLUMN rule_id; ALTER TABLE actions DROP COLUMN rule_version; DROP INDEX IF EXISTS tasks_redraft_of;";
+const DROP_PANEL: &str = "DROP TABLE rule_settings; DROP TABLE rule_suggestions; DROP TABLE rule_signals; DROP TABLE rule_evaluations; DROP TABLE rule_meta; ALTER TABLE actions DROP COLUMN rule_id; ALTER TABLE actions DROP COLUMN rule_version; DROP INDEX IF EXISTS tasks_redraft_of; DROP TABLE IF EXISTS sender_preferences;";
 
 fn has_table(path: &std::path::Path, name: &str) -> bool {
     rusqlite::Connection::open(path)
@@ -106,7 +106,7 @@ fn migrating_from_schema_2_adds_sales_tables_and_keeps_a_copy() {
 
     let store = Store::open(&path).unwrap();
     assert_eq!(store.schema_version().unwrap(), SCHEMA_VERSION);
-    assert_eq!(SCHEMA_VERSION, 5);
+    assert_eq!(SCHEMA_VERSION, 6);
     assert_eq!(
         store.audit_log().unwrap().len(),
         1,
@@ -326,8 +326,10 @@ fn migrating_from_schema_4_adds_the_redraft_index_and_keeps_a_copy() {
     let path = dir.path().join("nestadmin.db");
     drop(Store::open(&path).unwrap());
     let conn = rusqlite::Connection::open(&path).unwrap();
-    conn.execute_batch("DROP INDEX tasks_redraft_of; PRAGMA user_version = 4;")
-        .unwrap();
+    conn.execute_batch(
+        "DROP INDEX tasks_redraft_of; DROP TABLE sender_preferences; PRAGMA user_version = 4;",
+    )
+    .unwrap();
     for (id, input) in [(1, "{}"), (2, "no es json"), (3, r#"{"redraft_of": 1}"#)] {
         conn.execute(
             "INSERT INTO tasks (id, kind, input_ref, state, created_at, updated_at) VALUES (?1, 'email', ?2, 'queued', 1, 1)",
@@ -352,4 +354,59 @@ fn migrating_from_schema_4_adds_the_redraft_index_and_keeps_a_copy() {
     // Cancelada la primera, deja el sitio libre.
     store.cancel(3).unwrap();
     store.enqueue("email", r#"{"redraft_of": 1}"#).unwrap();
+}
+
+/// La migración 6 añade las preferencias por remitente (D161), con copia previa del esquema 5,
+/// sin tocar nada de lo anterior, y la tabla rechaza claves sin normalizar y rutas desconocidas.
+#[test]
+fn migrating_from_schema_5_adds_sender_preferences_and_keeps_a_copy() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("nestadmin.db");
+    drop(Store::open(&path).unwrap());
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    conn.execute_batch("DROP TABLE sender_preferences; PRAGMA user_version = 5;")
+        .unwrap();
+    conn.execute(
+        "INSERT INTO audit_log (at, action, status) VALUES (1, 'previa', 'ok')",
+        [],
+    )
+    .unwrap();
+    drop(conn);
+
+    let store = Store::open(&path).unwrap();
+    assert_eq!(store.schema_version().unwrap(), SCHEMA_VERSION);
+    assert_eq!(store.audit_log().unwrap().len(), 1);
+    assert!(store.sender_preferences().unwrap().is_empty());
+    drop(store);
+
+    let backup = backup_path(&path, 5);
+    assert_eq!(backup.file_name().unwrap(), "nestadmin.esquema-5.db");
+    assert_eq!(user_version(&backup), 5);
+    assert!(!has_table(&backup, "sender_preferences"));
+    assert!(has_table(&path, "sender_preferences"));
+
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    let insert = |scope: &str, key: &str, route: &str| {
+        conn.execute(
+            "INSERT INTO sender_preferences (scope, key, route, updated_at) VALUES (?1, ?2, ?3, 1)",
+            rusqlite::params![scope, key, route],
+        )
+    };
+    assert!(insert("address", "a@b.test", "review").is_ok());
+    assert!(
+        insert("address", "a@b.test", "informative").is_err(),
+        "clave única"
+    );
+    for (scope, key, route) in [
+        ("otro", "a@b.test", "review"),
+        ("address", "A@b.test", "review"),
+        ("address", " a@b.test", "review"),
+        ("address", "", "review"),
+        ("domain", "b.test", "siempre"),
+    ] {
+        assert!(
+            insert(scope, key, route).is_err(),
+            "{scope} {key:?} {route}"
+        );
+    }
 }

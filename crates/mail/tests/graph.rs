@@ -532,3 +532,15 @@ fn file_attachments_are_listed_without_inline_images_and_downloaded() {
         "invalid_input"
     );
 }
+
+/// Estado del hilo (D162): Graph no lo implementa (ver la documentación de `graph.rs`), así que
+/// siempre es desconocido y no hace ninguna llamada: el correo sigue el flujo normal.
+#[test]
+fn graph_reports_the_thread_state_as_unknown_without_calling_the_service() {
+    let (mailbox, world) = mailbox();
+    assert_eq!(
+        mailbox.last_message_is_ours("conversacion-1").unwrap(),
+        None
+    );
+    assert!(world.lock().unwrap().requests.is_empty());
+}

@@ -86,7 +86,7 @@ impl Signal {
     }
 }
 
-/// Ruta local de un correo nuevo (D157, D161 aún sin preferencias): lo decide el código, sin IA.
+/// Ruta local de un correo nuevo (D157, D161): lo decide el código, sin IA.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Route {
     /// Aviso de entrega fallida: revisión sin IA ni borrador.
@@ -106,6 +106,117 @@ impl Route {
             Route::Ia => "ia",
         }
     }
+}
+
+/// Preferencia del usuario sobre un remitente (D161). Un clic explícito, nunca aprendida.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum PreferenceRoute {
+    /// «Siempre a Pendientes»: una señal fuerte cuenta como débil (va a la IA y a revisión).
+    Review,
+    /// «Siempre a Informativos»: se cierra sin IA.
+    Informative,
+}
+
+impl PreferenceRoute {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            PreferenceRoute::Review => "review",
+            PreferenceRoute::Informative => "informative",
+        }
+    }
+
+    pub fn from_code(code: &str) -> Option<PreferenceRoute> {
+        match code {
+            "review" => Some(PreferenceRoute::Review),
+            "informative" => Some(PreferenceRoute::Informative),
+            _ => None,
+        }
+    }
+}
+
+/// Quién decidió la ruta de un correo nuevo; se guarda en `triage.source`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum TriageSource {
+    /// Las señales del propio correo.
+    Local,
+    /// Una preferencia del usuario sobre el remitente.
+    Preference,
+    /// El último mensaje del hilo es propio (D162).
+    Thread,
+}
+
+impl TriageSource {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            TriageSource::Local => "local",
+            TriageSource::Preference => "preference",
+            TriageSource::Thread => "thread",
+        }
+    }
+}
+
+/// Decisión local sobre un correo nuevo, con quién la tomó.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TriageDecision {
+    pub route: Route,
+    pub source: TriageSource,
+    /// El último mensaje del hilo ya era propio (D162).
+    pub already_replied: bool,
+}
+
+/// Precedencia de D161 para un correo nuevo, sin IA ni red. La primera lectura (D133) se resuelve
+/// antes, porque sus mensajes ya tienen tarea: nunca llegan aquí.
+///
+/// 1. Rebote: revisión, sin que ninguna preferencia ni el hilo lo cambien.
+/// 2. Hilo: si el último mensaje es propio (`Some(true)`), informativo `already_replied`. `None`
+///    (desconocido o con error) no tiene efecto.
+/// 3. Preferencia ya resuelta (dirección y, si no hay, dominio): `Informative` cierra; `Review`
+///    trata una señal fuerte como débil y sigue a la IA.
+/// 4. Señal fuerte: informativo. 5. Si no, IA.
+pub fn decide(
+    signals: &[Signal],
+    thread_own: Option<bool>,
+    preference: Option<PreferenceRoute>,
+) -> TriageDecision {
+    let (route, source, already_replied) = if signals.iter().any(|s| s.is_bounce()) {
+        (Route::Rebote, TriageSource::Local, false)
+    } else if thread_own == Some(true) {
+        (Route::Informativo, TriageSource::Thread, true)
+    } else {
+        match preference {
+            Some(PreferenceRoute::Informative) => {
+                (Route::Informativo, TriageSource::Preference, false)
+            }
+            Some(PreferenceRoute::Review) => (Route::Ia, TriageSource::Preference, false),
+            None => (route(signals), TriageSource::Local, false),
+        }
+    };
+    TriageDecision {
+        route,
+        source,
+        already_replied,
+    }
+}
+
+/// Dirección completa y dominio, en minúsculas, de `Nombre <a@b>` o `a@b`. Se conserva el
+/// sufijo `+etiqueta`: una preferencia es de una dirección exacta. `None` si no hay dirección.
+pub fn sender_parts(from: &str) -> Option<(String, String)> {
+    let text = match (from.rfind('<'), from.rfind('>')) {
+        (Some(open), Some(close)) if open < close => &from[open + 1..close],
+        _ => from,
+    };
+    let text = text.trim().trim_matches('"').trim();
+    let (local, domain) = text.rsplit_once('@')?;
+    let (local, domain) = (local.trim().to_lowercase(), domain.trim().to_lowercase());
+    let valid_domain = !domain.is_empty()
+        && domain.contains('.')
+        && !domain.starts_with('.')
+        && !domain.ends_with('.')
+        && domain
+            .chars()
+            .all(|c| c.is_alphanumeric() || c == '.' || c == '-');
+    let valid_local = !local.is_empty() && !local.chars().any(|c| c.is_whitespace() || c == '@');
+    (valid_domain && valid_local).then(|| (format!("{local}@{domain}"), domain))
 }
 
 /// Rebote antes que señal fuerte; una señal débil sola no oculta.
@@ -439,5 +550,161 @@ mod tests {
         assert_eq!(route_of("a@a.test", Some(&codes(&["otro"]))), Route::Ia);
         assert_eq!(route_of_message(None, None).0, Route::Ia);
         assert_eq!(Route::Rebote.as_str(), "rebote");
+    }
+    /// Una fila por cada caso de la precedencia de D161 (la primera lectura queda fuera: sus
+    /// mensajes ya tienen tarea y no llegan a `decide`).
+    #[test]
+    fn decide_follows_the_precedence_table() {
+        use PreferenceRoute::{Informative, Review};
+        use TriageSource::{Local, Preference, Thread};
+        let strong = [Signal::NoreplyAddress];
+        let weak = [Signal::ListId];
+        let bounce = [Signal::BounceAddress];
+        let both = [Signal::NullReturnPath, Signal::AutoSubmitted];
+        let none: [Signal; 0] = [];
+        // (señales, hilo propio, preferencia, ruta, quién, ya respondido)
+        #[allow(clippy::type_complexity)]
+        let table: Vec<(
+            &[Signal],
+            Option<bool>,
+            Option<PreferenceRoute>,
+            Route,
+            TriageSource,
+            bool,
+        )> = vec![
+            // Sin nada: señal fuerte, débil o ninguna, como antes de las preferencias.
+            (&strong, None, None, Route::Informativo, Local, false),
+            (&weak, None, None, Route::Ia, Local, false),
+            (&none, None, None, Route::Ia, Local, false),
+            (&bounce, None, None, Route::Rebote, Local, false),
+            // El hilo desconocido o ajeno no tiene efecto.
+            (&none, Some(false), None, Route::Ia, Local, false),
+            (&strong, Some(false), None, Route::Informativo, Local, false),
+            // Hilo propio: informativo ya respondido, con o sin señales.
+            (&none, Some(true), None, Route::Informativo, Thread, true),
+            (&weak, Some(true), None, Route::Informativo, Thread, true),
+            (&strong, Some(true), None, Route::Informativo, Thread, true),
+            // El hilo va antes que la preferencia, sea cual sea.
+            (
+                &none,
+                Some(true),
+                Some(Review),
+                Route::Informativo,
+                Thread,
+                true,
+            ),
+            (
+                &strong,
+                Some(true),
+                Some(Review),
+                Route::Informativo,
+                Thread,
+                true,
+            ),
+            (
+                &none,
+                Some(true),
+                Some(Informative),
+                Route::Informativo,
+                Thread,
+                true,
+            ),
+            // Preferencia «Informativos»: cierra sin IA aunque no haya señal.
+            (
+                &none,
+                None,
+                Some(Informative),
+                Route::Informativo,
+                Preference,
+                false,
+            ),
+            (
+                &weak,
+                None,
+                Some(Informative),
+                Route::Informativo,
+                Preference,
+                false,
+            ),
+            (
+                &strong,
+                None,
+                Some(Informative),
+                Route::Informativo,
+                Preference,
+                false,
+            ),
+            (
+                &none,
+                Some(false),
+                Some(Informative),
+                Route::Informativo,
+                Preference,
+                false,
+            ),
+            // Preferencia «Pendientes»: una señal fuerte cuenta como débil y va a la IA.
+            (&strong, None, Some(Review), Route::Ia, Preference, false),
+            (&both[1..], None, Some(Review), Route::Ia, Preference, false),
+            (&none, None, Some(Review), Route::Ia, Preference, false),
+            (&weak, None, Some(Review), Route::Ia, Preference, false),
+            // Un rebote no cambia con ninguna preferencia ni con el hilo.
+            (
+                &bounce,
+                None,
+                Some(Informative),
+                Route::Rebote,
+                Local,
+                false,
+            ),
+            (&bounce, None, Some(Review), Route::Rebote, Local, false),
+            (&bounce, Some(true), None, Route::Rebote, Local, false),
+            (
+                &bounce,
+                Some(true),
+                Some(Informative),
+                Route::Rebote,
+                Local,
+                false,
+            ),
+            (&both, None, Some(Informative), Route::Rebote, Local, false),
+            (&both, Some(true), Some(Review), Route::Rebote, Local, false),
+        ];
+        for (signals, thread, preference, route, source, replied) in table {
+            let got = decide(signals, thread, preference);
+            let wanted = TriageDecision {
+                route,
+                source,
+                already_replied: replied,
+            };
+            assert_eq!(
+                got, wanted,
+                "{signals:?} hilo={thread:?} preferencia={preference:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn sender_parts_lowercases_keeps_the_tag_and_rejects_garbage() {
+        assert_eq!(
+            sender_parts("Ana <Ana+x@Alfa.Test>"),
+            Some(("ana+x@alfa.test".to_owned(), "alfa.test".to_owned()))
+        );
+        for bad in [
+            "",
+            "ana",
+            "ana@",
+            "@alfa.test",
+            "ana@alfa",
+            "a b@alfa.test",
+            "ana@alfa.test.",
+            "ana@al fa.test",
+        ] {
+            assert_eq!(sender_parts(bad), None, "{bad:?}");
+        }
+        assert_eq!(
+            PreferenceRoute::from_code("review"),
+            Some(PreferenceRoute::Review)
+        );
+        assert_eq!(PreferenceRoute::from_code("otra"), None);
     }
 }

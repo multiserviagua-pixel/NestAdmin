@@ -1323,6 +1323,7 @@ const RULE_AUDIT_STATUS: Record<string, string> = {
 
 /** Estado en palabras de una entrada del historial que viene de una regla; el resto se deja tal cual. */
 export function auditStatusLabel(action: string, status: string): string {
+  if (action === "sender_preference") return status === "set" ? "Fijada" : status === "removed" ? "Quitada" : status;
   return action.startsWith("rule") ? (RULE_AUDIT_STATUS[status] ?? status) : status;
 }
 

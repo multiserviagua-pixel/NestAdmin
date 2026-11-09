@@ -47,6 +47,11 @@ pub trait MailProvider {
     fn status(&self, draft: &CreatedDraft) -> MailResult<DraftStatus>;
     /// Contenido de un adjunto anunciado en la lista de mensajes.
     fn attachment(&self, message_id: &str, attachment_id: &str) -> MailResult<Vec<u8>>;
+    /// Si el último mensaje del hilo es propio (D162), solo con metadatos. Por defecto, `None`
+    /// (desconocido): un proveedor sin una llamada segura no inventa la respuesta.
+    fn last_message_is_ours(&self, _thread_key: &str) -> MailResult<Option<bool>> {
+        Ok(None)
+    }
 }
 
 /// Una cuenta de correo con su proveedor y su registro local.
@@ -193,6 +198,14 @@ impl<P: MailProvider> MailConnector for Mailbox<P> {
         };
         self.state.mutate(|d| d.drafts.push(record))?;
         Ok(created.draft_id)
+    }
+
+    /// Solo lectura de metadatos: no anota nada en el registro local ni en el buzón.
+    fn last_message_is_ours(&self, thread_key: &str) -> Result<Option<bool>, ConnectorError> {
+        if thread_key.trim().is_empty() {
+            return Ok(None);
+        }
+        self.provider.last_message_is_ours(thread_key)
     }
 
     /// Solo lectura: no anota nada en el registro local ni en el buzón.

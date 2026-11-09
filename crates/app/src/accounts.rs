@@ -316,6 +316,9 @@ impl MailConnector for SharedSimulator {
     ) -> Result<SendReceipt, ConnectorError> {
         self.0.send_draft(draft_id, idempotency_key)
     }
+    fn last_message_is_ours(&self, thread_key: &str) -> Result<Option<bool>, ConnectorError> {
+        self.0.last_message_is_ours(thread_key)
+    }
     fn fetch_attachment(
         &self,
         message_id: &str,
@@ -745,6 +748,16 @@ impl Accounts {
             join_id(account, id)
         };
         Ok(self.recent(account)?.into_iter().find(|m| m.id == wanted))
+    }
+
+    /// Si el último mensaje del hilo de una cuenta es propio (D162), solo con metadatos. Un error
+    /// o un valor desconocido se tratan igual por quien llama: flujo normal.
+    pub(crate) fn last_message_is_ours(
+        &self,
+        account: &str,
+        thread_key: &str,
+    ) -> Result<Option<bool>, ConnectorError> {
+        self.connector(account)?.last_message_is_ours(thread_key)
     }
 
     /// Contenido de un adjunto de un mensaje con ID de cuenta (`<cuenta>:<mensaje>`).

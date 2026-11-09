@@ -35,6 +35,7 @@ import type {
   Startup,
   Task,
   ThresholdSettings,
+  SenderPreference,
 } from "./types";
 import {
   READ_HELP,
@@ -185,12 +186,37 @@ import {
   REDRAFT_TITLE,
   informativeReason,
   informativeTasks,
+  isBounce,
   redraftConfirmText,
   redraftFor,
   redraftNeedsConfirm,
   reviewEmailActions,
   triageNotices,
 } from "./triage-text";
+import {
+  PREFERENCE_CANCEL,
+  PREFERENCE_INFORMATIVE_TITLE,
+  PREFERENCE_REMOVE,
+  PREFERENCE_REVIEW_TITLE,
+  PREFERENCES_EMPTY,
+  PREFERENCES_INTRO,
+  PREFERENCES_TITLE,
+  PUBLIC_DOMAIN_NOTE,
+  ROUTE_LABEL,
+  canOfferPreference,
+  isPublicDomain,
+  preferenceAuditText,
+  preferenceChoices,
+  preferenceConfirmText,
+  preferenceFor,
+  preferenceLine,
+  preferenceSavedText,
+  preferenceWarningText,
+  scopeText,
+  senderParts,
+  type PreferenceChoice,
+  type PreferenceRoute,
+} from "./preferences-text";
 
 const STATE_LABEL: Record<string, string> = {
   queued: "En cola",
@@ -238,6 +264,7 @@ const ACTION_LABEL: Record<string, string> = {
   rule_archive: "Archivado de una regla",
   rule_rename: "Nombre de una regla",
   rule_merge: "Unificación de reglas",
+  sender_preference: "Preferencia de remitente",
 };
 
 type View = "review" | "tasks" | "rules" | "history" | "mail" | "settings" | "setup";
@@ -273,6 +300,9 @@ const state = {
   // Informativos (D157): cuántos se enseñan y el correo cuya redacción espera confirmación.
   informativeShown: BOARD_PAGE,
   confirmRedraft: null as number | null,
+  // Preferencias por remitente (D161) y el correo cuya preferencia espera confirmación.
+  preferences: [] as SenderPreference[],
+  confirmPreference: null as null | { task: number; route: PreferenceRoute },
   // Clave del control que debe recibir el foco tras el repintado (flechas de la lista).
   focusAfterRender: null as string | null,
   // Filtro de la lista de pendientes por origen: "" (todo), "file" o el ID de una cuenta.
@@ -482,8 +512,9 @@ async function refresh(background = false) {
     let suggestionsError: string | null = null;
     let refineError: string | null = null;
     let readError: string | null = null;
-    const [tasks, rules, findings, suggestions, refinement, refinePreview, audit, settings, mail, read] = await Promise.all([
+    const [tasks, preferences, rules, findings, suggestions, refinement, refinePreview, audit, settings, mail, read] = await Promise.all([
       api.tasks(),
+      api.senderPreferences(),
       api.ruleViews(),
       api.ruleFindings().catch((error) => {
         findingsError = String(error);
@@ -509,7 +540,7 @@ async function refresh(background = false) {
         return null;
       }),
     ]);
-    Object.assign(state, { tasks, rules, findings, findingsError, suggestions, suggestionsError, refinement, refinePreview, refineError, audit, settings, mail, read, readError });
+    Object.assign(state, { tasks, preferences, rules, findings, findingsError, suggestions, suggestionsError, refinement, refinePreview, refineError, audit, settings, mail, read, readError });
     // La oferta de la IA local necesita saber si está preparada: se comprueba al aparecer la espera.
     if (isProviderWait(settings?.ai_wait)) {
       if (!checkedForWait) {
@@ -1179,6 +1210,98 @@ function redraftConfirm(task: Task, tab: ReviewTab) {
   );
 }
 
+// ---- Preferencias por remitente (D161) ----
+
+function askPreference(task: Task, route: PreferenceRoute) {
+  state.confirmPreference = { task: task.id, route };
+  state.focusAfterRender = `pref-choice:${task.id}:address`;
+  render();
+}
+
+function cancelPreference(task: Task, route: PreferenceRoute) {
+  state.confirmPreference = null;
+  state.focusAfterRender = `pref:${task.id}:${route}`;
+  render();
+}
+
+async function setPreference(task: Task, choice: PreferenceChoice, route: PreferenceRoute) {
+  state.confirmPreference = null;
+  state.focusAfterRender = `item:${task.id}`;
+  try {
+    const change = await api.setSenderPreference(choice.scope, choice.key, route);
+    const warning = preferenceWarningText(change);
+    state.notice = warning ? { kind: "warn", text: `${preferenceSavedText(change)} ${warning}` } : { kind: "ok", text: preferenceSavedText(change) };
+    await refresh();
+  } catch (error) {
+    notify("error", error);
+  }
+}
+
+/** Botón de la barra de acciones: «Siempre a Informativos» o «Siempre a Pendientes» para el remitente. */
+function preferenceButton(task: Task, from: unknown, route: PreferenceRoute) {
+  if (!canOfferPreference(state.preferences, from, route)) return null;
+  return h(
+    "button",
+    { title: route === "informative" ? PREFERENCE_INFORMATIVE_TITLE : PREFERENCE_REVIEW_TITLE, "data-focus-key": `pref:${task.id}:${route}`, onclick: () => askPreference(task, route) },
+    ROUTE_LABEL[route],
+  );
+}
+
+/** La preferencia vigente de este remitente, con la forma de quitarla. */
+function preferenceNote(task: Task, from: unknown) {
+  const current = preferenceFor(state.preferences, from);
+  if (!current) return null;
+  return h(
+    "div",
+    { class: "notice info", role: "status" },
+    h("span", {}, `Su preferencia: ${preferenceLine(current)}.`),
+    h("button", { "data-focus-key": `pref-remove:${task.id}`, onclick: () => void act(() => api.removeSenderPreference(current.scope, current.key), "Preferencia quitada") }, PREFERENCE_REMOVE),
+  );
+}
+
+/** Confirmación con el efecto explicado y la elección entre la dirección y el dominio. */
+function preferenceConfirm(task: Task, from: unknown) {
+  const pending = state.confirmPreference;
+  if (!pending || pending.task !== task.id) return null;
+  const parts = senderParts(from);
+  return h(
+    "div",
+    { class: "notice warn stacked", role: "group", "aria-label": "Confirmar preferencia" },
+    h("span", { role: "status" }, preferenceConfirmText(pending.route, from)),
+    parts && isPublicDomain(parts.domain) ? h("span", { class: "meta" }, PUBLIC_DOMAIN_NOTE) : null,
+    h(
+      "div",
+      { class: "buttons" },
+      ...preferenceChoices(from).map((choice) =>
+        h("button", { class: choice.scope === "address" ? "primary" : undefined, "data-focus-key": `pref-choice:${task.id}:${choice.scope}`, onclick: () => void setPreference(task, choice, pending.route) }, choice.label),
+      ),
+      h("button", { "data-focus-key": `pref-cancel:${task.id}`, onclick: () => cancelPreference(task, pending.route) }, PREFERENCE_CANCEL),
+    ),
+  );
+}
+
+/** Lista de preferencias en Cuentas de correo: ver y quitar. */
+function preferencesSection() {
+  const list = state.preferences;
+  return h(
+    "section",
+    { class: "section" },
+    sectionHeader(PREFERENCES_TITLE),
+    h("p", { class: "intro" }, PREFERENCES_INTRO),
+    list.length
+      ? dataTable(
+          [{ label: "Remitente" }, { label: "Preferencia" }, { label: "Fijada" }, { label: "" }],
+          list.map((p) => [
+            scopeText(p),
+            ROUTE_LABEL[p.route],
+            dateText(p.updated_at / 1000),
+            h("button", { "data-focus-key": `pref-list-remove:${p.scope}:${p.key}`, "aria-label": `Quitar la preferencia de ${scopeText(p)}`, onclick: () => void act(() => api.removeSenderPreference(p.scope, p.key), "Preferencia quitada") }, PREFERENCE_REMOVE),
+          ]),
+        )
+      : emptyState("Sin preferencias", PREFERENCES_EMPTY),
+  );
+}
+
 /** Detalle de solo lectura de un informativo (D157): no tiene borrador ni nada que aprobar. */
 function informativeDetail(task: Task) {
   const r = task.result ?? {};
@@ -1190,6 +1313,8 @@ function informativeDetail(task: Task) {
     h("div", { class: "detail-head" }, h("h2", {}, message.subject ?? h("span", { class: "missing" }, "(sin asunto)")), statusChip("Informativo")),
     h("p", { class: "reason" }, `Motivo: ${informativeReason(r)}`),
     h("p", { class: "meta" }, "No se envió a la IA ni se ha borrado."),
+    preferenceNote(task, message.from),
+    preferenceConfirm(task, message.from),
     h(
       "dl",
       { class: "origin" },
@@ -1212,6 +1337,7 @@ function informativeDetail(task: Task) {
     actionBar(
       requested ? "Ya se pidió una respuesta a este correo: aparece en Pendientes." : null,
       requested ? h("button", { "data-focus-key": `redraft:${task.id}`, onclick: () => openInReview(requested) }, "Ver en Pendientes") : redraftButton(task, "informative"),
+      preferenceButton(task, message.from, "review"),
     ),
   );
 }
@@ -1250,6 +1376,8 @@ function emailDetail(task: Task) {
       ? h("div", { class: "triage-notices" }, ...notices.map((n) => h("div", { class: `notice ${n.tone}`, role: "status" }, h("span", {}, n.text))))
       : null,
     redraftConfirm(task, "emails"),
+    preferenceNote(task, message.from),
+    preferenceConfirm(task, message.from),
     h(
       "dl",
       { class: "origin" },
@@ -1302,6 +1430,8 @@ function emailDetail(task: Task) {
       acts.editor ? h("button", { onclick: () => void act(() => api.editDraft(task.id, body.value), "Borrador guardado como versión nueva") }, "Guardar borrador") : null,
       acts.redraft ? redraftButton(task, "emails") : null,
       acts.archive ? h("button", { title: ARCHIVE_TITLE, "data-focus-key": `archive:${task.id}`, onclick: () => archiveEmail(task) }, ARCHIVE_LABEL) : null,
+      // Un rebote no se manda a Informativos (D161) y una redacción pedida a mano tampoco lo necesita.
+      isBounce(r) || r.redraft_of != null ? null : preferenceButton(task, message.from, "informative"),
       acts.editor ? createRuleButton(task) : null,
       h("button", { class: "danger", onclick: () => resolveTask(task, () => api.reject(task.id), "Tarea descartada") }, "Descartar"),
     ),
@@ -3494,7 +3624,7 @@ function historyView() {
               ACTION_LABEL[e.action] ?? e.action,
               auditStatusLabel(e.action, e.status),
               e.authorization ?? missing(),
-              h("div", { class: "detail-cell" }, e.detail ?? missing()),
+              h("div", { class: "detail-cell" }, (e.action === "sender_preference" ? preferenceAuditText(e.detail) : e.detail) ?? missing()),
             ]),
           )
         : emptyState("Ninguna entrada coincide con el filtro", "Pruebe con otra regla o quite el filtro.")
@@ -4072,6 +4202,7 @@ function mailView() {
           )
         : null,
     ),
+    preferencesSection(),
     readSection(),
     h(
       "section",
