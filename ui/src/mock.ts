@@ -43,6 +43,13 @@ import type {
   Startup,
   StepState,
   Task,
+  TaskTemplate,
+  BlockerCode,
+  PipelineBlock,
+  PipelineBlocker,
+  PipelineOverview,
+  PipelineRunView,
+  PipelineStepView,
 } from "./types";
 
 const now = () => Date.now();
@@ -784,6 +791,122 @@ setEvaluation("Duplicado de la factura FS-2026-020", "ninguna regla activa coinc
     };
 }
 
+// ---- Plantillas de pipeline (D149, D150) ----
+// Imitan las reglas de la capa Rust sin decidir nada: catálogo cerrado, una condición de
+// remitente, una sola plantilla activa por condición y «Continuar sin ese paso». Con `?pipelines`
+// hay una ejecución de muestra (una factura fallida, otra en revisión y la respuesta en cola).
+
+const templateStore: TaskTemplate[] = [
+  {
+    id: "facturas-zeta",
+    version: 2,
+    name: "Facturas de Zeta",
+    conditions: { sender_domain: "proveedor-zeta.test" },
+    steps: [{ kind: "attachment_invoices" }, { kind: "reply" }],
+    active: true,
+    archived: false,
+    created_at: now(),
+  },
+];
+
+interface MockStep {
+  id: number;
+  stage: number;
+  kind: string;
+  label: string;
+  task_id: number | null;
+  waived: boolean;
+  note: string | null;
+  error: string | null;
+}
+interface MockRun {
+  id: number;
+  template_id: string;
+  template_version: number;
+  subject_task_id: number;
+  created_at: number;
+  steps: MockStep[];
+}
+const mockRuns: MockRun[] = [];
+let nextStepId = 1;
+
+const conditionKey = (c: TaskTemplate["conditions"]) =>
+  c.sender ? `sender:${c.sender.toLowerCase()}` : c.sender_domain ? `domain:${c.sender_domain.toLowerCase()}` : "any";
+
+function checkTemplate(name: string, conditions: Record<string, unknown>, steps: Array<Record<string, unknown>>): TaskTemplate["conditions"] {
+  if (!String(name ?? "").trim()) throw "indique un nombre para la plantilla";
+  const kinds = (Array.isArray(steps) ? steps : []).map((s) => s && typeof s === "object" ? s : {});
+  for (const step of kinds) {
+    const kind = (step as { kind?: unknown }).kind;
+    if (kind !== "attachment_invoices" && kind !== "reply") throw `tipo de paso desconocido: «${String(kind)}»; solo se admiten «attachment_invoices» y «reply»`;
+    if (Object.keys(step).length !== 1) throw "un paso de la plantilla solo lleva su tipo: no admite acciones ni automatizaciones";
+  }
+  if (kinds.length !== 2 || (kinds[0] as { kind: string }).kind !== "attachment_invoices" || (kinds[1] as { kind: string }).kind !== "reply")
+    throw "la plantilla necesita exactamente los pasos «attachment_invoices» y después «reply»";
+  const keys = Object.keys(conditions ?? {});
+  if (keys.some((k) => k !== "sender" && k !== "sender_domain")) throw "condición desconocida: solo se admite el remitente o su dominio";
+  if (keys.length > 1) throw "indique una dirección o un dominio de remitente, no los dos";
+  const out: TaskTemplate["conditions"] = {};
+  if (keys[0] === "sender") {
+    const v = String(conditions.sender ?? "").trim().toLowerCase();
+    if (!/^[^\s@<>,]+@[a-z0-9-]+(\.[a-z0-9-]+)+$/.test(v)) throw `«${v}» no es una dirección de correo simple`;
+    out.sender = v;
+  } else if (keys[0] === "sender_domain") {
+    const v = String(conditions.sender_domain ?? "").trim().toLowerCase();
+    if (!/^[a-z0-9-]+(\.[a-z0-9-]+)+$/.test(v)) throw `«${v}» no es un dominio válido`;
+    out.sender_domain = v;
+  }
+  return out;
+}
+
+function assertConditionFree(id: string, conditions: TaskTemplate["conditions"]) {
+  const other = templateStore.find((t) => t.id !== id && t.active && !t.archived && conditionKey(t.conditions) === conditionKey(conditions));
+  if (other) throw `la plantilla «${other.name}» ya está activa con la misma condición; desactívela antes`;
+}
+
+function mockRunView(run: MockRun): PipelineRunView {
+  const stateOf = (s: MockStep) => (s.task_id === null ? null : find(s.task_id).state);
+  const steps: PipelineStepView[] = run.steps.map((s) => {
+    const state = stateOf(s);
+    const retains = run.steps.some((l) => l.stage > s.stage && stateOf(l) === "queued");
+    let blocked: PipelineBlock | null = null;
+    if (state === "queued") {
+      const by: PipelineBlocker[] = run.steps
+        .filter((p) => p.stage < s.stage && !p.waived && stateOf(p) !== "completed")
+        .map((p) => {
+          const ps = stateOf(p);
+          const code: BlockerCode = ps === null ? "attachment_missing" : ps === "failed" ? "failed" : ps === "cancelled" ? "cancelled" : "waiting";
+          return { step_id: p.id, task_id: p.task_id, task_state: ps, code, error_code: p.error };
+        });
+      if (by.length) blocked = { reason: by.some((b) => b.code !== "waiting") ? "blocked" : "waiting", by };
+    }
+    return {
+      id: s.id,
+      stage: s.stage,
+      kind: s.kind,
+      label: s.label,
+      task_id: s.task_id,
+      task_state: state,
+      waived: s.waived,
+      waived_note: s.note,
+      error_code: s.error,
+      linked_after_waive: s.waived && s.task_id !== null,
+      waivable: !s.waived && (state === null || state === "failed" || state === "cancelled") && retains,
+      blocked,
+    };
+  });
+  const template = templateStore.find((t) => t.id === run.template_id);
+  return {
+    id: run.id,
+    template_id: run.template_id,
+    template_version: run.template_version,
+    template_name: template?.name ?? null,
+    subject_task_id: run.subject_task_id,
+    created_at: run.created_at,
+    steps,
+  };
+}
+
 function find(id: number) {
   const t = tasks.find((t) => t.id === id);
   if (!t) throw `tarea ${id} inexistente`;
@@ -794,6 +917,25 @@ function reviewable(id: number) {
   const t = find(id);
   if (t.state !== "awaiting_review") throw `la tarea ${id} no está pendiente de revisión`;
   return t;
+}
+
+if (new URLSearchParams(location.search).has("pipelines")) {
+  const mail = { message_id: "simulador:Z-1", message: { id: "simulador:Z-1", from: "ventas@proveedor-zeta.test", subject: "Pedido 2231" } };
+  const failedInvoice = task("invoice", { document: "factura-0910.pdf", origin: { kind: "email", message_id: "simulador:Z-1", attachment: "factura-0910.pdf", from: "ventas@proveedor-zeta.test", subject: "Pedido 2231" } }, "failed", null, { code: "unavailable", message: "el servicio no respondió", recoverable: true });
+  const reviewInvoice = task("invoice", { document: "factura-1005.pdf", origin: { kind: "email", message_id: "simulador:Z-1", attachment: "factura-1005.pdf", from: "ventas@proveedor-zeta.test", subject: "Pedido 2231" } }, "awaiting_review", { type: "invoice", version: 1, document: "factura-1005.pdf", fields: { supplier: "Zeta Servicios SL", invoice_number: "Z-1005", date: "2026-10-05", total: "121.00" }, issues: [] });
+  const reply = task("email", mail, "queued", null);
+  mockRuns.push({
+    id: 1,
+    template_id: "facturas-zeta",
+    template_version: 2,
+    subject_task_id: reply.id,
+    created_at: now(),
+    steps: [
+      { id: nextStepId++, stage: 1, kind: "attachment_invoices", label: "factura-0910.pdf", task_id: failedInvoice.id, waived: false, note: null, error: null },
+      { id: nextStepId++, stage: 1, kind: "attachment_invoices", label: "factura-1005.pdf", task_id: reviewInvoice.id, waived: false, note: null, error: null },
+      { id: nextStepId++, stage: 2, kind: "reply", label: "Responder al correo", task_id: reply.id, waived: false, note: null, error: null },
+    ],
+  });
 }
 
 function latest(): Rule[] {
@@ -1771,6 +1913,75 @@ const handlers: Record<string, (a: any, options?: any) => unknown> = {
     if (t.state !== "failed") throw "solo se reintentan tareas fallidas";
     return Object.assign(t, { state: "queued" });
   },
+  task_templates: (): TaskTemplate[] => templateStore.map((t) => ({ ...t })),
+  save_task_template: ({ id, name, conditions, steps }): TaskTemplate => {
+    const clean = checkTemplate(name, conditions, steps);
+    const cleanName = String(name).trim();
+    const existing = id ? templateStore.find((t) => t.id === id) : undefined;
+    if (existing?.archived) throw `la plantilla ${existing.id} está archivada; desarchívela para volver a usarla`;
+    if (existing?.active) assertConditionFree(existing.id, clean);
+    if (existing) {
+      Object.assign(existing, { version: existing.version + 1, name: cleanName, conditions: clean, steps: [{ kind: "attachment_invoices" }, { kind: "reply" }], created_at: now() });
+      return { ...existing };
+    }
+    let base = String(id ?? "").trim() || slug(cleanName) || "plantilla";
+    let candidate = base;
+    for (let n = 2; templateStore.some((t) => t.id === candidate); n++) candidate = `${base}-${n}`;
+    const created: TaskTemplate = {
+      id: candidate,
+      version: 1,
+      name: cleanName,
+      conditions: clean,
+      steps: [{ kind: "attachment_invoices" }, { kind: "reply" }],
+      active: false,
+      archived: false,
+      created_at: now(),
+    };
+    templateStore.push(created);
+    return { ...created };
+  },
+  set_task_template_active: ({ id, active }): TaskTemplate => {
+    const t = templateStore.find((x) => x.id === id);
+    if (!t) throw `la plantilla ${id} no existe`;
+    if (t.archived && active) throw `la plantilla ${id} está archivada; desarchívela para volver a usarla`;
+    if (active) assertConditionFree(t.id, t.conditions);
+    if (t.active !== Boolean(active)) Object.assign(t, { active: Boolean(active), version: t.version + 1 });
+    return { ...t };
+  },
+  pipeline_overview: (): PipelineOverview => ({ runs: mockRuns.map(mockRunView).reverse() }),
+  waive_pipeline_step: ({ stepId, note }): PipelineRunView => {
+    const text = String(note ?? "").trim();
+    if (text.length > 200) throw "la nota admite como mucho 200 caracteres";
+    const run = mockRuns.find((r) => r.steps.some((s) => s.id === stepId));
+    const step = run?.steps.find((s) => s.id === stepId);
+    if (!run || !step) throw `el paso ${stepId} del pipeline no existe`;
+    if (step.waived) return mockRunView(run);
+    const view = mockRunView(run).steps.find((s) => s.id === stepId);
+    if (!view?.waivable) throw `el paso ${stepId} no retiene ninguna tarea que pueda empezar, o ya se omitió`;
+    step.waived = true;
+    step.note = text || null;
+    audit.push({ task_id: run.subject_task_id, action: "pipeline_step", status: "waived", authorization: null, detail: JSON.stringify({ step_id: stepId, stage: step.stage, kind: step.kind }) });
+    // Sin nada más que la retenga, la respuesta pasa por su evaluación y, tras omitir un paso,
+    // siempre a revisión (D150), aunque coincida una regla.
+    const reply = find(run.subject_task_id);
+    const still = mockRunView(run).steps.find((s) => s.task_id === reply.id)?.blocked;
+    if (reply.state === "queued" && !still) {
+      reply.state = "awaiting_review";
+      reply.attempts = 1;
+      const message = JSON.parse(reply.input_ref).message;
+      reply.result = {
+        type: "email",
+        version: 1,
+        message,
+        category: "solicitud_factura",
+        draft: { to: [message.from], subject: `Re: ${message.subject}`, body: "Adjuntamos la factura solicitada." },
+        review_reason: "se continuó sin un paso anterior del pipeline; revise antes de enviar",
+        evaluation: { code: "pipeline_step_waived", facts: {}, candidates: [] },
+        action: { kind: "send_draft" },
+      };
+    }
+    return mockRunView(run);
+  },
   rules: () => latest(),
   rule_views: () => latest().map(ruleView),
   create_rule: ({ id, name, actionKind, conditions, acknowledgeAnySender }) => {
@@ -2268,6 +2479,9 @@ const mutating = new Set([
   "edit_draft",
   "reject",
   "retry",
+  "save_task_template",
+  "set_task_template_active",
+  "waive_pipeline_step",
   "create_rule",
   "rename_rule",
   "update_rule",

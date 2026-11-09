@@ -27,6 +27,12 @@ pub enum CoreError {
     PipelineSubjectNotAStep,
     #[error("añadir un paso en la etapa {0} retendría una tarea de una etapa posterior que ya fue tomada")]
     PipelineStageTooLate(i64),
+    #[error("el paso {0} no retiene ninguna tarea que pueda empezar, o ya se omitió")]
+    PipelineStepNotRetaining(i64),
+    #[error("la plantilla {0} no existe")]
+    TemplateNotFound(String),
+    #[error("la plantilla {0} está archivada; desarchívela para volver a usarla")]
+    TemplateArchived(String),
     #[error(
         "esquema de base de datos {found} más reciente que el soportado ({supported}); \n         instale la versión de NestAdmin que lo creó o restaure la copia nestadmin.esquema-{supported}.db"
     )]

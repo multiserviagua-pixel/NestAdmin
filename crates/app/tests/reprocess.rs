@@ -1041,3 +1041,110 @@ fn the_simulator_retry_reuses_the_approved_text() {
     assert_eq!(drafts.len(), 1);
     assert_eq!(drafts[0].content.body, proposal(1));
 }
+
+/// D150 y D50: la respuesta de un pipeline liberada con «Continuar sin ese paso» va a revisión
+/// aunque coincida una regla, y un envío perdido seguido de un reinicio no la envía dos veces ni
+/// pide otro texto a la IA; la ejecución sigue siendo una sola.
+#[test]
+fn a_released_pipeline_reply_is_reviewed_and_survives_a_lost_send_without_resending() {
+    use nestadmin_simulators::Message;
+
+    let fixture = Fixture::new();
+    let mut app = fixture.open();
+    app.fetch_mail().unwrap();
+    process_all(&mut app);
+    app.save_task_template(
+        Some("zeta"),
+        "Zeta",
+        &json!({ "sender_domain": "proveedor-zeta.test" }),
+        &json!([{ "kind": "attachment_invoices" }, { "kind": "reply" }]),
+    )
+    .unwrap();
+    app.set_task_template_active("zeta", true).unwrap();
+    // Una regla de envío que automatizaría la respuesta si no se hubiera omitido un paso.
+    app.create_rule(
+        "responder",
+        "send_draft",
+        &json!({ "category": "solicitud_factura", "sender_domain": "proveedor-zeta.test" }),
+    )
+    .unwrap();
+    app.set_rule_active("responder", true).unwrap();
+    let sim = app.simulators().0;
+    sim.add_message(Message {
+        id: "Z-1".into(),
+        subject: Some("Pedido".into()),
+        from: Some("ventas@proveedor-zeta.test".into()),
+        to: Some(vec!["administracion@nestadmin.test".into()]),
+        body: Some("Texto sintético.".into()),
+        date: Some(today_text()),
+        attachments: Vec::new(),
+    })
+    .unwrap();
+    sim.add_attachment("Z-1", "a.txt", "text/plain", b"factura sintetica")
+        .unwrap();
+    sim.set_attachment_failure(Some(FailureMode::Unavailable));
+    app.fetch_mail().unwrap();
+    process_all(&mut app);
+    let reply = task_for(&app, "simulador:Z-1");
+    assert_eq!(reply.state, TaskState::Queued);
+    assert_eq!(fixture.ai.calls_for(reply.id), 0, "bloqueada: sin IA");
+
+    let overview = app.pipeline_overview().unwrap();
+    assert_eq!(overview.runs.len(), 1);
+    let step = overview.runs[0]
+        .steps
+        .iter()
+        .find(|s| s.kind == "attachment_invoices")
+        .unwrap();
+    app.waive_pipeline_step(step.id, "").unwrap();
+    process_all(&mut app);
+    let review = task_for(&app, "simulador:Z-1");
+    assert_eq!(review.state, TaskState::AwaitingReview);
+    assert_eq!(
+        review.result.as_ref().unwrap()["evaluation"]["code"],
+        "pipeline_step_waived"
+    );
+    assert_eq!(app.simulators().0.sent().unwrap().len(), 0);
+
+    // El envío aprobado se pierde; tras reiniciar se reintenta sin otra llamada a la IA.
+    app.simulators()
+        .0
+        .set_failure(Some(FailureMode::Unavailable));
+    assert_eq!(app.approve(review.id, 1).unwrap().state, TaskState::Failed);
+    app.simulators().0.set_failure(None);
+    drop(app);
+    let mut app = fixture.open();
+    app.retry(review.id).unwrap();
+    process_all(&mut app);
+    let again = task_for(&app, "simulador:Z-1");
+    assert_eq!(again.state, TaskState::AwaitingReview);
+    assert_eq!(body(&again), proposal(1));
+    assert_eq!(fixture.ai.calls_for(review.id), 1);
+    assert_eq!(
+        app.approve(review.id, 1).unwrap().state,
+        TaskState::Completed
+    );
+    assert_eq!(app.simulators().0.sent().unwrap().len(), 1);
+    assert_eq!(app.simulators().0.drafts().unwrap().len(), 1);
+    assert_eq!(app.pipeline_overview().unwrap().runs.len(), 1);
+}
+
+/// Fecha `AAAA-MM-DD` de hoy (UTC): las plantillas solo se aplican a correo fechado desde su
+/// activación (D149), así que los correos de prueba llevan la fecha de hoy.
+fn today_text() -> String {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let z = (secs / 86_400) as i64 + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+    format!("{y:04}-{m:02}-{d:02}")
+}

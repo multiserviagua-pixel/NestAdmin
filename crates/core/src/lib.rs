@@ -9,13 +9,14 @@ pub mod rule_panel;
 pub mod rules;
 pub mod sales;
 pub mod store;
+pub mod templates;
 
 pub use actions::{
     ActionOutcome, ActionRecord, ActionRequest, AuditEntry, Authorization, Connector,
     ConnectorError,
 };
 pub use error::{CoreError, Result};
-pub use pipeline::{BlockingStep, NewStep, PipelineStep};
+pub use pipeline::{BlockingStep, NewStep, PipelineRun, PipelineStep, ATTACHMENT_REJECTED};
 pub use queue::{Task, TaskError, TaskState};
 pub use rule_panel::{
     EvaluationRecord, EvaluationRow, RuleMeta, RuleStats, SignalRecord, SignalRow, SuggestionRow,
@@ -23,3 +24,4 @@ pub use rule_panel::{
 };
 pub use rules::Rule;
 pub use store::Store;
+pub use templates::{active_since, TaskTemplate};

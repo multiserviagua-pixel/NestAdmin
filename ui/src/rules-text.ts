@@ -522,6 +522,7 @@ export const REASON_CODES = [
   "foreign_currency",
   "currency_not_checked",
   "currency_not_shown",
+  "pipeline_step_waived",
 ] as const;
 
 export type ReasonCode = (typeof REASON_CODES)[number];
@@ -565,6 +566,8 @@ export function reasonText(code: string, facts?: Record<string, unknown> | null)
       return "no consta la comprobación de moneda; reprocese o revise";
     case "currency_not_shown":
       return "el documento no muestra la moneda; no se puede comprobar que sea en euros";
+    case "pipeline_step_waived":
+      return "se continuó sin un paso anterior de la plantilla; la respuesta se revisa antes de enviarla";
     default:
       return `motivo no reconocido (${code})`;
   }

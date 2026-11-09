@@ -50,6 +50,8 @@ pub enum ReasonCode {
     /// El documento no muestra el euro (`€`, `EUR`, «euro»): no se puede comprobar que sea en
     /// euros, sea texto digital o escaneado (D127).
     CurrencyNotShown,
+    /// Se continuó sin un paso del pipeline: la respuesta siempre se revisa (D150).
+    PipelineStepWaived,
 }
 
 /// Resultado de comprobar una regla contra los datos de una tarea. El motivo de no
@@ -96,6 +98,7 @@ impl Explanation {
             ),
             ReasonCode::CurrencyNotChecked => CURRENCY_UNCHECKED.into(),
             ReasonCode::CurrencyNotShown => CURRENCY_NOT_SHOWN.into(),
+            ReasonCode::PipelineStepWaived => PIPELINE_WAIVED.into(),
             ReasonCode::SenderRequired => format!(
                 "la regla no indica remitente; añádalo o valide la opción avanzada (regla: {})",
                 self.facts["rule_ids"]
@@ -127,6 +130,15 @@ impl Explanation {
         }
     }
 
+    /// Explicación de una tarea cuyo pipeline continuó sin un paso (D150).
+    pub fn pipeline_step_waived() -> Self {
+        Self {
+            code: ReasonCode::PipelineStepWaived,
+            facts: json!({}),
+            candidates: Vec::new(),
+        }
+    }
+
     /// Explicación de una factura separada de un documento con varias.
     pub fn split_invoice() -> Self {
         Self {
@@ -136,6 +148,10 @@ impl Explanation {
         }
     }
 }
+
+/// Motivo cuando el pipeline continuó sin un paso (D150).
+pub const PIPELINE_WAIVED: &str =
+    "se continuó sin un paso anterior del pipeline; revise antes de enviar";
 
 /// Motivo cuando falta la comprobación local de moneda (D127).
 pub const CURRENCY_UNCHECKED: &str = "no consta la comprobación de moneda; reprocese o revise";
@@ -427,7 +443,7 @@ fn sender_mismatch(
     any_sender_ack: bool,
     result: &Value,
 ) -> Option<Mismatch> {
-    let actual = result["message"]["from"].as_str().map(str::trim);
+    let actual = result["message"]["from"].as_str();
     let (key, wanted) = match (conditions.get("sender"), conditions.get("sender_domain")) {
         (Some(_), Some(_)) => {
             return no("la regla indica a la vez una dirección y un dominio de remitente")
@@ -449,13 +465,21 @@ fn sender_mismatch(
     let Some(wanted) = wanted.as_str().map(str::trim).filter(|w| !w.is_empty()) else {
         return no("el remitente de la regla no es un texto válido");
     };
-    let Some(actual) = actual.filter(|a| !a.is_empty()) else {
-        return no(format!(
+    sender_matches(key, wanted, actual).err().and_then(no)
+}
+
+/// Comparación de remitente de D126, compartida por las reglas de envío y por las plantillas
+/// de pipeline (D149): `key` es `sender` (dirección exacta) o `sender_domain` (dominio exacto, sin
+/// subdominios), sin distinguir mayúsculas. `actual` es `message.from`; si falta, está vacío o no
+/// es una dirección simple (`is_email_address`), no coincide. El error es el motivo en texto.
+pub fn sender_matches(key: &str, wanted: &str, actual: Option<&str>) -> Result<(), String> {
+    let Some(actual) = actual.map(str::trim).filter(|a| !a.is_empty()) else {
+        return Err(format!(
             "el correo no indica remitente y la regla pide «{wanted}»"
         ));
     };
     if !is_email_address(actual) {
-        return no(format!(
+        return Err(format!(
             "el remitente «{actual}» no es una dirección de correo simple"
         ));
     }
@@ -467,13 +491,13 @@ fn sender_mismatch(
             .is_some_and(|(_, domain)| domain.eq_ignore_ascii_case(wanted))
     };
     if same {
-        None
+        Ok(())
     } else if key == "sender" {
-        no(format!(
+        Err(format!(
             "el remitente es «{actual}» y la regla pide «{wanted}»"
         ))
     } else {
-        no(format!(
+        Err(format!(
             "el remitente es «{actual}», de otro dominio que «{wanted}»"
         ))
     }
@@ -575,6 +599,40 @@ pub fn rules_fingerprint(
 /// (D120) y una factura separada de un documento con varias (D68) nunca se registran por
 /// regla. Es el único camino que usan `finish` y la simulación.
 pub fn evaluate_result(
+    rules: &[Rule],
+    any_sender: &HashSet<String>,
+    action_kind: &str,
+    result: &Value,
+) -> Evaluation {
+    evaluate_result_in_run(rules, any_sender, action_kind, result, false)
+}
+
+/// Como `evaluate_result`, para una tarea de un pipeline. Si se continuó sin un paso anterior
+/// (`step_waived`, D150), una decisión de automatizar pasa a revisión con su propia explicación,
+/// manteniendo las reglas candidatas para los recuentos (D129). Solo restringe: nunca convierte
+/// una revisión en automatización ni cambia el motivo de una revisión que ya lo era.
+pub fn evaluate_result_in_run(
+    rules: &[Rule],
+    any_sender: &HashSet<String>,
+    action_kind: &str,
+    result: &Value,
+    step_waived: bool,
+) -> Evaluation {
+    let evaluation = evaluate_shortcuts(rules, any_sender, action_kind, result);
+    match evaluation.decision {
+        RuleDecision::Automate { .. } if step_waived => {
+            let mut explanation = Explanation::pipeline_step_waived();
+            explanation.candidates = evaluation.explanation.candidates;
+            Evaluation {
+                decision: RuleDecision::Review(explanation.summary()),
+                explanation,
+            }
+        }
+        _ => evaluation,
+    }
+}
+
+fn evaluate_shortcuts(
     rules: &[Rule],
     any_sender: &HashSet<String>,
     action_kind: &str,

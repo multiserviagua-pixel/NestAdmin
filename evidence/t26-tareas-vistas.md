@@ -31,4 +31,4 @@ La vista previa admite `?muchos` (más de 50 tarjetas en «Con error» y «Cerra
 - **Windows real:** la ventana con WebView2 no se ha recorrido a mano ni está automatizada. Por eso T26 sigue parcial.
 - **Teclado y lectores de pantalla:** los roles ARIA (secciones con título, listas, pestañas) se han revisado por código; no se ha recorrido el tablero solo con teclado ni probado con Narrador.
 - **Auditoría automática:** la herramienta Axe no estaba disponible en esta sesión.
-- **Plantillas de pipeline:** no existen todavía; se añadirán a R25 en su fase.
+- **Plantillas de pipeline:** el motor, los comandos IPC y `api.ts`, `types.ts` y `mock.ts` existen y tienen pruebas de Rust (D148–D151, `crates/core/tests/pipeline.rs`, `crates/app/tests/pipelines.rs`, `crates/app/tests/reprocess.rs`, `crates/desktop/src/recorrido.rs`), pero **la interfaz de plantillas (fase 4) no existe**: la vista previa solo expone una ejecución de muestra con `?pipelines` a través de `mock.ts`, sin pantalla que la muestre. No hay recorrido real en Windows.

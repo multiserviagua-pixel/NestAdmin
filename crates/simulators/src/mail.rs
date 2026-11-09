@@ -126,6 +126,21 @@ impl MailSimulator {
         *self.attachment_failure.lock().expect("mutex") = failure;
     }
 
+    /// Para pruebas: añade un mensaje sintético al final de la bandeja. Falla con `conflict` si
+    /// ya existe un mensaje con ese identificador.
+    pub fn add_message(&self, message: Message) -> SimResult<()> {
+        self.state.mutate(|s| {
+            if s.messages.iter().any(|m| m.id == message.id) {
+                return Err(error(
+                    codes::CONFLICT,
+                    format!("el mensaje {} ya existe", message.id),
+                ));
+            }
+            s.messages.push(message);
+            Ok(((), true))
+        })
+    }
+
     /// Añade un adjunto sintético a un mensaje existente y devuelve su identificador.
     pub fn add_attachment(
         &self,

@@ -20,11 +20,14 @@ import type {
   RefinePreview,
   RefinementView,
   SeenInvoice,
+  PipelineOverview,
+  PipelineRunView,
   Rule,
   RuleFinding,
   RuleSeed,
   RuleStats,
   RuleView,
+  TaskTemplate,
   SettingsView,
   Simulation,
   Suggestions,
@@ -108,6 +111,23 @@ export const api = {
   editDraft: (id: number, body: string) => invoke<Task>("edit_draft", { id, body }),
   reject: (id: number) => invoke<Task>("reject", { id }),
   retry: (id: number) => invoke<Task>("retry", { id }),
+  /** Plantillas de pipeline (D149): versión vigente de cada una, archivadas incluidas. */
+  taskTemplates: () => invoke<TaskTemplate[]>("task_templates"),
+  /** Una plantilla nueva nace inactiva; guardar una existente crea una versión nueva y conserva
+   * su estado. Los pasos son del catálogo cerrado. Una plantilla nunca autoriza nada. */
+  saveTaskTemplate: (
+    id: string | null,
+    name: string,
+    conditions: { sender?: string; sender_domain?: string },
+    steps: Array<{ kind: string }>,
+  ) => invoke<TaskTemplate>("save_task_template", { id, name, conditions, steps }),
+  setTaskTemplateActive: (id: string, active: boolean) =>
+    invoke<TaskTemplate>("set_task_template_active", { id, active }),
+  /** Ejecuciones de pipeline con sus pasos y, por tarea retenida, qué la retiene (D148). */
+  pipelineOverview: () => invoke<PipelineOverview>("pipeline_overview"),
+  /** «Continuar sin ese paso» (D150): la respuesta irá siempre a revisión. */
+  waivePipelineStep: (stepId: number, note: string) =>
+    invoke<PipelineRunView>("waive_pipeline_step", { stepId, note }),
   rules: () => invoke<Rule[]>("rules"),
   ruleViews: () => invoke<RuleView[]>("rule_views"),
   /** `id` puede ser `null` (se genera del nombre). `acknowledgeAnySender` no tiene valor por

@@ -1396,3 +1396,268 @@ fn clave_y_respaldo_cambian_la_espera_y_la_configuracion() {
     );
     s.close();
 }
+
+/// R25, D149 y D150 por la ventana: se guarda y activa una plantilla (un paso fuera del catálogo
+/// se rechaza), llega un correo con una factura adjunta, la respuesta espera sin gastar IA,
+/// «Continuar sin ese paso» no es válido mientras la factura avanza, y al aprobar la factura la
+/// cola despierta enseguida (sin esperar al sondeo de 5 s) y la respuesta llega a revisión, sin
+/// enviar nada: la plantilla no autoriza.
+#[test]
+fn plantilla_de_pipeline_la_respuesta_espera_a_la_factura_y_no_se_envia_sola() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = data_dir_for(&dir);
+    let ai = FakeOllama::start(Mode::Answer);
+    select_local(&data, &ai.url);
+    let s = Session::open(test_deps(&data, &ai.url));
+
+    assert_eq!(s.ok("task_templates", json!({})), json!([]));
+    let unknown = s.call(
+        "save_task_template",
+        json!({
+            "id": null, "name": "Mala", "conditions": {},
+            "steps": [{ "kind": "attachment_invoices" }, { "kind": "send_reply" }],
+        }),
+    );
+    assert!(unknown.is_err(), "un paso fuera del catálogo se rechaza");
+    assert_eq!(s.ok("task_templates", json!({})), json!([]));
+    let saved = s.ok(
+        "save_task_template",
+        json!({
+            "id": null, "name": "Facturas de Zeta",
+            "conditions": { "sender_domain": "proveedor-zeta.test" },
+            "steps": [{ "kind": "attachment_invoices" }, { "kind": "reply" }],
+        }),
+    );
+    assert_eq!(saved["id"], "facturas-de-zeta");
+    assert_eq!(
+        (saved["version"].as_i64(), saved["active"].as_bool()),
+        (Some(1), Some(false))
+    );
+    let active = s.ok(
+        "set_task_template_active",
+        json!({ "id": "facturas-de-zeta", "active": true }),
+    );
+    assert_eq!(active["active"], true);
+
+    {
+        let shared = s.app.state::<SharedState>();
+        let app = shared.app().unwrap();
+        let sim = app.simulators().0;
+        sim.add_message(nestadmin_simulators::Message {
+            id: "Z-1".into(),
+            subject: Some("Pedido".into()),
+            from: Some("ventas@proveedor-zeta.test".into()),
+            to: Some(vec!["administracion@nestadmin.test".into()]),
+            body: Some("Texto sintético.".into()),
+            date: Some(today_text()),
+            attachments: Vec::new(),
+        })
+        .unwrap();
+        sim.add_attachment(
+            "Z-1",
+            "zeta.txt",
+            "text/plain",
+            &invoice("Zeta SL", "Z-1", 1, "121.00"),
+        )
+        .unwrap();
+    }
+    s.ok("fetch_mail", json!({}));
+    let overview = s.ok("pipeline_overview", json!({}));
+    let run = &overview["runs"][0];
+    assert_eq!(run["template_id"], "facturas-de-zeta");
+    assert_eq!(run["template_name"], "Facturas de Zeta");
+    let reply_step = run["steps"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|st| st["kind"] == "reply")
+        .unwrap()
+        .clone();
+    let reply_id = reply_step["task_id"].as_i64().unwrap();
+    assert_eq!(reply_step["blocked"]["reason"], "waiting");
+
+    // La factura llega a revisión y la respuesta sigue en cola, sin intentos ni IA.
+    let invoice_task = s
+        .tasks()
+        .into_iter()
+        .find(|t| {
+            t["kind"] == "invoice" && t["input_ref"].as_str().unwrap().contains("simulador:Z-1")
+        })
+        .expect("factura del correo");
+    let invoice_task = s.wait_state(id(&invoice_task), "awaiting_review");
+    let reply = s.task(reply_id);
+    assert_eq!(
+        (reply["state"].as_str(), reply["attempts"].as_i64()),
+        (Some("queued"), Some(0))
+    );
+    // Omitir un paso que avanza, o la propia respuesta, no es válido.
+    for step in run["steps"].as_array().unwrap() {
+        assert!(
+            s.call(
+                "waive_pipeline_step",
+                json!({ "stepId": step["id"], "note": "" })
+            )
+            .is_err(),
+            "{step}"
+        );
+    }
+
+    // Que la cola esté ociosa (todo lo demás hecho) y, al aprobar, despierte sin esperar 5 s.
+    let started = Instant::now();
+    loop {
+        let busy = s
+            .tasks()
+            .iter()
+            .any(|t| t["state"] == "running" || (t["state"] == "queued" && id(t) != reply_id));
+        if !busy {
+            break;
+        }
+        assert!(started.elapsed() < WAIT, "la cola no quedó ociosa");
+        thread::sleep(Duration::from_millis(25));
+    }
+    thread::sleep(Duration::from_millis(400));
+    let approved_at = Instant::now();
+    let done = s.ok(
+        "approve",
+        json!({ "id": id(&invoice_task), "version": version(&invoice_task) }),
+    );
+    assert_eq!(done["state"], "completed");
+    let review = s.wait_state(reply_id, "awaiting_review");
+    assert!(
+        approved_at.elapsed() < Duration::from_secs(4),
+        "la cola debe despertar al aprobar: {:?}",
+        approved_at.elapsed()
+    );
+    assert_eq!(
+        review["result"]["evaluation"]["code"],
+        "no_active_rule_matches"
+    );
+    assert_eq!(s.sent(), 0, "la plantilla no envía nada");
+    assert_eq!(s.registered(), 1);
+    let overview = s.ok("pipeline_overview", json!({}));
+    assert!(overview["runs"][0]["steps"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|st| st["blocked"].is_null() && st["waivable"] == false));
+    s.close();
+}
+
+/// Fecha `AAAA-MM-DD` de hoy (UTC): las plantillas solo se aplican a correo fechado desde su
+/// activación (D149), así que los correos de prueba llevan la fecha de hoy.
+fn today_text() -> String {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let z = (secs / 86_400) as i64 + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+    format!("{y:04}-{m:02}-{d:02}")
+}
+
+/// D150 por la ventana: un adjunto que nunca podrá importarse (vacío) deja la respuesta
+/// «Bloqueada»; «Continuar sin ese paso» es válido, libera la respuesta (que va a revisión) y
+/// repetirlo es idempotente.
+#[test]
+fn continuar_sin_ese_paso_por_la_ventana_libera_la_respuesta_a_revision() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = data_dir_for(&dir);
+    let ai = FakeOllama::start(Mode::Answer);
+    select_local(&data, &ai.url);
+    let s = Session::open(test_deps(&data, &ai.url));
+    s.ok(
+        "save_task_template",
+        json!({
+            "id": "zeta", "name": "Zeta", "conditions": {},
+            "steps": [{ "kind": "attachment_invoices" }, { "kind": "reply" }],
+        }),
+    );
+    s.ok(
+        "set_task_template_active",
+        json!({ "id": "zeta", "active": true }),
+    );
+    {
+        let shared = s.app.state::<SharedState>();
+        let app = shared.app().unwrap();
+        let sim = app.simulators().0;
+        sim.add_message(nestadmin_simulators::Message {
+            id: "Z-9".into(),
+            subject: Some("Pedido".into()),
+            from: Some("ventas@proveedor-zeta.test".into()),
+            to: Some(vec!["administracion@nestadmin.test".into()]),
+            body: Some("Texto sintético.".into()),
+            date: Some(today_text()),
+            attachments: Vec::new(),
+        })
+        .unwrap();
+        sim.add_attachment("Z-9", "vacia.txt", "text/plain", b"")
+            .unwrap();
+    }
+    s.ok("fetch_mail", json!({}));
+    let overview = s.ok("pipeline_overview", json!({}));
+    let run = overview["runs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| {
+            r["steps"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|st| st["label"] == "vacia.txt")
+        })
+        .expect("ejecución del correo Z-9")
+        .clone();
+    let steps = run["steps"].as_array().unwrap();
+    let attachment = steps
+        .iter()
+        .find(|st| st["kind"] == "attachment_invoices")
+        .unwrap();
+    let reply = steps.iter().find(|st| st["kind"] == "reply").unwrap();
+    assert_eq!(attachment["error_code"], "attachment_rejected");
+    assert_eq!(attachment["waivable"], true);
+    assert_eq!(reply["blocked"]["reason"], "blocked");
+    assert_eq!(reply["blocked"]["by"][0]["code"], "attachment_rejected");
+    let reply_id = reply["task_id"].as_i64().unwrap();
+    assert_eq!(s.task(reply_id)["state"], "queued");
+
+    let updated = s.ok(
+        "waive_pipeline_step",
+        json!({ "stepId": attachment["id"], "note": "Sin adjunto válido" }),
+    );
+    let waived = updated["steps"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|st| st["kind"] == "attachment_invoices")
+        .unwrap();
+    assert_eq!(waived["waived"], true);
+    assert_eq!(waived["waived_note"], "Sin adjunto válido");
+    let review = s.wait_state(reply_id, "awaiting_review");
+    assert_eq!(
+        review["result"]["evaluation"]["code"],
+        "no_active_rule_matches"
+    );
+    // Repetirlo no falla ni añade otro evento.
+    let again = s.ok(
+        "waive_pipeline_step",
+        json!({ "stepId": attachment["id"], "note": "" }),
+    );
+    assert_eq!(again["subject_task_id"], run["subject_task_id"]);
+    let events = s
+        .audit()
+        .into_iter()
+        .filter(|e| e["action"] == "pipeline_step")
+        .count();
+    assert_eq!(events, 1);
+    assert_eq!(s.sent(), 0);
+    s.close();
+}

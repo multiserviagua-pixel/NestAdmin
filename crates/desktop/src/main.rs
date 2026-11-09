@@ -23,13 +23,14 @@ use nestadmin_app::initial_read::{
     FolderPreview, InitialReadOverview, InitialReadStatus, ReadExpectation, ReadStep,
 };
 use nestadmin_app::panel::{MergePreview, NewRule, RuleView, Simulation};
+use nestadmin_app::pipelines::{PipelineOverview, RunView};
 use nestadmin_app::refine::{
     ConsentView, RefineExpectation, RefineMode, RefinePreview, RefineTrigger, RefinementView,
 };
 use nestadmin_app::rules::RuleFinding;
 use nestadmin_app::suggest::{RuleSeed, SeenInvoice, Suggestions, ThresholdSettings};
 use nestadmin_app::{AiWait, App, AppPaths, LocalFallback, ProviderInfo};
-use nestadmin_core::{AuditEntry, Rule, RuleStats, Task};
+use nestadmin_core::{AuditEntry, Rule, RuleStats, Task, TaskTemplate};
 use nestadmin_extract::{Extractor, Tesseract};
 use nestadmin_mail::PendingAuthorization;
 use nestadmin_setup::{Cancel, Report, Setup, SetupError, Startup, Status, WindowsSystem};
@@ -505,6 +506,8 @@ fn approve<R: Runtime>(
     version: i64,
 ) -> CmdResult<Task> {
     let task = shared.app()?.approve(id, version).map_err(text);
+    // Una tarea que esperaba a esta (pipeline) puede empezar ya, sin esperar al sondeo.
+    shared.wake();
     changed(&handle);
     task
 }
@@ -517,6 +520,7 @@ fn confirm_not_sent<R: Runtime>(
     id: i64,
 ) -> CmdResult<Task> {
     let task = shared.app()?.confirm_not_sent(id).map_err(text);
+    shared.wake();
     changed(&handle);
     task
 }
@@ -540,6 +544,7 @@ fn reject<R: Runtime>(
     id: i64,
 ) -> CmdResult<Task> {
     let task = shared.app()?.reject(id).map_err(text)?;
+    shared.wake();
     changed(&handle);
     Ok(task)
 }
@@ -554,6 +559,75 @@ fn retry<R: Runtime>(
     shared.wake();
     changed(&handle);
     Ok(task)
+}
+
+/// Versión vigente de cada plantilla de pipeline, archivadas incluidas (D149).
+#[tauri::command]
+fn task_templates(shared: State<'_, SharedState>) -> CmdResult<Vec<TaskTemplate>> {
+    shared.app()?.task_templates().map_err(text)
+}
+
+/// Guarda una plantilla (nueva e inactiva, o versión nueva de una existente). Los pasos son del
+/// catálogo cerrado; la plantilla nunca autoriza nada.
+#[tauri::command]
+fn save_task_template<R: Runtime>(
+    shared: State<'_, SharedState>,
+    handle: AppHandle<R>,
+    id: Option<String>,
+    name: String,
+    conditions: Value,
+    steps: Value,
+) -> CmdResult<TaskTemplate> {
+    let template = shared
+        .app()?
+        .save_task_template(id.as_deref(), &name, &conditions, &steps)
+        .map_err(text)?;
+    changed(&handle);
+    Ok(template)
+}
+
+#[tauri::command]
+fn set_task_template_active<R: Runtime>(
+    shared: State<'_, SharedState>,
+    handle: AppHandle<R>,
+    id: String,
+    active: bool,
+) -> CmdResult<TaskTemplate> {
+    let template = shared
+        .app()?
+        .set_task_template_active(&id, active)
+        .map_err(text)?;
+    changed(&handle);
+    Ok(template)
+}
+
+/// Ejecuciones de pipeline con sus pasos, la plantilla y, por tarea retenida, qué la retiene.
+///
+/// Con muchas ejecuciones la consulta no es instantánea, así que se hace fuera del hilo de la
+/// ventana, como `fetch_mail`.
+#[tauri::command]
+async fn pipeline_overview(shared: State<'_, SharedState>) -> CmdResult<PipelineOverview> {
+    let worker = Arc::clone(shared.inner());
+    tauri::async_runtime::spawn_blocking(move || worker.app()?.pipeline_overview().map_err(text))
+        .await
+        .map_err(text)?
+}
+
+/// «Continuar sin ese paso»: la persona lo pide para un paso atascado; la respuesta irá siempre a
+/// revisión (D150).
+#[tauri::command]
+fn waive_pipeline_step<R: Runtime>(
+    shared: State<'_, SharedState>,
+    handle: AppHandle<R>,
+    step_id: i64,
+    note: String,
+) -> CmdResult<RunView> {
+    let (run, newly) = shared.app()?.waive_step(step_id, &note).map_err(text)?;
+    if newly {
+        shared.wake();
+    }
+    changed(&handle);
+    Ok(run)
 }
 
 #[tauri::command]
@@ -2062,6 +2136,11 @@ fn configure<R: Runtime>(builder: Builder<R>, prepare_only: bool) -> Builder<R> 
             edit_draft,
             reject,
             retry,
+            task_templates,
+            save_task_template,
+            set_task_template_active,
+            pipeline_overview,
+            waive_pipeline_step,
             rules,
             rule_views,
             create_rule,
