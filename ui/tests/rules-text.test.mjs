@@ -18,6 +18,7 @@ import {
   anySenderEditNotice,
   auditMatches,
   auditMentionsRule,
+  capitalize,
   conditionsSummary,
   draftConditions,
   draftOf,
@@ -301,7 +302,8 @@ test("todos los códigos de motivo tienen texto y ninguno se muestra como códig
   for (const code of REASON_CODES) {
     const text = reasonText(code);
     assert.ok(text.length > 15, code);
-    assert.ok(!text.includes(code), `${code} se muestra en crudo: ${text}`);
+    // «rodaje» es además una palabra del texto («en rodaje»): para ese código solo se comprueba que no salga con guion bajo.
+    if (code !== "rodaje") assert.ok(!text.includes(code), `${code} se muestra en crudo: ${text}`);
     assert.ok(!text.includes("_"), `${code}: ${text}`);
   }
 });
@@ -313,6 +315,16 @@ test("los códigos del frontend son los del backend", () => {
   const variants = [...body.matchAll(/^ {4}([A-Z][A-Za-z]+),$/gm)].map((m) => m[1].replace(/([a-z])([A-Z])/g, "$1_$2").toLowerCase());
   assert.ok(variants.length >= 12, "no se pudo leer el enum del backend");
   assert.deepEqual([...REASON_CODES].sort(), variants.sort());
+});
+
+test("el motivo del rodaje dice lo mismo que el backend y no lleva contenido del correo", () => {
+  const rust = readFileSync(new URL("../../crates/app/src/rules.rs", import.meta.url), "utf8").replace(/\r\n/g, "\n");
+  const backend = /RODAJE_REASON: &str =\s*"([^"]+)"/.exec(rust)?.[1];
+  assert.equal(backend, "En rodaje: esta regla aprendida enviará sola a partir del envío n.º 4");
+  assert.equal(capitalize(reasonText("rodaje")), backend);
+  // Con o sin hechos, el texto es el mismo: los hechos (regla, versión, envíos que faltan) no se mezclan.
+  assert.equal(reasonText("rodaje", { rule_id: "regla-ana", rule_version: 2, left: 2, of: 3 }), reasonText("rodaje"));
+  assert.ok(!reasonText("rodaje", { rule_id: "regla-ana" }).includes("regla-ana"));
 });
 
 test("los motivos usan los datos de la evaluación y no inventan", () => {

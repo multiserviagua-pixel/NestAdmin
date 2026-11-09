@@ -1028,6 +1028,15 @@ pub struct LimitSkipped {
     pub currencies: Vec<String>,
 }
 
+/// Lo que se crea al aceptar una sugerencia (ver `App::accept_plan`).
+pub(crate) struct AcceptPlan {
+    pub(crate) action_kind: String,
+    pub(crate) conditions: Value,
+    pub(crate) name: String,
+    pub(crate) origin: Value,
+    pub(crate) evidence: Value,
+}
+
 impl App {
     /// Señales con lo que necesita `suggest`. Solo lectura. Solo se leen las tareas de
     /// facturas con una aprobación o un rechazo válidos (proveedor, importe, si estaba limpia
@@ -1273,6 +1282,32 @@ impl App {
             }
         }
         let all = self.rule_suggestions()?;
+        let plan = self.accept_plan(&all, fingerprint, shown, name, model_limit, user_limit)?;
+        let id = self.unique_rule_id(&plan.name)?;
+        let (rule, _created) = self.store.accept_suggestion(
+            fingerprint,
+            &id,
+            &plan.action_kind,
+            &plan.conditions,
+            Some(&plan.name),
+            &plan.origin,
+            &plan.evidence,
+        )?;
+        self.rule_view(&rule.id)
+    }
+
+    /// Lo que se crea al aceptar una sugerencia vigente: condiciones ya comprobadas con
+    /// `check_rule`, nombre, origen y evidencia. Solo lectura. Lo comparten la aceptación de una
+    /// tarjeta y la del lote aprendido (D173), que así no duplican la lógica.
+    pub(crate) fn accept_plan(
+        &self,
+        all: &Suggestions,
+        fingerprint: &str,
+        shown: &str,
+        name: Option<&str>,
+        model_limit: Option<&str>,
+        user_limit: Option<&str>,
+    ) -> AppResult<AcceptPlan> {
         let c = all
             .candidates
             .iter()
@@ -1319,7 +1354,7 @@ impl App {
                 None => {}
                 Some(limit) => {
                     let proposal = self
-                    .refinement_view_for(&all)?
+                    .refinement_view_for(all)?
                     .limits
                     .into_iter()
                     .find(|l| l.fingerprint == c.fingerprint && l.max_total == limit)
@@ -1351,7 +1386,6 @@ impl App {
             Some(n) => n,
             None => c.name.clone(),
         };
-        let id = self.unique_rule_id(&name)?;
         let mut task_ids = c.evidence.task_ids.clone();
         let skip = task_ids.len().saturating_sub(MAX_ORIGIN_TASKS);
         task_ids.drain(..skip);
@@ -1374,16 +1408,13 @@ impl App {
             "reappeared": c.evidence.reappeared.is_some(),
         });
         let evidence = json!({ "baseline": c.evidence.count, "watermark": all.watermark });
-        let (rule, _created) = self.store.accept_suggestion(
-            fingerprint,
-            &id,
-            &c.action_kind,
-            &conditions,
-            Some(&name),
-            &origin,
-            &evidence,
-        )?;
-        self.rule_view(&rule.id)
+        Ok(AcceptPlan {
+            action_kind: c.action_kind.clone(),
+            conditions,
+            name,
+            origin,
+            evidence,
+        })
     }
 
     /// Las facturas que solo se leyeron (primera lectura) en la serie de una sugerencia, con el
@@ -1493,7 +1524,7 @@ impl App {
     }
 }
 
-fn stale_message() -> String {
+pub(crate) fn stale_message() -> String {
     "La sugerencia ya no está vigente: los datos cambiaron o ya se resolvió. Actualice la lista."
         .into()
 }

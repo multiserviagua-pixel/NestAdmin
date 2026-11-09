@@ -70,6 +70,9 @@ pub enum ReasonCode {
     DraftNotChecked,
     /// El borrador contiene enlaces, direcciones, teléfonos o IBAN (D160).
     DraftFlagged,
+    /// Una regla aprendida aceptada en lote aún está en rodaje (D174): sus primeros envíos se
+    /// revisan. Va después de todos los bloqueos: nunca los sustituye.
+    Rodaje,
 }
 
 /// Resultado de comprobar una regla contra los datos de una tarea. El motivo de no
@@ -135,6 +138,7 @@ impl Explanation {
                 "el borrador contiene datos de contacto que no se pueden dar por buenos ({}); compruébelos",
                 join_ids(&self.facts["flags"])
             ),
+            ReasonCode::Rodaje => RODAJE_REASON.into(),
             ReasonCode::SenderRequired => format!(
                 "la regla no indica remitente; añádalo o valide la opción avanzada (regla: {})",
                 self.facts["rule_ids"]
@@ -175,6 +179,22 @@ impl Explanation {
         }
     }
 
+    /// Explicación de un envío de rodaje (D174): la regla aprendida coincide y no hay bloqueos, pero
+    /// aún no ha enviado sola. Solo ids y recuentos; las candidatas se conservan para las
+    /// estadísticas (D129).
+    pub fn rodaje(rule_id: &str, rule_version: i64, left: i64, candidates: Vec<RuleCheck>) -> Self {
+        Self {
+            code: ReasonCode::Rodaje,
+            facts: json!({
+                "rule_id": rule_id,
+                "rule_version": rule_version,
+                "left": left,
+                "of": nestadmin_core::RODAJE_SENDS,
+            }),
+            candidates,
+        }
+    }
+
     /// Explicación de una factura separada de un documento con varias.
     pub fn split_invoice() -> Self {
         Self {
@@ -188,6 +208,10 @@ impl Explanation {
 /// Motivo cuando el pipeline continuó sin un paso (D150).
 pub const PIPELINE_WAIVED: &str =
     "se continuó sin un paso anterior del pipeline; revise antes de enviar";
+
+/// Motivo de un envío de rodaje (D174).
+pub const RODAJE_REASON: &str =
+    "En rodaje: esta regla aprendida enviará sola a partir del envío n.º 4";
 
 /// Motivo cuando falta la comprobación local de moneda (D127).
 pub const CURRENCY_UNCHECKED: &str = "no consta la comprobación de moneda; reprocese o revise";
@@ -224,6 +248,38 @@ pub const SPLIT_REASON: &str =
 pub struct Evaluation {
     pub decision: RuleDecision,
     pub explanation: Explanation,
+}
+
+impl Evaluation {
+    /// Si la decisión es automatizar, la pasa a revisión por el rodaje de la regla (D174), con
+    /// `left` envíos de rodaje pendientes. Solo restringe: una revisión previa (y su motivo, que
+    /// viene de los bloqueos de `send_draft_blocker`) no cambia nunca. Devuelve el id de la regla
+    /// que automatizaría, para que quien llama sepa si hay rodaje que consultar.
+    pub fn automating_rule(&self) -> Option<(&str, i64)> {
+        match &self.decision {
+            RuleDecision::Automate {
+                rule_id,
+                rule_version,
+            } => Some((rule_id.as_str(), *rule_version)),
+            RuleDecision::Review(_) => None,
+        }
+    }
+
+    pub fn into_rodaje(self, left: i64) -> Self {
+        let RuleDecision::Automate {
+            rule_id,
+            rule_version,
+        } = &self.decision
+        else {
+            return self;
+        };
+        let explanation =
+            Explanation::rodaje(rule_id, *rule_version, left, self.explanation.candidates);
+        Evaluation {
+            decision: RuleDecision::Review(explanation.summary()),
+            explanation,
+        }
+    }
 }
 
 /// `result` es el resultado de la tarea (ver `pipeline`). Condiciones admitidas:

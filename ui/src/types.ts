@@ -116,7 +116,19 @@ export interface RuleView extends Rule {
   /** Marca de la opción avanzada: la regla de envío contesta a cualquier remitente. */
   any_sender_ack_at: number | null;
   /** De dónde sale la regla: al unificar, las reglas de origen y la opción elegida (D131). */
-  origin: { kind: string; sources?: Array<{ id: string; version: number }>; option?: string; count?: number; threshold?: number } | null;
+  origin: {
+    kind: string;
+    sources?: Array<{ id: string; version: number }>;
+    option?: string;
+    count?: number;
+    threshold?: number;
+    /** Sugerencias: aprobaciones de la persona o pares aprendidos en la primera carga (D172). */
+    evidence_origin?: "approved" | "learned";
+    /** Aceptada en lote con «Aceptar y activar todas» (D173). */
+    batch?: boolean;
+    /** Rodaje de una regla aceptada en lote: envíos de revisión que le quedan y total (D174). Solo en las aprendidas en lote. */
+    rodaje?: { left: number; of: number };
+  } | null;
   stats: RuleStats;
 }
 
@@ -547,6 +559,67 @@ export interface Suggestions {
   hidden: { covered: number; discarded: number; accepted: number; invalid: number; not_suggested: number; seen_invalidated: number };
   thresholds: ThresholdSettings;
   watermark: number;
+}
+
+// ---- Aceptar y activar en lote las reglas aprendidas (D173, D174) ----
+
+/** Una regla de la tanda aprendida con su evidencia: solo recuentos y la dirección o el dominio de la propia regla. */
+export interface LearnedBatchItem {
+  /** Es la huella de la sugerencia: el id que se pasa a `acceptAndActivateLearned`. */
+  id: string;
+  shown: string;
+  name: string;
+  category: string | null;
+  /** Dirección exacta o dominio al que respondería la regla. */
+  subject: string;
+  conditions: Record<string, string>;
+  count: number;
+  threshold: number;
+  learned: number;
+  /** Direcciones distintas (más de una solo en las reglas por dominio). */
+  addresses: number;
+}
+
+/** Las sugerencias aprendidas pendientes y la huella de la tanda: si algo cambia, la aceptación se rechaza. */
+export interface LearnedBatch {
+  batch_fp: string;
+  items: LearnedBatchItem[];
+  /** Envíos de rodaje que tendrá cada regla al aceptarla. */
+  rodaje_sends: number;
+}
+
+export interface LearnedAcceptedRule {
+  id: string;
+  rule_id: string;
+  name: string;
+  /** `activated` (aceptada y activada ahora) o `already_active` (ya lo estaba: nada cambió). */
+  status: "activated" | "already_active";
+  /** Envíos de rodaje que le quedan; `null`: sin rodaje. */
+  rodaje_left: number | null;
+}
+
+/** La regla por la que se deshizo todo, y por qué, para que la persona pueda desmarcarla. */
+export interface LearnedAcceptFailure {
+  id: string;
+  name: string;
+  code: "invalid_rule" | "not_valid" | "rule_exists" | "rule_archived" | "write_failed";
+  message: string;
+}
+
+export interface LearnedAcceptOutcome {
+  /** `true`: todas quedaron activas (ahora o ya lo estaban). `false`: no se escribió nada y `failed` dice por qué. */
+  applied: boolean;
+  rules: LearnedAcceptedRule[];
+  activated: number;
+  already_active: number;
+  failed: LearnedAcceptFailure | null;
+}
+
+export interface LearnedDeactivateOutcome {
+  /** Reglas que estaban activas y ahora no. */
+  deactivated: string[];
+  /** Reglas aprendidas que existen, activas o no. */
+  learned_total: number;
 }
 
 // ---- Capa con modelo de las sugerencias (D134) ----

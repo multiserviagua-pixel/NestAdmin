@@ -404,7 +404,31 @@ impl Store {
     /// Resuelve la señal `approved` de una versión: `valid` si la acción quedó confirmada o
     /// reconciliada, `void` si no llegó a ejecutarse. Sin esa fila no hace nada.
     pub fn settle_signal(&mut self, task_id: i64, content_version: i64, valid: bool) -> Result<()> {
-        self.conn.execute(
+        self.settle_approval(task_id, content_version, valid, None)
+            .map(|_| ())
+    }
+
+    /// Como `settle_signal`; con `rodaje_rule` (la regla aprendida que mandó la tarea a revisión por
+    /// el Rodaje, D174), en la **misma transacción** baja su contador si esta aprobación pasa a
+    /// `valid` ahora (no antes) y se hizo **sin editar**. Así un reintento no cuenta dos veces y una
+    /// aprobación que no llegó a enviarse no cuenta. Devuelve los envíos de rodaje que quedan.
+    pub fn settle_approval(
+        &mut self,
+        task_id: i64,
+        content_version: i64,
+        valid: bool,
+        rodaje_rule: Option<&str>,
+    ) -> Result<Option<i64>> {
+        let tx = self.conn.transaction()?;
+        let before: Option<(String, String)> = tx
+            .query_row(
+                "SELECT state, edit_state FROM rule_signals
+                 WHERE kind = 'approved' AND task_id = ?1 AND content_version = ?2",
+                params![task_id, content_version],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?;
+        tx.execute(
             "UPDATE rule_signals SET state = ?3
              WHERE kind = 'approved' AND task_id = ?1 AND content_version = ?2",
             params![
@@ -413,7 +437,17 @@ impl Store {
                 if valid { "valid" } else { "void" }
             ],
         )?;
-        Ok(())
+        let mut left = None;
+        if let (true, Some((state, edit)), Some(rule)) = (valid, before, rodaje_rule) {
+            if state != "valid" && edit == "unedited" {
+                if let Some((now, _)) = rodaje_of(&tx, rule)?.filter(|(n, _)| *n > 0) {
+                    set_rodaje(&tx, rule, now - 1, "envío de rodaje aprobado sin editar")?;
+                    left = Some(now - 1);
+                }
+            }
+        }
+        tx.commit()?;
+        Ok(left)
     }
 
     pub fn rule_signals(&self) -> Result<Vec<SignalRow>> {
@@ -548,53 +582,125 @@ impl Store {
         evidence: &Value,
     ) -> Result<(Rule, bool)> {
         let tx = self.conn.transaction()?;
-        let prior: Option<(String, String)> = tx
-            .query_row(
-                "SELECT status, evidence_json FROM rule_suggestions WHERE fingerprint = ?1",
-                [fingerprint],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )
-            .optional()?;
-        if let Some((status, stored)) = prior {
-            if status == "accepted" {
-                let stored: Value = serde_json::from_str(&stored).unwrap_or(Value::Null);
-                if let Some(rule) = stored["rule_id"]
-                    .as_str()
-                    .map(|id| current_rule(&tx, id))
-                    .transpose()?
-                    .flatten()
-                {
-                    return Ok((rule, false));
-                }
-            }
-        }
-        if current_rule(&tx, new_id)?.is_some() {
-            return Err(CoreError::IdempotencyConflict(format!("regla {new_id}")));
-        }
-        let rule = insert_rule_version(&tx, new_id, 1, action_kind, conditions, false)?;
-        tx.execute(
-            "INSERT INTO rule_meta (rule_id, name, origin_json) VALUES (?1, ?2, ?3)",
-            params![new_id, name, serde_json::to_string(origin)?],
-        )?;
-        let mut stored = evidence.clone();
-        stored["rule_id"] = Value::String(new_id.to_owned());
-        let now = now_ms();
-        tx.execute(
-            "INSERT INTO rule_suggestions (fingerprint, status, evidence_json, decided_at)
-             VALUES (?1, 'accepted', ?2, ?3)
-             ON CONFLICT(fingerprint) DO UPDATE SET status = 'accepted',
-                 evidence_json = excluded.evidence_json, decided_at = excluded.decided_at",
-            params![fingerprint, serde_json::to_string(&stored)?, now],
-        )?;
-        tx.execute(
-            "INSERT INTO audit_log (at, task_id, action, status, authorization, detail) VALUES (?1, NULL, 'rule_suggestion', 'accepted', NULL, ?2)",
-            params![
-                now,
-                format!("{new_id} v1 (inactiva) creada desde la sugerencia {fingerprint}")
-            ],
+        let accepted = accept_in_tx(
+            &tx,
+            &BatchRule {
+                fingerprint,
+                new_id,
+                action_kind,
+                conditions,
+                name,
+                origin,
+                evidence,
+            },
         )?;
         tx.commit()?;
-        Ok((rule, true))
+        Ok(accepted)
+    }
+
+    /// Acepta y activa varias sugerencias aprendidas (D173) en **una sola transacción**: para cada
+    /// regla, la misma aceptación que `accept_suggestion` (idempotente por huella) y su activación
+    /// como una versión nueva. Todo o nada: si una falla (por ejemplo, un identificador ya usado o
+    /// una regla archivada) se deshace todo y se devuelve el índice de la que falló. Deja una
+    /// entrada de auditoría por regla y, si cambió algo, una agregada con `detail`; ninguna lleva
+    /// contenido. Quien llama ya comprobó cada regla con `check_rule`.
+    pub fn accept_and_activate_batch(
+        &mut self,
+        rules: &[BatchRule<'_>],
+        detail: &str,
+    ) -> std::result::Result<Vec<BatchApplied>, (usize, CoreError)> {
+        let tx = self.conn.transaction().map_err(|e| (0, e.into()))?;
+        let mut applied = Vec::with_capacity(rules.len());
+        for (index, rule) in rules.iter().enumerate() {
+            applied.push(apply_batch_rule(&tx, rule).map_err(|e| (index, e))?);
+        }
+        if applied.iter().any(|a| a.created || a.activated) {
+            tx.execute(
+                "INSERT INTO audit_log (at, task_id, action, status, authorization, detail) VALUES (?1, NULL, 'rule_learned_batch', 'activated_all', NULL, ?2)",
+                params![now_ms(), detail],
+            )
+            .map_err(|e| (0, e.into()))?;
+        }
+        tx.commit().map_err(|e| (0, e.into()))?;
+        Ok(applied)
+    }
+
+    /// Desactiva todas las reglas de origen `learned` que estén activas (D174), en una transacción,
+    /// con una entrada de auditoría por regla y una agregada. Idempotente: sin reglas activas de ese
+    /// origen no escribe nada. Devuelve las versiones inactivas nuevas.
+    pub fn deactivate_learned_rules(&mut self) -> Result<Vec<Rule>> {
+        let tx = self.conn.transaction()?;
+        let ids: Vec<String> = {
+            let mut stmt = tx.prepare(
+                "SELECT rule_id, origin_json FROM rule_meta WHERE origin_json IS NOT NULL ORDER BY rule_id",
+            )?;
+            let rows =
+                stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+            let mut ids = Vec::new();
+            for row in rows {
+                let (id, origin) = row?;
+                let origin: Value = serde_json::from_str(&origin).unwrap_or(Value::Null);
+                if is_learned_origin(&origin) {
+                    ids.push(id);
+                }
+            }
+            ids
+        };
+        let mut off = Vec::new();
+        for id in ids {
+            let Some(current) = current_rule(&tx, &id)?.filter(|r| r.active) else {
+                continue;
+            };
+            let rule = insert_rule_version(
+                &tx,
+                &id,
+                current.version + 1,
+                &current.action_kind,
+                &current.conditions,
+                false,
+            )?;
+            tx.execute(
+                "INSERT INTO audit_log (at, task_id, action, status, authorization, detail) VALUES (?1, NULL, 'rule_learned_batch', 'deactivated', NULL, ?2)",
+                params![
+                    now_ms(),
+                    format!("{id} v{} desactivada con las aprendidas", rule.version)
+                ],
+            )?;
+            off.push(rule);
+        }
+        if !off.is_empty() {
+            tx.execute(
+                "INSERT INTO audit_log (at, task_id, action, status, authorization, detail) VALUES (?1, NULL, 'rule_learned_batch', 'deactivated_all', NULL, ?2)",
+                params![
+                    now_ms(),
+                    format!("{} reglas aprendidas desactivadas", off.len())
+                ],
+            )?;
+        }
+        tx.commit()?;
+        Ok(off)
+    }
+
+    /// Envíos de rodaje que le quedan a una regla (D174), o `None` si no tiene rodaje (no se aceptó
+    /// por el lote aprendido). `Some(0)`: el rodaje terminó.
+    pub fn rodaje_left(&self, id: &str) -> Result<Option<i64>> {
+        Ok(rodaje_of(&self.conn, id)?.map(|(left, _)| left))
+    }
+
+    /// Reinicia el rodaje de una regla que aún lo tiene a medias (D174): una edición o un rechazo
+    /// de un envío de rodaje vuelven a exigir los envíos completos. Un rodaje ya terminado (0) o
+    /// intacto (completo) no cambia. `true` si cambió algo.
+    pub fn rodaje_reset(&mut self, id: &str) -> Result<bool> {
+        let tx = self.conn.transaction()?;
+        let changed = match rodaje_of(&tx, id)? {
+            Some((left, of)) if left > 0 && left < of => {
+                set_rodaje(&tx, id, of, "reiniciado por una edición o un rechazo")?;
+                true
+            }
+            _ => false,
+        };
+        tx.commit()?;
+        Ok(changed)
     }
 
     /// Valor guardado de un ajuste del panel (`rule_settings`), si existe.
@@ -1031,6 +1137,177 @@ pub fn parse_rule_label(label: &str) -> Option<(String, i64)> {
         return None;
     }
     Some((id.to_owned(), version.parse().ok()?))
+}
+
+/// Envíos de rodaje de una regla aprendida aceptada en lote (D174).
+pub const RODAJE_SENDS: i64 = 3;
+
+/// Una regla de un lote que se acepta (D173). Solo ids, condiciones y cifras.
+#[derive(Debug, Clone)]
+pub struct BatchRule<'a> {
+    pub fingerprint: &'a str,
+    pub new_id: &'a str,
+    pub action_kind: &'a str,
+    pub conditions: &'a Value,
+    pub name: Option<&'a str>,
+    pub origin: &'a Value,
+    pub evidence: &'a Value,
+}
+
+/// Lo que pasó con una regla del lote: se creó ahora o ya existía, y si se activó ahora.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BatchApplied {
+    pub rule: Rule,
+    pub created: bool,
+    pub activated: bool,
+}
+
+/// El origen de la regla es una sugerencia con evidencia aprendida en la primera carga (D172).
+pub fn is_learned_origin(origin: &Value) -> bool {
+    origin["evidence_origin"] == "learned"
+}
+
+/// Acepta una sugerencia dentro de una transacción (lógica común de `accept_suggestion` y del lote).
+fn accept_in_tx(tx: &rusqlite::Transaction<'_>, r: &BatchRule<'_>) -> Result<(Rule, bool)> {
+    let prior: Option<(String, String)> = tx
+        .query_row(
+            "SELECT status, evidence_json FROM rule_suggestions WHERE fingerprint = ?1",
+            [r.fingerprint],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?;
+    if let Some((status, stored)) = prior {
+        if status == "accepted" {
+            let stored: Value = serde_json::from_str(&stored).unwrap_or(Value::Null);
+            if let Some(rule) = stored["rule_id"]
+                .as_str()
+                .map(|id| current_rule(tx, id))
+                .transpose()?
+                .flatten()
+            {
+                return Ok((rule, false));
+            }
+        }
+    }
+    if current_rule(tx, r.new_id)?.is_some() {
+        return Err(CoreError::IdempotencyConflict(format!(
+            "regla {}",
+            r.new_id
+        )));
+    }
+    let rule = insert_rule_version(tx, r.new_id, 1, r.action_kind, r.conditions, false)?;
+    tx.execute(
+        "INSERT INTO rule_meta (rule_id, name, origin_json) VALUES (?1, ?2, ?3)",
+        params![r.new_id, r.name, serde_json::to_string(r.origin)?],
+    )?;
+    let mut stored = r.evidence.clone();
+    stored["rule_id"] = Value::String(r.new_id.to_owned());
+    let now = now_ms();
+    tx.execute(
+        "INSERT INTO rule_suggestions (fingerprint, status, evidence_json, decided_at)
+         VALUES (?1, 'accepted', ?2, ?3)
+         ON CONFLICT(fingerprint) DO UPDATE SET status = 'accepted',
+             evidence_json = excluded.evidence_json, decided_at = excluded.decided_at",
+        params![r.fingerprint, serde_json::to_string(&stored)?, now],
+    )?;
+    tx.execute(
+        "INSERT INTO audit_log (at, task_id, action, status, authorization, detail) VALUES (?1, NULL, 'rule_suggestion', 'accepted', NULL, ?2)",
+        params![
+            now,
+            format!(
+                "{} v1 (inactiva) creada desde la sugerencia {}",
+                r.new_id, r.fingerprint
+            )
+        ],
+    )?;
+    Ok((rule, true))
+}
+
+/// Acepta (si falta) y activa una regla del lote dentro de la transacción del lote.
+fn apply_batch_rule(tx: &rusqlite::Transaction<'_>, r: &BatchRule<'_>) -> Result<BatchApplied> {
+    let (rule, created) = accept_in_tx(tx, r)?;
+    if is_archived(tx, &rule.id)? {
+        return Err(CoreError::RuleArchived(rule.id));
+    }
+    let (rule, activated) = if rule.active {
+        (rule, false)
+    } else {
+        let active = insert_rule_version(
+            tx,
+            &rule.id,
+            rule.version + 1,
+            &rule.action_kind,
+            &rule.conditions,
+            true,
+        )?;
+        tx.execute(
+            "INSERT INTO audit_log (at, task_id, action, status, authorization, detail) VALUES (?1, NULL, 'rule_learned_batch', 'activated', NULL, ?2)",
+            params![
+                now_ms(),
+                format!(
+                    "{} v{} aceptada y activada en lote desde la sugerencia {}",
+                    active.id, active.version, r.fingerprint
+                )
+            ],
+        )?;
+        (active, true)
+    };
+    Ok(BatchApplied {
+        rule,
+        created,
+        activated,
+    })
+}
+
+/// Envíos de rodaje que quedan y total, leídos del origen de la regla (`origin.rodaje`).
+fn rodaje_of(conn: &rusqlite::Connection, id: &str) -> Result<Option<(i64, i64)>> {
+    let origin: Option<Option<String>> = conn
+        .query_row(
+            "SELECT origin_json FROM rule_meta WHERE rule_id = ?1",
+            [id],
+            |r| r.get(0),
+        )
+        .optional()?;
+    let origin: Value = origin
+        .flatten()
+        .and_then(|text| serde_json::from_str(&text).ok())
+        .unwrap_or(Value::Null);
+    // Con marca de rodaje pero un contador ilegible, falla cerrado: el rodaje sigue completo.
+    if origin["rodaje"].is_null() {
+        return Ok(None);
+    }
+    Ok(Some((
+        origin["rodaje"]["left"]
+            .as_i64()
+            .map_or(RODAJE_SENDS, |left| left.clamp(0, RODAJE_SENDS)),
+        origin["rodaje"]["of"].as_i64().unwrap_or(RODAJE_SENDS),
+    )))
+}
+
+/// Cambia el contador de rodaje del origen de la regla y lo deja en el historial, sin contenido.
+fn set_rodaje(tx: &rusqlite::Transaction<'_>, id: &str, left: i64, why: &str) -> Result<()> {
+    let text: Option<String> = tx.query_row(
+        "SELECT origin_json FROM rule_meta WHERE rule_id = ?1",
+        [id],
+        |r| r.get(0),
+    )?;
+    let mut origin: Value = text
+        .and_then(|t| serde_json::from_str(&t).ok())
+        .unwrap_or(Value::Null);
+    origin["rodaje"]["left"] = Value::from(left);
+    tx.execute(
+        "UPDATE rule_meta SET origin_json = ?2 WHERE rule_id = ?1",
+        params![id, serde_json::to_string(&origin)?],
+    )?;
+    tx.execute(
+        "INSERT INTO audit_log (at, task_id, action, status, authorization, detail) VALUES (?1, NULL, 'rule_rodaje', ?2, NULL, ?3)",
+        params![
+            now_ms(),
+            if left == 0 { "finished" } else { "counted" },
+            format!("{id}: {why}; faltan {left} envíos de rodaje")
+        ],
+    )?;
+    Ok(())
 }
 
 fn meta_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RuleMeta> {

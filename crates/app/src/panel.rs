@@ -282,10 +282,20 @@ impl App {
     }
 
     pub(crate) fn unique_rule_id(&self, name: &str) -> AppResult<String> {
+        self.unique_rule_id_avoiding(name, &HashSet::new())
+    }
+
+    /// Como `unique_rule_id`, evitando además los identificadores `reserved` (reglas de un lote que
+    /// aún no se han escrito, D173).
+    pub(crate) fn unique_rule_id_avoiding(
+        &self,
+        name: &str,
+        reserved: &HashSet<String>,
+    ) -> AppResult<String> {
         let base = slugify(name);
         let mut candidate = base.clone();
         let mut n = 1;
-        while self.store.rule_id_taken(&candidate)? {
+        while self.store.rule_id_taken(&candidate)? || reserved.contains(&candidate) {
             n += 1;
             candidate = format!("{base}-{n}");
         }

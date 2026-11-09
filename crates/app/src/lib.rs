@@ -12,6 +12,7 @@ pub mod initial_read;
 pub mod learn;
 pub mod learn_consent;
 pub mod learn_evidence;
+pub mod learn_rules;
 pub mod learn_state;
 pub mod panel;
 pub mod pipelines;
@@ -54,7 +55,9 @@ use crate::accounts::{
     split_id, AccountFetch, AccountView, Accounts, AttachmentFetch, AttachmentIssue, FetchReport,
     MailAccountsView, MailEnv, MailIssue, MailProviderKind,
 };
-use crate::rules::{evaluate_result_in_run, RuleDecision, REGISTER_INVOICE, SEND_DRAFT};
+use crate::rules::{
+    evaluate_result_in_run, Evaluation, RuleDecision, REGISTER_INVOICE, SEND_DRAFT,
+};
 
 pub const INVOICE: &str = "invoice";
 pub const EMAIL: &str = "email";
@@ -1931,6 +1934,10 @@ impl App {
             }
         };
         let evaluation = evaluate_result_in_run(&rules, &any_sender, kind, &result, step_waived);
+        // Una regla aprendida aceptada en lote revisa sus primeros envíos (D174). Va después de la
+        // evaluación completa: los bloqueos de `send_draft_blocker` ya tuvieron prioridad y solo una
+        // decisión de automatizar puede pasar a Rodaje.
+        let evaluation = self.apply_rodaje(evaluation, &mut result);
         // Solo ids, códigos e importes o nombres que ya están en el resultado (D125).
         result["evaluation"] = json!(evaluation.explanation);
         // La evidencia (D129) no puede impedir ni duplicar la acción: si no se guarda, la
@@ -1962,6 +1969,25 @@ impl App {
                     result["review_reason"] = json!(NO_REPLY_REASON);
                 }
                 Ok(self.store.await_review(task.id, &result)?)
+            }
+        }
+    }
+
+    /// Rodaje de las reglas aprendidas (D174): si la regla que automatizaría tiene envíos de rodaje
+    /// pendientes, la tarea va a revisión con el motivo `Rodaje`. Una regla sin rodaje (la mayoría)
+    /// no cambia nada. Si no se puede leer el contador, falla cerrado: va a revisión.
+    fn apply_rodaje(&self, evaluation: Evaluation, result: &mut Value) -> Evaluation {
+        let Some((rule_id, _)) = evaluation.automating_rule() else {
+            return evaluation;
+        };
+        match self.store.rodaje_left(rule_id) {
+            Ok(Some(left)) if left > 0 => evaluation.into_rodaje(left),
+            Ok(_) => evaluation,
+            Err(error) => {
+                result["evidence_error"] = json!(format!(
+                    "no se pudo comprobar el rodaje de la regla: {error}"
+                ));
+                evaluation.into_rodaje(nestadmin_core::RODAJE_SENDS)
             }
         }
     }
@@ -2508,6 +2534,9 @@ impl App {
             result["evidence_error"] = json!(format!("no se guardó la señal: {error}"));
         }
         let task_id = task.id;
+        // Si la tarea estaba en revisión por el Rodaje de una regla aprendida, aprobarla sin editar
+        // y que se envíe baja el contador de esa regla (D174), en la misma transacción que la señal.
+        let rodaje = rodaje_rule(&result);
         let done = self.execute(task, result, Authorization::Approval)?;
         // La aprobación solo vale como señal si la acción de esta versión quedó confirmada o
         // reconciliada; si falló o volvió a revisión, la señal queda anulada (D129).
@@ -2515,7 +2544,10 @@ impl App {
             && done.result.as_ref().is_some_and(|r| {
                 r["version"].as_i64() == Some(version) && r.get("sent_version").is_none()
             });
-        if let Err(error) = self.store.settle_signal(task_id, version, confirmed) {
+        if let Err(error) =
+            self.store
+                .settle_approval(task_id, version, confirmed, rodaje.as_deref())
+        {
             let note = json!({ "kind": "approved", "error": error.to_string() });
             let _ = self
                 .store
@@ -2548,6 +2580,12 @@ impl App {
         let signal = panel::signal_for(&task, &result, "edited");
         if let Err(error) = self.record_signal("edited", signal) {
             result["evidence_error"] = json!(format!("no se guardó la señal: {error}"));
+        }
+        // Editar un envío de rodaje reinicia el rodaje de su regla (D174).
+        if let Some(rule) = rodaje_rule(&result) {
+            if let Err(error) = self.store.rodaje_reset(&rule) {
+                result["evidence_error"] = json!(format!("no se reinició el rodaje: {error}"));
+            }
         }
         Ok(self.store.revise(task_id, &result)?)
     }
@@ -2703,6 +2741,15 @@ impl App {
             if let Err(error) = self.record_signal("rejected", signal) {
                 result["evidence_error"] = json!(format!("no se guardó la señal: {error}"));
                 self.store.revise(task_id, &result)?;
+            }
+            // Rechazar un envío de rodaje también reinicia el rodaje de su regla (D174).
+            if let Some(rule) = rodaje_rule(&result) {
+                if let Err(error) = self.store.rodaje_reset(&rule) {
+                    let note = json!({ "kind": "rodaje", "error": error.to_string() });
+                    let _ = self
+                        .store
+                        .record_event(task_id, "signal_error", "unsettled", &note);
+                }
             }
         }
         Ok(self.store.cancel(task_id)?)
@@ -2860,6 +2907,15 @@ impl App {
     }
 }
 
+/// Regla aprendida cuyo rodaje mandó la tarea a revisión (D174): solo si la evaluación guardada
+/// tiene el motivo `rodaje`. Cualquier otra revisión (un bloqueo, otra regla) no cuenta.
+fn rodaje_rule(result: &Value) -> Option<String> {
+    let evaluation = &result["evaluation"];
+    (evaluation["code"] == "rodaje")
+        .then(|| evaluation["facts"]["rule_id"].as_str().map(str::to_owned))
+        .flatten()
+}
+
 /// Marca un resultado como archivado (D159): sin `action` ni intento de recuperación.
 fn archived_result(result: &mut Value) {
     if let Some(fields) = result.as_object_mut() {
@@ -2929,8 +2985,10 @@ fn action_kind(task: &Task) -> &'static str {
 }
 
 /// Valida las condiciones de una regla (D123, D126, D127). `allow_no_sender`: la validación
-/// avanzada permite una regla de envío sin remitente.
-fn check_rule(action_kind: &str, conditions: &Value, allow_no_sender: bool) -> AppResult<()> {
+/// avanzada permite una regla de envío sin remitente. Es `pub` (oculta) solo para que las pruebas de
+/// la aceptación en lote (D173) puedan envolverla.
+#[doc(hidden)]
+pub fn check_rule(action_kind: &str, conditions: &Value, allow_no_sender: bool) -> AppResult<()> {
     let Some(map) = conditions.as_object() else {
         return Err(AppError::Invalid(
             "las condiciones de la regla deben ser un objeto".into(),

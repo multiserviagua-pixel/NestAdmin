@@ -531,6 +531,7 @@ export const REASON_CODES = [
   "empty_draft",
   "draft_not_checked",
   "draft_flagged",
+  "rodaje",
 ] as const;
 
 export type ReasonCode = (typeof REASON_CODES)[number];
@@ -592,6 +593,9 @@ export function reasonText(code: string, facts?: Record<string, unknown> | null)
       return "no consta la comprobación del borrador; reprocese o revise";
     case "draft_flagged":
       return "el borrador contiene enlaces, direcciones, teléfonos o IBAN que no se pueden dar por buenos; compruébelos";
+    case "rodaje":
+      // Regla aprendida aceptada en lote (D174): sus 3 primeros envíos se revisan. El mismo texto que el backend.
+      return "en rodaje: esta regla aprendida enviará sola a partir del envío n.º 4";
     default:
       return `motivo no reconocido (${code})`;
   }

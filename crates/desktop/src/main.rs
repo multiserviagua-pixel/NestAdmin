@@ -23,6 +23,7 @@ use nestadmin_app::initial_read::{
     FolderPreview, InitialReadOverview, InitialReadStatus, ReadExpectation, ReadStep,
 };
 use nestadmin_app::learn_consent::LearnExpectation;
+use nestadmin_app::learn_rules::{LearnedAcceptOutcome, LearnedBatch, LearnedDeactivateOutcome};
 use nestadmin_app::learn_state::{
     AccountLearningPreview, LearnChoiceArg, LearningOverview, LearningStatus, LearningStep,
 };
@@ -1409,6 +1410,43 @@ fn accept_suggestion<R: Runtime>(
     Ok(view)
 }
 
+/// Las sugerencias aprendidas pendientes con su evidencia (recuentos y direcciones) y la huella de
+/// la tanda (D173). Solo lectura.
+#[tauri::command]
+fn learned_suggestions_batch(shared: State<'_, SharedState>) -> CmdResult<LearnedBatch> {
+    shared.app()?.learned_suggestions_batch().map_err(text)
+}
+
+/// Acepta y activa de una vez las reglas aprendidas que la persona dejó marcadas (D173): todo o
+/// nada, rechaza una huella caducada y, si una regla falla, dice cuál y por qué. Repetirlo no
+/// duplica nada. Las reglas nacen con un rodaje de 3 envíos (D174).
+#[tauri::command]
+fn accept_and_activate_learned<R: Runtime>(
+    shared: State<'_, SharedState>,
+    handle: AppHandle<R>,
+    batch_fp: String,
+    ids: Vec<String>,
+) -> CmdResult<LearnedAcceptOutcome> {
+    let outcome = shared
+        .app()?
+        .accept_and_activate_learned(&batch_fp, &ids)
+        .map_err(text)?;
+    changed(&handle);
+    Ok(outcome)
+}
+
+/// «Desactivar las aprendidas»: desactiva en una transacción todas las reglas de origen aprendido
+/// (D174). Idempotente.
+#[tauri::command]
+fn deactivate_learned_rules<R: Runtime>(
+    shared: State<'_, SharedState>,
+    handle: AppHandle<R>,
+) -> CmdResult<LearnedDeactivateOutcome> {
+    let outcome = shared.app()?.deactivate_learned_rules().map_err(text)?;
+    changed(&handle);
+    Ok(outcome)
+}
+
 /// Las facturas que solo se leyeron en la serie de una sugerencia (D133). Solo lectura.
 #[tauri::command]
 fn seen_invoices(
@@ -2529,6 +2567,9 @@ fn configure<R: Runtime>(builder: Builder<R>, prepare_only: bool) -> Builder<R> 
             simulate_rule,
             rule_findings,
             rule_suggestions,
+            learned_suggestions_batch,
+            accept_and_activate_learned,
+            deactivate_learned_rules,
             business_profile,
             business_profile_prefill,
             save_business_profile,

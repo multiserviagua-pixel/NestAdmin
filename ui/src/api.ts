@@ -25,6 +25,9 @@ import type {
   MergePreview,
   ProfileConsentView,
   ProfilePreview,
+  LearnedAcceptOutcome,
+  LearnedBatch,
+  LearnedDeactivateOutcome,
   LearnedProfileProposal,
   ProfileSaved,
   ProfileView,
@@ -194,6 +197,13 @@ export const api = {
    * de lo que se mostró: si los datos cambiaron, el backend rechaza y hay que revisar de nuevo. */
   acceptSuggestion: (fingerprint: string, shown: string, name: string | null, modelLimit: string | null = null, userLimit: string | null = null) =>
     invoke<RuleView>("accept_suggestion", { fingerprint, shown, name, modelLimit, userLimit }),
+  /** Las sugerencias aprendidas pendientes con su evidencia y la huella de la tanda (D173). Solo lectura. */
+  learnedSuggestionsBatch: () => invoke<LearnedBatch>("learned_suggestions_batch"),
+  /** Acepta y activa de una vez las reglas aprendidas marcadas (subconjunto de la tanda de `batchFp`). Todo o nada: rechaza una
+   * huella caducada y, si una regla falla, `failed` dice cuál y por qué. Repetirlo no duplica. Cada regla nace con un rodaje de 3 envíos (D174). */
+  acceptAndActivateLearned: (batchFp: string, ids: string[]) => invoke<LearnedAcceptOutcome>("accept_and_activate_learned", { batchFp, ids }),
+  /** «Desactivar las aprendidas»: desactiva en una transacción todas las reglas de origen aprendido. Idempotente (D174). */
+  deactivateLearnedRules: () => invoke<LearnedDeactivateOutcome>("deactivate_learned_rules"),
   /** Las facturas solo leídas de la serie de una sugerencia, con documento, fecha e importe. Solo lectura. */
   seenInvoices: (fingerprint: string) => invoke<SeenInvoice[]>("seen_invoices", { fingerprint }),
   /** Perfil del negocio (D163). Solo lectura. */

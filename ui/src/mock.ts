@@ -43,6 +43,11 @@ import type {
   ProfileConsentView,
   ProfileFinding,
   ProfilePreview,
+  LearnedAcceptOutcome,
+  LearnedAcceptedRule,
+  LearnedBatch,
+  LearnedBatchItem,
+  LearnedDeactivateOutcome,
   LearnedProfileProposal,
   ProfileSaved,
   ProfileView,
@@ -1598,6 +1603,19 @@ function mockPlan(members: Rule[], chosen: string): MergePlan {
 const mockThresholds = { invoice: 3, reply: 5, learned_reply: 3 };
 const mockDiscarded = new Set<string>();
 const mockAccepted = new Map<string, string>();
+
+// ---- Tanda de reglas aprendidas (D173, D174): dos candidatas sintéticas ----
+const mockLearnedItems: LearnedBatchItem[] = [
+  { id: "mock-aprendida-ana", shown: "s1", name: "Respuestas a ana@ejemplo.test (solicitud_factura)", category: "solicitud_factura", subject: "ana@ejemplo.test", conditions: { category: "solicitud_factura", sender: "ana@ejemplo.test" }, count: 4, threshold: 3, learned: 4, addresses: 1 },
+  { id: "mock-aprendida-dominio", shown: "s2", name: "Respuestas a ejemplo.test (documentacion)", category: "documentacion", subject: "ejemplo.test", conditions: { category: "documentacion", sender_domain: "ejemplo.test" }, count: 5, threshold: 3, learned: 5, addresses: 2 },
+];
+/** Id de la tanda -> id de la regla creada. */
+const mockLearnedRules = new Map<string, string>();
+const mockLearnedBatch = (): LearnedBatch => {
+  const items = mockLearnedItems.filter((i) => !mockLearnedRules.has(i.id));
+  const fp = items.map((i) => `${i.id}|${i.shown}|${i.count}|${i.learned}|${i.addresses}`).sort().join("#");
+  return { batch_fp: `mock-${fp.length}-${[...fp].reduce((h, ch) => (h * 31 + ch.charCodeAt(0)) >>> 0, 7)}`, items, rodaje_sends: 3 };
+};
 const mockThresholdSettings = (): ThresholdSettings => ({
   invoice: mockThresholds.invoice,
   reply: mockThresholds.reply,
@@ -2841,6 +2859,51 @@ const handlers: Record<string, (a: any, options?: any) => unknown> = {
     audit.push({ task_id: null, action: "rule_suggestion", status: "accepted", authorization: null, detail: `${view.id} v1 (inactiva) creada desde la sugerencia ${fingerprint}` });
     return ruleView(latest().find((r) => r.id === view.id)!);
   },
+  learned_suggestions_batch: (): LearnedBatch => mockLearnedBatch(),
+  accept_and_activate_learned: ({ batchFp, ids }): LearnedAcceptOutcome => {
+    const wanted = [...new Set((ids as string[]).map((i) => String(i).trim()).filter(Boolean))];
+    if (!wanted.length) throw "Deje marcada al menos una regla para aceptar.";
+    const live = (id: string) => {
+      const ruleId = mockLearnedRules.get(id);
+      return ruleId && latest().find((r) => r.id === ruleId)?.active ? ruleId : null;
+    };
+    const rules: LearnedAcceptedRule[] = [];
+    const pending = wanted.filter((id) => !live(id));
+    const left = (ruleId: string) => metaOf(ruleId).origin?.rodaje?.left ?? null;
+    for (const id of wanted.filter((i) => live(i))) {
+      const ruleId = live(id)!;
+      rules.push({ id, rule_id: ruleId, name: metaOf(ruleId).name ?? ruleId, status: "already_active", rodaje_left: left(ruleId) });
+    }
+    if (pending.length) {
+      const batch = mockLearnedBatch();
+      if (batch.batch_fp !== batchFp) throw "La tanda de reglas aprendidas ha cambiado desde que la vio: revise la lista de nuevo antes de aceptar.";
+      if (pending.some((id) => !batch.items.some((i) => i.id === id))) throw "La sugerencia ya no está vigente: los datos cambiaron o ya se resolvió. Actualice la lista.";
+      for (const id of pending) {
+        const item = batch.items.find((i) => i.id === id)!;
+        const view = handlers.create_rule!({ id: null, name: item.name, actionKind: "send_draft", conditions: item.conditions, acknowledgeAnySender: false }) as RuleView;
+        setMeta(view.id, { origin: { kind: "suggestion", count: item.count, threshold: item.threshold, evidence_origin: "learned", batch: true, rodaje: { left: 3, of: 3 } } });
+        handlers.set_rule_active!({ id: view.id, active: true });
+        mockLearnedRules.set(id, view.id);
+        audit.push({ task_id: null, action: "rule_learned_batch", status: "activated", authorization: null, detail: `${view.id} v2 aceptada y activada en lote desde la sugerencia ${id}` });
+        rules.push({ id, rule_id: view.id, name: item.name, status: "activated", rodaje_left: 3 });
+      }
+      audit.push({ task_id: null, action: "rule_learned_batch", status: "activated_all", authorization: null, detail: `${pending.length} reglas aprendidas aceptadas y activadas en lote (rodaje de 3 envíos cada una)` });
+    }
+    const activated = rules.filter((r) => r.status === "activated").length;
+    rules.sort((a, b) => wanted.indexOf(a.id) - wanted.indexOf(b.id));
+    return { applied: true, rules, activated, already_active: rules.length - activated, failed: null };
+  },
+  deactivate_learned_rules: (): LearnedDeactivateOutcome => {
+    const off: string[] = [];
+    for (const r of latest()) {
+      if (metaOf(r.id).origin?.evidence_origin !== "learned" || !r.active) continue;
+      addRule({ ...r, version: r.version + 1, active: false, created_at: now() });
+      audit.push({ task_id: null, action: "rule_learned_batch", status: "deactivated", authorization: null, detail: `${r.id} v${r.version + 1} desactivada con las aprendidas` });
+      off.push(r.id);
+    }
+    if (off.length) audit.push({ task_id: null, action: "rule_learned_batch", status: "deactivated_all", authorization: null, detail: `${off.length} reglas aprendidas desactivadas` });
+    return { deactivated: off, learned_total: latest().filter((r) => metaOf(r.id).origin?.evidence_origin === "learned").length };
+  },
   discard_suggestion: ({ fingerprint }) => {
     if (!mockSuggestions().candidates.some((x) => x.fingerprint === fingerprint) && !mockDiscarded.has(String(fingerprint)))
       throw "La sugerencia ya no está vigente: los datos cambiaron o ya se resolvió. Actualice la lista.";
@@ -3037,6 +3100,8 @@ const mutating = new Set([
   "save_business_profile",
   "accept_learned_profile",
   "dismiss_learned_profile",
+  "accept_and_activate_learned",
+  "deactivate_learned_rules",
   "clear_business_profile",
   "grant_profile_consent",
   "withdraw_profile_consent",
