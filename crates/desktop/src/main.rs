@@ -5,6 +5,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod mail_clients;
+mod probe;
 mod settings;
 
 use std::path::PathBuf;
@@ -1116,6 +1117,10 @@ struct SettingsView {
     /// Por qué las tareas con IA esperan en la cola, si esperan (D101).
     ai_wait: Option<AiWait>,
     ai_wait_message: Option<String>,
+    /// Con una espera de D146 (404, 402): causa enumerada (`model_not_found`, `route_not_found`,
+    /// `other`) y estado HTTP, para que la interfaz ofrezca la salida que corresponde.
+    ai_wait_cause: Option<&'static str>,
+    ai_wait_status: Option<u16>,
     /// Respaldo automático del externo elegido a la IA local (D101).
     local_fallback: bool,
     /// Las tareas van directas a la IA local por un `unavailable` reciente del externo (D101).
@@ -1126,6 +1131,9 @@ struct SettingsView {
     offer_external: bool,
     /// Modelo prefijado para Ollama cloud (D108): la interfaz lo toma de aquí.
     default_cloud_model: &'static str,
+    /// Modelo y dirección de la IA local, para el botón explícito «Usar la IA local» (D146).
+    default_local_model: &'static str,
+    default_local_url: &'static str,
     data_dir: PathBuf,
 }
 
@@ -1149,20 +1157,34 @@ fn settings(shared: State<'_, SharedState>) -> CmdResult<SettingsView> {
             offer_external,
         )
     };
-    let (active, ai_wait, fallback_period_active) = {
+    // Con el compatible con OpenAI, el texto de la espera cita la dirección configurada.
+    let address = match &choice {
+        Some(ProviderChoice::OpenAiCompatible { base_url, .. }) => Some(base_url.clone()),
+        _ => None,
+    };
+    let (active, ai_wait, ai_wait_message, fallback_period_active) = {
         let app = shared.app()?;
-        (app.provider(), app.ai_wait(), app.fallback_period_active())
+        (
+            app.provider(),
+            app.ai_wait(),
+            app.ai_wait_message(address.as_deref()),
+            app.fallback_period_active(),
+        )
     };
     Ok(SettingsView {
         choice,
         active,
         ai_wait,
-        ai_wait_message: ai_wait.map(|w| w.message().to_owned()),
+        ai_wait_message,
+        ai_wait_cause: ai_wait.and_then(AiWait::cause),
+        ai_wait_status: ai_wait.and_then(AiWait::status),
         local_fallback,
         fallback_period_active,
         consented,
         offer_external,
         default_cloud_model: nestadmin_ai::ollama::DEFAULT_CLOUD_MODEL,
+        default_local_model: nestadmin_ai::ollama::DEFAULT_MODEL,
+        default_local_url: nestadmin_ai::ollama::DEFAULT_URL,
         data_dir: shared.data_dir.clone(),
     })
 }
@@ -1268,6 +1290,7 @@ fn delete_provider_key(shared: State<'_, SharedState>, choice: ProviderChoice) -
     if let Some(name) = choice.credential_name() {
         shared.credentials.delete(&name).map_err(text)?;
     }
+    lift_wait_if_same_credential(&shared, &choice);
     refresh_provider(&shared)
 }
 
@@ -1346,6 +1369,7 @@ fn list_models_for(
         nestadmin_ai::models::list_models(choice, used, PROVIDER_CALL_TIMEOUT).map_err(text)?;
     if let (Some(key), Some(name)) = (&provided, &name) {
         shared.credentials.set(name, key).map_err(text)?;
+        lift_wait_if_same_credential(shared, choice);
         refresh_provider(shared)?;
     }
     Ok(models)
@@ -1356,20 +1380,145 @@ fn list_models_for(
 /// confirmado antes de leer la clave o construir ningún cliente. No usa el bloqueo de la
 /// aplicación: una respuesta lenta no detiene el resto.
 #[tauri::command]
-async fn test_provider(shared: State<'_, SharedState>, choice: ProviderChoice) -> CmdResult<()> {
+async fn test_provider<R: Runtime>(
+    shared: State<'_, SharedState>,
+    handle: AppHandle<R>,
+    choice: ProviderChoice,
+) -> CmdResult<()> {
     let shared = Arc::clone(shared.inner());
-    tauri::async_runtime::spawn_blocking(move || test_provider_for(&shared, &choice))
-        .await
-        .map_err(text)?
+    tauri::async_runtime::spawn_blocking(move || {
+        let outcome = probe_provider(&shared, &choice);
+        if settle_probe(&shared, &choice, &outcome) {
+            changed(&handle);
+        }
+        outcome.map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(text)?
 }
 
-fn test_provider_for(shared: &SharedState, choice: &ProviderChoice) -> CmdResult<()> {
-    if !choice.is_local() && !shared.settings.lock().map_err(text)?.has_consent(choice) {
-        return Err("Confirme antes el destino de los datos".into());
+/// Cambiar o borrar la clave del proveedor vigente puede significar otra cuenta: una espera de
+/// D146 ya no vale. Solo si la credencial es la de la elección vigente; la clave de otro proveedor
+/// no toca la espera.
+fn lift_wait_if_same_credential(shared: &SharedState, choice: &ProviderChoice) -> bool {
+    let same = choice.credential_name().is_some_and(|name| {
+        shared
+            .settings
+            .lock()
+            .map(|s| {
+                s.provider
+                    .as_ref()
+                    .and_then(ProviderChoice::credential_name)
+                    == Some(name)
+            })
+            .unwrap_or(false)
+    });
+    if !same {
+        return false;
+    }
+    let lifted = shared
+        .app()
+        .map(|mut app| app.lift_provider_wait())
+        .unwrap_or(false);
+    if lifted {
+        shared.wake();
+    }
+    lifted
+}
+
+/// Por qué una prueba sintética no dio un resultado del servicio.
+#[derive(Debug)]
+enum ProbeError {
+    /// El destino externo no está confirmado: no se leyó ninguna clave ni se construyó ningún cliente.
+    NoConsent,
+    /// No se pudo construir el proveedor (por ejemplo, sin clave): tampoco salió nada.
+    Unprepared(nestadmin_ai::AiError),
+    /// El servicio respondió (o falló) al generar o al leer la respuesta.
+    Ai(nestadmin_ai::AiError),
+}
+
+impl std::fmt::Display for ProbeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NoConsent => f.write_str("Confirme antes el destino de los datos"),
+            Self::Unprepared(e) | Self::Ai(e) => write!(f, "{e}"),
+        }
+    }
+}
+
+/// Qué hace con la espera de D146 el resultado de una prueba de la elección `choice`, solo si es
+/// la vigente: un éxito, o una respuesta que no cumple el formato (`invalid_response`, que ya
+/// falla por su cuenta en cada tarea, D105), demuestran que el servicio responde y levantan la
+/// espera; un 401 la convierte en clave inválida; cualquier otro error la deja como está.
+/// Devuelve si algo cambió.
+fn settle_probe(
+    shared: &SharedState,
+    choice: &ProviderChoice,
+    outcome: &Result<(), ProbeError>,
+) -> bool {
+    use nestadmin_ai::AiError;
+    match outcome {
+        Ok(()) | Err(ProbeError::Ai(AiError::InvalidResponse(_))) => {
+            lift_wait_if_current(shared, choice)
+        }
+        Err(ProbeError::Ai(AiError::Unauthorized)) => {
+            let current = shared
+                .settings
+                .lock()
+                .map(|s| s.provider.as_ref() == Some(choice))
+                .unwrap_or(false);
+            let Ok(mut app) = shared.app() else {
+                return false;
+            };
+            if current && app.ai_wait().is_some_and(AiWait::is_provider_response) {
+                app.set_ai_wait(Some(AiWait::InvalidKey));
+                return true;
+            }
+            false
+        }
+        Err(_) => false,
+    }
+}
+
+/// Prueba y resuelve la espera: el sondeo. Devuelve si algo cambió.
+fn run_probe(shared: &SharedState, choice: &ProviderChoice) -> bool {
+    let outcome = probe_provider(shared, choice);
+    settle_probe(shared, choice, &outcome)
+}
+
+/// Una prueba sintética con éxito demuestra que el proveedor responde con esa elección: si es la
+/// vigente, levanta la espera de D146 (404, 402) y despierta la cola (D146).
+fn lift_wait_if_current(shared: &SharedState, choice: &ProviderChoice) -> bool {
+    let current = shared
+        .settings
+        .lock()
+        .map(|s| s.provider.as_ref() == Some(choice))
+        .unwrap_or(false);
+    if !current {
+        return false;
+    }
+    let lifted = shared
+        .app()
+        .map(|mut app| app.lift_provider_wait())
+        .unwrap_or(false);
+    if lifted {
+        shared.wake();
+    }
+    lifted
+}
+
+fn probe_provider(shared: &SharedState, choice: &ProviderChoice) -> Result<(), ProbeError> {
+    let consented = shared
+        .settings
+        .lock()
+        .map(|s| choice.is_local() || s.has_consent(choice))
+        .unwrap_or(false);
+    if !consented {
+        return Err(ProbeError::NoConsent);
     }
     let provider =
         nestadmin_ai::build_provider(choice, shared.credentials.as_ref(), PROVIDER_CALL_TIMEOUT)
-            .map_err(text)?;
+            .map_err(ProbeError::Unprepared)?;
     // La misma solicitud que el correo real: un modelo que no devuelve el JSON estricto falla
     // aquí y no más tarde en una tarea (D105).
     let result = provider
@@ -1377,10 +1526,10 @@ fn test_provider_for(shared: &SharedState, choice: &ProviderChoice) -> CmdResult
             "prueba-sintetica",
             SYNTHETIC_TEST_MAIL,
         ))
-        .map_err(text)?;
+        .map_err(ProbeError::Ai)?;
     nestadmin_ai::tasks::parse_email(&result.output)
         .map(|_| ())
-        .map_err(text)
+        .map_err(ProbeError::Ai)
 }
 
 #[derive(Serialize)]
@@ -1547,6 +1696,8 @@ fn resume_initial_reads<R: Runtime>(shared: &SharedState, handle: &AppHandle<R>)
 
 /// Procesa la cola sin bloquear la ventana: la llamada al modelo se hace sin el cerrojo.
 fn worker<R: Runtime>(shared: SharedState, handle: AppHandle<R>, wake: Receiver<()>) {
+    let mut probe = probe::WaitProbe::default();
+    let probing = Arc::new(AtomicBool::new(false));
     while !shared.stopping.load(Ordering::SeqCst) {
         let job = match shared.app() {
             Ok(mut app) => app.begin_next(),
@@ -1568,6 +1719,7 @@ fn worker<R: Runtime>(shared: SharedState, handle: AppHandle<R>, wake: Receiver<
                     continue;
                 }
                 auto_refine(&shared, &handle);
+                probe_provider_wait(&shared, &handle, &mut probe, &probing);
                 let _ = wake.recv_timeout(Duration::from_secs(5));
             }
             Err(error) => {
@@ -1575,6 +1727,55 @@ fn worker<R: Runtime>(shared: SharedState, handle: AppHandle<R>, wake: Receiver<
                 let _ = wake.recv_timeout(Duration::from_secs(5));
             }
         }
+    }
+}
+
+/// Sondeo sintético de la espera de D146 (404, 402): con la cola ociosa, cada
+/// [`probe::PROBE_EVERY`] y solo mientras dure la espera, repite la prueba sintética de D122 con el
+/// proveedor elegido. Sin clave o sin el destino confirmado `probe_provider` falla antes de
+/// construir ningún cliente, así que no sale nada. No envía contenido del usuario: es el mismo
+/// correo fijo y sintético de la prueba. Si responde, levanta la espera y la cola sigue.
+/// La elección que toca sondear ahora, si toca: hay una espera de D146, pasaron los 15 minutos y
+/// hay un proveedor elegido.
+fn probe_target(
+    shared: &SharedState,
+    probe: &mut probe::WaitProbe,
+    now: std::time::Instant,
+) -> Option<ProviderChoice> {
+    let waiting = shared
+        .app()
+        .map(|app| app.ai_wait().is_some_and(AiWait::is_provider_response))
+        .unwrap_or(false);
+    if !probe.due(waiting, now) {
+        return None;
+    }
+    shared.settings.lock().ok().and_then(|s| s.provider.clone())
+}
+
+fn probe_provider_wait<R: Runtime>(
+    shared: &SharedState,
+    handle: &AppHandle<R>,
+    probe: &mut probe::WaitProbe,
+    probing: &Arc<AtomicBool>,
+) {
+    let Some(choice) = probe_target(shared, probe, std::time::Instant::now()) else {
+        return;
+    };
+    if probing.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    let (shared, handle, probing_flag) = (Arc::clone(shared), handle.clone(), Arc::clone(probing));
+    let spawned = thread::Builder::new()
+        .name("nestadmin-sondeo".into())
+        .spawn(move || {
+            if run_probe(&shared, &choice) {
+                changed(&handle);
+            }
+            probing_flag.store(false, Ordering::SeqCst);
+        });
+    if let Err(error) = spawned {
+        probing.store(false, Ordering::SeqCst);
+        eprintln!("no se pudo iniciar el sondeo: {error}");
     }
 }
 
@@ -1936,5 +2137,7 @@ fn main() {
         .expect("no se pudo iniciar NestAdmin");
 }
 
+#[cfg(test)]
+mod espera;
 #[cfg(test)]
 mod recorrido;

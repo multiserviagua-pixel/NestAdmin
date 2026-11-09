@@ -83,6 +83,39 @@ pub enum AiError {
     /// la dio. Se reintenta con el mismo proveedor dentro del plazo; nunca cambia de proveedor.
     #[error("rate_limited: el proveedor limita las peticiones; vuelva a intentarlo más tarde")]
     RateLimited { retry_after_ms: Option<u64> },
+    /// Al generar, el proveedor respondió 404 o 410 (o 400 con `model_not_found`): la
+    /// configuración (modelo o dirección) no sirve, no el servicio. Es una espera de configuración
+    /// (D146), no activa el respaldo. La causa es un valor enumerado: nunca se guarda el cuerpo.
+    #[error("model_unavailable: estado HTTP {status}")]
+    ModelUnavailable {
+        cause: ModelUnavailableCause,
+        status: u16,
+    },
+    /// El proveedor respondió 402: la cuenta no tiene crédito (D146). Espera global, sin respaldo.
+    #[error("no_credit: la cuenta del proveedor no tiene crédito")]
+    NoCredit,
+    /// El proveedor rechazó esta petición (400, 413 o 422 al generar): falla solo esa tarea
+    /// (D146), sin espera global ni respaldo. `kind` es el identificador corto `error.type`, si lo
+    /// hay.
+    #[error("request_rejected: estado HTTP {status}{}", kind_suffix(.kind))]
+    RequestRejected { status: u16, kind: Option<String> },
+}
+
+/// Qué indica el cuerpo de un 404 o 410 al generar. Solo se conserva esta enumeración, nunca el
+/// cuerpo, porque podría repetir contenido enviado (D146).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelUnavailableCause {
+    /// El cuerpo dice que el modelo no existe o no está disponible.
+    ModelNotFound,
+    /// Cuerpo no JSON o «not found» genérico, sin mención de modelo: la dirección no es la del servicio.
+    RouteNotFound,
+    /// Cualquier otro cuerpo: no consta la causa exacta.
+    Other,
+}
+
+fn kind_suffix(kind: &Option<String>) -> String {
+    kind.as_ref().map(|k| format!(" ({k})")).unwrap_or_default()
 }
 
 impl AiError {
@@ -93,6 +126,9 @@ impl AiError {
             Self::Timeout | Self::TimeoutCause(_) => "timeout",
             Self::InvalidResponse(_) => "invalid_response",
             Self::RateLimited { .. } => "rate_limited",
+            Self::ModelUnavailable { .. } => "model_unavailable",
+            Self::NoCredit => "no_credit",
+            Self::RequestRejected { .. } => "request_rejected",
         }
     }
 }
@@ -103,6 +139,11 @@ pub trait Provider: Send + Sync {
     /// Destino real al que salen los datos (host y puerto si no es el 443): `None` con la IA local.
     /// El consentimiento del afinado automático (D134) se liga a él.
     fn destination(&self) -> Option<String> {
+        None
+    }
+    /// Dirección completa configurada por el usuario (solo el compatible con OpenAI). Distingue
+    /// dos rutas del mismo host: corregir la ruta cambia la identidad del proveedor (D146).
+    fn configured_url(&self) -> Option<String> {
         None
     }
     fn generate(&self, request: &GenerateRequest) -> Result<GenerateResult, AiError>;

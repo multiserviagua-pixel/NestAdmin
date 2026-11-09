@@ -187,8 +187,14 @@ export interface ProviderInfo {
   model: string;
 }
 
-/** Por qué las tareas con IA esperan en la cola (D101). */
-export type AiWait = "needs_choice" | "needs_key" | "needs_consent" | "invalid_key";
+/**
+ * Por qué las tareas con IA esperan en la cola (D101, D146). `model_unavailable` (404 o 410 al
+ * generar) y `no_credit` (402) nacen de la respuesta del proveedor, no de la configuración.
+ */
+export type AiWait = "needs_choice" | "needs_key" | "needs_consent" | "invalid_key" | "model_unavailable" | "no_credit";
+
+/** Qué indicó el proveedor con una espera `model_unavailable`; `other`: no consta la causa exacta. */
+export type AiWaitCause = "model_not_found" | "route_not_found" | "other";
 
 export interface SettingsView {
   /** `null`: hay que elegir proveedor (D100). */
@@ -196,6 +202,10 @@ export interface SettingsView {
   active: ProviderInfo;
   ai_wait: AiWait | null;
   ai_wait_message: string | null;
+  /** Con `model_unavailable`, la causa enumerada; con `no_credit`, `null`. */
+  ai_wait_cause: AiWaitCause | null;
+  /** Estado HTTP que originó una espera de D146. */
+  ai_wait_status: number | null;
   /** Respaldo del proveedor externo elegido a la IA local (D101). */
   local_fallback: boolean;
   /** Las tareas van directas a la IA local durante 10 minutos por un fallo del externo. */
@@ -206,6 +216,9 @@ export interface SettingsView {
   offer_external: boolean;
   /** Modelo recomendado de Ollama cloud: `DEFAULT_CLOUD_MODEL` del backend (D108). */
   default_cloud_model: string;
+  /** Modelo y dirección de la IA local, para el botón explícito «Usar la IA local» (D146). */
+  default_local_model: string;
+  default_local_url: string;
   data_dir: string;
 }
 

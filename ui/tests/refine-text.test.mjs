@@ -106,7 +106,16 @@ test("cada fallo dice qué pasó y que no se aplicó nada", () => {
   assert.match(texts("invalid_response"), /formato pedido/);
   assert.match(texts("rejected", "unknown_id"), /se descartó entera.*no se enviaron.*No se aplicó nada/);
   assert.match(texts("rejected", "comment_has_figures"), /cifras/);
-  for (const wait of ["needs_choice", "needs_key", "needs_consent", "invalid_key"]) assert.match(texts(wait), /No se envió nada/);
+  for (const wait of ["needs_choice", "needs_key", "needs_consent", "invalid_key", "model_unavailable", "no_credit"]) assert.match(texts(wait), /No se envió nada/);
+  assert.match(texts("request_rejected"), /rechazó la petición/);
+  // Un afinado enviado que falló con el código de una espera (D146): se envió, no se dice lo contrario.
+  const sent = (reason) => refinementStatus(view({ reason, failures: 1 })).lines.join(" ");
+  for (const reason of ["model_unavailable", "no_credit"]) {
+    assert.match(sent(reason), /El último intento falló/, reason);
+    assert.doesNotMatch(sent(reason), /No se envió nada/, reason);
+    // Como espera (sin intento fallido), sí es cierto que no se envió nada.
+    assert.match(texts(reason), /No se envió nada/, reason);
+  }
   // Sin un afinado anterior no se habla de «el último afinado».
   assert.match(texts("waiting_signals"), /afinará sola cuando haya 5 decisiones válidas; hay 2/);
   assert.doesNotMatch(texts("waiting_signals"), /último afinado/);

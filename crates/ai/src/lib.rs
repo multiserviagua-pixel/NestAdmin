@@ -18,5 +18,8 @@ pub mod selection;
 pub mod tasks;
 
 pub use credentials::{CredentialError, CredentialStore, MemoryCredentialStore, Secret};
-pub use provider::{AiError, GenerateRequest, GenerateResult, Provider, ProviderKind, Task, Usage};
+pub use provider::{
+    AiError, GenerateRequest, GenerateResult, ModelUnavailableCause, Provider, ProviderKind, Task,
+    Usage,
+};
 pub use selection::{build_provider, AiService, ProviderChoice};

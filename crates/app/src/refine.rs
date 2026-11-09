@@ -215,8 +215,8 @@ pub struct RefinementView {
     /// Por qué no está afinado o por qué falló el último intento: `no_candidates`, `on_demand`,
     /// `auto_consent_missing`, `auto_consent_stale`, `waiting_signals`, `pending_auto`,
     /// `interrupted`, una espera de IA (`needs_choice`, `needs_key`, `needs_consent`,
-    /// `invalid_key`) o el fallo (`unavailable`, `timeout`, `rate_limited`, `unauthorized`,
-    /// `invalid_response`, `rejected`).
+    /// `invalid_key`, `model_unavailable`, `no_credit`) o el fallo (`unavailable`, `timeout`,
+    /// `rate_limited`, `unauthorized`, `invalid_response`, `request_rejected`, `rejected`).
     pub reason: Option<String>,
     /// Con `rejected`, el motivo de la validación.
     pub detail: Option<String>,
@@ -336,10 +336,11 @@ pub struct RefineCompleted {
     watermark: i64,
     asked: (String, String),
     result: Result<GenerateResult, nestadmin_core::TaskError>,
-    unauthorized: bool,
+    /// Espera que impone el error del proveedor (clave rechazada, 404, 402).
+    wait: Option<AiWait>,
     fallback: Option<Value>,
     /// El proveedor con el que se pidió: si ya no es el activo (la clave o el proveedor cambiaron
-    /// mientras tanto), un `unauthorized` no vuelve a poner la espera de clave.
+    /// mientras tanto), la respuesta del anterior no vuelve a poner ninguna espera.
     used: Arc<dyn Provider>,
     turn: Turn,
 }
@@ -359,7 +360,7 @@ impl RefineJob {
             watermark: self.watermark,
             asked: self.asked,
             result: attempt.result,
-            unauthorized: attempt.unauthorized,
+            wait: attempt.wait,
             fallback: attempt.fallback,
             used: self.provider,
             turn: self.turn,
@@ -498,12 +499,7 @@ fn build_batch(suggestions: &Suggestions) -> Batch {
 }
 
 fn wait_code(wait: AiWait) -> &'static str {
-    match wait {
-        AiWait::NeedsChoice => "needs_choice",
-        AiWait::NeedsKey => "needs_key",
-        AiWait::NeedsConsent => "needs_consent",
-        AiWait::InvalidKey => "invalid_key",
-    }
+    wait.code()
 }
 
 /// Fallos que pueden pasar solos (red, cuota, servicio): se reintentan con espera y tope.
@@ -694,7 +690,7 @@ impl App {
             via_local_first: external && self.fallback.is_some() && self.fallback_period_active(),
             local_fallback: external && self.fallback.is_some(),
             blocked: self.ai_wait,
-            blocked_message: self.ai_wait.map(|w| w.message().to_owned()),
+            blocked_message: self.ai_wait_message(self.provider.destination().as_deref()),
             consent: self.refine_consent()?,
             provider,
             host: self.provider.destination(),
@@ -866,7 +862,11 @@ impl App {
     fn key_was_fixed(&self, attempt: &Attempt) -> bool {
         // Solo si en esta sesión se levantó la espera de clave o cambió el proveedor: tras reiniciar,
         // el error antiguo no autoriza una llamada por arranque con una clave que puede seguir revocada.
-        attempt.code.as_deref() == Some("unauthorized") && self.key_fixed && self.ai_wait.is_none()
+        matches!(
+            attempt.code.as_deref(),
+            Some("unauthorized" | "model_unavailable" | "no_credit")
+        ) && self.key_fixed
+            && self.ai_wait.is_none()
     }
 
     fn pending_reason(&self, view: &RefinementView) -> &'static str {
@@ -1043,17 +1043,19 @@ impl App {
             watermark,
             asked,
             result,
-            unauthorized,
+            wait,
             fallback,
             used,
             turn,
         } = completed;
-        if unauthorized && Arc::ptr_eq(&used, &self.provider) {
-            // Como en las tareas (D101): la clave no sirve y nada más sale hasta corregirla. Si el
-            // proveedor ya cambió mientras tanto (se corrigió la clave), el aviso es de la clave
-            // antigua y no se vuelve a poner la espera.
-            self.ai_wait = Some(AiWait::InvalidKey);
-            self.key_fixed = false;
+        if let Some(wait) = wait.filter(|_| Arc::ptr_eq(&used, &self.provider)) {
+            // Como en las tareas (D101, D146): la clave no sirve, el modelo no existe o no hay
+            // crédito, y nada más sale hasta corregirlo. Si el proveedor ya cambió mientras tanto,
+            // el aviso es del anterior y no se vuelve a poner la espera.
+            self.ai_wait = Some(wait);
+            if wait == AiWait::InvalidKey {
+                self.key_fixed = false;
+            }
         }
         let mut record = self.record()?;
         let previous = record

@@ -309,6 +309,10 @@ impl Provider for OpenAiCompatibleProvider {
         Some(self.destination.clone())
     }
 
+    fn configured_url(&self) -> Option<String> {
+        Some(self.client.endpoint.clone())
+    }
+
     fn generate(&self, request: &GenerateRequest) -> Result<GenerateResult, AiError> {
         self.client
             .generate(ProviderKind::OpenAiCompatible, request)

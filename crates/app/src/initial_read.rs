@@ -653,9 +653,8 @@ impl App {
             _ => "done",
         };
         let waiting_message = self
-            .ai_wait
-            .filter(|_| state == "waiting" || counts.queued > 0)
-            .map(|w| w.message().to_owned());
+            .ai_wait_message(self.provider.destination().as_deref())
+            .filter(|_| state == "waiting" || counts.queued > 0);
         let m = mark.as_ref();
         Ok(InitialReadStatus {
             source: source.to_owned(),
@@ -776,7 +775,7 @@ impl App {
             external,
             local_fallback: external && self.fallback.is_some(),
             blocked: self.ai_wait,
-            blocked_message: self.ai_wait.map(|w| w.message().to_owned()),
+            blocked_message: self.ai_wait_message(self.provider.destination().as_deref()),
             sends: vec![
                 "El texto completo de cada documento adjunto o de la carpeta que parece una factura según una comprobación local, ya extraído en este equipo (el OCR y la extracción de texto son locales), para leer proveedor, número, fechas e importes",
             ],
@@ -944,10 +943,12 @@ impl App {
                 "La cuenta ya no está conectada: no se puede continuar su lectura.".into(),
             ));
         }
-        if self.ai_wait.is_some() {
-            return Err(AppError::Invalid(
-                "Falta confirmar un proveedor de IA: no se ha enviado nada.".into(),
-            ));
+        // D146: el motivo real de la espera; un 404 no es «falta confirmar un proveedor».
+        if let Some(message) = self.ai_wait_message(self.provider.destination().as_deref()) {
+            return Err(AppError::Invalid(format!(
+                "{}. No se ha enviado nada.",
+                message.trim_end_matches('.')
+            )));
         }
         let now = self.current_destination();
         mark.stopped = false;
@@ -1114,11 +1115,11 @@ impl App {
             }
         }
         // Sin proveedor confirmado no sale nada (D100, D101).
-        if let Some(wait) = self.ai_wait {
+        if let Some(message) = self.ai_wait_message(self.provider.destination().as_deref()) {
             if !auto && mode == RefineMode::OnDemand {
                 return Err(AppError::Invalid(format!(
                     "{}. No se ha leído ni enviado nada.",
-                    wait.message()
+                    message.trim_end_matches('.')
                 )));
             }
             // Versión final: queda anotada y empieza sola cuando haya proveedor confirmado.
