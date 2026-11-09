@@ -92,7 +92,7 @@ pub struct LearnRun {
     pub source: Option<LearnSource>,
     pub learned: Option<Learned>,
     pub counts: LearnCounts,
-    /// Por qué no se llamó al externo estando configurado: `no_consent`, `use_local`.
+    /// Por qué no se llamó al externo estando configurado: `no_consent`, `use_local`, `consent_withdrawn`.
     pub external_skipped: Option<&'static str>,
     /// Código del fallo (o de la respuesta no válida) de la llamada externa, si la hubo.
     pub external_failure: Option<String>,
@@ -235,7 +235,20 @@ impl LearnJob {
                 .unwrap_or(false)
         });
         if had_external && external.is_none() {
-            external_skipped = Some("no_consent");
+            // Retirar el consentimiento cancela el aprendizaje (D170): no se envía y tampoco se
+            // pasa a la IA local; la fase vuelve a esperar a la persona.
+            external_skipped = Some("consent_withdrawn");
+            return LearnRun {
+                status: LearnStatus::Unavailable,
+                source: None,
+                learned: None,
+                counts,
+                external_skipped,
+                external_failure: None,
+                local_failure: None,
+                wait: None,
+                used: None,
+            };
         }
         // `is_masked` es verdadero si no queda nada que enmascarar: lo contrario es «inseguro».
         // Saludo y despedida solo valen si coinciden con una línea de dos o más respuestas propias.

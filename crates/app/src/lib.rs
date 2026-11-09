@@ -2852,6 +2852,8 @@ impl App {
         // Las tareas pendientes de su primera lectura no siguen enviando datos (D133); lo ya
         // leído sigue visible.
         for source in sources {
+            // Una recogida de «aprender» en curso de ese buzón se descarta (solo está en memoria).
+            self.learning.collecting.remove(&source);
             self.cancel_initial_read(&source)?;
         }
         Ok(())

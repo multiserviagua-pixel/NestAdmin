@@ -869,10 +869,11 @@ fn a_consent_withdrawn_between_begin_and_run_sends_nothing() {
         .unwrap();
     let run = job.run();
     assert_eq!(w.ext.calls(), 0, "no debe llamarse al externo");
-    assert_eq!(run.external_skipped, Some("no_consent"));
-    // Solo responde la IA local (la persona no consintió el envío).
-    assert_eq!(local.calls(), 1);
-    assert_eq!(run.source, Some(LearnSource::Local));
+    assert_eq!(run.external_skipped, Some("consent_withdrawn"));
+    // Retirar el consentimiento cancela el aprendizaje: tampoco responde la IA local.
+    assert_eq!(local.calls(), 0);
+    assert_eq!(run.source, None);
+    assert_eq!(run.status, LearnStatus::Unavailable);
 
     // Sin consentimiento retirado, la misma preparación sí envía, una sola vez.
     let (mut w, local, _, choice) = consented(&collected);

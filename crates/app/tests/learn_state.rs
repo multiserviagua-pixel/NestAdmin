@@ -840,7 +840,7 @@ fn a_consent_withdrawn_between_begin_and_run_sends_nothing() {
     assert_eq!(spy.calls(), 0, "retirado el consentimiento, no sale nada");
     let s = app.finish_learning(completed).unwrap();
     assert_eq!(s.state, "awaiting_consent");
-    assert!(s.failure.unwrap().contains("no_consent"));
+    assert!(s.failure.unwrap().contains("consent_withdrawn"));
     assert!(learning_entries(&app).is_empty());
 }
 
@@ -921,4 +921,152 @@ fn the_collection_goes_step_by_step_and_matches_the_one_shot_result() {
     let once = app.account_learning_preview(ACCOUNT).unwrap();
     assert_eq!(once.preview.unwrap().input_fp, stepped_fp);
     assert_eq!(spy.calls(), 0, "recoger no llama a la IA");
+}
+
+// ---- Segunda revisión: carrera de la recogida, cuenta quitada, espera con proveedor renovado ----
+
+/// Buzón con 45 correos (34 con respuesta): la recogida lleva muchos pasos.
+fn long_mailbox(dir: &Path, provider: Arc<dyn Provider>) -> App {
+    let messages: Vec<Message> = (1..=45)
+        .map(|i| {
+            let mut m = incoming(
+                i,
+                &format!("c{i}@cliente.test"),
+                &format!("Consulta número {i}."),
+            );
+            m.date = Some("2026-11-01T10:00:00Z".into());
+            m
+        })
+        .collect();
+    seed_mail(dir, messages);
+    let app = open(dir, provider);
+    for i in (1..=45).filter(|i| i % 4 != 0) {
+        app.simulators()
+            .0
+            .add_sent_message(SentMessage {
+                id: format!("s{i}"),
+                thread_key: format!("t{i}"),
+                date: Some("2026-11-01T12:00:00Z".into()),
+                body: Some(format!("Respuesta número {i}.")),
+                to: vec![format!("c{i}@cliente.test")],
+            })
+            .unwrap();
+    }
+    app
+}
+
+/// Deja la cuenta esperando una decisión, con la vista previa en memoria y el consentimiento dado.
+fn ready_to_send(app: &mut App) -> LearnExpectation {
+    finish_first_read(app);
+    tick(app);
+    assert_eq!(status(app).state, "awaiting_consent");
+    let preview = app
+        .account_learning_preview_view(ACCOUNT)
+        .unwrap()
+        .preview
+        .expect("hay vista previa");
+    let seen = LearnExpectation {
+        provider: preview.provider.provider.to_string(),
+        model: preview.provider.model,
+        host: preview.host.unwrap_or_default(),
+        input_fp: preview.input_fp,
+    };
+    app.grant_account_learning_consent(ACCOUNT, &seen).unwrap();
+    seen
+}
+
+/// Hallazgo 1: «generar vista previa» y luego «Enviar» con la caché anterior; la recogida en
+/// curso no pisa `sent` ni `done` y no hay una segunda llamada externa.
+#[test]
+fn a_collection_in_flight_never_overwrites_sent_or_done() {
+    let dir = tempfile::tempdir().unwrap();
+    let spy = Spy::external();
+    let mut app = long_mailbox(dir.path(), spy.clone());
+    let seen = ready_to_send(&mut app);
+
+    assert!(app.start_account_learning_preview(ACCOUNT).unwrap());
+    assert!(app.step_account_learning_preview(ACCOUNT).unwrap());
+    assert!(app.step_account_learning_preview(ACCOUNT).unwrap());
+    let job = app
+        .begin_account_learning(ACCOUNT, &LearnChoiceArg::Send { expect: seen })
+        .unwrap();
+    assert_eq!(status(&app).state, "sent");
+    // La recogida pendiente se descartó al pasar a `sent`.
+    assert!(!app.step_account_learning_preview(ACCOUNT).unwrap());
+    assert_eq!(status(&app).state, "sent");
+
+    let s = app.finish_learning(job.run()).unwrap();
+    assert_eq!(s.state, "done");
+    assert!(!app.step_account_learning_preview(ACCOUNT).unwrap());
+    assert_eq!(status(&app).state, "done");
+    assert!(is_idle(tick(&mut app)));
+    assert_eq!(spy.calls(), 1, "una sola llamada externa");
+    assert_eq!(learning_entries(&app).len(), 1);
+}
+
+/// Hallazgo 1 (defensa en `step_collection`): si la fase guardada ya es `sent` cuando termina una
+/// recogida que empezó antes, se descarta sin escribir `awaiting_consent`.
+#[test]
+fn a_finished_collection_is_discarded_when_the_stored_phase_moved_on() {
+    let dir = tempfile::tempdir().unwrap();
+    let spy = Spy::external();
+    let mut app = long_mailbox(dir.path(), spy.clone());
+    ready_to_send(&mut app);
+
+    assert!(app.start_account_learning_preview(ACCOUNT).unwrap());
+    assert!(app.step_account_learning_preview(ACCOUNT).unwrap());
+    set_phase(dir.path(), "sent");
+    while app.step_account_learning_preview(ACCOUNT).unwrap() {}
+    assert_eq!(status(&app).state, "sent", "no se pisa la fase posterior");
+    assert_eq!(spy.calls(), 0);
+}
+
+/// Hallazgo 4: quitar la cuenta vacía su recogida en curso.
+#[test]
+fn removing_the_account_drops_its_collection() {
+    let dir = tempfile::tempdir().unwrap();
+    let spy = Spy::external();
+    let mut app = long_mailbox(dir.path(), spy.clone());
+    ready_to_send(&mut app);
+    assert!(app.start_account_learning_preview(ACCOUNT).unwrap());
+    assert!(app.step_account_learning_preview(ACCOUNT).unwrap());
+    app.remove_mail_account(ACCOUNT).unwrap();
+    assert!(!matches!(
+        app.step_account_learning_preview(ACCOUNT),
+        Ok(true)
+    ));
+    assert_eq!(spy.calls(), 0);
+}
+
+/// Hallazgo 6: la espera de IA se fija aunque el proveedor se haya vuelto a resolver (otro `Arc`
+/// con el mismo proveedor, modelo y destino); con otro destino, no.
+#[test]
+fn the_ai_wait_is_set_when_the_provider_was_refreshed_to_the_same_identity() {
+    for (same, expected) in [
+        (true, Some(nestadmin_app::AiWait::InvalidKey)),
+        (false, None),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        mailbox_with_pairs(dir.path());
+        let spy = Spy::external();
+        let mut app = open(dir.path(), spy.clone());
+        add_replies(&app);
+        finish_first_read(&mut app);
+        tick(&mut app);
+        let seen = expectation(&mut app);
+        app.grant_account_learning_consent(ACCOUNT, &seen).unwrap();
+        spy.fail_learn(AiError::Unauthorized);
+        let job = app
+            .begin_account_learning(ACCOUNT, &LearnChoiceArg::Send { expect: seen })
+            .unwrap();
+        let completed = job.run();
+        let renewed = if same {
+            Spy::external()
+        } else {
+            Spy::make(ProviderKind::OllamaCloud, "otro-modelo", Some(HOST))
+        };
+        app.select_provider(renewed);
+        app.finish_learning(completed).unwrap();
+        assert_eq!(app.ai_wait(), expected, "mismo proveedor: {same}");
+    }
 }

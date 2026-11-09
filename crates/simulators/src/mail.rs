@@ -52,7 +52,7 @@ impl Message {
 /// Respuesta propia hallada en Enviados (D168): lo mínimo para emparejarla con el recibido. El
 /// cuerpo va en texto plano tal como llega, con la cita incluida: recortarla es cosa de quien
 /// aprende (E2).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OwnReply {
     pub id: String,
     /// Fecha de envío tal como la da el proveedor; `None` si no la da.
@@ -66,14 +66,42 @@ pub struct OwnReply {
     pub to: Vec<String>,
 }
 
+/// `Debug` sin contenido: id y longitudes, nunca el cuerpo ni las direcciones.
+impl std::fmt::Debug for OwnReply {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OwnReply")
+            .field("id", &self.id)
+            .field("has_date", &self.date.is_some())
+            .field("body_chars", &self.body.as_ref().map(|b| b.chars().count()))
+            .field("recipients", &self.to.len())
+            .finish()
+    }
+}
+
 /// Lo que algunos conectores dan de un mensaje recibido además de [`Message`] y que solo usa la
 /// fase de aprender (D168, D169). Todo opcional: lo que el proveedor no da queda en `None`.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Clone, Default, PartialEq, Eq)]
 pub struct ReceivedExtra {
     /// Cuerpo sin el texto citado del hilo (`uniqueBody` de Graph), en texto plano.
     pub unique_body: Option<String>,
     /// Nombre visible del remitente (sin la dirección).
     pub sender_name: Option<String>,
+}
+
+/// `Debug` sin contenido: solo longitudes.
+impl std::fmt::Debug for ReceivedExtra {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ReceivedExtra")
+            .field(
+                "unique_body_chars",
+                &self.unique_body.as_ref().map(|b| b.chars().count()),
+            )
+            .field(
+                "sender_name_chars",
+                &self.sender_name.as_ref().map(|b| b.chars().count()),
+            )
+            .finish()
+    }
 }
 
 /// Mensaje propio del simulador en Enviados, con el hilo al que responde.
@@ -719,7 +747,27 @@ pub fn sample_messages() -> Vec<Message> {
 
 #[cfg(test)]
 mod tests {
-    use super::format_utc;
+    use super::{format_utc, OwnReply, ReceivedExtra};
+
+    /// B4: el `Debug` no muestra textos ni direcciones.
+    #[test]
+    fn debug_of_own_reply_and_received_extra_shows_no_content() {
+        let own = OwnReply {
+            id: "m1".into(),
+            date: Some("2026-01-01".into()),
+            body: Some("CUERPO-SENTINELA".into()),
+            to: vec!["alguien@ejemplo.test".into()],
+        };
+        let extra = ReceivedExtra {
+            unique_body: Some("CUERPO-SENTINELA".into()),
+            sender_name: Some("NOMBRE-SENTINELA".into()),
+        };
+        let shown = format!("{own:?} {extra:?}");
+        for secret in ["SENTINELA", "ejemplo.test", "alguien"] {
+            assert!(!shown.contains(secret), "{shown}");
+        }
+        assert!(shown.contains("m1") && shown.contains("body_chars"));
+    }
 
     #[test]
     fn format_utc_handles_epoch_and_leap_day() {

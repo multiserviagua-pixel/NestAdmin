@@ -395,11 +395,27 @@ fn is_outlook_block(lines: &[&str], i: usize) -> bool {
     if !field_name(lines[i]).is_some_and(|f| FROM_FIELDS.contains(&f.as_str())) {
         return false;
     }
+    // Cabecera de Outlook aplanada en una sola línea («De: … Enviado: … Para: …»).
+    if has_inline_date_label(lines[i]) {
+        return true;
+    }
     lines
         .iter()
         .skip(i + 1)
         .take(5)
         .any(|l| field_name(l).is_some_and(|f| DATE_FIELDS.contains(&f.as_str())))
+}
+
+/// ¿Trae la línea, tras su primer campo, otra etiqueta de fecha seguida de «:»?
+fn has_inline_date_label(line: &str) -> bool {
+    let lower = line.to_lowercase();
+    let Some(colon) = lower.find(':') else {
+        return false;
+    };
+    let rest = &lower[colon + 1..];
+    DATE_FIELDS
+        .iter()
+        .any(|f| rest.contains(&format!(" {f}:")) || rest.contains(&format!(" {f} :")))
 }
 
 fn is_header_field(line: &str) -> bool {
@@ -702,19 +718,109 @@ fn looks_like_signature(line: &str) -> bool {
     }
     // Nombre propio solo: dos a cuatro palabras con inicial mayúscula, sin cifras ni puntuación
     // de frase.
-    const NOT_NAMES: [&str; 12] = [
-        "hola", "buenos", "buenas", "días", "tardes", "noches", "gracias", "saludos", "estimado",
-        "estimada", "querido", "querida",
+    (2..=4).contains(&words.len()) && chars <= 40 && words.iter().all(|w| is_name_word(w))
+}
+
+const NOT_NAMES: [&str; 12] = [
+    "hola", "buenos", "buenas", "días", "tardes", "noches", "gracias", "saludos", "estimado",
+    "estimada", "querido", "querida",
+];
+
+/// Palabra con inicial mayúscula y solo letras, apóstrofo, guion o punto, que no sea un saludo.
+fn is_name_word(w: &str) -> bool {
+    w.chars().next().is_some_and(char::is_uppercase)
+        && w.chars()
+            .all(|c| c.is_alphabetic() || matches!(c, '\'' | '-' | '.'))
+        && !NOT_NAMES.contains(&w.to_lowercase().as_str())
+}
+
+/// Nombre de pila suelto en su línea («Ana»): solo se mira tras una despedida o un pie.
+fn is_lone_first_name(line: &str) -> bool {
+    let t = line.trim();
+    (2..=20).contains(&t.chars().count())
+        && t.split_whitespace().count() == 1
+        && is_name_word(t)
+        && !t.ends_with('.')
+}
+
+/// Despedida y nombre en una misma línea («Un saludo, Ana Pérez»): devuelve solo la despedida
+/// (con su coma si la tenía). Un prefijo de [`CLOSINGS`] seguido de una a cuatro palabras con
+/// inicial mayúscula; cualquier otra cosa («Gracias, le llamo mañana.») no lo es.
+fn closing_with_name(line: &str) -> Option<String> {
+    let t = examined(line);
+    let t = t.trim();
+    if t.chars().count() > 70 || is_closing_line(t) {
+        return None;
+    }
+    let mut closings = CLOSINGS.to_vec();
+    closings.sort_by_key(|c| std::cmp::Reverse(c.chars().count()));
+    let chars: Vec<char> = t.chars().collect();
+    for closing in closings {
+        let n = closing.chars().count();
+        if chars.len() <= n
+            || chars[..n].iter().collect::<String>().to_lowercase() != closing
+            || !matches!(chars[n], ',' | ' ')
+        {
+            continue;
+        }
+        let rest: String = chars[n..].iter().collect();
+        let rest = rest
+            .trim_start_matches([',', ' '])
+            .trim_end_matches(['.', ',', '!', ';', ':']);
+        let words: Vec<&str> = rest.split_whitespace().collect();
+        if (1..=4).contains(&words.len()) && words.iter().all(|w| is_name_word(w)) {
+            let comma = if chars[n] == ',' { "," } else { "" };
+            return Some(format!("{}{comma}", chars[..n].iter().collect::<String>()));
+        }
+        return None;
+    }
+    None
+}
+
+/// Pie automático que se recorta: «Enviado desde mi …», «Sent from my …» y las cláusulas de
+/// confidencialidad.
+fn is_footer_line(line: &str) -> bool {
+    let l = squash(line);
+    const DEVICE: [&str; 9] = [
+        "enviado desde mi",
+        "enviado desde outlook",
+        "enviado desde gmail",
+        "sent from my",
+        "sent from outlook",
+        "get outlook for",
+        "obtener outlook para",
+        "envoyé de mon",
+        "gesendet von meinem",
     ];
-    (2..=4).contains(&words.len())
-        && chars <= 40
-        && words.iter().all(|w| {
-            let mut cs = w.chars();
-            cs.next().is_some_and(char::is_uppercase)
-                && w.chars()
-                    .all(|c| c.is_alphabetic() || matches!(c, '\'' | '-' | '.'))
-                && !NOT_NAMES.contains(&w.to_lowercase().as_str())
-        })
+    if DEVICE.iter().any(|p| l.starts_with(p)) {
+        return true;
+    }
+    const LEGAL_START: [&str; 14] = [
+        "este mensaje",
+        "este correo",
+        "este e-mail",
+        "este email",
+        "la información",
+        "la informacion",
+        "el contenido de este",
+        "this message",
+        "this email",
+        "this e-mail",
+        "the information",
+        "aviso legal",
+        "aviso de confidencialidad",
+        "disclaimer",
+    ];
+    const LEGAL_WORDS: [&str; 7] = [
+        "confidencial",
+        "confidential",
+        "privilegiad",
+        "privileged",
+        "destinatario",
+        "intended recipient",
+        "legal",
+    ];
+    LEGAL_START.iter().any(|p| l.starts_with(p)) && LEGAL_WORDS.iter().any(|k| l.contains(k))
 }
 
 /// Quita la firma de una respuesta (ya sin cita):
@@ -747,28 +853,69 @@ pub fn strip_signature(reply: &str, signatures: &SignatureSet) -> Option<String>
     while lines.last().is_some_and(|l| l.trim().is_empty()) {
         lines.pop();
     }
-    // Sin firma común: líneas cortas tras la última despedida, que debe estar entre las últimas.
+    // Pie automático («Enviado desde mi iPhone», confidencialidad): se recorta.
     let from = lines.len().saturating_sub(SIGNATURE_MAX_LINES + 1);
-    if let Some(d) = lines
+    let footer_cut = match lines.iter().skip(from).position(|l| is_footer_line(l)) {
+        Some(p) => {
+            lines.truncate(from + p);
+            true
+        }
+        None => false,
+    };
+    while lines.last().is_some_and(|l| l.trim().is_empty()) {
+        lines.pop();
+    }
+    // Sin firma común: lo que sigue a la última despedida (sola o con el nombre en la misma
+    // línea), que debe estar entre las últimas líneas.
+    let from = lines.len().saturating_sub(SIGNATURE_MAX_LINES + 1);
+    let closing = lines
         .iter()
         .enumerate()
         .skip(from)
         .rev()
-        .find(|(_, l)| is_closing_line(l))
-        .map(|(i, _)| i)
-    {
-        let after = &lines[d + 1..];
+        .find(|(_, l)| is_closing_line(l) || closing_with_name(l).is_some())
+        .map(|(i, _)| i);
+    if let Some(d) = closing {
+        // El nombre de la misma línea no se conserva; la despedida sí (es estilo).
+        if let Some(only_closing) = closing_with_name(&lines[d]) {
+            lines[d] = only_closing;
+        }
         // Una frase entera (cuatro palabras o más y punto final) es contenido, no firma.
         let sentence = |l: &String| {
             let t = l.trim();
             t.split_whitespace().count() >= 4 && t.ends_with(['.', '!', '?'])
         };
-        if after.iter().filter(|l| !l.trim().is_empty()).count() <= SIGNATURE_MAX_LINES
-            && after
-                .iter()
-                .all(|l| l.trim().chars().count() <= SIGNATURE_LINE_MAX_CHARS && !sentence(l))
-        {
+        let short =
+            |l: &String| l.trim().chars().count() <= SIGNATURE_LINE_MAX_CHARS && !sentence(l);
+        let after: Vec<&String> = lines[d + 1..]
+            .iter()
+            .filter(|l| !l.trim().is_empty())
+            .collect();
+        if after.len() <= SIGNATURE_MAX_LINES && after.iter().all(|l| short(l)) {
             lines.truncate(d + 1);
+        } else if let Some(j) = after
+            .iter()
+            .position(|l| looks_like_signature(l) || is_lone_first_name(l))
+        {
+            // Tras una firma ya no se exige el límite de longitud (cargo, aviso legal…). Si antes
+            // de ella hay contenido propio, el par es dudoso.
+            if after[..j].iter().all(|l| short(l)) {
+                lines.truncate(d + 1);
+            } else {
+                return None;
+            }
+        }
+    } else {
+        // Sin despedida: ninguna de las últimas cuatro líneas puede parecer firma. El nombre de
+        // pila suelto solo cuenta tras un pie recortado («Ana» + «Enviado desde mi iPhone»).
+        if lines
+            .iter()
+            .rev()
+            .filter(|l| !l.trim().is_empty())
+            .take(4)
+            .any(|l| looks_like_signature(l) || (footer_cut && is_lone_first_name(l)))
+        {
+            return None;
         }
     }
     while lines.last().is_some_and(|l| l.trim().is_empty()) {
@@ -985,10 +1132,29 @@ fn is_id_token(token: &[char]) -> bool {
             && (up[8].is_ascii_digit() || ('A'..='J').contains(&up[8])))
 }
 
+/// Forma de un identificador partido en trozos: letra inicial opcional (NIE, CIF), una racha de
+/// cifras en un trozo o en grupos `d.ddd.ddd`, y un último carácter suelto. Las letras sueltas
+/// deben ser mayúsculas, para no tomar por DNI una fecha seguida de «a» o «y».
+fn is_split_id_shape(chars: &[char], group: &[(usize, usize)]) -> bool {
+    let tok = |&(s, e): &(usize, usize)| &chars[s..e];
+    let single_upper = |t: &[char]| t.len() == 1 && t[0].is_alphabetic() && t[0].is_uppercase();
+    let last = tok(&group[group.len() - 1]);
+    if !(single_upper(last) || (last.len() == 1 && last[0].is_ascii_digit())) {
+        return false;
+    }
+    let skip = usize::from(single_upper(tok(&group[0])));
+    let mid = &group[skip..group.len() - 1];
+    if mid.is_empty() || !mid.iter().all(|t| tok(t).iter().all(char::is_ascii_digit)) {
+        return false;
+    }
+    let lens: Vec<usize> = mid.iter().map(|&(s, e)| e - s).collect();
+    lens.len() == 1 || (lens.len() == 3 && lens[0] <= 2 && lens[1] == 3 && lens[2] == 3)
+}
+
 /// Recorre los trozos alfanuméricos de un texto y devuelve su posición si son un identificador
 /// fiscal.
 fn id_spans(chars: &[char]) -> Vec<(usize, usize)> {
-    let mut spans = Vec::new();
+    let mut tokens: Vec<(usize, usize)> = Vec::new();
     let mut i = 0;
     while i < chars.len() {
         if chars[i].is_alphanumeric() || chars[i] == '_' {
@@ -996,11 +1162,39 @@ fn id_spans(chars: &[char]) -> Vec<(usize, usize)> {
             while i < chars.len() && (chars[i].is_alphanumeric() || chars[i] == '_') {
                 i += 1;
             }
-            if is_id_token(&chars[start..i]) {
-                spans.push((start, i));
-            }
+            tokens.push((start, i));
         } else {
             i += 1;
+        }
+    }
+    let mut spans = Vec::new();
+    let mut t = 0;
+    while t < tokens.len() {
+        let mut found = None;
+        for len in (1..=5).filter(|len| t + len <= tokens.len()).rev() {
+            let group = &tokens[t..t + len];
+            // Los trozos se unen solo con un `-`, `.` o espacio entre cada dos.
+            let one_separator = group
+                .windows(2)
+                .all(|w| w[1].0 == w[0].1 + 1 && matches!(chars[w[0].1], '-' | '.' | ' '));
+            if !one_separator || (len > 1 && !is_split_id_shape(chars, group)) {
+                continue;
+            }
+            let joined: Vec<char> = group
+                .iter()
+                .flat_map(|&(s, e)| chars[s..e].iter().copied())
+                .collect();
+            if is_id_token(&joined) {
+                found = Some(len);
+                break;
+            }
+        }
+        match found {
+            Some(len) => {
+                spans.push((tokens[t].0, tokens[t + len - 1].1));
+                t += len;
+            }
+            None => t += 1,
         }
     }
     spans
@@ -2210,6 +2404,91 @@ mod tests {
         ]
     }
 
+    /// Segunda revisión: firma en respuestas sueltas (sin firma común).
+    #[test]
+    fn a_lone_signature_is_cut_or_the_pair_dropped() {
+        let none = SignatureSet::default();
+        let cut = |reply: &str| strip_signature(reply, &none);
+        // a) cargo y aviso de confidencialidad largo tras el nombre.
+        assert_eq!(
+            cut("Le confirmo la cita.
+Un saludo,
+Ana Pérez
+Gerente
+Este mensaje es confidencial y va dirigido solo a su destinatario.")
+            .as_deref(),
+            Some(
+                "Le confirmo la cita.
+Un saludo,"
+            )
+        );
+        // El aviso largo tras un nombre sin pie reconocible: se descarta el par.
+        assert_eq!(
+            cut("Le confirmo la cita.
+Un saludo,
+Ana Pérez
+La información de este envío es de uso interno y no debe difundirse fuera."),
+            Some(
+                "Le confirmo la cita.
+Un saludo,"
+                    .into()
+            )
+        );
+        // b) nombre de pila y pie de dispositivo.
+        assert_eq!(
+            cut("Vale, perfecto.
+Ana
+Enviado desde mi iPhone"),
+            None
+        );
+        assert_eq!(
+            cut("Vale, perfecto.
+Sent from my phone")
+            .as_deref(),
+            Some("Vale, perfecto.")
+        );
+        // c) despedida y nombre en la misma línea.
+        assert_eq!(
+            cut("Gracias por todo.
+Un saludo, Ana Pérez")
+            .as_deref(),
+            Some(
+                "Gracias por todo.
+Un saludo,"
+            )
+        );
+        assert_eq!(
+            cut("Todo listo.
+Saludos Ana")
+            .as_deref(),
+            Some(
+                "Todo listo.
+Saludos"
+            )
+        );
+        // Una firma sin despedida entre las últimas cuatro líneas descarta el par.
+        assert_eq!(
+            cut("Vale.
+Ana Pérez
+Gerente
+llámeme cuando quiera"),
+            None
+        );
+        // Respuestas normales: no se tocan.
+        for body in [
+            "Gracias, le llamo mañana.",
+            "De acuerdo, Ana.",
+            "Hola
+De acuerdo, Ana.
+Nos vemos el martes.",
+            "Gracias, Ana, por avisar. Mañana lo reviso con calma.",
+            "Perfecto.
+Este mensaje se lo confirmo hoy mismo.",
+        ] {
+            assert_eq!(cut(body).as_deref(), Some(body), "{body}");
+        }
+    }
+
     #[test]
     fn common_signature_is_detected_and_removed_keeping_the_closing() {
         let replies = sig_replies();
@@ -2453,6 +2732,71 @@ mod tests {
         // Texto corriente, fechas, importes y archivos no se tocan.
         let plain = "Pedido FS-2026-014, factura.pdf, 2026-11-05 y 120,50 euros; ref 4455.";
         assert_eq!(mask(plain), plain);
+    }
+
+    /// Segunda revisión: DNI y NIE con separadores se enmascaran.
+    #[test]
+    fn masks_fiscal_ids_with_separators() {
+        for text in [
+            "DNI 12345678-Z.",
+            "DNI 12.345.678 Z.",
+            "NIE X-1234567-L.",
+            "NIE X 1234567 L.",
+            "NIE X-1.234.567-L.",
+        ] {
+            let masked = mask(text);
+            assert!(masked.contains("[ID]"), "{text} -> {masked}");
+            assert!(!masked.chars().any(|c| c.is_ascii_digit()), "{masked}");
+            assert!(!is_masked(text), "{text}");
+            assert!(is_masked(&masked));
+        }
+        // Texto corriente con guiones, puntos y espacios no se toca.
+        let plain =
+            "Pedido 12-34-56, versión 1.2.3, el 2026-11-05 a las 10 y 8 de 10 en 2026-11-05 y 5.";
+        assert_eq!(mask(plain), plain);
+    }
+
+    /// Segunda revisión: cabecera de Outlook aplanada en una línea sin `@`.
+    #[test]
+    fn a_flattened_outlook_header_cuts_the_quote() {
+        assert_eq!(
+            strip_quote(
+                "Perfecto, gracias.
+De: Ana Pérez Enviado: lunes 3 de marzo Para: Luis Asunto: cita
+Texto citado"
+            )
+            .as_deref(),
+            Some("Perfecto, gracias.")
+        );
+        assert_eq!(
+            strip_quote(
+                "Fine.
+From: Ana Perez Sent: Monday To: Luis Subject: visit
+Quoted"
+            )
+            .as_deref(),
+            Some("Fine.")
+        );
+        // Sin cuerpo propio antes de la cabecera, el par se descarta.
+        assert_eq!(
+            strip_quote(
+                "De: Ana Pérez Enviado: lunes Para: Luis
+Texto"
+            ),
+            None
+        );
+        // Una línea «De:» corriente sin más etiquetas no es una cita.
+        assert_eq!(
+            strip_quote(
+                "Vale.
+De: nada, gracias."
+            )
+            .as_deref(),
+            Some(
+                "Vale.
+De: nada, gracias."
+            )
+        );
     }
 
     #[test]

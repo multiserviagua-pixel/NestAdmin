@@ -42,7 +42,6 @@
 //!   misma transacción que la marca: reanudar no la duplica.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
 
 use nestadmin_ai::ProviderKind;
 use nestadmin_core::LearnedEvidence;
@@ -302,7 +301,7 @@ pub enum LearningStep {
 }
 
 /// Recogida en curso de un buzón: solo en memoria.
-struct Collecting {
+pub(crate) struct Collecting {
     collector: Collector,
     /// Marca previa (para conservar la fecha de inicio y limpiar errores).
     prior: Option<LearnMark>,
@@ -310,6 +309,10 @@ struct Collecting {
     auto_local: bool,
     /// La lleva la ventana (la persona la pidió): el hilo de trabajo no la toca.
     by_person: bool,
+    /// La fase guardada era `sent` (llamada cortada) al empezar: es el reintento de la persona, y
+    /// terminar con `sent` guardado es lo esperado. En otro caso, un `sent` guardado al terminar
+    /// significa que alguien envió mientras se recogía.
+    started_in_sent: bool,
 }
 
 /// Estado en memoria (no se guarda): reanudaciones ya hechas en este proceso, trabajos en curso,
@@ -320,7 +323,7 @@ pub(crate) struct LearningRuntime {
     checked: HashSet<String>,
     running: HashSet<String>,
     cache: HashMap<String, Collected>,
-    collecting: HashMap<String, Collecting>,
+    pub(crate) collecting: HashMap<String, Collecting>,
     /// Huellas con consentimiento vigente (se vuelve a comprobar justo antes de enviar).
     pub(crate) gate: ConsentGate,
     /// Resolvedor de la IA local para «Usar IA local», independiente de `local_fallback`.
@@ -707,6 +710,11 @@ impl App {
         auto_local: bool,
         by_person: bool,
     ) {
+        let started_in_sent = self
+            .load_learn(source)
+            .ok()
+            .flatten()
+            .is_some_and(|m| m.phase == SENT);
         self.learning.collecting.insert(
             source.to_owned(),
             Collecting {
@@ -714,6 +722,7 @@ impl App {
                 prior,
                 auto_local,
                 by_person,
+                started_in_sent,
             },
         );
     }
@@ -730,6 +739,11 @@ impl App {
         let Some(mut collecting) = self.learning.collecting.remove(source) else {
             return Ok((false, None));
         };
+        // La recogida va atada al buzón, no solo al id de la cuenta: si el id ya apunta a otro
+        // buzón (se reconectó otra dirección), esta recogida no vale.
+        if self.account_read_source(account).as_deref() != Some(source) {
+            return Ok((false, None));
+        }
         match collecting.collector.step(&self.mail) {
             Ok(CollectStep::Continue) => {
                 self.learning
@@ -738,6 +752,19 @@ impl App {
                 Ok((true, None))
             }
             Ok(CollectStep::Done(collected)) => {
+                // Carrera: mientras se recogía, la persona pudo enviar con la vista previa
+                // anterior. Una fase posterior (o una llamada en curso) no se pisa ni se repite.
+                if self.learning.running.contains(source)
+                    || self
+                        .load_learn(source)?
+                        .is_some_and(|m| match m.phase.as_str() {
+                            DONE | NOTHING => true,
+                            SENT => !collecting.started_in_sent,
+                            _ => false,
+                        })
+                {
+                    return Ok((false, None));
+                }
                 let job = self.apply_collection(
                     source,
                     account,
@@ -941,6 +968,8 @@ impl App {
         let Some(mark) = self.load_learn(&source)? else {
             return Err(AppError::Invalid("La recogida no ha empezado.".into()));
         };
+        // Una recogida en curso de esta fuente ya no vale: la fase pasa a `sent` y no se pisa.
+        self.learning.collecting.remove(&source);
         self.launch_learning(&source, mark, &collected, &choice.choice())
     }
 
@@ -959,7 +988,14 @@ impl App {
         // falta de crédito fijan la espera de IA. Si el proveedor ya cambió, el aviso es del
         // anterior y no se vuelve a poner.
         if let (Some(wait), Some(used)) = (run.wait, run.used.as_ref()) {
-            if Arc::ptr_eq(used, &self.provider) {
+            // Misma identidad (proveedor, modelo, destino y ruta), no el mismo objeto: una nueva
+            // resolución del proveedor (`refresh_provider`) crea otro `Arc` con la misma identidad.
+            let current = &self.provider;
+            if used.kind() == current.kind()
+                && used.model() == current.model()
+                && used.destination() == current.destination()
+                && used.configured_url() == current.configured_url()
+            {
                 self.ai_wait = Some(wait);
                 if wait == crate::AiWait::InvalidKey {
                     self.key_fixed = false;
