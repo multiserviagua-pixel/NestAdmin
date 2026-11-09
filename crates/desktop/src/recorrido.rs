@@ -1451,6 +1451,8 @@ fn plantilla_de_pipeline_la_respuesta_espera_a_la_factura_y_no_se_envia_sola() {
             body: Some("Texto sintético.".into()),
             date: Some(today_text()),
             attachments: Vec::new(),
+            signals: None,
+            thread_key: None,
         })
         .unwrap();
         sim.add_attachment(
@@ -1596,6 +1598,8 @@ fn continuar_sin_ese_paso_por_la_ventana_libera_la_respuesta_a_revision() {
             body: Some("Texto sintético.".into()),
             date: Some(today_text()),
             attachments: Vec::new(),
+            signals: None,
+            thread_key: None,
         })
         .unwrap();
         sim.add_attachment("Z-9", "vacia.txt", "text/plain", b"")

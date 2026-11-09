@@ -75,6 +75,8 @@ fn list_messages_pages_with_stable_ids_and_explicit_absences() {
         body: None,
         date: None,
         attachments: Vec::new(),
+        signals: None,
+        thread_key: None,
     }]);
     let page = unknown.list_messages(None).unwrap();
     assert_eq!(page.messages[0].to, None);
@@ -665,4 +667,40 @@ fn sample_invoice_attachment_is_listed_and_downloadable_without_effects() {
     );
     // La lista no se ve afectada por el fallo de descarga.
     assert!(sim.list_messages(None).is_ok());
+}
+
+#[test]
+fn sample_messages_report_checked_signals_from_their_sender() {
+    let mail = MailSimulator::with_messages(vec![Message {
+        id: "M-0200".into(),
+        subject: None,
+        from: Some("Avisos <no-reply@servicio.test>".into()),
+        to: None,
+        body: None,
+        date: None,
+        attachments: Vec::new(),
+        signals: None,
+        thread_key: None,
+    }
+    .with_checked_signals(&[("Precedence", "bulk")])]);
+    let page = mail.list_messages(None).unwrap();
+    assert_eq!(
+        page.messages[0].signals,
+        Some(vec![
+            "noreply_address".to_owned(),
+            "precedence_bulk".to_owned()
+        ])
+    );
+    for m in nestadmin_simulators::mail::sample_messages() {
+        assert_eq!(m.signals, Some(Vec::new()), "{}", m.id);
+    }
+}
+
+#[test]
+fn message_without_new_fields_still_deserializes_and_omits_them() {
+    let old = r#"{"id":"M-1","subject":null,"from":"a@b.test","to":null,"body":null,"date":null}"#;
+    let m: Message = serde_json::from_str(old).unwrap();
+    assert_eq!((m.signals.as_ref(), m.thread_key.as_ref()), (None, None));
+    let back = serde_json::to_string(&m).unwrap();
+    assert!(!back.contains("signals") && !back.contains("thread_key"));
 }

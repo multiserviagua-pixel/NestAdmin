@@ -28,6 +28,24 @@ pub struct Message {
     /// los adjuntos se leen con la lista vacía.
     #[serde(default)]
     pub attachments: Vec<Attachment>,
+    /// Códigos de señal de correo automático (D157, `nestadmin_core::mail_signals`). `None` =
+    /// sin comprobar (mensaje guardado antes de las señales, o proveedor que no dio cabeceras);
+    /// `Some(vacía)` = comprobado sin señales. Nunca guarda valores de cabecera.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signals: Option<Vec<String>>,
+    /// Clave opaca del hilo (`threadId` de Gmail, `conversationId` de Graph); `None` si no se
+    /// conoce.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thread_key: Option<String>,
+}
+
+impl Message {
+    /// Fija `signals` como comprobadas a partir de su remitente y de cabeceras sintéticas.
+    pub fn with_checked_signals(mut self, headers: &[(&str, &str)]) -> Self {
+        let found = nestadmin_core::mail_signals::detect(self.from.as_deref(), Some(headers));
+        self.signals = Some(nestadmin_core::mail_signals::codes(&found));
+        self
+    }
 }
 
 /// Adjunto de un mensaje. El contenido se pide aparte con
@@ -521,7 +539,10 @@ pub fn sample_messages() -> Vec<Message> {
                 body: Some(body.to_owned()),
                 date: date.map(str::to_owned),
                 attachments: Vec::new(),
+                signals: None,
+                thread_key: None,
             }
+            .with_checked_signals(&[])
         };
     vec![
         message(

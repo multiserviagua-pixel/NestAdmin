@@ -25,6 +25,8 @@ La sesión principal usa Opus para coordinar y decidir; el trabajo mecánico se 
 - Workflows: como máximo unos 5 agentes salvo petición expresa. `/code-review` en nivel `low` o `medium` por defecto.
 - Todo brief a un subagente repite la regla del instalador: pruebas manuales sobre `tauri dev`; instalador solo para la versión final o si el usuario lo pide.
 
+Skills del proyecto en `.claude/skills/`: `medir-calidad-correo`, `anadir-senal-correo` y `revisar-envio-reglas`.
+
 ### Flujo automático
 
 La sesión principal encadena los agentes sin pedir confirmación entre pasos:

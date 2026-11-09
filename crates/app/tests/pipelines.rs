@@ -198,6 +198,8 @@ fn message(id: &str, from: Option<&str>, date: Option<String>) -> Message {
         body: Some("Texto sintético del correo.".into()),
         date,
         attachments: Vec::new(),
+        signals: None,
+        thread_key: None,
     }
 }
 

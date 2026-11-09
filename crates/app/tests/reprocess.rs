@@ -1171,6 +1171,8 @@ fn a_released_pipeline_reply_is_reviewed_and_survives_a_lost_send_without_resend
         body: Some("Texto sintético.".into()),
         date: Some(today_text()),
         attachments: Vec::new(),
+        signals: None,
+        thread_key: None,
     })
     .unwrap();
     sim.add_attachment("Z-1", "a.txt", "text/plain", b"factura sintetica")

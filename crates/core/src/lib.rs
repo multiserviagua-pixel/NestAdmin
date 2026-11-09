@@ -3,6 +3,7 @@
 
 pub mod actions;
 pub mod error;
+pub mod mail_signals;
 pub mod pipeline;
 pub mod queue;
 pub mod rule_panel;
