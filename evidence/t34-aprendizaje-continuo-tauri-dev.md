@@ -62,3 +62,20 @@ La consulta de metadatos de Enviados respondió sin error en las dos cuentas rea
 **Nota:** a los pocos segundos de abrir esta versión, otra sesión de trabajo volvió a abrir su propia versión de desarrollo sobre la misma carpeta de datos. Esa versión ya incluía el mismo código de D178 (`cebf498`), así que los recuentos no dependen de qué ventana los mostró.
 
 **Límite:** las demás tareas reales se descargaron antes de que NestAdmin guardara el hilo del mensaje y el aprendizaje continuo no puede consultarlas; y no había correo nuevo. Falta ver con cuentas reales un cierre por respuesta hecha fuera, que exige un correo nuevo respondido desde Gmail u Outlook.
+
+## Cuentas reales con hilos recuperados (solo recuentos)
+
+2026-11-10, commit `31e9ead` (recuperación del hilo de las tareas antiguas, D178), misma carpeta y mismas cuentas, con autorización expresa. Copia previa de la base: `nestadmin.antes-hilos.db` en esa carpeta. Pasada al abrir y otra adelantada con «Consultar correo».
+
+| Comprobación | Gmail | Outlook |
+|---|---|---|
+| Tareas con el hilo recuperado (`thread_recovered`) | 26 | 3 |
+| Tareas que siguen sin hilo | 1 en revisión | 2 completadas (con envío de NestAdmin) |
+| Pantalla «Aprendizaje continuo» | 24 correos comprobados, 2 respuestas suyas, 2 tareas cerradas | 2 correos comprobados, 0 respuestas suyas, 0 tareas cerradas |
+| Tareas cerradas como `replied_outside` | 2 | 0 |
+| Evidencia `learned` nueva | 0 | 0 |
+
+- **Primer cierre real por respuesta hecha fuera:** 2 tareas de Gmail, con la fecha de la respuesta encontrada en Enviados por metadatos.
+- **Sin evidencia nueva:** todas las tareas reales antiguas están en `otros` y sin `needs_reply`, porque se clasificaron antes del catálogo D177 y del triaje. D178 no da evidencia con `otros` ni sin `needs_reply` explícito, así que las filas `learned` siguen en 3, todas del recorrido sintético.
+- **Outlook:** las 2 tareas con envío confirmado de NestAdmin no tienen hilo guardado. Por la regla que falla cerrado, las 3 tareas de Outlook con hilo recuperado no se cierran ni dan evidencia.
+- **Nada enviado:** 2 acciones de envío, las mismas que antes de la prueba, y ninguna regla creada ni activada.
