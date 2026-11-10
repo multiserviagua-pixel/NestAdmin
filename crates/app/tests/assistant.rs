@@ -347,7 +347,49 @@ fn an_unknown_tool_or_an_argument_outside_the_list_is_an_invalid_output_and_two_
     let turn = ask(&mut w.app, None, "pregunta", "other");
     assert_eq!((turn.outcome, turn.steps), (Outcome::Answered, 2));
     let second = &w.ext.requests()[1];
-    assert!(blocks(&second.content).iter().any(|b| b == "unknown_tool"));
+    assert!(second.content.contains("esa herramienta no existe"));
+    assert!(blocks(&second.content).iter().all(|b| b != "unknown_tool"));
+}
+
+#[test]
+fn a_tool_step_without_its_required_argument_is_corrected_by_a_fixed_notice() {
+    let mut w = world(ProviderKind::Ollama);
+    w.ext.steps(vec![
+        json!({ "tool": "search" }),
+        tool("search", json!({ "query": "agua" })),
+        answer("Nada con agua."),
+    ]);
+    let turn = ask(&mut w.app, None, "¿Hay facturas de agua?", "other");
+    assert_eq!((turn.outcome, turn.steps), (Outcome::Answered, 3));
+    assert_eq!(turn.error_detail, None);
+    let second = &w.ext.requests()[1];
+    let notice = "a la herramienta search le falta el argumento obligatorio query";
+    assert!(second.content.contains(notice));
+    // El aviso es texto de la aplicación: no está entre los marcadores de datos.
+    assert!(blocks(&second.content).iter().all(|b| !b.contains(notice)));
+    assert!(blocks(&second.content).iter().all(|b| b != "missing_arg"));
+    // Un nombre de herramienta inventado por el modelo no se repite en el aviso.
+    let mut w = world(ProviderKind::Ollama);
+    w.ext
+        .steps(vec![tool("INVENTADA-4471", json!({})), answer("Listo.")]);
+    let turn = ask(&mut w.app, None, "pregunta", "other");
+    assert_eq!(turn.outcome, Outcome::Answered);
+    let second = &w.ext.requests()[1];
+    assert!(second.content.contains("esa herramienta no existe"));
+    assert!(!sent_text(second).contains("INVENTADA-4471"));
+    // Con dos rechazos el turno termina y el último código queda visible.
+    let mut w = world(ProviderKind::Ollama);
+    w.ext.steps(vec![json!({ "tool": "search" })]);
+    let turn = ask(&mut w.app, None, "pregunta", "other");
+    assert_eq!(turn.error_code.as_deref(), Some("invalid_response"));
+    assert_eq!(turn.error_detail.as_deref(), Some("missing_arg"));
+    let saved = w.app.assistant_conversation(None).unwrap().unwrap();
+    assert_eq!(
+        saved.turns[1].meta.error_detail.as_deref(),
+        Some("missing_arg")
+    );
+    let (_, detail) = last_audit(&w.app, "assistant_turn");
+    assert!(detail.contains("\"error_detail\":\"missing_arg\""));
 }
 
 #[test]

@@ -1160,6 +1160,8 @@ export interface AssistantTurn {
   outcome: AssistantOutcome;
   /** Código del proveedor o del protocolo cuando `outcome` es `error`. */
   error_code: string | null;
+  /** Código cerrado del último paso rechazado (`missing_arg`…) si `error_code` es `invalid_response`; nunca contenido. */
+  error_detail?: string | null;
   /** Texto plano: la respuesta o el motivo si no la hay. */
   answer: string;
   /** Tarjetas de los documentos citados. */
@@ -1200,6 +1202,8 @@ export interface AssistantStoredTurn {
   tools: string[];
   /** Código del fallo si el turno guardado terminó con `error`. */
   error_code?: string | null;
+  /** Código cerrado del último paso rechazado si el fallo fue `invalid_response`. */
+  error_detail?: string | null;
   /** Tarjetas de los documentos citados, tal como están ahora en el índice. */
   citations: SearchHit[];
 }

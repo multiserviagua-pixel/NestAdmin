@@ -26,7 +26,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use nestadmin_ai::assistant::{
-    assistant_request, doc_id, parse_step, skills_for, tools_for, Entry, HistoryTurn, Step, View,
+    assistant_request, doc_id, parse_step, skills_for, tool_spec, tools_for, Entry, HistoryTurn,
+    Rejection, Step, View,
 };
 use nestadmin_ai::{AiError, GenerateRequest, GenerateResult, Provider, ProviderKind};
 use nestadmin_core::{NewCall, SearchHit, SentCall};
@@ -140,7 +141,7 @@ pub(crate) enum StoredEntry {
         value: Value,
     },
     Invalid {
-        code: String,
+        rejection: Rejection,
     },
 }
 
@@ -187,6 +188,8 @@ pub struct AssistantRun {
     model: String,
     local: bool,
     fallback: Option<Value>,
+    /// Código cerrado del último rechazo de un paso (nunca contenido).
+    error_detail: Option<String>,
     _guard: TurnGuard,
 }
 
@@ -200,6 +203,9 @@ pub struct AssistantTurn {
     pub outcome: Outcome,
     /// Código de error del proveedor o del protocolo (`outcome` = `error`).
     pub error_code: Option<String>,
+    /// Código cerrado del último paso rechazado (`missing_arg`, `unknown_tool`…), para
+    /// diagnosticar un `invalid_response`; nunca contenido.
+    pub error_detail: Option<String>,
     /// La respuesta, o el motivo si no la hay. Texto plano.
     pub answer: String,
     /// Tarjetas de los documentos citados (solo referencias que una herramienta devolvió).
@@ -239,6 +245,8 @@ pub struct TurnMeta {
     pub tools: Vec<String>,
     /// Código del fallo si el turno terminó con `error`.
     pub error_code: Option<String>,
+    /// Código cerrado del último rechazo si el fallo fue `invalid_response`.
+    pub error_detail: Option<String>,
 }
 
 /// Un turno de una conversación guardada.
@@ -325,7 +333,9 @@ pub(crate) fn compose(
                     output: value.to_string(),
                 }
             }
-            StoredEntry::Invalid { code } => Entry::Invalid { code: code.clone() },
+            StoredEntry::Invalid { rejection } => Entry::Invalid {
+                rejection: *rejection,
+            },
         });
     }
     prepared.reverse();
@@ -411,6 +421,7 @@ impl AssistantJob {
             model: info.1,
             local: false,
             fallback: None,
+            error_detail: None,
             _guard: guard,
         };
         let external = matches!(route, Route::External { .. });
@@ -558,17 +569,15 @@ impl AssistantJob {
             }
             let step = match parse_step(&output) {
                 Ok(step) => step,
-                Err(error) => {
+                Err(rejection) => {
+                    // Cuenta las salidas no válidas del turno (no las consecutivas), D182.
                     invalid += 1;
+                    state.error_detail = Some(rejection.code.to_owned());
                     if invalid >= MAX_INVALID {
                         state.status = RunStatus::Error("invalid_response".into());
                         return state;
                     }
-                    let code = match error {
-                        AiError::InvalidResponse(code) => code,
-                        other => other.code().to_owned(),
-                    };
-                    entries.push(StoredEntry::Invalid { code });
+                    entries.push(StoredEntry::Invalid { rejection });
                     continue;
                 }
             };
@@ -583,12 +592,16 @@ impl AssistantJob {
                     if !offered.contains(&name.as_str()) {
                         // Del catálogo, pero no de los bloques de esta vista: también es no válida.
                         invalid += 1;
+                        state.error_detail = Some("tool_not_offered".to_owned());
                         if invalid >= MAX_INVALID {
                             state.status = RunStatus::Error("invalid_response".into());
                             return state;
                         }
                         entries.push(StoredEntry::Invalid {
-                            code: "tool_not_offered".into(),
+                            rejection: match tool_spec(&name) {
+                                Some(t) => Rejection::for_tool("tool_not_offered", t.name),
+                                None => Rejection::new("tool_not_offered"),
+                            },
                         });
                         continue;
                     }
@@ -792,6 +805,7 @@ impl App {
             model,
             local,
             fallback,
+            error_detail,
             _guard,
         } = run;
         let mut turn = AssistantTurn {
@@ -799,6 +813,7 @@ impl App {
             turn_id: None,
             outcome: Outcome::Error,
             error_code: None,
+            error_detail: None,
             answer: String::new(),
             citations: Vec::new(),
             dropped_citations: 0,
@@ -868,6 +883,9 @@ impl App {
             RunStatus::Error(code) => {
                 turn.outcome = Outcome::Error;
                 turn.answer = error_message(&code);
+                if code == "invalid_response" {
+                    turn.error_detail = error_detail;
+                }
                 turn.error_code = Some(code);
                 "error"
             }
@@ -905,6 +923,7 @@ impl App {
                 steps: turn.steps,
                 tools: turn.tools.clone(),
                 error_code: turn.error_code.clone(),
+                error_detail: turn.error_detail.clone(),
             };
             let saved = self.store.assistant_save_exchange(
                 conversation_id,
@@ -931,6 +950,7 @@ impl App {
                 "dropped_citations": turn.dropped_citations,
                 "withheld": turn.withheld,
                 "error_code": turn.error_code,
+                "error_detail": turn.error_detail,
             }),
         )?;
         Ok(turn)
