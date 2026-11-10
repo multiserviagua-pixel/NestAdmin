@@ -23,7 +23,7 @@
 //! # Tareas sin hilo
 //!
 //! Las tareas creadas antes de que el resultado guardara `message.thread_key` entran como candidatas
-//! con el hilo pendiente, detrás de las que ya lo tienen. Su paso pide el hilo con `thread_of`
+//! con el hilo pendiente y se ordenan como las demás. Su paso pide el hilo con `thread_of`
 //! (solo metadatos), lo guarda con una escritura que solo ocurre si la tarea no cambió
 //! ([`nestadmin_core::Store::record_recovered_thread`]) y sigue como cualquier otra. Cada
 //! consulta, de hilo o de Enviados, descuenta del tope de la pasada.
@@ -163,6 +163,9 @@ struct Candidate {
     /// El resultado no lleva `message.thread_key` (tarea anterior a ese dato): el primer paso
     /// pide el hilo al conector con `thread_of` (D178).
     thread_pending: bool,
+    /// El hilo se recuperó con `thread_of` (en una pasada anterior o en esta): las comprobaciones
+    /// de envíos de NestAdmin también miran las tareas sin hilo guardado.
+    recovered: bool,
     address: String,
     /// Instante del recibido (ms) con el que se compara un envío de NestAdmin en el hilo.
     received_ms: i64,
@@ -547,11 +550,11 @@ impl App {
     fn plan_continuous(&self, account: &str, source: &str) -> AppResult<VecDeque<Candidate>> {
         let today = today_day();
         let mut seen: HashSet<String> = HashSet::new();
-        // Con hilo primero y, dentro de cada tipo, las que aún piden su hilo después (D178).
+        // Primero las que esperan revisión y después las archivadas; dentro de cada grupo, sin
+        // mirar si tienen hilo, las no comprobadas en esta sesión y luego las que llevan más
+        // tiempo sin comprobarse (D178).
         let mut review: Vec<Candidate> = Vec::new();
-        let mut review_pending: Vec<Candidate> = Vec::new();
         let mut archived: Vec<Candidate> = Vec::new();
-        let mut archived_pending: Vec<Candidate> = Vec::new();
         // `all_tasks` va de la más reciente a la más antigua; un mensaje con dos tareas (una
         // redacción pedida) se comprueba una sola vez, con la que espera revisión si la hay.
         let mut tasks = self.store.all_tasks()?;
@@ -569,11 +572,9 @@ impl App {
             if !seen.insert(message_id) {
                 continue;
             }
-            match (candidate.kind, candidate.thread_pending) {
-                (Kind::Review, false) => review.push(candidate),
-                (Kind::Review, true) => review_pending.push(candidate),
-                (Kind::Archived, false) => archived.push(candidate),
-                (Kind::Archived, true) => archived_pending.push(candidate),
+            match candidate.kind {
+                Kind::Review => review.push(candidate),
+                Kind::Archived => archived.push(candidate),
             }
         }
         let order = |list: &mut Vec<Candidate>, runtime: &ContinuousRuntime| {
@@ -585,30 +586,35 @@ impl App {
             });
         };
         order(&mut review, &self.continuous);
-        order(&mut review_pending, &self.continuous);
         order(&mut archived, &self.continuous);
-        order(&mut archived_pending, &self.continuous);
         Ok(review
             .into_iter()
-            .chain(review_pending)
             .chain(archived)
-            .chain(archived_pending)
             .take(CONTINUOUS_MAX_PER_PASS)
             .collect())
     }
 
     /// Si NestAdmin tiene en ese hilo (misma cuenta) un envío confirmado, en curso o sin resolver
     /// posterior al recibido (D178): la respuesta que se vería en Enviados puede ser la suya.
+    /// Con `recovered` (el hilo no estaba en el resultado), falla cerrado: también cuenta un
+    /// envío de una tarea de la cuenta que sigue sin hilo guardado, que podría ser de este mismo
+    /// hilo sin que se sepa.
     fn nestadmin_sent_after(
         &self,
         account: &str,
         thread_key: &str,
         received_ms: i64,
+        recovered: bool,
     ) -> AppResult<bool> {
-        Ok(self
-            .store
-            .thread_send_times(account, thread_key)?
+        let in_thread = self.store.thread_send_times(account, thread_key)?;
+        let unknown = if recovered {
+            self.store.unthreaded_send_times(account)?
+        } else {
+            Vec::new()
+        };
+        Ok(in_thread
             .iter()
+            .chain(unknown.iter())
             .any(|at| *at > received_ms))
     }
 
@@ -669,7 +675,10 @@ impl App {
         }
         // Un envío de NestAdmin posterior en el hilo: ni se consulta, ni se cierra, ni da evidencia.
         // Sin hilo todavía no se puede saber: se vuelve a comprobar al recuperarlo.
-        if !thread_pending && self.nestadmin_sent_after(account, thread_key, received_ms)? {
+        let recovered = result["message"]["thread_recovered"] == json!(true);
+        if !thread_pending
+            && self.nestadmin_sent_after(account, thread_key, received_ms, recovered)?
+        {
             return Ok(None);
         }
         let evidence = evidence_of(result, &message, source);
@@ -710,6 +719,7 @@ impl App {
                 message_id: message.id.clone(),
                 thread_key: thread_key.to_owned(),
                 thread_pending,
+                recovered,
                 address,
                 received_ms,
                 evidence,
@@ -802,7 +812,12 @@ impl App {
         // Y NestAdmin pudo enviar otra respuesta del hilo desde que se planificó la pasada.
         if !candidate.thread_pending
             && self
-                .nestadmin_sent_after(account, &candidate.thread_key, candidate.received_ms)
+                .nestadmin_sent_after(
+                    account,
+                    &candidate.thread_key,
+                    candidate.received_ms,
+                    candidate.recovered,
+                )
                 .map_err(CheckFailure::Store)?
         {
             return Ok(false);
@@ -849,7 +864,7 @@ impl App {
             }
             // Con el hilo ya conocido, NestAdmin pudo haber respondido a otro correo de él.
             if self
-                .nestadmin_sent_after(account, &thread_key, candidate.received_ms)
+                .nestadmin_sent_after(account, &thread_key, candidate.received_ms, true)
                 .map_err(CheckFailure::Store)?
             {
                 return Ok(false);

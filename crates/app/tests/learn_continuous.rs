@@ -1521,7 +1521,7 @@ fn a_nestadmin_send_in_the_recovered_thread_still_blocks_the_task() {
 }
 
 #[test]
-fn the_cap_of_25_counts_the_recoveries_and_the_with_thread_ones_go_first() {
+fn the_cap_of_25_counts_the_recoveries() {
     // 20 con hilo y 10 sin él, todas respondidas.
     let total = 30;
     let mut e = env((1..=total)
@@ -1570,14 +1570,14 @@ fn the_cap_of_25_counts_the_recoveries_and_the_with_thread_ones_go_first() {
     );
     assert_eq!(e.task(13).state, TaskState::AwaitingReview);
     assert!((1..=12).all(|i| is_closed_outside(&e.task(i))));
-    // La siguiente empieza por la 13.ª, que ya tiene hilo y no lo pide otra vez.
+    // La siguiente empieza por las que nunca se comprobaron; la 13.ª, ya anotada, espera su turno.
     e.pass();
-    assert_eq!(e.lookups()[12], ("t13".to_owned(), "m13".to_owned()));
+    assert_eq!(e.lookups()[12], ("t14".to_owned(), "m14".to_owned()));
     assert_eq!(e.thread_calls().len() + e.lookups().len(), 2 * 25);
 }
 
 #[test]
-fn tasks_with_thread_go_first_then_review_without_it_then_archived() {
+fn review_goes_before_archived_and_having_a_thread_does_not_set_the_order() {
     let mut e = env(vec![
         incoming(1, &sender_of(1), "Necesito la factura."),
         incoming(2, &sender_of(2), "Necesito otra factura."),
@@ -1590,8 +1590,74 @@ fn tasks_with_thread_go_first_then_review_without_it_then_archived() {
         e.reply(i);
     }
     e.pass();
-    // Revisión con hilo (3), revisión sin hilo (2), archivada (1).
+    // Revisión (2 sin hilo y 3 con él, por antigüedad de comprobación) y después la archivada.
     assert_eq!(e.thread_calls(), ["m2", "m1"]);
     let order: Vec<String> = e.lookups().into_iter().map(|(t, _)| t).collect();
-    assert_eq!(order, ["t3", "t2", "t1"]);
+    assert_eq!(order, ["t2", "t3", "t1"]);
+}
+
+#[test]
+fn tasks_without_thread_are_not_starved_by_those_with_one() {
+    // 30 en revisión: 25 con hilo y 5 sin él (las últimas), sin respuesta alguna.
+    let total = 30;
+    let mut e = env((1..=total)
+        .map(|i| incoming(i, &sender_of(i), "Necesito la factura."))
+        .collect());
+    for i in 26..=total {
+        e.strip_thread(i);
+    }
+    e.pass();
+    e.pass();
+    let mut checked: Vec<String> = e.lookups().into_iter().map(|(t, _)| t).collect();
+    checked.sort();
+    checked.dedup();
+    let mut all: Vec<String> = (1..=total).map(|i| format!("t{i}")).collect();
+    all.sort();
+    assert_eq!(checked, all, "las 30 se comprobaron al cabo de dos pasadas");
+    for i in 26..=total {
+        assert_eq!(
+            thread_of_task(&e.task(i)),
+            (Some(format!("t{i}")), Some(true))
+        );
+    }
+    assert_eq!(e.thread_calls().len(), 5);
+}
+
+#[test]
+fn a_send_by_nestadmin_in_an_old_task_without_thread_blocks_the_others_recovered() {
+    // A (respondida por NestAdmin) y B son del mismo hilo y ninguna guarda el hilo: el envío de A
+    // podría ser de ese hilo, así que B no se cierra ni da evidencia (falla cerrado).
+    let mut a = incoming(1, &sender_of(1), "Necesito la factura.");
+    a.thread_key = Some("tx".into());
+    let mut b = incoming(2, &sender_of(2), "Otra consulta más.");
+    b.thread_key = Some("tx".into());
+    let mut e = env(vec![a, b]);
+    e.app.approve(e.task(1).id, 1).unwrap();
+    e.strip_thread(1);
+    e.strip_thread(2);
+    e.sim()
+        .add_sent_message(SentMessage {
+            id: "s2".into(),
+            thread_key: "tx".into(),
+            date: Some(at(2, 12)),
+            body: None,
+            to: vec![sender_of(2)],
+        })
+        .unwrap();
+
+    for _ in 0..2 {
+        assert_ne!(e.pass(), ContinuousStep::Changed);
+        let task = e.task(2);
+        assert_eq!(task.state, TaskState::AwaitingReview);
+        assert!(closed_reason(&task).is_none());
+        // El hilo queda guardado, pero no se consulta Enviados ni hay evidencia.
+        assert_eq!(thread_of_task(&task), (Some("tx".into()), Some(true)));
+        assert!(e.lookups().is_empty());
+        assert!(e.learned().is_empty());
+    }
+    assert_eq!(
+        e.thread_calls(),
+        ["m2"],
+        "la recuperada no vuelve a pedirse"
+    );
 }

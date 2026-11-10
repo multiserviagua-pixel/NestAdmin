@@ -115,6 +115,21 @@ impl Store {
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
+    /// Instantes (ms) de los envíos de respuesta de NestAdmin (`pending`, `failed`, `confirmed`)
+    /// de las tareas de correo de la cuenta cuyo resultado no guarda `message.thread_key` (D178):
+    /// pueden ser de cualquier hilo, también del que se acaba de recuperar para otra tarea.
+    pub fn unthreaded_send_times(&self, account: &str) -> Result<Vec<i64>> {
+        let prefix = format!("{account}:");
+        let mut stmt = self.conn.prepare(
+            "SELECT a.created_at FROM actions a JOIN tasks t ON t.id = a.task_id
+             WHERE a.kind = 'send_draft' AND a.status IN ('pending', 'failed', 'confirmed')
+               AND CASE WHEN json_valid(t.result) THEN COALESCE(trim(json_extract(t.result, '$.message.thread_key')), '') END = ''
+               AND CASE WHEN json_valid(t.result) THEN substr(json_extract(t.result, '$.message.id'), 1, length(?1)) END = ?1",
+        )?;
+        let rows = stmt.query_map(params![prefix], |r| r.get::<_, i64>(0))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
     /// Guarda una fila `learned` (única por `source_key`) con una entrada del Historial sin
     /// contenido ligada a la tarea de la que sale, en una transacción. `false` si ya existía.
     pub fn insert_learned_outside(&mut self, task_id: i64, signal: &LearnedSignal) -> Result<bool> {
