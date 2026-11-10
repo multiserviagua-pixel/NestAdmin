@@ -81,6 +81,9 @@ CREATE TABLE rules (
     include_str!("migrations/009_learned.sql"),
     // Índice local de búsqueda y su tabla FTS5 (D179); ver search.rs.
     include_str!("migrations/010_search.sql"),
+    // Registros Verifactu encadenados, escritos con la emisión y la anulación (fase 11);
+    // ver sales/verifactu.rs.
+    include_str!("migrations/011_verifactu.sql"),
 ];
 
 /// Base de datos local. Cada operación pública se confirma en una transacción,

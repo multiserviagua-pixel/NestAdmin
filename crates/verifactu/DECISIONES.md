@@ -27,6 +27,10 @@ pasar a `specs/v1/decisiones.md` como detalle de D83–D85. Cada una cita su fue
 | DV-15 | D83, D60 | Versiones fijadas: `quick-xml =0.42.0`, `qrcode =0.14.1` (sin `image`), `png =0.18.1`. `THIRD_PARTY_NOTICES.md` no cambia mientras el crate no sea dependencia de `nestadmin-desktop`; cambiará cuando se enlace. | Reproducibilidad (D60). | `python scripts/third_party.py --check` |
 | DV-16 | D85 | El simulador escucha solo en `127.0.0.1` y reproduce únicamente comportamientos documentados (códigos 2000, 3000-3002, 4102-4104, 4114, 4116, 4135, 4136). No comprueba firma, certificado ni censo real. | `AGENTS.md`: sin red real ni datos personales. | `tests/simulador.rs` |
 
+## Concreción en la aplicación (2026-11-10)
+
+La persistencia de los registros en el núcleo (`verifactu_records`, `crates/core/src/sales/verifactu.rs`) se rige por D193–D197 de `specs/v1/decisiones.md`. D195 concreta DV-6: ante una cadena rota o un reloj atrasado, la aplicación **bloquea** la emisión sin consumir número, y verifica la cadena entera antes de cada registro. D196 concreta la traducción de las calificaciones de D113.
+
 ## Fuera de alcance, para fases siguientes
 
 - Registros de evento (sistemas no VERI\*FACTU) y firma XAdES: no aplican a la modalidad

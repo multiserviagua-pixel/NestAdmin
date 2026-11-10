@@ -2342,6 +2342,7 @@ version = "0.1.0"
 dependencies = [
  "nestadmin-documents",
  "nestadmin-sales",
+ "nestadmin-verifactu",
  "rusqlite",
  "rust_decimal",
  "serde",

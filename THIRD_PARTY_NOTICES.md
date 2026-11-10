@@ -47,7 +47,7 @@ Licencia del proyecto original de cada DLL de `tesseract\`. JBIG-KIT (GPL) y lib
 | `libzstd.dll` | Zstandard | BSD-3-Clause OR GPL-2.0-only |
 | `zlib1.dll` | zlib | Zlib |
 
-## Crates de Rust enlazados en `nestadmin.exe` (293)
+## Crates de Rust enlazados en `nestadmin.exe` (294)
 
 Dependencias normales de `nestadmin-desktop` para `x86_64-pc-windows-msvc`; se excluyen las de compilación y pruebas.
 
@@ -202,6 +202,7 @@ Dependencias normales de `nestadmin-desktop` para `x86_64-pc-windows-msvc`; se e
 | proc-macro-crate | 3.5.0 | MIT OR Apache-2.0 | https://github.com/bkchr/proc-macro-crate |
 | proc-macro2 | 1.0.107 | MIT OR Apache-2.0 | https://github.com/dtolnay/proc-macro2 |
 | pxfm | 0.1.30 | BSD-3-Clause OR Apache-2.0 | https://github.com/awxkee/pxfm |
+| qrcode | 0.14.1 | MIT OR Apache-2.0 | https://github.com/kennytm/qrcode-rust |
 | quick-error | 2.0.1 | MIT/Apache-2.0 | http://github.com/tailhook/quick-error |
 | quick-xml | 0.42.0 | MIT | https://github.com/tafia/quick-xml |
 | quote | 1.0.47 | MIT OR Apache-2.0 | https://github.com/dtolnay/quote |

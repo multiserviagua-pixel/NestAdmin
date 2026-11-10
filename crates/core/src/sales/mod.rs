@@ -6,6 +6,7 @@
 //! * [`documents`]: borradores, emisión, transiciones, revisión, anulación, rectificativas y
 //!   conversión.
 //! * [`collections`]: cobros (D88) y plantillas recurrentes (D87).
+//! * [`verifactu`]: registros Verifactu de alta y anulación, encadenados (fase 11, migración 11).
 
 use std::str::FromStr;
 
@@ -22,6 +23,7 @@ pub mod collections;
 pub mod documents;
 pub mod error;
 pub mod master;
+pub mod verifactu;
 
 pub use collections::{GeneratedDraft, RecurringRecord, RecurringRun};
 pub use documents::{
@@ -30,6 +32,10 @@ pub use documents::{
 };
 pub use error::{SalesResult, SalesStoreError};
 pub use master::{Company, Customer, CustomerData, ReceivedDeliveryNote};
+pub use verifactu::{
+    ChainStatus, VerifactuContext, VerifactuKind, VerifactuRecordRow, CODE_CHAIN_BROKEN,
+    CODE_CLOCK_BEHIND, CODE_RECORD_INVALID,
+};
 
 // Conversiones entre los tipos puros y el texto guardado.
 

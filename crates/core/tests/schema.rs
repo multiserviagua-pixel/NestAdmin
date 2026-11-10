@@ -35,6 +35,10 @@ const DROP_PANEL: &str = "DROP TABLE rule_settings; DROP TABLE rule_suggestions;
 const DROP_PIPELINES: &str =
     "DROP TABLE pipeline_steps; DROP TABLE pipeline_runs; DROP TABLE task_templates;";
 
+/// Quita lo que añadió la migración 11 (registros Verifactu; índices y triggers caen con su
+/// tabla). Va antes de los `DROP` anteriores.
+const DROP_VERIFACTU: &str = "DROP TABLE verifactu_records;";
+
 /// Quita lo que añadió la migración 10 (índice de búsqueda; los triggers caen con su tabla).
 /// Va antes de los `DROP` anteriores.
 const DROP_SEARCH: &str = "DROP TABLE search_fts; DROP TABLE search_index;";
@@ -75,7 +79,7 @@ fn migrating_keeps_a_copy_of_the_previous_schema() {
     // Simula una base creada por la versión anterior (esquema 1, sin la tabla de reglas).
     let conn = rusqlite::Connection::open(&path).unwrap();
     conn.execute_batch(&format!(
-        "{DROP_SEARCH} {DROP_LEARNED} {DROP_PIPELINES} {DROP_PANEL} {DROP_SALES} DROP TABLE rules; PRAGMA user_version = 1;"
+        "{DROP_VERIFACTU} {DROP_SEARCH} {DROP_LEARNED} {DROP_PIPELINES} {DROP_PANEL} {DROP_SALES} DROP TABLE rules; PRAGMA user_version = 1;"
     ))
     .unwrap();
     drop(conn);
@@ -107,7 +111,7 @@ fn migrating_from_schema_2_adds_sales_tables_and_keeps_a_copy() {
     // Base de la versión anterior (esquema 2): con reglas y sin tablas de venta.
     let conn = rusqlite::Connection::open(&path).unwrap();
     conn.execute_batch(&format!(
-        "{DROP_SEARCH} {DROP_LEARNED} {DROP_PIPELINES} {DROP_PANEL} {DROP_SALES} PRAGMA user_version = 2;"
+        "{DROP_VERIFACTU} {DROP_SEARCH} {DROP_LEARNED} {DROP_PIPELINES} {DROP_PANEL} {DROP_SALES} PRAGMA user_version = 2;"
     ))
     .unwrap();
     conn.execute(
@@ -119,7 +123,7 @@ fn migrating_from_schema_2_adds_sales_tables_and_keeps_a_copy() {
 
     let store = Store::open(&path).unwrap();
     assert_eq!(store.schema_version().unwrap(), SCHEMA_VERSION);
-    assert_eq!(SCHEMA_VERSION, 10);
+    assert_eq!(SCHEMA_VERSION, 11);
     assert_eq!(
         store.audit_log().unwrap().len(),
         1,
@@ -163,7 +167,7 @@ fn migrating_from_schema_3_adds_the_rules_panel_and_keeps_old_actions() {
     drop(Store::open(&path).unwrap());
     let conn = rusqlite::Connection::open(&path).unwrap();
     conn.execute_batch(&format!(
-        "{DROP_SEARCH} {DROP_LEARNED} {DROP_PIPELINES} {DROP_PANEL} PRAGMA user_version = 3;"
+        "{DROP_VERIFACTU} {DROP_SEARCH} {DROP_LEARNED} {DROP_PIPELINES} {DROP_PANEL} PRAGMA user_version = 3;"
     ))
     .unwrap();
     conn.execute(
@@ -214,7 +218,7 @@ fn migrating_from_schema_3_deactivates_old_rules_whose_conditions_now_apply() {
     drop(Store::open(&path).unwrap());
     let conn = rusqlite::Connection::open(&path).unwrap();
     conn.execute_batch(&format!(
-        "{DROP_SEARCH} {DROP_LEARNED} {DROP_PIPELINES} {DROP_PANEL} PRAGMA user_version = 3;"
+        "{DROP_VERIFACTU} {DROP_SEARCH} {DROP_LEARNED} {DROP_PIPELINES} {DROP_PANEL} PRAGMA user_version = 3;"
     ))
     .unwrap();
     let rule = |id: &str, version: i64, kind: &str, conditions: &str, active: i64| {
@@ -324,7 +328,7 @@ fn migrating_from_schema_7_adds_pipeline_tables_and_keeps_tasks() {
     drop(Store::open(&path).unwrap());
     let conn = rusqlite::Connection::open(&path).unwrap();
     conn.execute_batch(&format!(
-        "{DROP_SEARCH} {DROP_LEARNED} {DROP_PIPELINES} PRAGMA user_version = 7;"
+        "{DROP_VERIFACTU} {DROP_SEARCH} {DROP_LEARNED} {DROP_PIPELINES} PRAGMA user_version = 7;"
     ))
     .unwrap();
     for (id, state) in [
@@ -402,7 +406,7 @@ fn migrating_from_schema_4_adds_the_redraft_index_and_keeps_a_copy() {
     drop(Store::open(&path).unwrap());
     let conn = rusqlite::Connection::open(&path).unwrap();
     conn.execute_batch(&format!(
-        "{DROP_SEARCH} {DROP_LEARNED} {DROP_PIPELINES} DROP INDEX tasks_redraft_of; DROP TABLE sender_preferences; DROP TABLE business_profile; PRAGMA user_version = 4;"
+        "{DROP_VERIFACTU} {DROP_SEARCH} {DROP_LEARNED} {DROP_PIPELINES} DROP INDEX tasks_redraft_of; DROP TABLE sender_preferences; DROP TABLE business_profile; PRAGMA user_version = 4;"
     ))
     .unwrap();
     for (id, input) in [(1, "{}"), (2, "no es json"), (3, r#"{"redraft_of": 1}"#)] {
@@ -440,7 +444,7 @@ fn migrating_from_schema_5_adds_sender_preferences_and_keeps_a_copy() {
     drop(Store::open(&path).unwrap());
     let conn = rusqlite::Connection::open(&path).unwrap();
     conn.execute_batch(&format!(
-        "{DROP_SEARCH} {DROP_LEARNED} {DROP_PIPELINES} DROP TABLE sender_preferences; DROP TABLE business_profile; PRAGMA user_version = 5;"
+        "{DROP_VERIFACTU} {DROP_SEARCH} {DROP_LEARNED} {DROP_PIPELINES} DROP TABLE sender_preferences; DROP TABLE business_profile; PRAGMA user_version = 5;"
     ))
     .unwrap();
     conn.execute(
@@ -497,7 +501,7 @@ fn migrating_from_schema_6_adds_the_business_profile_and_keeps_a_copy() {
     drop(Store::open(&path).unwrap());
     let conn = rusqlite::Connection::open(&path).unwrap();
     conn.execute_batch(&format!(
-        "{DROP_SEARCH} {DROP_LEARNED} {DROP_PIPELINES} DROP TABLE business_profile; PRAGMA user_version = 6;"
+        "{DROP_VERIFACTU} {DROP_SEARCH} {DROP_LEARNED} {DROP_PIPELINES} DROP TABLE business_profile; PRAGMA user_version = 6;"
     ))
     .unwrap();
     conn.execute(
@@ -565,7 +569,7 @@ fn migrating_from_schema_8_keeps_the_signals_and_allows_learned_ones_without_a_t
     drop(Store::open(&path).unwrap());
     let conn = rusqlite::Connection::open(&path).unwrap();
     conn.execute_batch(&format!(
-        "{DROP_SEARCH} DROP TABLE reply_style; DROP TABLE rule_signals;
+        "{DROP_VERIFACTU} {DROP_SEARCH} DROP TABLE reply_style; DROP TABLE rule_signals;
          CREATE TABLE rule_signals (
              id INTEGER PRIMARY KEY, kind TEXT NOT NULL, action_kind TEXT NOT NULL,
              subject_key TEXT NOT NULL, edit_state TEXT NOT NULL,
