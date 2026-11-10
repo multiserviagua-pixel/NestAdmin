@@ -200,6 +200,12 @@ pub struct MailSimulator {
 struct ThreadStates {
     last_own: HashMap<String, Result<Option<bool>, FailureMode>>,
     lookups: Vec<String>,
+    /// Consultas a Enviados (`own_reply_in_thread`, D168): clave del hilo y id del recibido.
+    sent_lookups: Vec<(String, String)>,
+    /// Fallo forzado en toda consulta a Enviados.
+    sent_failure: Option<FailureMode>,
+    /// El conector simulado dice que no lee Enviados.
+    no_sent_folder: bool,
 }
 
 const DEFAULT_PAGE_SIZE: usize = 20;
@@ -264,6 +270,21 @@ impl MailSimulator {
             .expect("mutex")
             .last_own
             .insert(thread_key.to_owned(), Err(failure));
+    }
+
+    /// Para pruebas: toda consulta a Enviados falla con ese modo mientras esté activo.
+    pub fn set_sent_failure(&self, failure: Option<FailureMode>) {
+        self.threads.lock().expect("mutex").sent_failure = failure;
+    }
+
+    /// Para pruebas: el simulador se comporta como un conector sin Enviados (D168).
+    pub fn set_no_sent_folder(&self, none: bool) {
+        self.threads.lock().expect("mutex").no_sent_folder = none;
+    }
+
+    /// Consultas a Enviados hasta ahora (espía: clave del hilo e id del recibido, nunca contenido).
+    pub fn sent_lookups(&self) -> Vec<(String, String)> {
+        self.threads.lock().expect("mutex").sent_lookups.clone()
     }
 
     /// Claves de hilo consultadas hasta ahora (espía: solo la clave, nunca contenido).
@@ -422,12 +443,21 @@ impl MailConnector for MailSimulator {
     }
 
     fn supports_sent(&self) -> bool {
-        true
+        !self.threads.lock().expect("mutex").no_sent_folder
     }
 
     /// Primer mensaje de Enviados del hilo con fecha posterior a la de `after_id`. Sin fecha en
     /// el recibido o en el enviado no se puede ordenar: no hay respuesta que dar.
     fn own_reply_in_thread(&self, thread_key: &str, after_id: &str) -> SimResult<Option<OwnReply>> {
+        {
+            let mut threads = self.threads.lock().expect("mutex");
+            threads
+                .sent_lookups
+                .push((thread_key.to_owned(), after_id.to_owned()));
+            if let Some(mode) = threads.sent_failure {
+                return Err(error(mode.code(), "fallo simulado al consultar Enviados"));
+            }
+        }
         self.state.read(|s| {
             let Some(after) = s
                 .messages

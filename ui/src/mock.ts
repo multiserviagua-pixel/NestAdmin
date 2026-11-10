@@ -49,6 +49,7 @@ import type {
   LearnedBatch,
   LearnedBatchItem,
   LearnedDeactivateOutcome,
+  ContinuousOverview,
   LearnedProfileProposal,
   ProfileSaved,
   ProfileView,
@@ -1612,6 +1613,30 @@ const mockLearnedItems: LearnedBatchItem[] = [
 ];
 /** Id de la tanda -> id de la regla creada. */
 const mockLearnedRules = new Map<string, string>();
+// Aprendizaje continuo (D178): activado por defecto; un buzón con recuentos de ejemplo.
+let mockContinuousOn = true;
+function mockContinuous(): ContinuousOverview {
+  return {
+    enabled: mockContinuousOn,
+    window_days: 14,
+    max_per_pass: 25,
+    every_minutes: 15,
+    mailboxes: [
+      {
+        account: "simulador",
+        label: "Correo simulado",
+        address: "administracion@nestadmin.test",
+        enabled: mockContinuousOn,
+        last_pass_at: mockContinuousOn ? Date.now() - 4 * 60_000 : null,
+        checked: mockContinuousOn ? 12 : 0,
+        observed: mockContinuousOn ? 3 : 0,
+        learned: mockContinuousOn ? 2 : 0,
+        closed: mockContinuousOn ? 1 : 0,
+        last_error: null,
+      },
+    ],
+  };
+}
 const mockLearnedBatch = (): LearnedBatch => {
   const items = mockLearnedItems.filter((i) => !mockLearnedRules.has(i.id));
   const fp = items.map((i) => `${i.id}|${i.shown}|${i.count}|${i.learned}|${i.addresses}`).sort().join("#");
@@ -2934,6 +2959,22 @@ const handlers: Record<string, (a: any, options?: any) => unknown> = {
     if (off.length) audit.push({ task_id: null, action: "rule_learned_batch", status: "deactivated_all", authorization: null, detail: `${off.length} reglas aprendidas desactivadas` });
     return { deactivated: off, learned_total: latest().filter((r) => metaOf(r.id).origin?.evidence_origin === "learned").length };
   },
+  // Aprendizaje continuo (D178): un buzón simulado con recuentos; cambiar el ajuste queda en el Historial.
+  continuous_learning_overview: (): ContinuousOverview => mockContinuous(),
+  set_continuous_learning: ({ enabled }): ContinuousOverview => {
+    const on = Boolean(enabled);
+    if (mockContinuousOn !== on) {
+      audit.push({
+        task_id: null,
+        action: "rule_setting",
+        status: "changed",
+        authorization: null,
+        detail: `aprendizaje continuo de las respuestas hechas fuera: ${mockContinuousOn ? "activado" : "desactivado"} -> ${on ? "activado" : "desactivado"}`,
+      });
+      mockContinuousOn = on;
+    }
+    return mockContinuous();
+  },
   discard_suggestion: ({ fingerprint }) => {
     if (!mockSuggestions().candidates.some((x) => x.fingerprint === fingerprint) && !mockDiscarded.has(String(fingerprint)))
       throw "La sugerencia ya no está vigente: los datos cambiaron o ya se resolvió. Actualice la lista.";
@@ -3133,6 +3174,7 @@ const mutating = new Set([
   "dismiss_learned_profile",
   "accept_and_activate_learned",
   "deactivate_learned_rules",
+  "set_continuous_learning",
   "clear_business_profile",
   "grant_profile_consent",
   "withdraw_profile_consent",

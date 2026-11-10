@@ -625,6 +625,44 @@ export interface LearnedDeactivateOutcome {
   learned_total: number;
 }
 
+// ---- Aprendizaje continuo de las respuestas hechas fuera (D178) ----
+
+/** `result.closed` de una tarea cerrada sin enviar porque la persona ya respondió desde su programa de correo (D178).
+ * La tarea sale `completed` y `archived`; no hay señal `rejected`. `replied_at` es la fecha de la respuesta tal como la da el conector, o `null`. */
+export interface TaskClosed {
+  reason: "replied_outside" | string;
+  replied_at: string | null;
+}
+
+/** Recuentos de un buzón desde que arrancó la aplicación. Solo cifras y un código, nunca contenido. */
+export interface ContinuousMailbox {
+  account: string;
+  label: string;
+  address: string | null;
+  /** El ajuste global está activado. */
+  enabled: boolean;
+  /** Fin de la última pasada (ms desde 1970); `null` si aún no hubo ninguna. */
+  last_pass_at: number | null;
+  /** Tareas cuya consulta a Enviados llegó a contestar. */
+  checked: number;
+  /** Respuestas propias válidas halladas (dirigidas al remitente). */
+  observed: number;
+  /** Filas de evidencia `learned` nuevas. */
+  learned: number;
+  /** Tareas en revisión cerradas como «Respondido fuera de NestAdmin». */
+  closed: number;
+  /** Código del último fallo de la última pasada (`unavailable`, `unauthorized`, `no_sent_folder`, `signed_out`…); `null` si fue bien. */
+  last_error: string | null;
+}
+
+export interface ContinuousOverview {
+  enabled: boolean;
+  window_days: number;
+  max_per_pass: number;
+  every_minutes: number;
+  mailboxes: ContinuousMailbox[];
+}
+
 // ---- Capa con modelo de las sugerencias (D134) ----
 
 export type RefineMode = "on_demand" | "automatic";

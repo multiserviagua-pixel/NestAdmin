@@ -3,6 +3,7 @@
 
 pub mod actions;
 pub mod business_profile;
+pub mod continuous;
 pub mod error;
 pub mod mail_signals;
 pub mod pipeline;

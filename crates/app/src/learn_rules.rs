@@ -16,6 +16,18 @@ use sha2::{Digest, Sha256};
 use crate::suggest::{stale_message, Candidate, DOMAIN_MIN_ADDRESSES};
 use crate::{check_rule, App, AppError, AppResult, SEND_DRAFT};
 
+/// El rodaje con el que nace toda regla de origen aprendido (D174, D178): [`RODAJE_SENDS`]
+/// envíos. Una regla por dominio no sale del rodaje hasta aprobar a varias direcciones distintas
+/// (solo se guardan sus huellas). Lo comparten el lote y la aceptación de una tarjeta.
+pub(crate) fn learned_rodaje(conditions: &Value) -> Value {
+    let mut rodaje = json!({ "left": RODAJE_SENDS, "of": RODAJE_SENDS });
+    if conditions.get("sender_domain").is_some() {
+        rodaje["min_addresses"] = json!(DOMAIN_MIN_ADDRESSES);
+        rodaje["address_hashes"] = json!([]);
+    }
+    rodaje
+}
+
 /// Una regla de la tanda aprendida, con la evidencia que la sostiene. Solo recuentos y la dirección
 /// o el dominio de la propia regla; nunca texto de correos.
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -267,14 +279,8 @@ impl App {
             if let Err(error) = check(&plan.action_kind, &plan.conditions, false) {
                 return Ok(fail("invalid_rule", error.to_string()));
             }
+            // El rodaje ya lo pone `accept_plan` a toda regla de origen aprendido (D178).
             plan.origin["batch"] = json!(true);
-            plan.origin["rodaje"] = json!({ "left": RODAJE_SENDS, "of": RODAJE_SENDS });
-            // Una regla por dominio no sale del rodaje hasta aprobar a varias direcciones distintas
-            // (solo se guardan sus huellas).
-            if plan.conditions.get("sender_domain").is_some() {
-                plan.origin["rodaje"]["min_addresses"] = json!(DOMAIN_MIN_ADDRESSES);
-                plan.origin["rodaje"]["address_hashes"] = json!([]);
-            }
             let rule_id = self.unique_rule_id_avoiding(&plan.name, &reserved)?;
             reserved.insert(rule_id.clone());
             prepared.push(Prepared {

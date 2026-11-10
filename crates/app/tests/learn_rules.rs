@@ -825,10 +825,11 @@ fn an_approval_that_does_not_end_up_sent_does_not_count() {
 }
 
 #[test]
-fn rules_from_other_paths_have_no_rodaje() {
+fn a_manual_rule_has_no_rodaje_and_a_learned_card_rule_has_it_too() {
     let (dir, mut app) = learned();
-    // Una regla creada a mano y una sugerencia aceptada con la tarjeta de siempre: ninguna lleva
-    // rodaje, y la compuerta es lo único que las frena.
+    // Una regla creada a mano no lleva rodaje: la compuerta es lo único que la frena. Una
+    // sugerencia aprendida aceptada con su tarjeta sí (D178): nadie aprobó nunca un borrador de
+    // NestAdmin para esa serie.
     app.create_rule_full(NewRule {
         id: Some("manual-ana"),
         name: None,
@@ -855,8 +856,9 @@ fn rules_from_other_paths_have_no_rodaje() {
         .shown
         .clone();
     let view = app.accept_suggestion(&marta, &shown, None).unwrap();
+    assert!(!view.rule.active, "la regla nace inactiva");
     app.set_rule_active(&view.rule.id, true).unwrap();
-    assert_eq!(rodaje_left(dir.path(), &view.rule.id), None);
+    assert_eq!(rodaje_left(dir.path(), &view.rule.id), Some(3));
     new_mail(
         &app,
         42,
@@ -867,8 +869,8 @@ fn rules_from_other_paths_have_no_rodaje() {
     app.fetch_mail().unwrap();
     process_all(&mut app);
     let task = task_of(&app, 42);
-    assert_eq!(task.state, TaskState::Completed, "{task:?}");
-    assert_eq!(code(&task), "automated");
+    assert_eq!(task.state, TaskState::AwaitingReview, "{task:?}");
+    assert_eq!(code(&task), "rodaje");
 }
 
 // ---- Desactivar las aprendidas ----

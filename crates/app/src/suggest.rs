@@ -1409,6 +1409,12 @@ impl App {
             "task_ids": task_ids,
             "reappeared": c.evidence.reappeared.is_some(),
         });
+        // Toda regla que nace de evidencia aprendida pasa por el rodaje (D174, D178), también la
+        // de una tarjeta individual: nadie aprobó nunca un borrador de NestAdmin para esa serie.
+        let mut origin = origin;
+        if c.evidence.origin == ORIGIN_LEARNED {
+            origin["rodaje"] = crate::learn_rules::learned_rodaje(&conditions);
+        }
         let evidence = json!({ "baseline": c.evidence.count, "watermark": all.watermark });
         Ok(AcceptPlan {
             action_kind: c.action_kind.clone(),

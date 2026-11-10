@@ -23,6 +23,7 @@ use nestadmin_app::initial_read::{
     FolderPreview, InitialReadOverview, InitialReadStatus, ReadExpectation, ReadStep,
 };
 use nestadmin_app::learn_consent::LearnExpectation;
+use nestadmin_app::learn_continuous::{ContinuousOverview, ContinuousStep};
 use nestadmin_app::learn_rules::{LearnedAcceptOutcome, LearnedBatch, LearnedDeactivateOutcome};
 use nestadmin_app::learn_state::{
     AccountLearningPreview, LearnChoiceArg, LearningOverview, LearningStatus, LearningStep,
@@ -1380,6 +1381,49 @@ fn resume_learning<R: Runtime>(shared: &SharedState, handle: &AppHandle<R>) -> b
     }
 }
 
+/// Aprendizaje continuo (D178): con la cola vacía, una consulta a Enviados por paso (el cerrojo se
+/// suelta entre pasos), con la puerta de 15 minutos por buzón dentro de la aplicación. No llama a la
+/// IA. Avisa a la ventana si cerró una tarea o contó evidencia. Devuelve si hizo trabajo.
+fn resume_continuous_learning<R: Runtime>(shared: &SharedState, handle: &AppHandle<R>) -> bool {
+    let step = match shared.app() {
+        Ok(mut app) => app.continuous_learning_tick(),
+        Err(_) => return false,
+    };
+    match step {
+        Ok(ContinuousStep::Idle) => false,
+        Ok(ContinuousStep::Progress) => true,
+        Ok(ContinuousStep::Changed) => {
+            changed(handle);
+            true
+        }
+        Err(error) => {
+            eprintln!("no se pudo hacer la pasada de aprendizaje continuo: {error}");
+            false
+        }
+    }
+}
+
+/// Resumen del aprendizaje continuo por buzón: solo recuentos y códigos (D178).
+#[tauri::command]
+fn continuous_learning_overview(shared: State<'_, SharedState>) -> CmdResult<ContinuousOverview> {
+    shared.app()?.continuous_learning_overview().map_err(text)
+}
+
+/// Activa o desactiva el aprendizaje continuo (D178); el cambio queda en el Historial.
+#[tauri::command]
+fn set_continuous_learning<R: Runtime>(
+    shared: State<'_, SharedState>,
+    handle: AppHandle<R>,
+    enabled: bool,
+) -> CmdResult<ContinuousOverview> {
+    let overview = shared
+        .app()?
+        .set_continuous_learning(enabled)
+        .map_err(text)?;
+    changed(&handle);
+    Ok(overview)
+}
+
 /// Crea la regla de una sugerencia, siempre inactiva (D132). Repetirlo no duplica.
 #[tauri::command]
 fn accept_suggestion<R: Runtime>(
@@ -2195,7 +2239,10 @@ fn worker<R: Runtime>(shared: SharedState, handle: AppHandle<R>, wake: Receiver<
                 changed(&handle);
             }
             Ok(None) => {
-                if resume_initial_reads(&shared, &handle) || resume_learning(&shared, &handle) {
+                if resume_initial_reads(&shared, &handle)
+                    || resume_learning(&shared, &handle)
+                    || resume_continuous_learning(&shared, &handle)
+                {
                     continue;
                 }
                 auto_refine(&shared, &handle);
@@ -2570,6 +2617,8 @@ fn configure<R: Runtime>(builder: Builder<R>, prepare_only: bool) -> Builder<R> 
             learned_suggestions_batch,
             accept_and_activate_learned,
             deactivate_learned_rules,
+            continuous_learning_overview,
+            set_continuous_learning,
             business_profile,
             business_profile_prefill,
             save_business_profile,

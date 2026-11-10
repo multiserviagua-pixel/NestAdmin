@@ -158,7 +158,7 @@ pub(crate) fn load(tx: &Transaction<'_>, id: i64) -> Result<Task> {
 }
 
 /// Cambia el estado validando el contrato y deja constancia de la transición.
-fn transition(
+pub(crate) fn transition(
     tx: &Transaction<'_>,
     id: i64,
     to: TaskState,
@@ -231,7 +231,11 @@ fn insert_born(
 }
 
 /// Evento del historial sin contenido (mismo formato que `record_event`) dentro de una transacción.
-fn insert_event(tx: &Transaction<'_>, task_id: i64, event: (&str, &str, &Value)) -> Result<()> {
+pub(crate) fn insert_event(
+    tx: &Transaction<'_>,
+    task_id: i64,
+    event: (&str, &str, &Value),
+) -> Result<()> {
     tx.execute(
         "INSERT INTO audit_log (at, task_id, action, status, authorization, detail) VALUES (?1, ?2, ?3, ?4, NULL, ?5)",
         params![now_ms(), task_id, event.0, event.1, event.2.to_string()],

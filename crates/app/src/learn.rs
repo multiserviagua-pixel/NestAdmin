@@ -1649,7 +1649,7 @@ struct Staged {
 }
 
 /// ¿Incluye `to` la dirección del remitente (sin distinguir mayúsculas ni nombre visible)?
-fn replies_to(to: &[String], address: &str) -> bool {
+pub(crate) fn replies_to(to: &[String], address: &str) -> bool {
     to.iter().any(|entry| {
         sender_parts(entry).is_some_and(|(a, _)| a == address.to_lowercase())
             || entry.trim().eq_ignore_ascii_case(address)

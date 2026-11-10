@@ -28,6 +28,7 @@ import type {
   LearnedAcceptOutcome,
   LearnedBatch,
   LearnedDeactivateOutcome,
+  ContinuousOverview,
   LearnedProfileProposal,
   ProfileSaved,
   ProfileView,
@@ -204,6 +205,10 @@ export const api = {
   acceptAndActivateLearned: (batchFp: string, ids: string[]) => invoke<LearnedAcceptOutcome>("accept_and_activate_learned", { batchFp, ids }),
   /** «Desactivar las aprendidas»: desactiva en una transacción todas las reglas de origen aprendido. Idempotente (D174). */
   deactivateLearnedRules: () => invoke<LearnedDeactivateOutcome>("deactivate_learned_rules"),
+  /** Resumen del aprendizaje continuo por buzón: solo recuentos y códigos (D178). Solo lectura. */
+  continuousLearningOverview: () => invoke<ContinuousOverview>("continuous_learning_overview"),
+  /** Activa o desactiva el aprendizaje continuo de las respuestas hechas fuera (D178); el cambio queda en el Historial. */
+  setContinuousLearning: (enabled: boolean) => invoke<ContinuousOverview>("set_continuous_learning", { enabled }),
   /** Las facturas solo leídas de la serie de una sugerencia, con documento, fecha e importe. Solo lectura. */
   seenInvoices: (fingerprint: string) => invoke<SeenInvoice[]>("seen_invoices", { fingerprint }),
   /** Perfil del negocio (D163). Solo lectura. */

@@ -11,6 +11,7 @@ pub mod accounts;
 pub mod initial_read;
 pub mod learn;
 pub mod learn_consent;
+pub mod learn_continuous;
 pub mod learn_evidence;
 pub mod learn_rules;
 pub mod learn_state;
@@ -325,6 +326,9 @@ pub struct App {
     /// Estado en memoria de la fase «Aprender a responder» (E4, D175): reanudaciones hechas,
     /// trabajos en curso y lo recogido. No se guarda nada de esto.
     learning: learn_state::LearningRuntime,
+    /// Estado en memoria del aprendizaje continuo (D178): pasadas en curso, puerta de tiempo,
+    /// orden de comprobación y recuentos. No se guarda nada de esto.
+    continuous: learn_continuous::ContinuousRuntime,
 }
 
 /// Si se puede instalar una actualización sin cortar trabajo (actualizaciones.md, paso 5).
@@ -933,6 +937,7 @@ impl App {
             refine_mode: refine::RefineMode::of_build(),
             reads_active: HashSet::new(),
             learning: learn_state::LearningRuntime::default(),
+            continuous: learn_continuous::ContinuousRuntime::default(),
             read_gate: Arc::new(Mutex::new(HashSet::new())),
         };
         app.store.recover()?;
@@ -1560,6 +1565,10 @@ impl App {
                 },
             };
             report.added += fetch.added;
+            // Una consulta correcta adelanta la siguiente pasada de aprendizaje continuo (D178).
+            if fetch.error.is_none() {
+                self.continuous_advance(&fetch.account);
+            }
             self.mail.record_fetch(fetch.clone());
             report.accounts.push(fetch);
         }
