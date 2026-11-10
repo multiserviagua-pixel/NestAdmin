@@ -37,12 +37,21 @@ const ERROR_HEADLINE: Record<string, string> = {
   pdf_failed: "No se pudo generar el PDF",
 };
 
+/** `invalid_input` llega como «datos no válidos: campo: motivo»: el encabezado ya dice lo primero y
+ * el campo del membrete (`letterhead`, `letterhead.margins`…) no le dice nada al usuario. */
+function cleanInvalidInput(detail: string): string {
+  let text = detail.replace(/^datos no válidos:\s*/i, "");
+  text = text.replace(/^letterhead(?:\.[A-Za-z0-9_.]+)?:\s*/, "");
+  return text.trim();
+}
+
 /** Texto para el usuario: el encabezado del código y, detrás, el detalle del backend sin tocar. */
 export function salesErrorText(error: unknown): string {
   const { code, detail } = parseSalesError(error);
   const headline = code ? ERROR_HEADLINE[code] : undefined;
   if (!headline) return detail || "Error desconocido";
-  return detail ? `${headline}: ${detail}` : headline;
+  const body = code === "invalid_input" ? cleanInvalidInput(detail) : detail;
+  return body ? `${headline}: ${body}` : headline;
 }
 
 /** Códigos que impiden emitir y anular hasta que se arregle algo fuera del documento. */

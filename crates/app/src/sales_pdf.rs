@@ -504,17 +504,76 @@ struct Columns {
     discount: f32,
     tax: f32,
     amount: f32,
+    /// Factor del tamaño de letra de las columnas numéricas (1 salvo que no quepan).
+    scale: f32,
 }
 
-fn columns(l: &Layout<'_>) -> Columns {
+/// Separación mínima entre dos textos numéricos contiguos.
+const COL_GAP: f32 = 4.0;
+/// Fracción mínima de la anchura que conserva la descripción al repartir por contenido.
+const MIN_DESC: f32 = 0.25;
+const HEAD_SIZE: f32 = 8.5;
+const CELL_SIZE: f32 = 9.0;
+const HEADS: [&str; 5] = ["Cant.", "Precio", "Dto.", "IVA", "Importe €"];
+
+/// Textos de las cinco columnas numéricas de una línea (el descuento, vacío si es cero).
+type Cells = [String; 5];
+
+/// Reparto de la anchura. Si todo cabe con el reparto proporcional se conserva tal cual (los PDF
+/// ya emitidos dan los mismos bytes, D226); si no, las columnas salen del contenido real y la
+/// descripción se queda el resto, con un mínimo; y si ni así cabe, se reduce la letra.
+fn columns(l: &Layout<'_>, rows: &[Cells]) -> Columns {
     let w = l.width();
-    Columns {
+    let proportional = Columns {
         desc_w: w * 0.43,
         qty: l.x0 + w * 0.52,
         price: l.x0 + w * 0.66,
         discount: l.x0 + w * 0.75,
         tax: l.x0 + w * 0.84,
         amount: l.x1,
+        scale: 1.0,
+    };
+    let mut need = [0.0f32; 5];
+    for (i, head) in HEADS.iter().enumerate() {
+        need[i] = l.widths.of(true, &clean_text(head), HEAD_SIZE);
+        for row in rows {
+            need[i] = need[i].max(l.widths.of(false, &clean_text(&row[i]), CELL_SIZE));
+        }
+    }
+    let edges = [
+        l.x0 + proportional.desc_w,
+        proportional.qty,
+        proportional.price,
+        proportional.discount,
+        proportional.tax,
+        proportional.amount,
+    ];
+    if (0..5).all(|i| need[i] + COL_GAP <= edges[i + 1] - edges[i]) {
+        return proportional;
+    }
+    let text: f32 = need.iter().sum();
+    let gaps = COL_GAP * 5.0;
+    let room = w * (1.0 - MIN_DESC) - gaps;
+    let scale = if text <= room || text <= 0.0 {
+        1.0
+    } else {
+        // Un poco menos para que el redondeo no deje una columna justa.
+        room / text * 0.999
+    };
+    let mut x = l.x0 + w - (text * scale + gaps);
+    let desc_w = x - l.x0;
+    let mut edge = |i: usize| {
+        x += need[i] * scale + COL_GAP;
+        x
+    };
+    Columns {
+        desc_w,
+        qty: edge(0),
+        price: edge(1),
+        discount: edge(2),
+        tax: edge(3),
+        amount: l.x1,
+        scale,
     }
 }
 
@@ -522,12 +581,13 @@ fn table_header(l: &mut Layout<'_>, c: &Columns) {
     let (x0, w, y) = (l.x0, l.width(), l.y);
     l.rect(x0, y, w, 16.0, 232);
     let base = y + 11.0;
-    l.text(x0 + 4.0, base, 8.5, true, 0, "Descripción");
-    l.text_right(c.qty - 4.0, base, 8.5, true, 0, "Cant.");
-    l.text_right(c.price - 4.0, base, 8.5, true, 0, "Precio");
-    l.text_right(c.discount - 4.0, base, 8.5, true, 0, "Dto.");
-    l.text_right(c.tax - 4.0, base, 8.5, true, 0, "IVA");
-    l.text_right(c.amount - 4.0, base, 8.5, true, 0, "Importe €");
+    let size = HEAD_SIZE * c.scale;
+    l.text(x0 + 4.0, base, HEAD_SIZE, true, 0, "Descripción");
+    l.text_right(c.qty - 4.0, base, size, true, 0, HEADS[0]);
+    l.text_right(c.price - 4.0, base, size, true, 0, HEADS[1]);
+    l.text_right(c.discount - 4.0, base, size, true, 0, HEADS[2]);
+    l.text_right(c.tax - 4.0, base, size, true, 0, HEADS[3]);
+    l.text_right(c.amount - 4.0, base, size, true, 0, HEADS[4]);
     l.y += 16.0;
 }
 
@@ -713,10 +773,38 @@ fn compose<'w>(src: &PdfSource<'_>, widths: &'w Widths) -> Result<Layout<'w>, Pd
     l.y = yl.max(yr) + 14.0;
 
     // --- Líneas ---
-    let c = columns(&l);
+    let rows: Vec<Cells> = doc
+        .lines
+        .iter()
+        .enumerate()
+        .map(|(index, line)| {
+            let input = &line.input;
+            let amount = line
+                .amount
+                .or_else(|| totals.line_amounts.get(index).copied())
+                .unwrap_or_default();
+            let discount = if input.discount.is_zero() {
+                String::new()
+            } else {
+                format!(
+                    "{} %",
+                    fmt_decimal(input.discount * Decimal::from(100), 0, 2)
+                )
+            };
+            [
+                fmt_decimal(input.quantity, 0, 3),
+                fmt_decimal(input.unit_price, 2, 4),
+                discount,
+                format!("{} %", fmt_decimal(input.tax_rate.percent(), 0, 2)),
+                fmt_decimal(amount, 2, 2),
+            ]
+        })
+        .collect();
+    let c = columns(&l, &rows);
+    let size = CELL_SIZE * c.scale;
     l.ensure(16.0 + 30.0);
     table_header(&mut l, &c);
-    for (index, line) in doc.lines.iter().enumerate() {
+    for (line, cells) in doc.lines.iter().zip(&rows) {
         let input = &line.input;
         let desc = widths.wrap(&input.description, c.desc_w - 8.0, 9.0, false);
         let mut notes = Vec::new();
@@ -734,10 +822,6 @@ fn compose<'w>(src: &PdfSource<'_>, widths: &'w Widths) -> Result<Layout<'w>, Pd
         }
         let top = l.y;
         let first = top + 3.0 + 9.0;
-        let amount = line
-            .amount
-            .or_else(|| totals.line_amounts.get(index).copied())
-            .unwrap_or_default();
         for (i, text) in desc.iter().enumerate() {
             l.text(x0 + 4.0, first + i as f32 * LINE_H, 9.0, false, 0, text);
         }
@@ -745,39 +829,10 @@ fn compose<'w>(src: &PdfSource<'_>, widths: &'w Widths) -> Result<Layout<'w>, Pd
             let y = first + desc.len().max(1) as f32 * LINE_H - 1.0 + i as f32 * 10.0;
             l.text(x0 + 4.0, y, 8.0, false, 100, text);
         }
-        l.text_right(
-            c.qty - 4.0,
-            first,
-            9.0,
-            false,
-            0,
-            &fmt_decimal(input.quantity, 0, 3),
-        );
-        l.text_right(
-            c.price - 4.0,
-            first,
-            9.0,
-            false,
-            0,
-            &fmt_decimal(input.unit_price, 2, 4),
-        );
-        if !input.discount.is_zero() {
-            let pct = format!(
-                "{} %",
-                fmt_decimal(input.discount * Decimal::from(100), 0, 2)
-            );
-            l.text_right(c.discount - 4.0, first, 9.0, false, 0, &pct);
+        let edges = [c.qty, c.price, c.discount, c.tax, c.amount];
+        for (edge, text) in edges.iter().zip(cells) {
+            l.text_right(edge - 4.0, first, size, false, 0, text);
         }
-        let iva = format!("{} %", fmt_decimal(input.tax_rate.percent(), 0, 2));
-        l.text_right(c.tax - 4.0, first, 9.0, false, 0, &iva);
-        l.text_right(
-            c.amount - 4.0,
-            first,
-            9.0,
-            false,
-            0,
-            &fmt_decimal(amount, 2, 2),
-        );
         l.y += height;
         let y = l.y;
         l.rect(x0, y, l.width(), 0.4, 215);
@@ -786,18 +841,6 @@ fn compose<'w>(src: &PdfSource<'_>, widths: &'w Widths) -> Result<Layout<'w>, Pd
 
     // --- Desglose de IVA (izquierda) y totales (derecha) ---
     let w = l.width();
-    let bw = w * 0.56;
-    let (base_r, type_r, tax_r) = (x0 + bw * 0.38, x0 + bw * 0.62, x0 + bw);
-    let mut breakdown_h = 16.0;
-    let mut notes_per_row = Vec::new();
-    for b in &totals.breakdown {
-        let mut notes = Vec::new();
-        if let Some(label) = b.qualification.and_then(qualification_label) {
-            notes.push(label.to_owned());
-        }
-        breakdown_h += 12.0 + notes.len() as f32 * 9.5;
-        notes_per_row.push(notes);
-    }
     let has_withholding = !totals.withholding.is_zero();
     let mut total_rows = vec![
         ("Base imponible".to_owned(), money(totals.base_total), false),
@@ -818,36 +861,102 @@ fn compose<'w>(src: &PdfSource<'_>, widths: &'w Widths) -> Result<Layout<'w>, Pd
         .iter()
         .map(|(_, _, bold)| if *bold { 16.0 } else { 13.0 })
         .sum::<f32>();
-    if l.ensure(breakdown_h.max(totals_h) + 6.0) {
+    let breakdown: Vec<[String; 3]> = totals
+        .breakdown
+        .iter()
+        .map(|b| {
+            [
+                fmt_decimal(b.base, 2, 2),
+                format!("{} %", fmt_decimal(b.tax_rate.percent(), 0, 2)),
+                fmt_decimal(b.tax, 2, 2),
+            ]
+        })
+        .collect();
+    let bsizes = [HEAD_SIZE, HEAD_SIZE, HEAD_SIZE];
+    let bheads = ["Base", "Tipo", "Cuota"];
+    let mut bneed = [0.0f32; 3];
+    for (i, head) in bheads.iter().enumerate() {
+        bneed[i] = widths.of(true, head, bsizes[i]);
+        for row in &breakdown {
+            bneed[i] = bneed[i].max(widths.of(false, &clean_text(&row[i]), CELL_SIZE));
+        }
+    }
+    // Lo que más ocupa un renglón de totales (etiqueta y valor) a su tamaño nominal.
+    let tneed = total_rows
+        .iter()
+        .map(|(label, value, bold)| {
+            let size = if *bold { 11.0 } else { 9.0 };
+            widths.of(*bold, &clean_text(label), size) + widths.of(*bold, &clean_text(value), size)
+        })
+        .fold(0.0f32, f32::max);
+    // Reparto proporcional de siempre; se conserva si todo cabe (D226).
+    let bw = w * 0.56;
+    let (base_r, type_r, tax_r) = (x0 + bw * 0.38, x0 + bw * 0.62, x0 + bw);
+    let tx0_prop = l.x1 - w * 0.38;
+    let proportional_fits = bneed[0] <= base_r - x0
+        && bneed[1] + COL_GAP <= type_r - base_r
+        && bneed[2] + COL_GAP <= tax_r - type_r
+        && tneed + 6.0 <= l.x1 - tx0_prop;
+    const BLOCK_GAP: f32 = 12.0;
+    let (fs, base_r, type_r, tax_r, tx0, stacked) = if proportional_fits {
+        (1.0, base_r, type_r, tax_r, tx0_prop, false)
+    } else {
+        let btext: f32 = bneed.iter().sum();
+        let fs = 1.0f32
+            .min((w - 2.0 * BLOCK_GAP) / btext.max(1.0) * 0.999)
+            .min((w - BLOCK_GAP) / tneed.max(1.0) * 0.999);
+        let base_r = x0 + bneed[0] * fs;
+        let type_r = base_r + BLOCK_GAP + bneed[1] * fs;
+        let tax_r = type_r + BLOCK_GAP + bneed[2] * fs;
+        let t_w = tneed * fs + BLOCK_GAP;
+        // Si no caben lado a lado, los totales van debajo del desglose.
+        let stacked = (tax_r - x0) + 14.0 + t_w > w;
+        (fs, base_r, type_r, tax_r, l.x1 - t_w, stacked)
+    };
+    let note_w = tax_r - x0;
+    let mut breakdown_h = 16.0;
+    let mut notes_per_row = Vec::new();
+    for b in &totals.breakdown {
+        let mut notes = Vec::new();
+        if let Some(label) = b.qualification.and_then(qualification_label) {
+            notes.extend(widths.wrap(label, note_w, 7.5 * fs, false));
+        }
+        breakdown_h += 12.0 + notes.len() as f32 * 9.5;
+        notes_per_row.push(notes);
+    }
+    let block_h = if stacked {
+        breakdown_h + 6.0 + totals_h
+    } else {
+        breakdown_h.max(totals_h)
+    };
+    if l.ensure(block_h + 6.0) {
         // Página nueva: sin encabezado de tabla, solo el bloque de totales.
     }
     let by = l.y;
-    l.text(x0, by + 9.0, 8.0, true, 110, "DESGLOSE DE IVA");
-    l.text_right(base_r, by + 22.0, 8.5, true, 0, "Base");
-    l.text_right(type_r, by + 22.0, 8.5, true, 0, "Tipo");
-    l.text_right(tax_r, by + 22.0, 8.5, true, 0, "Cuota");
+    l.text(x0, by + 9.0, 8.0 * fs, true, 110, "DESGLOSE DE IVA");
+    l.text_right(base_r, by + 22.0, HEAD_SIZE * fs, true, 0, bheads[0]);
+    l.text_right(type_r, by + 22.0, HEAD_SIZE * fs, true, 0, bheads[1]);
+    l.text_right(tax_r, by + 22.0, HEAD_SIZE * fs, true, 0, bheads[2]);
     let mut yy = by + 22.0;
-    for (b, notes) in totals.breakdown.iter().zip(&notes_per_row) {
+    for (row, notes) in breakdown.iter().zip(&notes_per_row) {
         yy += 12.0;
-        l.text_right(base_r, yy, 9.0, false, 0, &fmt_decimal(b.base, 2, 2));
-        let rate = format!("{} %", fmt_decimal(b.tax_rate.percent(), 0, 2));
-        l.text_right(type_r, yy, 9.0, false, 0, &rate);
-        l.text_right(tax_r, yy, 9.0, false, 0, &fmt_decimal(b.tax, 2, 2));
+        l.text_right(base_r, yy, CELL_SIZE * fs, false, 0, &row[0]);
+        l.text_right(type_r, yy, CELL_SIZE * fs, false, 0, &row[1]);
+        l.text_right(tax_r, yy, CELL_SIZE * fs, false, 0, &row[2]);
         for note in notes {
             yy += 9.5;
-            l.text(x0, yy, 7.5, false, 100, note);
+            l.text(x0, yy, 7.5 * fs, false, 100, note);
         }
     }
-    let tx0 = l.x1 - w * 0.38;
-    let mut ty = by;
+    let mut ty = if stacked { by + breakdown_h + 6.0 } else { by };
     for (label, value, bold) in &total_rows {
         let step = if *bold { 16.0 } else { 13.0 };
-        let size = if *bold { 11.0 } else { 9.0 };
+        let size = (if *bold { 11.0 } else { 9.0 }) * fs;
         ty += step;
         l.text(tx0, ty - 3.0, size, *bold, 0, label);
         l.text_right(l.x1, ty - 3.0, size, *bold, 0, value);
     }
-    l.y = by + breakdown_h.max(totals_h) + 14.0;
+    l.y = by + block_h + 14.0;
 
     // --- Pago ---
     if let Some(iban) = issuer.and_then(|i| i.iban.as_deref()) {

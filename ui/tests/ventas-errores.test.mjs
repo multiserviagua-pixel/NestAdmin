@@ -12,6 +12,18 @@ test("el código estable se separa del mensaje", () => {
 
 test("el texto para el usuario añade el encabezado del código y conserva el detalle", () => {
   assert.equal(salesErrorText("[invalid_input] falta el cliente"), "Datos no válidos: falta el cliente");
+  assert.equal(
+    salesErrorText("[invalid_input] datos no válidos: letterhead: el PDF está protegido con contraseña"),
+    "Datos no válidos: el PDF está protegido con contraseña",
+  );
+  assert.equal(
+    salesErrorText("[invalid_input] datos no válidos: letterhead.margins: el margen izquierdo es excesivo"),
+    "Datos no válidos: el margen izquierdo es excesivo",
+  );
+  assert.equal(
+    salesErrorText("[invalid_input] datos no válidos: lines[0].quantity: debe ser positiva"),
+    "Datos no válidos: lines[0].quantity: debe ser positiva",
+  );
   assert.equal(salesErrorText("[codigo_nuevo] algo"), "algo");
   assert.equal(salesErrorText("[not_found]"), "No encontrado");
   assert.equal(salesErrorText(""), "Error desconocido");

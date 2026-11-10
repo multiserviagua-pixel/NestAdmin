@@ -868,3 +868,134 @@ fn render_rejects_a_document_without_totals() {
     .unwrap_err();
     assert!(err.0.contains("totales"));
 }
+
+/// Factura con importes grandes, descuento, dos tipos de IVA y retención.
+fn big_amounts_invoice(app: &mut App, customer: i64) -> i64 {
+    let mut big = LineInput {
+        description: "Suministro sintético de importe elevado".into(),
+        quantity: d("1234.56"),
+        unit_price: d("98765.43"),
+        discount: d("0.15"),
+        tax_rate: TaxRate::TwentyOne,
+        exemption: None,
+    };
+    let first = DraftLine::from(big.clone());
+    big.tax_rate = TaxRate::Ten;
+    big.description = "Segunda línea al diez por ciento".into();
+    let second = DraftLine::from(big);
+    let mut input = DraftInput::new(DocumentKind::Invoice);
+    input.customer_id = Some(customer);
+    input.withholding_percent = Some(d("15"));
+    input.lines = vec![first, second, line("Concepto corriente", "1", "10")];
+    let id = app.create_sales_draft(&input).unwrap();
+    app.issue_sales_document(id, None).unwrap();
+    id
+}
+
+/// Cajas (texto, izquierda, derecha, línea base, ancho de página) de los textos, sin el membrete.
+fn text_boxes(bytes: &[u8]) -> Vec<(String, f32, f32, f32, f32)> {
+    let pdfium = extractor().pdfium().unwrap();
+    let document = pdfium.load_pdf_from_byte_slice(bytes, None).unwrap();
+    let mut out = Vec::new();
+    for page in document.pages().iter() {
+        let h = page.height().value;
+        for object in page.objects().iter() {
+            let Some(text) = object.as_text_object() else {
+                continue;
+            };
+            if text.text().starts_with("MEMBRETE") {
+                continue;
+            }
+            let b = object.bounds().unwrap();
+            out.push((
+                text.text().trim().to_owned(),
+                b.left().value,
+                b.right().value,
+                h - b.bottom().value,
+                page.width().value,
+            ));
+        }
+    }
+    out
+}
+
+#[test]
+fn narrow_margins_with_big_amounts_never_overlap_numbers() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = app(&dir);
+    let customer = setup(&mut app);
+    app.set_sales_letterhead(&make_letterhead(1, false))
+        .unwrap();
+    let margins = LetterheadMargins {
+        top_mm: 30,
+        right_mm: 55,
+        bottom_mm: 20,
+        left_mm: 55,
+    };
+    app.set_sales_letterhead_margins(margins).unwrap();
+    let id = big_amounts_invoice(&mut app, customer);
+    let bytes = std::fs::read(app.sales_document_pdf(id).unwrap()).unwrap();
+
+    let boxes = text_boxes(&bytes);
+    let all: Vec<&str> = boxes.iter().map(|b| b.0.as_str()).collect();
+    assert!(all.contains(&"1.234,56"), "{all:?}");
+    assert!(all.contains(&"98.765,43"), "{all:?}");
+    // Ninguna pareja de textos de la misma línea se pisa ni sale del área útil.
+    let (min_x, max_x) = (
+        f32::from(margins.left_mm) * MM - 1.0,
+        boxes[0].4 - f32::from(margins.right_mm) * MM + 1.0,
+    );
+    for (i, a) in boxes.iter().enumerate() {
+        assert!(
+            a.1 >= min_x && a.2 <= max_x,
+            "«{}» fuera del área útil",
+            a.0
+        );
+        for b in &boxes[i + 1..] {
+            if (a.3 - b.3).abs() < 1.0 {
+                assert!(
+                    a.2 <= b.1 || b.2 <= a.1,
+                    "«{}» ({:.1}-{:.1}) se pisa con «{}» ({:.1}-{:.1})",
+                    a.0,
+                    a.1,
+                    a.2,
+                    b.0,
+                    b.1,
+                    b.2
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn normal_margins_and_amounts_keep_the_proportional_columns() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = app(&dir);
+    let customer = setup(&mut app);
+    let id = issue(
+        &mut app,
+        DocumentKind::Invoice,
+        Some(customer),
+        vec![line("Servicio sintético", "2", "125.50")],
+    );
+    let bytes = std::fs::read(app.sales_document_pdf(id).unwrap()).unwrap();
+    let boxes = text_boxes(&bytes);
+    let page_w = boxes[0].4;
+    let (x0, x1) = (18.0 * MM, page_w - 18.0 * MM);
+    let w = x1 - x0;
+    let right_of = |text: &str| boxes.iter().find(|b| b.0 == text).unwrap().2;
+    for (head, edge) in [
+        ("Cant.", 0.52),
+        ("Precio", 0.66),
+        ("Dto.", 0.75),
+        ("IVA", 0.84),
+        ("Importe €", 1.0),
+    ] {
+        let got = right_of(head);
+        let want = x0 + w * edge - 4.0;
+        assert!((got - want).abs() < 1.5, "{head}: {got:.1} y no {want:.1}");
+    }
+    let total_left = boxes.iter().find(|b| b.0 == "TOTAL").unwrap().1;
+    assert!((total_left - (x1 - w * 0.38)).abs() < 1.5);
+}

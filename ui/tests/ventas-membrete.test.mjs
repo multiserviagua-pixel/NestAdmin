@@ -81,7 +81,7 @@ test("la explicación del membrete dice lo que no hace y a quién afecta", () =>
 test("los errores del PDF y del membrete llegan con su encabezado y el motivo del backend", () => {
   assert.equal(
     salesErrorText("[invalid_input] datos no válidos: letterhead: el archivo no es un PDF válido o está dañado"),
-    "Datos no válidos: datos no válidos: letterhead: el archivo no es un PDF válido o está dañado",
+    "Datos no válidos: el archivo no es un PDF válido o está dañado",
   );
   assert.equal(salesErrorText("[pdf_unavailable] PDFium no disponible: no se pudo cargar pdfium.dll"), "PDFium no está disponible: PDFium no disponible: no se pudo cargar pdfium.dll");
   assert.equal(salesErrorText("[pdf_failed] no se pudo guardar el PDF"), "No se pudo generar el PDF: no se pudo guardar el PDF");
