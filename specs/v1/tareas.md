@@ -60,6 +60,19 @@ Plan por etapas; cada una acaba con `cargo fmt`, clippy, `cargo test --workspace
 
 Orden de recorte si hace falta: reglas por dominio, Rodaje, `reply_style` y su línea, y por último Graph Enviados (Gmail y el simulador van primero). Con cuenta real, solo lectura y recuentos, sin activar reglas que respondan a terceros salvo autorización expresa.
 
+## Buscador local y asistente de la aplicación (D179–D190)
+
+Plan por etapas; cada una acaba con `cargo fmt`, clippy, `cargo test --workspace`, `npm test` y `check.py`, y un commit local en `main`. La prueba manual es en `tauri dev`. `arquitecto` revisa E2, E3 y E4, con la skill `revisar-envio-reglas` antes de cerrarlas.
+
+1. **E0** (hecha, 2026-11-10) Bloque en `numeracion.md`, decisiones D179–D190, R32–R34, T35–T37, T08e-07, contratos, tareas y `PLAN.md`.
+2. **E1** Buscador: migración 010 (`search_index` y FTS5), indexado al extraer y de lo anterior por pasos, `App::search`, comando de la ventana y paleta con Ctrl+K (`ui/src/search-text.ts` con pruebas) (T35).
+3. **E2** Asistente de consulta: `Task::Assistant`, `crates/app/src/assistant/` (protocolo por pasos, herramientas de nivel libre, citas, `aggregate`), consentimiento `assistant_external_consent` con vista previa, conversaciones locales, panel lateral y «Ver lo enviado» (T36).
+4. **E3** Acciones: primero D186 (importes dudosos en `approve`, auditoría de la configuración y regla ampliada inactiva); después `assistant_proposals`, tarjetas y `proposal_confirm` con origen `chat` (T37a, T37b).
+5. **E4** Automatización: `list_suggestions`, regla a petición inactiva y apertura del panel (T37d).
+6. **E5** Evaluación: `synthetic-assistant-injection-v1` y corpus sintético de búsqueda y respuestas con citas en `evaluation/`, con resultados separados; recorridos T35d, T36e y T37e en `tauri dev` (T37c).
+
+Para después: búsqueda semántica con vectores calculados en el equipo, transmisión por partes, herramientas nativas del proveedor, y venta y Verifactu cuando tengan comandos en la ventana. Orden de recorte si hace falta: habilidades por vista (D190), E4 y «Ver lo enviado»; el buscador (E1) y la compuerta de confirmación (D185) no se recortan.
+
 ## Puertas de entrega
 
 Una entrega solo cumple el plan cuando todos los requisitos aplicables de la matriz tienen evidencia satisfactoria, incluida la ejecución de Windows y la medición en hardware equivalente. Fallos, casos omitidos, credenciales o hardware no disponibles deben declararse como pendientes. La comparación de modelos comunica mediciones observadas, no una precisión garantizada.
