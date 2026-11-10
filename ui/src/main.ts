@@ -137,6 +137,8 @@ import {
   AUTHORIZED_BY_RULE,
   CATEGORY_HELP,
   CATEGORY_LABEL,
+  REVIEW_ONLY_CATEGORIES,
+  REVIEW_ONLY_TEXT,
   FIELD_HELP,
   MERGE_NOTICE,
   NO_EVALUATION,
@@ -2540,7 +2542,9 @@ function ruleForm(): HTMLElement {
   const category = h(
     "select",
     { name: "category", "data-focus-key": "rule-form:category" },
-    ...Object.entries(CATEGORY_LABEL).map(([value, label]) => h("option", { value }, label)),
+    ...Object.entries(CATEGORY_LABEL)
+      .filter(([value]) => !REVIEW_ONLY_CATEGORIES.includes(value))
+      .map(([value, label]) => h("option", { value }, label)),
   ) as HTMLSelectElement;
   const scopeSender = h("input", { type: "radio", name: "scope", value: "sender", "data-focus-key": "rule-form:scope:sender" }) as HTMLInputElement;
   const scopeDomain = h("input", { type: "radio", name: "scope", value: "domain", "data-focus-key": "rule-form:scope:domain" }) as HTMLInputElement;
@@ -2552,6 +2556,11 @@ function ruleForm(): HTMLElement {
   kind.value = draft.kind;
   supplier.value = draft.supplier;
   maxTotal.value = draft.max_total;
+  // Una regla antigua con una categoría de solo revisión (D177) la conserva a la vista, sin poder
+  // elegirla de nuevo: hay que cambiarla para guardar.
+  if (REVIEW_ONLY_CATEGORIES.includes(draft.category)) {
+    category.append(h("option", { value: draft.category, disabled: true, title: REVIEW_ONLY_TEXT }, `${CATEGORY_LABEL[draft.category] ?? draft.category} (siempre se revisa)`));
+  }
   category.value = draft.category;
   scopeDomain.checked = draft.scope === "domain";
   scopeSender.checked = draft.scope !== "domain";
@@ -3244,7 +3253,7 @@ function categoriesPanel(): HTMLElement {
     h(
       "p",
       { class: "intro" },
-      "La IA clasifica cada correo recibido en una de estas cinco categorías; no se pueden añadir ni cambiar. Una regla de envío se aplica a los correos de la categoría que elija, de los remitentes que usted indique.",
+      "La IA clasifica cada correo recibido en una de estas once categorías; no se pueden añadir ni cambiar. Una regla de envío se aplica a los correos de la categoría que elija, de los remitentes que usted indique.",
     ),
     dataTable(
       [

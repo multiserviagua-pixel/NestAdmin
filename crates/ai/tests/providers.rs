@@ -421,6 +421,11 @@ fn model_output_outside_the_contract_is_invalid() {
         parse_email(&json!({ "category": "spam", "draft": "x" })),
         Err(AiError::InvalidResponse(_))
     ));
+    for category in nestadmin_ai::tasks::CATEGORIES {
+        let (parsed, _) =
+            parse_email(&json!({ "category": category, "draft": "Gracias." })).unwrap();
+        assert_eq!(parsed, category);
+    }
     assert!(matches!(
         parse_email(&json!({ "category": "otros" })),
         Err(AiError::InvalidResponse(_))

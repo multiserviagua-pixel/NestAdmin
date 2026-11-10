@@ -5,6 +5,7 @@
 use std::cmp::Ordering;
 use std::collections::HashSet;
 
+use nestadmin_ai::tasks::REVIEW_ONLY_CATEGORIES;
 use nestadmin_core::{Rule, Task};
 use nestadmin_documents::parse_amount;
 use serde::Serialize;
@@ -70,6 +71,9 @@ pub enum ReasonCode {
     DraftNotChecked,
     /// El borrador contiene enlaces, direcciones, teléfonos o IBAN (D160).
     DraftFlagged,
+    /// La categoría (`otros`, `reclamacion`) siempre va a revisión (D177): defensa por si una
+    /// regla antigua la envía sola.
+    CategoryReviewOnly,
     /// Una regla aprendida aceptada en lote aún está en rodaje (D174): sus primeros envíos se
     /// revisan. Va después de todos los bloqueos: nunca los sustituye.
     Rodaje,
@@ -138,6 +142,7 @@ impl Explanation {
                 "el borrador contiene datos de contacto que no se pueden dar por buenos ({}); compruébelos",
                 join_ids(&self.facts["flags"])
             ),
+            ReasonCode::CategoryReviewOnly => CATEGORY_REVIEW_ONLY.into(),
             ReasonCode::Rodaje => rodaje_reason(&self.facts),
             ReasonCode::SenderRequired => format!(
                 "la regla no indica remitente; añádalo o valide la opción avanzada (regla: {})",
@@ -247,6 +252,7 @@ pub const SIGNALS_UNCHECKED: &str =
     "no consta la comprobación de correo automático; reprocese o revise";
 
 /// Motivo cuando la tarea no lleva la comprobación del borrador (D160).
+pub const CATEGORY_REVIEW_ONLY: &str = "esta categoría siempre va a revisión: las reglas no envían respuestas a reclamaciones ni a correos sin clasificar";
 pub const DRAFT_UNCHECKED: &str = "no consta la comprobación del borrador; reprocese o revise";
 
 /// Motivo cuando el documento no muestra el euro (D127).
@@ -501,7 +507,15 @@ fn send_draft_blocker(result: &Value) -> Option<(ReasonCode, Value)> {
         Some(flags) if !flags.is_empty() => {
             Some((ReasonCode::DraftFlagged, json!({ "flags": flags })))
         }
-        Some(_) => None,
+        Some(_) => {
+            let category = result["category"].as_str().unwrap_or("");
+            REVIEW_ONLY_CATEGORIES.contains(&category).then(|| {
+                (
+                    ReasonCode::CategoryReviewOnly,
+                    json!({ "category": category }),
+                )
+            })
+        }
     }
 }
 

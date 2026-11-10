@@ -2693,6 +2693,7 @@ const handlers: Record<string, (a: any, options?: any) => unknown> = {
       else if (kind === "email" && r.message.signals.length) review("automatic_sender", "el correo parece automático; ninguna regla responde a un remitente automático");
       else if (kind === "email" && !Array.isArray(r.draft_flags)) review("draft_not_checked", "no consta la comprobación del borrador; reprocese o revise");
       else if (kind === "email" && r.draft_flags.length) review("draft_flagged", "el borrador contiene enlaces, direcciones, teléfonos o IBAN que no se pueden dar por buenos; compruébelos");
+      else if (kind === "email" && ["otros", "reclamacion"].includes(String(r.category ?? ""))) review("category_review_only", "esta categoría siempre va a revisión: las reglas no envían respuestas a reclamaciones ni a correos sin clasificar");
       else {
         const others = live
           .filter((o) => matchRule(kind, { conditions: o.conditions, ack: metaOf(o.id).any_sender_ack_at !== null }, r).matches)
@@ -2978,7 +2979,8 @@ const handlers: Record<string, (a: any, options?: any) => unknown> = {
     }
     const sender = String(r.message?.from ?? "").trim().toLowerCase();
     if (!/^[^@\s,<>;:"]+@[a-z0-9-]+(\.[a-z0-9-]+)+$/.test(sender)) throw "el correo no indica un remitente que se pueda usar en una regla";
-    if (!["solicitud_factura", "consulta_pago", "incidencia_factura", "documentacion", "otros"].includes(String(r.category ?? ""))) throw "la regla de envío necesita una categoría válida";
+    if (!["solicitud_factura", "consulta_pago", "incidencia_factura", "documentacion", "presupuesto", "pedido", "cita", "informacion", "acuse", "reclamacion", "otros"].includes(String(r.category ?? ""))) throw "la regla de envío necesita una categoría válida";
+    if (["otros", "reclamacion"].includes(String(r.category))) throw "category_review_only: las reglas no envían solas las respuestas de las categorías «otros» y «reclamacion»; siempre se revisan";
     return { action_kind: "send_draft", conditions: { category: String(r.category), sender }, name: `Respuestas a ${sender} (${r.category})`.slice(0, 80), limit_from_this_invoice: false, limit_skipped: null };
   },
   rule_findings: (): RuleFinding[] => mockFindings(latest()),

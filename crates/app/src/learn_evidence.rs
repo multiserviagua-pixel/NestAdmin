@@ -15,12 +15,12 @@ pub const HABIT_MIN: i64 = 2;
 
 /// Evidencia de un resultado `done` (D172). Una señal `learned` por correo recibido que cumple
 /// todo: remitente no automático y respuesta propia (ya garantizados por la recogida, D167-D168),
-/// `needs_reply` verdadero, categoría distinta de `otros` y una dirección simple. El dominio
+/// `needs_reply` verdadero, categoría que no sea de solo revisión (`otros`, `reclamacion`; D177) y una dirección simple. El dominio
 /// público no excluye la señal: vale para la regla de dirección exacta (D126) y solo las reglas
 /// por dominio lo rechazan, en `suggest`.
 ///
 /// `reply_style` recoge `(categoría, reply_kind)` de **todos** los pares con `needs_reply`
-/// verdadero y un `reply_kind` conocido, también los de `otros`.
+/// verdadero y un `reply_kind` conocido, también los de solo revisión.
 pub fn learned_evidence(source: &str, pairs: &[LearnedMessage]) -> LearnedEvidence {
     let mut out = LearnedEvidence::default();
     for p in pairs.iter().filter(|p| p.needs_reply) {
@@ -33,7 +33,10 @@ pub fn learned_evidence(source: &str, pairs: &[LearnedMessage]) -> LearnedEviden
                 .push((category.to_owned(), p.reply_kind.clone()));
         }
         let address = p.address.trim().to_ascii_lowercase();
-        if category == "otros" || p.message_id.is_empty() || !is_email_address(&address) {
+        if nestadmin_ai::tasks::REVIEW_ONLY_CATEGORIES.contains(&category)
+            || p.message_id.is_empty()
+            || !is_email_address(&address)
+        {
             continue;
         }
         out.signals.push(LearnedSignal {
@@ -80,13 +83,14 @@ mod tests {
                 pair("3", "ana@alfa.test", "otros", true, "inform"),
                 pair("4", "no es una direccion", "consulta", true, "inform"),
                 pair("5", "luis@gmail.com", "consulta", true, "quote"),
+                pair("6", "ana@alfa.test", "reclamacion", true, "inform"),
             ],
         );
         let keys: Vec<_> = e.signals.iter().map(|s| s.subject_key.as_str()).collect();
         assert_eq!(keys, ["consulta|ana@alfa.test", "consulta|luis@gmail.com"]);
         assert_eq!(e.signals[0].source_key, "learned|account:a|1");
         // El estilo cuenta todos los pares con respuesta necesaria y tipo conocido.
-        assert_eq!(e.reply_style.len(), 4);
+        assert_eq!(e.reply_style.len(), 5);
     }
 
     #[test]

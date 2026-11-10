@@ -3020,6 +3020,11 @@ pub fn check_rule(action_kind: &str, conditions: &Value, allow_no_sender: bool) 
                 "la regla de envío necesita una categoría válida".into(),
             ));
         }
+        if nestadmin_ai::tasks::REVIEW_ONLY_CATEGORIES.contains(&text("category").unwrap_or("")) {
+            return Err(AppError::Invalid(
+                "category_review_only: las reglas no envían solas las respuestas de las categorías «otros» y «reclamacion»; siempre se revisan".into(),
+            ));
+        }
         return check_sender(map, allow_no_sender);
     }
     if text("supplier").is_none() {

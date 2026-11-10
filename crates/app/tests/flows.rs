@@ -1447,7 +1447,7 @@ fn the_advanced_option_is_per_rule_audited_and_erased_by_editing() {
         .any(|e| e.action == "rule_any_sender" && e.status == "revoked"));
     // Sin la marca ni remitente, tampoco se guarda otra edición sin remitente.
     assert!(acked
-        .update_rule("vieja", &json!({ "category": "otros" }))
+        .update_rule("vieja", &json!({ "category": "consulta_pago" }))
         .is_err());
     let again = acked.set_rule_any_sender("vieja", true).unwrap();
     assert!(again.any_sender_ack_at.is_some());
@@ -1455,7 +1455,7 @@ fn the_advanced_option_is_per_rule_audited_and_erased_by_editing() {
     acked
         .update_rule(
             "vieja",
-            &json!({ "category": "otros", "sender": "a@alfa.test" }),
+            &json!({ "category": "consulta_pago", "sender": "a@alfa.test" }),
         )
         .unwrap();
     assert!(acked.set_rule_any_sender("vieja", true).is_err());
@@ -2168,6 +2168,34 @@ fn new_send_rule(app: &mut App, id: &str, conditions: &Value) {
 }
 
 #[test]
+fn send_rules_refuse_the_review_only_categories() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = open(&dir, FakeProvider::new());
+    for category in ["reclamacion", "otros"] {
+        let error = app
+            .create_rule_full(NewRule {
+                id: Some("solo-revision"),
+                name: None,
+                action_kind: "send_draft",
+                conditions: &json!({ "category": category, "sender": "a@alfa.test" }),
+                allow_any_sender: false,
+            })
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("category_review_only"),
+            "{category}: {error}"
+        );
+    }
+    // Una categoría nueva que no es de solo revisión sí se admite.
+    new_send_rule(
+        &mut app,
+        "presupuestos",
+        &json!({ "category": "presupuesto", "sender": "a@alfa.test" }),
+    );
+}
+
+#[test]
 fn update_with_ack_saves_conditions_name_and_validation_and_audits_it() {
     let dir = tempfile::tempdir().unwrap();
     let mut app = open(&dir, FakeProvider::new());
@@ -2210,7 +2238,7 @@ fn update_with_ack_rejects_an_archived_rule_without_changes() {
         .update_rule_with_ack(
             "envio",
             None,
-            &json!({ "category": "otros", "sender": "b@alfa.test" }),
+            &json!({ "category": "consulta_pago", "sender": "b@alfa.test" }),
             false,
         )
         .unwrap_err()
@@ -2244,7 +2272,7 @@ fn update_with_ack_never_validates_a_register_rule_or_a_rule_with_sender() {
         .update_rule_with_ack(
             "envio",
             None,
-            &json!({ "category": "otros", "sender": "b@alfa.test" }),
+            &json!({ "category": "consulta_pago", "sender": "b@alfa.test" }),
             true,
         )
         .is_err());

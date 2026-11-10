@@ -15,7 +15,9 @@ use serde_json::{json, Map, Value};
 
 use crate::provider::{strip_code_fence, AiError, GenerateRequest, Task};
 use crate::refine::is_format_char;
-use crate::tasks::{draft_flags, draft_leaks_internals, CATEGORIES, MAIL_END, MAIL_START};
+use crate::tasks::{
+    category_gloss, draft_flags, draft_leaks_internals, CATEGORIES, MAIL_END, MAIL_START,
+};
 
 /// Tipos de respuesta que el modelo puede asignar a un par.
 pub const REPLY_KINDS: [&str; 6] = ["confirm", "inform", "schedule", "quote", "decline", "other"];
@@ -46,11 +48,12 @@ repita en varias respuestas) y closing (despedida habitual, como mucho {MAX_CLOS
 también copiada de una línea que se repita); cada uno es opcional y debe omitirse si no se \
 aprecia un patrón. El saludo y la despedida son fórmulas breves, sin datos de contacto, sin \
 enlaces y sin copiar contenido de los correos. (2) pairs: por cada par, \
-pair_id (el id recibido, sin inventar ninguno ni repetirlo), category (exactamente una de: {cats}), \
+pair_id (el id recibido, sin inventar ninguno ni repetirlo), category (exactamente una de: {cats}; significan: {gloss}), \
 needs_reply (true si el correo recibido necesitaba respuesta) y reply_kind (el tipo de la respuesta: \
 exactamente uno de {kinds}). Puedes omitir un par si no puedes describirlo. Responde únicamente \
 con un objeto JSON, sin texto ni Markdown alrededor, con las claves style y pairs.",
         cats = CATEGORIES.join(", "),
+        gloss = category_gloss!(),
         kinds = REPLY_KINDS.join(", "),
         tones = TONES.join(", "),
         lengths = LENGTHS.join(", "),

@@ -19,8 +19,19 @@ export const CATEGORY_LABEL: Record<string, string> = {
   consulta_pago: "Consulta de pago",
   incidencia_factura: "Incidencia de factura",
   documentacion: "Documentación",
+  presupuesto: "Petición de presupuesto",
+  pedido: "Pedido o entrega",
+  cita: "Cita o reunión",
+  informacion: "Consulta de información",
+  acuse: "Confirmar recepción",
+  reclamacion: "Reclamación",
   otros: "Otros",
 };
+
+/** Categorías cuya respuesta siempre va a revisión (D177): ninguna regla de envío las admite. */
+export const REVIEW_ONLY_CATEGORIES: readonly string[] = ["otros", "reclamacion"];
+
+export const REVIEW_ONLY_TEXT = "Esta categoría siempre va a revisión: las reglas no envían respuestas a reclamaciones ni a correos sin clasificar.";
 
 export const ACTION_TEXT: Record<string, string> = {
   register_invoice: "Registrar factura",
@@ -49,8 +60,32 @@ export const CATEGORY_HELP: Record<string, CategoryHelp> = {
     description: "Quien escribe envía o pide documentos o certificados que no son una factura.",
     example: "«Le adjunto el certificado de estar al corriente de pago; ¿podrían confirmarnos la recepción?»",
   },
+  presupuesto: {
+    description: "Quien escribe pide un precio, una tarifa o un presupuesto.",
+    example: "«¿Pueden enviarme un presupuesto para 40 cajas de embalaje?»",
+  },
+  pedido: {
+    description: "Quien escribe hace, cambia o pregunta por un pedido, un envío o un plazo de entrega.",
+    example: "«¿Cuándo llegará el pedido 2231? Lo esperábamos para el jueves.»",
+  },
+  cita: {
+    description: "Quien escribe pide, confirma, cambia o anula una cita, una visita o una reunión.",
+    example: "«¿Podemos mover la visita del martes al miércoles por la mañana?»",
+  },
+  informacion: {
+    description: "Quien escribe pregunta por horarios, servicios, condiciones o disponibilidad.",
+    example: "«¿Hasta qué hora abren los sábados y tienen servicio de recogida?»",
+  },
+  acuse: {
+    description: "Quien escribe envía algo y solo espera que se le confirme la recepción.",
+    example: "«Les envío el albarán firmado; por favor, confirmen que lo han recibido.»",
+  },
+  reclamacion: {
+    description: "Quien escribe se queja de un producto o servicio (no de facturación). Siempre se revisa: ninguna regla la envía sola.",
+    example: "«La mesa llegó con una pata rota y nadie ha contestado a mis llamadas.»",
+  },
   otros: {
-    description: "Cualquier correo que no encaja en las categorías anteriores.",
+    description: "Cualquier correo que no encaja en las categorías anteriores. Siempre se revisa: ninguna regla lo envía sola.",
     example: "«Les informamos de que el horario de recogida cambia a partir del lunes.»",
   },
 };
@@ -319,6 +354,8 @@ export function ruleProblem(rule: RuleLike): string | null {
   if (rule.action_kind === "register_invoice" && "currency" in c && c.currency !== "EUR")
     return "Hoy la aplicación solo registra facturas en euros: la regla no actuará.";
   if (rule.action_kind === "send_draft" && !text(c.category)) return "La regla no indica categoría: no actuará.";
+  if (rule.action_kind === "send_draft" && REVIEW_ONLY_CATEGORIES.includes(text(c.category)))
+    return "La categoría de la regla siempre va a revisión: no enviará nada sola.";
   if (rule.action_kind === "send_draft" && text(c.sender) && text(c.sender_domain))
     return "La regla indica a la vez una dirección y un dominio: no actuará.";
   return null;
@@ -531,6 +568,7 @@ export const REASON_CODES = [
   "empty_draft",
   "draft_not_checked",
   "draft_flagged",
+  "category_review_only",
   "rodaje",
 ] as const;
 
@@ -593,6 +631,8 @@ export function reasonText(code: string, facts?: Record<string, unknown> | null)
       return "no consta la comprobación del borrador; reprocese o revise";
     case "draft_flagged":
       return "el borrador contiene enlaces, direcciones, teléfonos o IBAN que no se pueden dar por buenos; compruébelos";
+    case "category_review_only":
+      return REVIEW_ONLY_TEXT.charAt(0).toLowerCase() + REVIEW_ONLY_TEXT.slice(1).replace(/\.$/, "");
     case "rodaje":
     {
       // Regla aprendida aceptada en lote (D174). El mismo texto que el backend (`rodaje_reason`).

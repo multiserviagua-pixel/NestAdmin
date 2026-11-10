@@ -168,8 +168,8 @@ test("problemas que impiden que la regla actúe", () => {
   assert.match(ruleProblem(send({})) ?? "", /no indica categoría/);
 });
 
-test("las cinco categorías tienen etiqueta, descripción y ejemplo", () => {
-  const keys = ["solicitud_factura", "consulta_pago", "incidencia_factura", "documentacion", "otros"];
+test("las once categorías tienen etiqueta, descripción y ejemplo", () => {
+  const keys = ["solicitud_factura", "consulta_pago", "incidencia_factura", "documentacion", "presupuesto", "pedido", "cita", "informacion", "acuse", "reclamacion", "otros"];
   assert.deepEqual(Object.keys(CATEGORY_LABEL).sort(), [...keys].sort());
   assert.deepEqual(Object.keys(CATEGORY_HELP).sort(), [...keys].sort());
   for (const key of keys) {

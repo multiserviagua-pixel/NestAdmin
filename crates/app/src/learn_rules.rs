@@ -384,9 +384,9 @@ mod tests {
             shown: format!("shown-{fingerprint}"),
             action_kind: SEND_DRAFT.into(),
             name: format!("Responder a {fingerprint}"),
-            conditions: json!({ "category": "otros", "sender": format!("{fingerprint}@alfa.test") }),
+            conditions: json!({ "category": "solicitud_factura", "sender": format!("{fingerprint}@alfa.test") }),
             subject: format!("{fingerprint}@alfa.test"),
-            category: Some("otros".into()),
+            category: Some("solicitud_factura".into()),
             evidence: Evidence {
                 count: 3,
                 threshold: 3,

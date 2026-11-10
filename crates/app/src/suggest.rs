@@ -240,7 +240,8 @@ pub struct Hidden {
     pub accepted: u32,
     /// Condiciones que no pasan la validación de reglas (por ejemplo, datos ilegibles).
     pub invalid: u32,
-    /// Respuestas de la categoría `otros`, que no se sugiere nunca (D132).
+    /// Respuestas de una categoría de solo revisión (`otros`, `reclamacion`), que no se sugiere
+    /// nunca (D132, D177).
     pub not_suggested: u32,
     /// Proveedores cuyas facturas solo leídas no cuentan porque basta una con incidencias, otra
     /// moneda o un total no positivo (D133). Sus aprobaciones se conservan.
@@ -455,10 +456,11 @@ fn learned_address_unit<'a>(
     if !group.iter().any(|s| s.kind == "learned") {
         return None;
     }
-    // Nunca «otros»: lo aprendido tampoco lo sugiere (D132).
+    // Nunca una categoría de solo revisión («otros», «reclamacion»): lo aprendido tampoco la
+    // sugiere (D132, D177).
     if subject_key
         .split_once('|')
-        .is_none_or(|(c, _)| c == "otros")
+        .is_none_or(|(c, _)| nestadmin_ai::tasks::REVIEW_ONLY_CATEGORIES.contains(&c))
     {
         return None;
     }
@@ -493,7 +495,7 @@ fn learned_domain_units<'a>(valid: &[&'a Signal], thresholds: Thresholds) -> Vec
             continue;
         };
         if category.is_empty()
-            || category == "otros"
+            || nestadmin_ai::tasks::REVIEW_ONLY_CATEGORIES.contains(&category)
             || !is_email_address(sender)
             || sender != sender.to_ascii_lowercase()
         {
@@ -695,7 +697,7 @@ pub fn suggest(
             if !invoice
                 && subject_key
                     .split_once("|")
-                    .is_some_and(|(c, _)| c == "otros")
+                    .is_some_and(|(c, _)| nestadmin_ai::tasks::REVIEW_ONLY_CATEGORIES.contains(&c))
             {
                 out.hidden.not_suggested += 1;
                 break 'approved;

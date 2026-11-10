@@ -857,6 +857,19 @@ fn every_gate_condition_blocks_a_rule_on_its_own_and_the_clean_case_still_automa
         }),
         (ReasonCode::DraftNotChecked, false)
     );
+    // Categorías de solo revisión (D177): defensa aunque una regla antigua las admita.
+    for category in ["reclamacion", "otros"] {
+        assert_eq!(
+            with(&|r| r["category"] = json!(category)),
+            (ReasonCode::CategoryReviewOnly, false),
+            "{category}"
+        );
+    }
+    // Una categoría nueva que no es de solo revisión no cambia el bloqueo: solo no coincide la regla.
+    assert_eq!(
+        with(&|r| r["category"] = json!("presupuesto")),
+        (ReasonCode::NoActiveRuleMatches, false)
+    );
 }
 
 #[test]

@@ -29,6 +29,26 @@ fn triage_schema_has_category_enum_and_needs_reply_and_no_draft() {
 }
 
 #[test]
+fn the_three_instructions_list_every_category_and_review_only_is_a_subset() {
+    use nestadmin_ai::tasks::{email_request, REVIEW_ONLY_CATEGORIES};
+    assert_eq!(CATEGORIES.len(), 11);
+    assert!(REVIEW_ONLY_CATEGORIES
+        .iter()
+        .all(|c| CATEGORIES.contains(c)));
+    let list = CATEGORIES.join(", ");
+    for request in [
+        email_request("T001", "hola"),
+        triage_request("T001", "hola"),
+        nestadmin_ai::learn::learn_request("T001", "hola"),
+    ] {
+        assert!(request.instructions.contains(&list), "{:?}", request.task);
+        for category in CATEGORIES {
+            assert!(request.instructions.contains(category), "{category}");
+        }
+    }
+}
+
+#[test]
 fn draft_schema_has_only_draft() {
     let request = draft_request("T001", "hola", None);
     assert_eq!(request.task, Task::Draft);
@@ -48,6 +68,16 @@ fn parse_triage_reads_values_and_defaults_missing_needs_reply_to_true() {
     assert_eq!(
         ok(json!({"category": "consulta_pago", "needs_reply": true})),
         ("consulta_pago".to_owned(), true)
+    );
+    for category in nestadmin_ai::tasks::CATEGORIES {
+        assert_eq!(
+            ok(json!({"category": category, "needs_reply": true})),
+            (category.to_owned(), true)
+        );
+    }
+    assert_eq!(
+        ok(json!({"category": "reclamacion", "needs_reply": true})),
+        ("reclamacion".to_owned(), true)
     );
     assert_eq!(
         ok(json!({"category": "documentacion"})),
