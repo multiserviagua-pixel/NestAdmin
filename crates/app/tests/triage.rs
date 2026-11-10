@@ -24,7 +24,8 @@ use serde_json::{json, Value};
 /// Respuestas según marcas del correo (nunca según respuestas esperadas del producto):
 /// `[[CAIDA]]` hace fallar al proveedor externo como si no hubiera red, `[[SIN-RESPUESTA]]` clasifica con `needs_reply =
 /// false`, `[[SIN-CLAVE]]` omite `needs_reply`, `[[BORRADOR-VACIO]]` devuelve un borrador en
-/// blanco y `[[CON-URL]]` uno con un enlace. Con `compromised`, todo correo salvo el de control
+/// blanco y `[[CON-URL]]` uno con un enlace. `[[CAT-OTROS]]` y `[[CAT-RECLAMACION]]` clasifican en
+/// esas categorías de solo revisión (D177). Con `compromised`, todo correo salvo el de control
 /// (`FS-2026-014`) recibe un borrador comprometido.
 struct Spy {
     kind: ProviderKind,
@@ -114,6 +115,12 @@ impl Provider for Spy {
             }),
             AiTask::Classification if c.contains("[[SIN-RESPUESTA]]") => {
                 json!({ "category": "solicitud_factura", "needs_reply": false })
+            }
+            AiTask::Classification if c.contains("[[CAT-OTROS]]") => {
+                json!({ "category": "otros", "needs_reply": true })
+            }
+            AiTask::Classification if c.contains("[[CAT-RECLAMACION]]") => {
+                json!({ "category": "reclamacion", "needs_reply": true })
             }
             AiTask::Classification if c.contains("[[SIN-CLAVE]]") => {
                 json!({ "category": "solicitud_factura" })
@@ -858,10 +865,22 @@ fn every_gate_condition_blocks_a_rule_on_its_own_and_the_clean_case_still_automa
         (ReasonCode::DraftNotChecked, false)
     );
     // Categorías de solo revisión (D177): defensa aunque una regla antigua las admita.
+    // La regla se construye a mano, sin `check_rule`, como una guardada antes del cambio.
     for category in ["reclamacion", "otros"] {
+        let old_rule = Rule {
+            conditions: json!({ "category": category, "sender": "cliente@clienteficticio.test" }),
+            ..gate_rule()
+        };
+        let mut result = clean();
+        result["category"] = json!(category);
+        let evaluation = evaluate(&[old_rule], SEND_DRAFT, &result);
         assert_eq!(
-            with(&|r| r["category"] = json!(category)),
-            (ReasonCode::CategoryReviewOnly, false),
+            evaluation.explanation.code,
+            ReasonCode::CategoryReviewOnly,
+            "{category}"
+        );
+        assert!(
+            matches!(evaluation.decision, RuleDecision::Review(_)),
             "{category}"
         );
     }
@@ -870,6 +889,79 @@ fn every_gate_condition_blocks_a_rule_on_its_own_and_the_clean_case_still_automa
         with(&|r| r["category"] = json!("presupuesto")),
         (ReasonCode::NoActiveRuleMatches, false)
     );
+}
+
+#[test]
+fn an_old_active_rule_with_a_review_only_category_never_sends_and_says_why() {
+    for (marker, category) in [
+        ("[[CAT-OTROS]]", "otros"),
+        ("[[CAT-RECLAMACION]]", "reclamacion"),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        // La regla se guarda como antes de D177: sin `check_rule`, directamente en el almacén.
+        {
+            let mut store = nestadmin_core::Store::open(&dir.path().join("nestadmin.db")).unwrap();
+            store
+                .create_rule_named(
+                    "antigua",
+                    SEND_DRAFT,
+                    &json!({ "category": category, "sender": "cliente@clienteficticio.test" }),
+                    None,
+                    false,
+                )
+                .unwrap();
+            store.set_rule_active("antigua", true).unwrap();
+        }
+        seed(
+            dir.path(),
+            vec![msg(
+                "V1",
+                "cliente@clienteficticio.test",
+                "Consulta",
+                &format!("Hola {marker}"),
+                &[],
+            )],
+            &[],
+        );
+        let mut app = open(dir.path(), Spy::external());
+        assert!(app
+            .rules()
+            .unwrap()
+            .iter()
+            .any(|r| r.id == "antigua" && r.active));
+        app.fetch_mail().unwrap();
+        process_all(&mut app);
+        let task = mail_task(&app, "V1");
+        assert_eq!(
+            task.state,
+            TaskState::AwaitingReview,
+            "{category}: {task:?}"
+        );
+        let result = result_of(&task);
+        assert_eq!(result["category"], category);
+        assert_eq!(
+            result["evaluation"]["code"], "category_review_only",
+            "{category}"
+        );
+        assert_eq!(sent(&app), 0, "{category}");
+        // «Probar» esa misma regla antigua no falla: todo lo que cubre iría a revisión.
+        let sim = app
+            .simulate_rule(
+                SEND_DRAFT,
+                &json!({ "category": category, "sender": "cliente@clienteficticio.test" }),
+                None,
+                false,
+                Some("antigua"),
+            )
+            .unwrap();
+        assert_eq!(sim.would_automate, 0, "{category}");
+        assert_eq!(
+            sim.would_review.get("category_review_only"),
+            Some(&1),
+            "{category}: {:?}",
+            sim.would_review
+        );
+    }
 }
 
 #[test]

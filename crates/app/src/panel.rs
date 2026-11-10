@@ -16,8 +16,8 @@ use crate::rules::{
     MergePlan, PlanRule, ReasonCode, RuleDecision, RuleFinding,
 };
 use crate::{
-    action_kind, check_rule, check_rule_id, App, AppError, AppResult, EMAIL, INVOICE,
-    REGISTER_INVOICE, SEND_DRAFT,
+    action_kind, check_rule, check_rule_id, check_rule_inner, App, AppError, AppResult, EMAIL,
+    INVOICE, REGISTER_INVOICE, SEND_DRAFT,
 };
 
 /// Número de tareas que mira la simulación si no se indica otro.
@@ -485,8 +485,9 @@ impl App {
             )));
         }
         // Se valida como una regla real; el remitente ausente se simula tal cual (sin la
-        // validación avanzada), no se rechaza.
-        check_rule(action_kind, conditions, true)?;
+        // validación avanzada), no se rechaza. Una regla antigua con una categoría de solo
+        // revisión (D177) tampoco: se simula y todo lo que cubre va a revisión.
+        check_rule_inner(action_kind, conditions, true, true)?;
         let task_kind = match action_kind {
             REGISTER_INVOICE => INVOICE,
             _ => EMAIL,

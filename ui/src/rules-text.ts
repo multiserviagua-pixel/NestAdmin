@@ -31,7 +31,7 @@ export const CATEGORY_LABEL: Record<string, string> = {
 /** Categorías cuya respuesta siempre va a revisión (D177): ninguna regla de envío las admite. */
 export const REVIEW_ONLY_CATEGORIES: readonly string[] = ["otros", "reclamacion"];
 
-export const REVIEW_ONLY_TEXT = "Esta categoría siempre va a revisión: las reglas no envían respuestas a reclamaciones ni a correos sin clasificar.";
+export const REVIEW_ONLY_TEXT = "Esta categoría siempre va a revisión: las reglas no envían respuestas a reclamaciones ni a correos de la categoría «Otros».";
 
 export const ACTION_TEXT: Record<string, string> = {
   register_invoice: "Registrar factura",
@@ -485,6 +485,7 @@ export function draftProblems(d: RuleDraft, creating: boolean, options: { ignore
       if (!amount.ok) out.push(amount.message);
     }
   } else {
+    if (REVIEW_ONLY_CATEGORIES.includes(d.category)) out.push(REVIEW_ONLY_TEXT);
     if (d.scope === "sender" && !isEmailAddress(d.sender)) out.push("Indique la dirección completa del remitente, por ejemplo compras@cliente.test.");
     if (d.scope === "domain" && !isDomainName(d.sender_domain)) out.push("Indique el dominio, por ejemplo cliente.test (sin comodines ni @ en medio).");
     if (d.scope === "any" && !options.ignoreAck && !anyAckReady(d)) out.push(`Para contestar a cualquier remitente, marque «Entiendo las consecuencias» y escriba ${ANY_SENDER_CONFIRMATION}.`);

@@ -2674,7 +2674,7 @@ function ruleForm(): HTMLElement {
     problems.replaceChildren(...issues.map((i) => h("li", {}, i)));
     problems.hidden = issues.length === 0;
     submit.disabled = issues.length > 0;
-    testButton.disabled = draftProblems(d, false, { ignoreAck: true }).filter((p) => !p.startsWith("Escriba un nombre")).length > 0;
+    testButton.disabled = draftProblems(d, false, { ignoreAck: true }).filter((p) => !p.startsWith("Escriba un nombre") && p !== REVIEW_ONLY_TEXT).length > 0;
     ackBox?.refreshText();
     // Si las condiciones cambian, el resultado de la prueba ya no es de lo que hay en pantalla.
     if (state.ruleSim?.key === "form" && state.ruleSim.sig !== signature(d)) {
@@ -3985,11 +3985,17 @@ function suggestedPanel(): HTMLElement {
 
 /** «Crear regla» desde una revisión: abre el formulario precargado; la regla sigue naciendo inactiva. */
 function createRuleButton(task: Task): HTMLElement {
+  // Una respuesta de una categoría de solo revisión (D177) no admite regla: el botón se
+  // desactiva y dice por qué, sin llegar a pedir nada al servidor.
+  const category = task.kind === "email" ? (task.result as { category?: unknown } | null)?.category : null;
+  const reviewOnly = typeof category === "string" && REVIEW_ONLY_CATEGORIES.includes(category);
   return h(
     "button",
     {
       type: "button",
       "data-focus-key": `task:${task.id}:create-rule`,
+      disabled: reviewOnly,
+      title: reviewOnly ? REVIEW_ONLY_TEXT : undefined,
       onclick: async () => {
         try {
           const seed = await api.ruleSeedForTask(task.id);

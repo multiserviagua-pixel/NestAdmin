@@ -2989,6 +2989,17 @@ fn action_kind(task: &Task) -> &'static str {
 /// la aceptación en lote (D173) puedan envolverla.
 #[doc(hidden)]
 pub fn check_rule(action_kind: &str, conditions: &Value, allow_no_sender: bool) -> AppResult<()> {
+    check_rule_inner(action_kind, conditions, allow_no_sender, false)
+}
+
+/// Como `check_rule`. `allow_review_only` deja pasar una categoría de solo revisión (D177): solo
+/// la simulación de una regla antigua que ya la tiene, para poder enseñar que todo iría a revisión.
+pub(crate) fn check_rule_inner(
+    action_kind: &str,
+    conditions: &Value,
+    allow_no_sender: bool,
+    allow_review_only: bool,
+) -> AppResult<()> {
     let Some(map) = conditions.as_object() else {
         return Err(AppError::Invalid(
             "las condiciones de la regla deben ser un objeto".into(),
@@ -3020,10 +3031,10 @@ pub fn check_rule(action_kind: &str, conditions: &Value, allow_no_sender: bool) 
                 "la regla de envío necesita una categoría válida".into(),
             ));
         }
-        if nestadmin_ai::tasks::REVIEW_ONLY_CATEGORIES.contains(&text("category").unwrap_or("")) {
-            return Err(AppError::Invalid(
-                "category_review_only: las reglas no envían solas las respuestas de las categorías «otros» y «reclamacion»; siempre se revisan".into(),
-            ));
+        if !allow_review_only
+            && nestadmin_ai::tasks::REVIEW_ONLY_CATEGORIES.contains(&text("category").unwrap_or(""))
+        {
+            return Err(AppError::Invalid(crate::rules::REVIEW_ONLY_MESSAGE.into()));
         }
         return check_sender(map, allow_no_sender);
     }

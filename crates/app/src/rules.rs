@@ -251,8 +251,13 @@ pub const CURRENCY_UNCHECKED: &str = "no consta la comprobación de moneda; repr
 pub const SIGNALS_UNCHECKED: &str =
     "no consta la comprobación de correo automático; reprocese o revise";
 
+/// Motivo cuando la categoría del correo es de solo revisión (D177).
+pub const CATEGORY_REVIEW_ONLY: &str = "esta categoría siempre va a revisión: las reglas no envían respuestas a reclamaciones ni a correos de la categoría «Otros»";
+
+/// Mensaje para la persona al guardar, probar o unificar una regla de esa categoría (D177).
+pub const REVIEW_ONLY_MESSAGE: &str = "Esta categoría siempre va a revisión: las reglas no envían respuestas a reclamaciones ni a correos de la categoría «Otros».";
+
 /// Motivo cuando la tarea no lleva la comprobación del borrador (D160).
-pub const CATEGORY_REVIEW_ONLY: &str = "esta categoría siempre va a revisión: las reglas no envían respuestas a reclamaciones ni a correos sin clasificar";
 pub const DRAFT_UNCHECKED: &str = "no consta la comprobación del borrador; reprocese o revise";
 
 /// Motivo cuando el documento no muestra el euro (D127).
@@ -1442,7 +1447,9 @@ pub fn analyze(rules: &[Rule], marks: &Marks) -> Vec<RuleFinding> {
                 rules: vec![finding_rule(a), finding_rule(b)],
                 active_conflict: real && a.active && b.active,
                 effect: pair_effect(&relation, (a, ca), (b, cb)),
-                merge_candidate: real,
+                merge_candidate: real
+                    && !has_review_only_category(a)
+                    && !has_review_only_category(b),
                 others: if kind == FindingKind::Overlap {
                     region_others(i, j, &live, &parsed, &relation)
                 } else {
@@ -1462,6 +1469,14 @@ pub fn analyze(rules: &[Rule], marks: &Marks) -> Vec<RuleFinding> {
 
 // ---- Unificación ----
 
+/// Una regla de envío guardada con una categoría de solo revisión (D177): nunca se unifica.
+fn has_review_only_category(rule: &Rule) -> bool {
+    rule.action_kind == SEND_DRAFT
+        && rule.conditions["category"]
+            .as_str()
+            .is_some_and(|c| REVIEW_ONLY_CATEGORIES.contains(&c))
+}
+
 /// Por qué no se puede unificar.
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]
 pub enum MergeError {
@@ -1473,6 +1488,8 @@ pub enum MergeError {
     Missing(String),
     #[error("la regla {0} está archivada; restáurela antes de unificarla")]
     Archived(String),
+    #[error("la regla {0} es de una categoría que siempre va a revisión; no se puede unificar")]
+    ReviewOnly(String),
     #[error("solo se pueden unificar reglas del mismo tipo: no mezcle reglas de registrar facturas con reglas de enviar respuestas")]
     MixedKinds,
     #[error("la aplicación no reconoce este tipo de regla y no puede unificarla")]
@@ -1613,6 +1630,9 @@ fn merge_members<'a>(
             .ok_or_else(|| MergeError::Missing(id.clone()))?;
         if marks.archived.contains(id) {
             return Err(MergeError::Archived(id.clone()));
+        }
+        if has_review_only_category(rule) {
+            return Err(MergeError::ReviewOnly(id.clone()));
         }
         members.push(rule);
     }

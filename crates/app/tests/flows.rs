@@ -2182,8 +2182,9 @@ fn send_rules_refuse_the_review_only_categories() {
             })
             .unwrap_err()
             .to_string();
+        // Un mensaje para la persona, sin el código técnico.
         assert!(
-            error.contains("category_review_only"),
+            error.contains("siempre va a revisión") && !error.contains("category_review_only"),
             "{category}: {error}"
         );
     }
@@ -2193,6 +2194,61 @@ fn send_rules_refuse_the_review_only_categories() {
         "presupuestos",
         &json!({ "category": "presupuesto", "sender": "a@alfa.test" }),
     );
+}
+
+#[test]
+fn old_rules_with_a_review_only_category_are_not_proposed_for_merging_and_the_error_is_plain() {
+    let dir = tempfile::tempdir().unwrap();
+    with_stored_rules(
+        &dir,
+        &[
+            (
+                "otros-a",
+                "send_draft",
+                json!({ "category": "otros", "sender": "a@alfa.test" }),
+            ),
+            (
+                "otros-b",
+                "send_draft",
+                json!({ "category": "otros", "sender": "a@alfa.test" }),
+            ),
+            (
+                "fact-a",
+                "send_draft",
+                json!({ "category": "solicitud_factura", "sender": "a@alfa.test" }),
+            ),
+            (
+                "fact-b",
+                "send_draft",
+                json!({ "category": "solicitud_factura", "sender": "a@alfa.test" }),
+            ),
+        ],
+    );
+    let mut app = open(&dir, FakeProvider::new());
+    let findings = app.rule_findings().unwrap();
+    // El par normal sigue siendo candidato; el de solo revisión no se propone.
+    let candidate = |a: &str| {
+        findings
+            .iter()
+            .filter(|f| f.rules.iter().any(|r| r.id == a))
+            .any(|f| f.merge_candidate)
+    };
+    assert!(candidate("fact-a"));
+    assert!(!candidate("otros-a"));
+    let error = app
+        .merge_rules(&["otros-a".into(), "otros-b".into()], None, None, "x")
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("siempre va a revisión") && !error.contains("category_review_only"),
+        "{error}"
+    );
+    let error = app
+        .preview_merge(&["otros-a".into(), "otros-b".into()], None)
+        .map(|_| ())
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("siempre va a revisión"), "{error}");
 }
 
 #[test]
