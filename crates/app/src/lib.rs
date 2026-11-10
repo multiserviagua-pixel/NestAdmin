@@ -21,6 +21,7 @@ pub mod preferences;
 pub mod profile;
 pub mod refine;
 pub mod rules;
+pub mod search;
 pub mod suggest;
 
 use std::collections::{HashMap, HashSet};
@@ -39,7 +40,7 @@ use nestadmin_ai::{
 use nestadmin_core::mail_signals::{route_of_message, Route, Signal, TriageDecision};
 use nestadmin_core::{
     ActionRecord, ActionRequest, AuditEntry, Authorization, Connector, ConnectorError, CoreError,
-    Rule, Store, Task, TaskError, TaskState,
+    Rule, SearchDoc, Store, Task, TaskError, TaskState,
 };
 use nestadmin_documents::{
     looks_like_invoice, process_invoice, DuplicateRegistry, Evidenced, Invoice, Issue, RawInvoice,
@@ -962,7 +963,7 @@ impl App {
             if let Some(done) = done {
                 let result = task.result.clone().unwrap_or(Value::Null);
                 let receipt = done.receipt.unwrap_or(Value::Null);
-                self.complete_with(task.id, result, done.version, receipt)?;
+                self.complete_with(task.id, result, done.version, receipt, None)?;
             }
         }
         Ok(())
@@ -1053,6 +1054,7 @@ impl App {
         mut result: Value,
         version: i64,
         receipt: Value,
+        doc: Option<&SearchDoc>,
     ) -> AppResult<Task> {
         if result["version"].as_i64() != Some(version) {
             if result["attempt"]["version"].as_i64() == Some(version)
@@ -1070,16 +1072,21 @@ impl App {
         if let Some(fields) = result.as_object_mut() {
             fields.remove("recovery");
         }
-        Ok(self.store.complete(task_id, &result)?)
+        self.complete_indexing(task_id, &result, doc)
     }
 
     /// Deja la tarea en revisión con el contenido dado, desde `running` o desde la revisión.
-    fn back_to_review(&mut self, task: &Task, result: &Value) -> AppResult<Task> {
+    fn back_to_review(
+        &mut self,
+        task: &Task,
+        result: &Value,
+        doc: Option<&SearchDoc>,
+    ) -> AppResult<Task> {
         let current = self.store.task(task.id)?;
-        Ok(match current.state {
-            TaskState::AwaitingReview => self.store.revise(task.id, result)?,
-            _ => self.store.await_review(task.id, result)?,
-        })
+        match current.state {
+            TaskState::AwaitingReview => Ok(self.store.revise(task.id, result)?),
+            _ => self.review_indexing(task.id, result, doc),
+        }
     }
 
     /// Reproceso de una tarea cuya acción ya se intentó: si consta realizada se completa; si
@@ -1100,7 +1107,7 @@ impl App {
                 if done_by.starts_with("regla ") && result["rule_attempt"]["type"] == "rule" {
                     result["authorization"] = result["rule_attempt"].clone();
                 }
-                return self.complete_with(task.id, result, version, receipt);
+                return self.complete_with(task.id, result, version, receipt, None);
             }
             Previous::Unknown { error, .. } => {
                 let missing = error.code == nestadmin_simulators::codes::NOT_FOUND;
@@ -1118,7 +1125,7 @@ impl App {
             "error": error,
             "needs_confirmation": missing,
         });
-        self.back_to_review(&task, &result)
+        self.back_to_review(&task, &result, None)
     }
 
     /// Vuelve a cargar en orden las facturas ya procesadas para seguir detectando duplicados.
@@ -1400,6 +1407,12 @@ impl App {
             )));
         }
         let input: Value = serde_json::from_str(&task.input_ref).unwrap_or(Value::Null);
+        self.locate_document(task_id, &input)
+    }
+
+    /// Ruta de la copia guardada según la entrada de una tarea, comprobada: dentro de la carpeta
+    /// de documentos y existente. La usan `document_file` y el indexado (D179).
+    fn locate_document(&self, task_id: i64, input: &Value) -> AppResult<PathBuf> {
         let missing = || {
             AppError::Invalid(format!(
                 "la copia guardada del documento de la tarea {task_id} ya no está"
@@ -1471,13 +1484,13 @@ impl App {
                         let task_id = match known.get(&message.id) {
                             Some(id) => *id,
                             None => {
-                                let input = json!({
+                                let input_value = json!({
                                     "message_id": message.id,
                                     "account": account,
                                     "origin": self.mail.origin(&account),
                                     "message": message,
                                 });
-                                let origin = input["origin"].clone();
+                                let origin = input_value["origin"].clone();
                                 let (_, found) = route_of_message(
                                     message.from.as_deref(),
                                     message.signals.as_deref(),
@@ -1495,27 +1508,37 @@ impl App {
                                     },
                                 );
                                 let route = decision.route;
-                                let input = input.to_string();
+                                let input = input_value.to_string();
                                 // La ruta local (D157) se decide aquí, sin IA y de una vez: el
                                 // informativo y el rebote nacen ya cerrados o en revisión, en una
                                 // sola transacción, así que un corte no puede dejarlos en la cola.
                                 let task = match route {
-                                    Route::Informativo => self.store.enqueue_closed(
-                                        EMAIL,
-                                        &input,
-                                        &triaged_result(
+                                    Route::Informativo => {
+                                        let result = triaged_result(
                                             message, origin, &decision, scope, &found, false,
-                                        ),
-                                        "correo informativo",
-                                    )?,
-                                    Route::Rebote => self.store.enqueue_review(
-                                        EMAIL,
-                                        &input,
-                                        &triaged_result(
+                                        );
+                                        let doc = search::email_doc(&input_value, &result);
+                                        self.enqueue_born_indexing(
+                                            &input,
+                                            &result,
+                                            "correo informativo",
+                                            false,
+                                            doc.as_ref(),
+                                        )?
+                                    }
+                                    Route::Rebote => {
+                                        let result = triaged_result(
                                             message, origin, &decision, scope, &found, true,
-                                        ),
-                                        "posible fallo de entrega",
-                                    )?,
+                                        );
+                                        let doc = search::email_doc(&input_value, &result);
+                                        self.enqueue_born_indexing(
+                                            &input,
+                                            &result,
+                                            "posible fallo de entrega",
+                                            true,
+                                            doc.as_ref(),
+                                        )?
+                                    }
                                     // Solo un correo que va a la IA puede abrir una ejecución
                                     // de plantilla (D149): el informativo y el rebote no tienen
                                     // respuesta que retener y sus adjuntos siguen el flujo normal.
@@ -1925,8 +1948,11 @@ impl App {
                 return Ok(self.store.fail(task.id, &error)?);
             }
         }
+        // La fila del índice (D179) se calcula aquí, donde el texto extraído está disponible;
+        // si no se puede calcular, el resultado se guarda igual y la recoge la pasada de fondo.
+        let doc = search::doc_on_finish(&task, &result, completed.extraction.as_ref());
         if initial {
-            return self.finish_initial_read(&task, result, destination);
+            return self.finish_initial_read(&task, result, destination, doc.as_ref());
         }
         let kind = action_kind(&task);
         // Un importe dudoso o una factura separada de un documento con varias nunca se
@@ -1969,7 +1995,7 @@ impl App {
                     rule_id,
                     rule_version,
                 };
-                self.execute(task, result, authorization)
+                self.execute(task, result, authorization, doc.as_ref())
             }
             RuleDecision::Review(reason) => {
                 result["review_reason"] = json!(reason);
@@ -1977,7 +2003,7 @@ impl App {
                     // La IA no oculta correos: queda en revisión con el aviso (D158).
                     result["review_reason"] = json!(NO_REPLY_REASON);
                 }
-                Ok(self.store.await_review(task.id, &result)?)
+                self.review_indexing(task.id, &result, doc.as_ref())
             }
         }
     }
@@ -2200,6 +2226,7 @@ impl App {
         task: &Task,
         mut result: Value,
         destination: Option<String>,
+        doc: Option<&SearchDoc>,
     ) -> AppResult<Task> {
         if let Some(fields) = result.as_object_mut() {
             fields.remove("action");
@@ -2214,7 +2241,7 @@ impl App {
                 result["evidence_error"] = json!(format!("no se guardó la observación: {error}"));
             }
         }
-        Ok(self.store.complete(task.id, &result)?)
+        self.complete_indexing(task.id, &result, doc)
     }
 
     /// Cierra un documento de la primera lectura que no parece una factura: no se envió a ningún
@@ -2373,6 +2400,7 @@ impl App {
         task: Task,
         mut result: Value,
         authorization: Authorization,
+        doc: Option<&SearchDoc>,
     ) -> AppResult<Task> {
         let version = result["version"].as_i64().unwrap_or(1);
         // Quien autoriza lo que se ejecuta ahora es quien consta en el resultado. Si una
@@ -2399,7 +2427,7 @@ impl App {
                 if done_by.starts_with("regla ") && result["rule_attempt"]["type"] == "rule" {
                     result["authorization"] = result["rule_attempt"].clone();
                 }
-                return self.complete_with(task.id, result, version, receipt);
+                return self.complete_with(task.id, result, version, receipt, doc);
             }
             Previous::Unknown { version, error }
                 if error.code == nestadmin_simulators::codes::NOT_FOUND =>
@@ -2410,7 +2438,7 @@ impl App {
                     "error": error.code,
                     "needs_confirmation": true,
                 });
-                return self.back_to_review(&task, &result);
+                return self.back_to_review(&task, &result, doc);
             }
             Previous::Unknown { error, .. } => {
                 return Ok(self.store.fail(
@@ -2464,7 +2492,7 @@ impl App {
                     }
                 }
                 result["receipt"] = done.receipt().clone();
-                Ok(self.store.complete(task.id, &result)?)
+                self.complete_indexing(task.id, &result, doc)
             }
             Err(error) => {
                 let code = match &error {
@@ -2546,7 +2574,7 @@ impl App {
         // Si la tarea estaba en revisión por el Rodaje de una regla aprendida, aprobarla sin editar
         // y que se envíe baja el contador de esa regla (D174), en la misma transacción que la señal.
         let rodaje = rodaje_rule(&result);
-        let done = self.execute(task, result, Authorization::Approval)?;
+        let done = self.execute(task, result, Authorization::Approval, None)?;
         // La aprobación solo vale como señal si la acción de esta versión quedó confirmada o
         // reconciliada; si falló o volvió a revisión, la señal queda anulada (D129).
         let confirmed = done.state == TaskState::Completed
@@ -2619,7 +2647,7 @@ impl App {
         }
         if let Some(done) = actions.iter().rev().find(|a| a.status == "confirmed") {
             let receipt = done.receipt.clone().unwrap_or(Value::Null);
-            return self.complete_with(task.id, result, done.version, receipt);
+            return self.complete_with(task.id, result, done.version, receipt, None);
         }
         let mut unsent = Vec::new();
         for action in actions.iter().filter(|a| a.is_unsettled()) {
@@ -2630,7 +2658,7 @@ impl App {
             match found {
                 Ok(Some(receipt)) => {
                     self.store.reconcile_action(task.id, action, &receipt)?;
-                    return self.complete_with(task.id, result, action.version, receipt);
+                    return self.complete_with(task.id, result, action.version, receipt, None);
                 }
                 Ok(None) => unsent.push(action),
                 Err(e) if e.code == nestadmin_simulators::codes::NOT_FOUND => unsent.push(action),

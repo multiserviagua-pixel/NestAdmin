@@ -38,10 +38,12 @@ use nestadmin_app::refine::{
     ConsentView, RefineExpectation, RefineMode, RefinePreview, RefineTrigger, RefinementView,
 };
 use nestadmin_app::rules::RuleFinding;
+use nestadmin_app::search::{extract_for_index, QuestionAnswer, INDEX_BATCH};
 use nestadmin_app::suggest::{RuleSeed, SeenInvoice, Suggestions, ThresholdSettings};
 use nestadmin_app::{AiWait, App, AppPaths, LocalFallback, ProviderInfo};
 use nestadmin_core::{
-    AuditEntry, BusinessProfile, Rule, RuleStats, SenderPreference, Task, TaskTemplate,
+    AuditEntry, BusinessProfile, Rule, RuleStats, SearchFilters, SearchPage, SenderPreference,
+    Task, TaskTemplate,
 };
 use nestadmin_extract::{Extractor, Tesseract};
 use nestadmin_mail::PendingAuthorization;
@@ -130,6 +132,41 @@ fn text<E: ToString>(error: E) -> String {
 #[tauri::command]
 fn tasks(shared: State<'_, SharedState>) -> CmdResult<Vec<Task>> {
     shared.app()?.tasks().map_err(text)
+}
+
+/// Búsqueda local (D180): sin IA ni red. `query` se trocea por espacios y se exigen todos los
+/// términos; vacía, lista por fecha con los filtros.
+#[tauri::command]
+fn search(
+    shared: State<'_, SharedState>,
+    query: String,
+    filters: SearchFilters,
+    offset: usize,
+) -> CmdResult<SearchPage> {
+    shared.app()?.search(&query, filters, offset).map_err(text)
+}
+
+/// Respuesta por palabras del chat cuando no hay IA utilizable (D181): busca en el equipo con
+/// las palabras útiles de la pregunta; no hay ninguna petición a la IA ni a la red.
+#[tauri::command]
+fn search_question(shared: State<'_, SharedState>, text: String) -> CmdResult<QuestionAnswer> {
+    shared
+        .app()?
+        .search_question(&text)
+        .map_err(|e| e.to_string())
+}
+
+/// Devuelve a pendientes las filas del índice que fallaron para que la pasada de fondo las
+/// reintente (D179). Responde cuántas eran.
+#[tauri::command]
+fn reindex_failed<R: Runtime>(
+    shared: State<'_, SharedState>,
+    handle: AppHandle<R>,
+) -> CmdResult<usize> {
+    let count = shared.app()?.reindex_failed().map_err(text)?;
+    shared.wake();
+    changed(&handle);
+    Ok(count)
 }
 
 /// Recibe el archivo como cuerpo binario de la llamada y su nombre, codificado con
@@ -2245,6 +2282,9 @@ fn worker<R: Runtime>(shared: SharedState, handle: AppHandle<R>, wake: Receiver<
                 {
                     continue;
                 }
+                if index_pass(&shared, &handle) {
+                    continue;
+                }
                 auto_refine(&shared, &handle);
                 probe_provider_wait(&shared, &handle, &mut probe, &probing);
                 let _ = wake.recv_timeout(Duration::from_secs(5));
@@ -2255,6 +2295,55 @@ fn worker<R: Runtime>(shared: SharedState, handle: AppHandle<R>, wake: Receiver<
             }
         }
     }
+}
+
+/// Una tanda del indexado de lo anterior (D179), solo con la cola ociosa: sin IA, sin red y sin
+/// cambiar el estado de ninguna tarea. El cerrojo se toma para elegir la tanda, se suelta para
+/// extraer el texto (PDF u OCR, que puede tardar) y se vuelve a tomar para guardarlo. Devuelve
+/// `true` si quedan tareas por indexar, para que el hilo vuelva antes a mirar la cola; sin nada
+/// pendiente no hace nada y no gira en vacío.
+fn index_pass<R: Runtime>(shared: &SharedState, handle: &AppHandle<R>) -> bool {
+    static BATCHES: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    let (pending, extractor) = match shared.app() {
+        Ok(mut app) => {
+            if !app.index_backlog().unwrap_or(false) {
+                return false;
+            }
+            match app.index_pending(INDEX_BATCH) {
+                Ok(pending) => (pending, app.index_extractor()),
+                Err(error) => {
+                    eprintln!("no se pudo indexar: {error}");
+                    return false;
+                }
+            }
+        }
+        Err(_) => return false,
+    };
+    let extracted: Vec<_> = pending
+        .into_iter()
+        .map(|p| (p.task_id, extract_for_index(&extractor, &p.path)))
+        .collect();
+    let more = match shared.app() {
+        Ok(mut app) => {
+            let mut failed = false;
+            for (task_id, outcome) in extracted {
+                if let Err(error) = app.store_index(task_id, outcome) {
+                    eprintln!("no se pudo guardar el índice: {error}");
+                    failed = true;
+                }
+            }
+            // Tras un fallo de guardado se espera al siguiente turno en vez de reintentar en
+            // caliente.
+            !failed && app.index_backlog().unwrap_or(false)
+        }
+        Err(_) => return false,
+    };
+    // La ventana se avisa de vez en cuando y al terminar, no en cada tanda.
+    let batches = BATCHES.fetch_add(1, Ordering::Relaxed) + 1;
+    if !more || batches.is_multiple_of(5) {
+        changed(handle);
+    }
+    more
 }
 
 /// Sondeo sintético de la espera de D146 (404, 402): con la cola ociosa, cada
@@ -2573,6 +2662,9 @@ fn configure<R: Runtime>(builder: Builder<R>, prepare_only: bool) -> Builder<R> 
         .on_window_event(move |window, event| on_window_event(window, event, prepare_only))
         .invoke_handler(tauri::generate_handler![
             tasks,
+            search,
+            search_question,
+            reindex_failed,
             import_file,
             import_dialog,
             open_original,

@@ -279,8 +279,12 @@ fn index_in(tx: &Transaction<'_>, doc: &SearchDoc) -> Result<()> {
     Ok(())
 }
 
+/// Las tareas de nueva redacción (`redraft_of`) no se indexan aparte (D179): no cuentan como
+/// pendientes.
 const UNINDEXED_SQL: &str = "kind IN ('invoice', 'email')
     AND state NOT IN ('queued', 'running')
+    AND NOT (kind = 'email' AND CASE WHEN json_valid(tasks.input_ref)
+        THEN json_extract(tasks.input_ref, '$.redraft_of') END IS NOT NULL)
     AND NOT EXISTS (SELECT 1 FROM search_index s WHERE s.task_id = tasks.id)";
 
 fn count(conn: &Connection, sql: &str, p: impl rusqlite::Params) -> Result<usize> {
@@ -393,6 +397,15 @@ impl Store {
         )?;
         tx.commit()?;
         Ok(task)
+    }
+
+    /// Borra las filas `failed` para que la pasada de indexado las reintente (D179). Devuelve
+    /// cuántas. Los triggers mantienen el FTS.
+    pub fn delete_failed_index(&mut self) -> Result<usize> {
+        let tx = self.conn.transaction()?;
+        let n = tx.execute("DELETE FROM search_index WHERE status = 'failed'", [])?;
+        tx.commit()?;
+        Ok(n)
     }
 
     /// Tareas de factura o correo sin fila en el índice que ya no están en cola ni en curso,

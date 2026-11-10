@@ -452,8 +452,14 @@ fn la_interfaz_solo_llama_a_comandos_registrados() {
         "la interfaz llama a comandos no registrados: {:?}",
         called.difference(&registered).collect::<Vec<_>>()
     );
-    let unused: std::collections::BTreeSet<&str> =
-        registered.difference(&called).copied().collect();
+    // Comandos de la etapa E1 del chat (D179–D181) que la ventana empezará a llamar en la parte
+    // de interfaz (T35d); hasta entonces se permiten sin llamada. Quitar de aquí al conectarlos.
+    const SIN_LLAMADA_TODAVIA: [&str; 3] = ["search", "search_question", "reindex_failed"];
+    let unused: std::collections::BTreeSet<&str> = registered
+        .difference(&called)
+        .copied()
+        .filter(|name| !SIN_LLAMADA_TODAVIA.contains(name))
+        .collect();
     assert!(
         unused.is_empty(),
         "comandos registrados que la interfaz no llama: {unused:?}"

@@ -1514,7 +1514,8 @@ impl App {
             "origin": origin,
             "message_id": message.id,
         });
-        self.store.complete(task.id, &result)?;
+        let doc = crate::search::email_doc(&input, &result);
+        self.complete_indexing(task.id, &result, doc.as_ref())?;
         Ok(task.id)
     }
 
@@ -1538,7 +1539,8 @@ impl App {
                 "origin": input["origin"],
                 "message_id": input["message_id"],
             });
-            self.store.complete(current.id, &result)?;
+            let doc = crate::search::email_doc(&input, &result);
+            self.complete_indexing(current.id, &result, doc.as_ref())?;
         }
         Ok(())
     }
