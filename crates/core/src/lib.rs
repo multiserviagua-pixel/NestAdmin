@@ -5,6 +5,7 @@ pub mod actions;
 pub mod business_profile;
 pub mod continuous;
 pub mod error;
+pub mod installation;
 pub mod mail_signals;
 pub mod pipeline;
 pub mod preferences;

@@ -2320,14 +2320,18 @@ name = "nestadmin-app"
 version = "0.1.0"
 dependencies = [
  "base64 0.23.1",
+ "chrono",
  "nestadmin-ai",
  "nestadmin-core",
  "nestadmin-documents",
  "nestadmin-extract",
  "nestadmin-mail",
+ "nestadmin-sales",
  "nestadmin-simulators",
+ "nestadmin-verifactu",
  "pdfium-render",
  "rusqlite",
+ "rust_decimal",
  "serde",
  "serde_json",
  "sha2",

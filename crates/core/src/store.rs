@@ -84,6 +84,8 @@ CREATE TABLE rules (
     // Registros Verifactu encadenados, escritos con la emisión y la anulación (fase 11);
     // ver sales/verifactu.rs.
     include_str!("migrations/011_verifactu.sql"),
+    // Número de instalación, de una sola fila y solo inserción (fase 11); ver installation.rs.
+    include_str!("migrations/012_installation.sql"),
 ];
 
 /// Base de datos local. Cada operación pública se confirma en una transacción,

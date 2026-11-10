@@ -21,6 +21,7 @@ pub mod preferences;
 pub mod profile;
 pub mod refine;
 pub mod rules;
+pub mod sales;
 pub mod search;
 pub mod suggest;
 
@@ -38,6 +39,7 @@ use nestadmin_ai::{
     AiError, GenerateRequest, GenerateResult, ModelUnavailableCause, Provider, ProviderKind,
 };
 use nestadmin_core::mail_signals::{route_of_message, Route, Signal, TriageDecision};
+use nestadmin_core::sales::SalesStoreError;
 use nestadmin_core::{
     ActionRecord, ActionRequest, AuditEntry, Authorization, Connector, ConnectorError, CoreError,
     Rule, SearchDoc, Store, Task, TaskError, TaskState,
@@ -78,6 +80,25 @@ pub enum AppError {
     Invalid(String),
     #[error("el contenido cambió (versión {current}, se aprobó la {approved}); revíselo de nuevo")]
     StaleVersion { approved: i64, current: i64 },
+    /// Error de la facturación de venta; su código es el de `SalesStoreError::code`.
+    #[error("{0}")]
+    Sales(#[from] SalesStoreError),
+}
+
+impl AppError {
+    /// Código estable del error (contratos.md). Para la venta es el de core, incluidos los de
+    /// Verifactu (`verifactu_not_configured`, `verifactu_clock_behind`, ...).
+    pub fn code(&self) -> &str {
+        match self {
+            Self::Sales(e) => e.code(),
+            Self::Connector(e) => &e.code,
+            Self::Core(CoreError::Storage(_)) => "storage",
+            Self::Core(_) => "core",
+            Self::Io(_) => "io",
+            Self::Invalid(_) => "invalid_input",
+            Self::StaleVersion { .. } => "stale_version",
+        }
+    }
 }
 
 /// La interfaz recibe el error como texto; nunca contiene credenciales.
@@ -330,6 +351,10 @@ pub struct App {
     /// Estado en memoria del aprendizaje continuo (D178): pasadas en curso, puerta de tiempo,
     /// orden de comprobación y recuentos. No se guarda nada de esto.
     continuous: learn_continuous::ContinuousRuntime,
+    /// Reloj de la facturación de venta (sustituible en las pruebas); ver `sales.rs`.
+    sales_clock: Arc<dyn sales::SalesClock>,
+    /// Productor del software para los registros Verifactu; lo fija quien arranca la app.
+    verifactu_producer: Option<nestadmin_verifactu::Persona>,
 }
 
 /// Si se puede instalar una actualización sin cortar trabajo (actualizaciones.md, paso 5).
@@ -940,6 +965,8 @@ impl App {
             learning: learn_state::LearningRuntime::default(),
             continuous: learn_continuous::ContinuousRuntime::default(),
             read_gate: Arc::new(Mutex::new(HashSet::new())),
+            sales_clock: Arc::new(sales::LocalClock),
+            verifactu_producer: None,
         };
         app.store.recover()?;
         app.store.reconcile_actions(SEND_DRAFT, &app.mail)?;
