@@ -57,16 +57,37 @@ export function termsText(terms: readonly string[]): string {
   return terms.map((t) => `«${t}»`).join(", ");
 }
 
+/** Tipo por el que se filtró la búsqueda: `null` si no se filtró. */
+export type AnswerKind = "invoice" | "email" | null | undefined;
+
+function kindNoun(kind: AnswerKind, n: number): string {
+  if (kind === "invoice") return plural(n, "factura", "facturas");
+  if (kind === "email") return plural(n, "correo", "correos");
+  return plural(n, "documento", "documentos");
+}
+
+function noneOf(kind: AnswerKind): string {
+  return kind === "invoice" ? "ninguna factura" : kind === "email" ? "ningún correo" : "nada";
+}
+
 /** Respuesta según lo que coincidió. `total` es el número de coincidencias totales. */
-export function answerText(matched: string, total: number, terms: readonly string[]): string {
+export function answerText(matched: string, total: number, terms: readonly string[], kind?: AnswerKind): string {
   if (matched === "none" || total <= 0) {
-    if (terms.length === 0)
+    if (terms.length === 0) {
+      if (kind) return `No encontré ${noneOf(kind)} en este equipo.`;
       return "No encontré palabras útiles en su pregunta para buscar. Indíqueme el proveedor, el número de factura o el mes.";
-    return `No encontré nada con ${termsText(terms)}. Pruebe con otras palabras, por ejemplo el proveedor, el número o el mes.`;
+    }
+    return `No encontré ${noneOf(kind)} con ${termsText(terms)}. Pruebe con otras palabras, por ejemplo el proveedor, el número o el mes.`;
   }
-  const count = `${total} ${plural(total, "documento", "documentos")}`;
-  if (matched === "any") return `No encontré nada con todas las palabras; esto coincide con alguna. Hay ${count}.`;
-  return total === 1 ? "Encontré 1 documento con todas las palabras." : `Encontré ${count} con todas las palabras.`;
+  const count = `${total} ${kindNoun(kind, total)}`;
+  // Sin palabras, solo el tipo: se listan los más recientes.
+  if (terms.length === 0)
+    return total === 1
+      ? `${kind === "invoice" ? "Esta es la factura" : `Este es el ${kindNoun(kind, 1)}`} más reciente.`
+      : `Estas son las ${count} más recientes.`;
+  if (matched === "any")
+    return `No encontré ${noneOf(kind)} con todas las palabras; esto coincide con alguna. Hay ${count}.`;
+  return `Encontré ${count} con todas las palabras.`;
 }
 
 /** Líneas de recuentos del índice; vacío si no hay nada que avisar. */

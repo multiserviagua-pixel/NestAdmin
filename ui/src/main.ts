@@ -6583,7 +6583,7 @@ async function sendChat() {
   renderChat({ focus: "chat:input", end: true });
   try {
     const answer = await api.searchQuestion(text);
-    chat.turns.push({ role: "assistant", text: answerText(answer.matched, answer.page.total, answer.terms), answer });
+    chat.turns.push({ role: "assistant", text: answerText(answer.matched, answer.page.total, answer.terms, answer.kind), answer });
   } catch (error) {
     chat.turns.push({ role: "info", text: searchErrorText(error), error: true });
   } finally {

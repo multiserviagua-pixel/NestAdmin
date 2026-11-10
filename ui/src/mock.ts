@@ -2234,15 +2234,30 @@ const mockHits: SearchHit[] = [
   { task_id: 8, kind: "email", title: "Cita de revisión", party: "Clínica Piloto <citas@clinica.test>", number: "", doc_date: "2026-04-02", total_minor: null, currency: "", task_state: "completed", index_status: "indexed", snippet: "Su cita de revisión es el jueves a las 10:00." },
 ];
 
-const QUESTION_STOP = new Set(["donde", "esta", "estan", "que", "cual", "cuales", "del", "los", "las", "una", "uno", "unos", "unas", "con", "sobre", "para", "por", "mi", "mis", "el", "la", "de", "en", "es", "un", "y", "o", "a", "me", "se", "he", "hay", "tengo", "factura", "facturas", "correo", "correos"]);
+const QUESTION_STOP = new Set(["donde", "esta", "estan", "que", "cual", "cuales", "del", "los", "las", "una", "uno", "unos", "unas", "con", "sobre", "para", "por", "mi", "mis", "el", "la", "de", "en", "es", "un", "y", "o", "a", "me", "se", "he", "hay", "tengo"]);
+const QUESTION_INVOICE = new Set(["factura", "facturas", "recibo", "recibos"]);
+const QUESTION_EMAIL = new Set(["correo", "correos", "email", "emails", "mail", "mails", "mensaje", "mensajes"]);
+const QUESTION_GENERIC = new Set(["documento", "documentos", "archivo", "archivos", "fichero", "ficheros"]);
 
 function plainText(text: string): string {
   return text.normalize("NFD").replace(/[̀-ͯ]/g, "").toLowerCase();
 }
 
+function questionParts(text: string): { terms: string[]; kinds: ("invoice" | "email")[] } {
+  const kinds: ("invoice" | "email")[] = [];
+  const terms: string[] = [];
+  for (const w of plainText(text).split(/[^a-z0-9]+/)) {
+    if (w.length < 2) continue;
+    const kind = QUESTION_INVOICE.has(w) ? "invoice" : QUESTION_EMAIL.has(w) ? "email" : null;
+    if (kind) {
+      if (!kinds.includes(kind)) kinds.push(kind);
+    } else if (!QUESTION_STOP.has(w) && !QUESTION_GENERIC.has(w) && !terms.includes(w)) terms.push(w);
+  }
+  return { terms, kinds };
+}
+
 function questionTerms(text: string): string[] {
-  const words = plainText(text).split(/[^a-z0-9]+/).filter((w) => w.length >= 2 && !QUESTION_STOP.has(w));
-  return [...new Set(words)];
+  return questionParts(text).terms;
 }
 
 function hitHaystack(h: SearchHit): string {
@@ -2374,16 +2389,27 @@ const handlers: Record<string, (a: any, options?: any) => unknown> = {
   tasks: () => structuredClone(tasks),
   // Chat sin IA (E1, D181): búsqueda por palabras sobre unos documentos inventados, sin tildes.
   search_question: ({ text }: { text: string }): QuestionAnswer => {
-    const terms = questionTerms(String(text ?? ""));
-    if (terms.length === 0) return { page: emptySearchPage(), terms, matched: "none" };
-    const all = mockHits.filter((h) => terms.every((t) => hitHaystack(h).includes(t)));
-    if (all.length) return { page: mockSearchPage(all), terms, matched: "all" };
-    const any = mockHits
-      .map((h) => ({ h, n: terms.filter((t) => hitHaystack(h).includes(t)).length }))
-      .filter((x) => x.n > 0)
-      .sort((a, b) => b.n - a.n)
-      .map((x) => x.h);
-    return any.length ? { page: mockSearchPage(any), terms, matched: "any" } : { page: emptySearchPage(), terms, matched: "none" };
+    const { terms, kinds } = questionParts(String(text ?? ""));
+    const kind = kinds.length === 1 ? kinds[0]! : null;
+    if (terms.length === 0) {
+      if (kinds.length === 0) return { page: emptySearchPage(), terms, matched: "none", kind: null };
+      const listed = mockHits.filter((h) => !kind || h.kind === kind);
+      return { page: mockSearchPage(listed), terms, matched: "all", kind };
+    }
+    for (const attempt of kind ? [kind, null] : [null]) {
+      const pool = mockHits.filter((h) => !attempt || h.kind === attempt);
+      const all = pool.filter((h) => terms.every((t) => hitHaystack(h).includes(t)));
+      if (all.length) return { page: mockSearchPage(all), terms, matched: "all", kind: attempt };
+      if (terms.length > 1) {
+        const any = pool
+          .map((h) => ({ h, n: terms.filter((t) => hitHaystack(h).includes(t)).length }))
+          .filter((x) => x.n > 0)
+          .sort((a, b) => b.n - a.n)
+          .map((x) => x.h);
+        if (any.length) return { page: mockSearchPage(any), terms, matched: "any", kind: attempt };
+      }
+    }
+    return { page: emptySearchPage(), terms, matched: "none", kind };
   },
   search: ({ query, filters }: { query: string; filters: SearchFilters; offset: number }): SearchPage => {
     const terms = questionTerms(String(query ?? ""));

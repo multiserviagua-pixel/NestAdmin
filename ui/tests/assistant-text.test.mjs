@@ -43,6 +43,29 @@ test("sin palabras útiles se pide el proveedor, el número o el mes", () => {
   assert.ok(text.includes("proveedor") && text.includes("número") && text.includes("mes"));
 });
 
+test("el tipo se nombra de forma natural, con singular y plural", () => {
+  assert.equal(T.answerText("all", 1, ["luz"], "invoice"), "Encontré 1 factura con todas las palabras.");
+  assert.equal(T.answerText("all", 2, ["luz"], "invoice"), "Encontré 2 facturas con todas las palabras.");
+  assert.equal(T.answerText("all", 3, ["luz"], "email"), "Encontré 3 correos con todas las palabras.");
+  assert.equal(T.answerText("all", 2, ["luz"], null), "Encontré 2 documentos con todas las palabras.");
+  assert.ok(T.answerText("any", 1, ["a", "b"], "email").startsWith("No encontré ningún correo con todas las palabras;"));
+  assert.ok(T.answerText("any", 1, ["a", "b"], "email").endsWith("Hay 1 correo."));
+  assert.ok(T.answerText("any", 2, ["a", "b"], "invoice").startsWith("No encontré ninguna factura con todas las palabras;"));
+});
+
+test("sin resultados con tipo dice qué tipo y qué palabras", () => {
+  assert.ok(T.answerText("none", 0, ["luz"], "invoice").startsWith("No encontré ninguna factura con «luz»."));
+  assert.ok(T.answerText("none", 0, ["luz"], "email").startsWith("No encontré ningún correo con «luz»."));
+  assert.equal(T.answerText("none", 0, [], "invoice"), "No encontré ninguna factura en este equipo.");
+});
+
+test("solo el tipo, sin palabras: dice que son las más recientes", () => {
+  assert.equal(T.answerText("all", 4, [], "invoice"), "Estas son las 4 facturas más recientes.");
+  assert.equal(T.answerText("all", 1, [], "invoice"), "Esta es la factura más reciente.");
+  assert.equal(T.answerText("all", 2, [], "email"), "Estas son las 2 correos más recientes.");
+  assert.equal(T.answerText("all", 1, [], "email"), "Este es el correo más reciente.");
+});
+
 test("el aviso fijo dice que no es la IA y no promete fecha ni activación", () => {
   assert.ok(T.SEARCH_NOTICE.includes("búsqueda por palabras hecha en este equipo"));
   assert.ok(T.SEARCH_NOTICE.includes("no una respuesta de la IA"));

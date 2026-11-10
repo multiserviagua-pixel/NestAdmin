@@ -1140,4 +1140,6 @@ export interface QuestionAnswer {
   page: SearchPage;
   terms: string[];
   matched: "all" | "any" | "none";
+  /** Tipo por el que se filtró la búsqueda; `null` si no se filtró. */
+  kind: "invoice" | "email" | null;
 }

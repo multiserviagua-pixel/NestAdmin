@@ -125,6 +125,21 @@ const STOP_WORDS: &[&str] = &[
     "localizar",
 ];
 
+/// Palabras de tipo de `question_parts` (D181): listas cerradas, sin tildes y en minúsculas.
+const INVOICE_WORDS: &[&str] = &["factura", "facturas", "recibo", "recibos"];
+const EMAIL_WORDS: &[&str] = &[
+    "correo", "correos", "email", "emails", "mail", "mails", "mensaje", "mensajes",
+];
+/// Genéricas que solo se quitan, sin filtrar.
+const GENERIC_WORDS: &[&str] = &[
+    "documento",
+    "documentos",
+    "archivo",
+    "archivos",
+    "fichero",
+    "ficheros",
+];
+
 /// Lo que devuelve la extracción local de una factura para el índice.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum IndexOutcome {
@@ -162,6 +177,8 @@ pub struct QuestionAnswer {
     /// Las palabras con las que se buscó.
     pub terms: Vec<String>,
     pub matched: Matched,
+    /// Tipo por el que se filtró en la búsqueda que dio este resultado (`null` si no se filtró).
+    pub kind: Option<SearchKind>,
 }
 
 /// Extrae el texto de un original, en local y sin ninguna llamada externa. Se llama fuera del
@@ -332,8 +349,16 @@ pub(crate) fn doc_on_finish(
 /// Palabras útiles de una pregunta en lenguaje corriente (D181): minúsculas, sin signos, sin
 /// palabras vacías ni interrogativas, con los números y sin repetidas.
 pub fn question_terms(text: &str) -> Vec<String> {
+    question_parts(text).0
+}
+
+/// Como `question_terms`, pero separa las palabras de tipo (D181): «factura», «correo» y sus
+/// sinónimos no son términos; dicen qué tipo se busca. Las genéricas («documento», «archivo»)
+/// solo se quitan. Devuelve los términos y los tipos nombrados, sin repetir.
+pub fn question_parts(text: &str) -> (Vec<String>, Vec<SearchKind>) {
     const MARKS: &[char] = &['¿', '?', '¡', '!', ';', ':', '(', ')', '"', '«', '»'];
     let mut terms: Vec<String> = Vec::new();
+    let mut kinds: Vec<SearchKind> = Vec::new();
     for raw in text.to_lowercase().split_whitespace() {
         let word: String = raw.chars().filter(|c| !MARKS.contains(c)).collect();
         // El punto y la coma solo sobran en los extremos: dentro de un número («1.234,56») no.
@@ -342,12 +367,28 @@ pub fn question_terms(text: &str) -> Vec<String> {
             continue;
         }
         let plain = strip_accents(&word);
-        if STOP_WORDS.contains(&plain.as_str()) || terms.contains(&word) {
+        let named = if INVOICE_WORDS.contains(&plain.as_str()) {
+            Some(SearchKind::Invoice)
+        } else if EMAIL_WORDS.contains(&plain.as_str()) {
+            Some(SearchKind::Email)
+        } else {
+            None
+        };
+        if let Some(kind) = named {
+            if !kinds.contains(&kind) {
+                kinds.push(kind);
+            }
+            continue;
+        }
+        if STOP_WORDS.contains(&plain.as_str())
+            || GENERIC_WORDS.contains(&plain.as_str())
+            || terms.contains(&word)
+        {
             continue;
         }
         terms.push(word);
     }
-    terms
+    (terms, kinds)
 }
 
 fn strip_accents(word: &str) -> String {
@@ -455,52 +496,79 @@ impl App {
     /// y, si así no hay resultados y hay más de una, admite cualquiera. Sin palabras útiles
     /// no busca nada y devuelve solo los recuentos.
     pub fn search_question(&self, text: &str) -> AppResult<QuestionAnswer> {
-        let terms = question_terms(text);
-        let run = |any: bool| {
+        let (terms, kinds) = question_parts(text);
+        // Un único tipo nombrado filtra; los dos o ninguno, no.
+        let kind = match kinds.as_slice() {
+            [one] => Some(*one),
+            _ => None,
+        };
+        let run = |any: bool, kind: Option<SearchKind>| {
             self.store.search(&SearchQuery {
                 terms: terms.clone(),
                 any,
-                filters: SearchFilters::default(),
+                filters: SearchFilters {
+                    kind,
+                    ..SearchFilters::default()
+                },
                 offset: 0,
             })
         };
         if terms.is_empty() {
-            let mut page = self.store.search(&SearchQuery::default())?;
-            page.results.clear();
-            page.total = 0;
-            return Ok(QuestionAnswer {
-                page,
-                terms,
-                matched: Matched::None,
-            });
-        }
-        let page = run(false)?;
-        if page.total > 0 {
+            if kinds.is_empty() {
+                let mut page = self.store.search(&SearchQuery::default())?;
+                page.results.clear();
+                page.total = 0;
+                return Ok(QuestionAnswer {
+                    page,
+                    terms,
+                    matched: Matched::None,
+                    kind: None,
+                });
+            }
+            // Solo tipo («mis facturas»): lista ese tipo por fecha.
+            let page = run(false, kind)?;
             return Ok(QuestionAnswer {
                 page,
                 terms,
                 matched: Matched::All,
+                kind,
             });
         }
-        if terms.len() > 1 {
-            let page = run(true)?;
+        // Con el filtro de tipo (si lo hay) y, si así no sale nada, sin él.
+        let mut last = None;
+        let attempts: &[Option<SearchKind>] = if kind.is_some() {
+            &[kind, None]
+        } else {
+            &[None]
+        };
+        for &attempt in attempts {
+            let page = run(false, attempt)?;
             if page.total > 0 {
                 return Ok(QuestionAnswer {
                     page,
                     terms,
-                    matched: Matched::Any,
+                    matched: Matched::All,
+                    kind: attempt,
                 });
             }
-            return Ok(QuestionAnswer {
-                page,
-                terms,
-                matched: Matched::None,
-            });
+            if terms.len() > 1 {
+                let page = run(true, attempt)?;
+                if page.total > 0 {
+                    return Ok(QuestionAnswer {
+                        page,
+                        terms,
+                        matched: Matched::Any,
+                        kind: attempt,
+                    });
+                }
+            }
+            last = Some(page);
         }
         Ok(QuestionAnswer {
-            page,
+            page: last.expect("al menos un intento"),
             terms,
             matched: Matched::None,
+            kind,
         })
     }
 
@@ -694,16 +762,30 @@ mod tests {
     fn question_terms_drop_marks_and_empty_words() {
         assert_eq!(
             question_terms("¿Dónde está la factura de la luz de octubre?"),
-            ["factura", "luz", "octubre"]
+            ["luz", "octubre"]
         );
         assert_eq!(
             question_terms("Muéstrame las facturas de Proveedor Alfa, 2026."),
-            ["facturas", "proveedor", "alfa", "2026"]
+            ["proveedor", "alfa", "2026"]
         );
         assert_eq!(
             question_terms("dame el importe 1.234,56 y 1.234,56"),
             ["importe", "1.234,56"]
         );
+    }
+
+    #[test]
+    fn question_parts_split_kind_words_from_terms() {
+        let (terms, kinds) = question_parts("¿Dónde está la factura de la luz?");
+        assert_eq!(
+            (terms, kinds),
+            (vec!["luz".to_owned()], vec![SearchKind::Invoice])
+        );
+        let (terms, kinds) = question_parts("Correo y recibo del archivo de Ana");
+        assert_eq!(terms, ["ana"]);
+        assert_eq!(kinds, [SearchKind::Email, SearchKind::Invoice]);
+        let (terms, kinds) = question_parts("mis documentos");
+        assert!(terms.is_empty() && kinds.is_empty());
     }
 
     #[test]
