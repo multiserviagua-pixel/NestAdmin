@@ -2231,6 +2231,7 @@ const mockHits: SearchHit[] = [
   { task_id: 5, kind: "email", title: "Aviso de vencimiento", party: "Suministros Ejemplo <avisos@suministros.test>", number: "", doc_date: "2026-03-28", total_minor: null, currency: "", task_state: "completed", index_status: "indexed", snippet: "Recordatorio: la factura F-2026-014 vence a fin de mes." },
   { task_id: 6, kind: "invoice", title: "Factura escaneada sin texto", party: "", number: "", doc_date: null, total_minor: null, currency: "", task_state: "completed", index_status: "no_text", snippet: "" },
   { task_id: 7, kind: "invoice", title: "Factura de la asesoría", party: "Asesoría Prueba", number: "AP-31", doc_date: "2026-01-30", total_minor: 0, currency: "", task_state: "completed", index_status: "failed", snippet: "" },
+  { task_id: 9, kind: "invoice", title: "factura-sin-leer.pdf", party: "", number: "", doc_date: null, total_minor: null, currency: "", task_state: "queued", index_status: "indexed", snippet: "Suministro de material de oficina para la nave, pendiente de leer." },
   { task_id: 8, kind: "email", title: "Cita de revisión", party: "Clínica Piloto <citas@clinica.test>", number: "", doc_date: "2026-04-02", total_minor: null, currency: "", task_state: "completed", index_status: "indexed", snippet: "Su cita de revisión es el jueves a las 10:00." },
 ];
 
@@ -2241,6 +2242,13 @@ const mockHits: SearchHit[] = [
   const used = new Set<number>();
   const plainEmail = (t: Task) => t.kind === "email" && !["informativo", "rebote"].includes(t.result?.triage?.route);
   for (const hit of mockHits) {
+    if (hit.task_state === "queued") {
+      // D179: sin IA utilizable lo importado espera en cola y ya se encuentra en el chat.
+      const waiting = task("invoice", { document: hit.title }, "queued", null);
+      used.add(waiting.id);
+      hit.task_id = waiting.id;
+      continue;
+    }
     const match = tasks.find(
       (t) => !used.has(t.id) && t.kind === hit.kind && t.state === (hit.task_state === "awaiting_review" ? "awaiting_review" : "completed") && (hit.kind === "invoice" || plainEmail(t)),
     );

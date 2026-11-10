@@ -11,6 +11,8 @@ export interface HitLike {
   total_minor: number | null;
   currency: string;
   index_status: string;
+  /** Estado de la tarea; solo hace falta para avisar de las que esperan a la IA. */
+  task_state?: string;
   snippet: string;
 }
 
@@ -136,9 +138,13 @@ export function formatMinor(minor: number | null | undefined, currency: string |
   return `${number} ${SYMBOL[code] ?? code}`;
 }
 
-export function indexNote(status: string): string | null {
+/** Etiqueta de una tarea que espera en cola sin IA utilizable (D179): solo se ha indexado en el equipo. */
+export const QUEUED_NOTE = "En espera de la IA: aún no se ha leído";
+
+export function indexNote(status: string, taskState?: string): string | null {
   if (status === "no_text") return "Sin texto legible";
   if (status === "failed") return "No se pudo leer";
+  if (taskState === "queued") return QUEUED_NOTE;
   return null;
 }
 
@@ -163,7 +169,7 @@ export function cardView(hit: HitLike): CardView {
     kind: kindLabel(hit.kind),
     title: hit.title.trim() || "Sin título",
     meta,
-    note: indexNote(hit.index_status),
+    note: indexNote(hit.index_status, hit.task_state),
     snippet: hit.snippet.trim(),
   };
 }

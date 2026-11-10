@@ -10,7 +10,7 @@ use nestadmin_ai::{
     AiError, GenerateRequest, GenerateResult, Provider, ProviderKind, Task as AiTask, Usage,
 };
 use nestadmin_app::search::{extract_for_index, question_terms, IndexOutcome, Matched};
-use nestadmin_app::{App, AppError, AppPaths};
+use nestadmin_app::{AiWait, App, AppError, AppPaths};
 use nestadmin_core::{CoreError, SearchFilters, SearchKind, SearchStatus, TaskState};
 use nestadmin_extract::{ExtractError, Extractor, Ocr};
 use nestadmin_simulators::Message;
@@ -878,4 +878,200 @@ fn d181_falls_back_to_no_kind_filter_when_the_kind_finds_nothing() {
     // Nada en ninguna parte.
     let n = app.search_question("la factura zzzz").unwrap();
     assert_eq!((n.matched, n.page.total), (Matched::None, 0));
+}
+
+// ---- D179, «Lo que espera a la IA»: lo que está en cola se indexa solo sin IA utilizable ----
+
+/// Una app sin IA utilizable con una factura y el correo del simulador en cola.
+fn waiting_fixture() -> (tempfile::TempDir, Arc<Spy>, App) {
+    let dir = tempfile::tempdir().unwrap();
+    let spy = Spy::new();
+    let mut app = open(&dir, &spy);
+    app.set_ai_wait(Some(AiWait::NeedsKey));
+    app.import_document(
+        "alfa.txt",
+        &invoice("Alfa SL", "F-7", "121.00", "papel reciclado para oficina"),
+    )
+    .unwrap();
+    app.fetch_mail().unwrap();
+    (dir, spy, app)
+}
+
+/// Una pasada completa de indexado como la del hilo de fondo.
+fn run_index_pass(app: &mut App) {
+    let extractor = app.index_extractor();
+    let mut steps = 0;
+    while app.index_backlog().unwrap() {
+        for pending in app.index_pending(2).unwrap() {
+            let outcome = extract_for_index(&extractor, &pending.path);
+            app.store_index(pending.task_id, outcome).unwrap();
+        }
+        steps += 1;
+        assert!(steps < 20, "la pasada no avanza");
+    }
+}
+
+#[test]
+fn d179_without_usable_ai_queued_tasks_are_indexed_and_found_without_touching_them() {
+    let (dir, spy, mut app) = waiting_fixture();
+    let conn = sql(&dir);
+    let queued = count(&conn, "SELECT count(*) FROM tasks WHERE state = 'queued'");
+    assert!(queued >= 2, "{queued}");
+    assert_eq!(count(&conn, "SELECT count(*) FROM search_index"), 0);
+    let order = dump(&conn, "tasks");
+    let transitions = dump(&conn, "task_transitions");
+    let audit = dump(&conn, "audit_log");
+    let mail = app.simulators().0;
+    let lookups = (
+        mail.sent_lookups(),
+        mail.thread_lookups(),
+        mail.thread_of_lookups(),
+        mail.sent_body_lookups(),
+    );
+    assert_eq!(
+        app.search("", SearchFilters::default(), 0)
+            .unwrap()
+            .pending_index as i64,
+        queued
+    );
+
+    run_index_pass(&mut app);
+
+    assert_eq!(count(&conn, "SELECT count(*) FROM search_index"), queued);
+    assert_eq!(
+        count(&conn, "SELECT count(DISTINCT task_id) FROM search_index"),
+        queued
+    );
+    let answer = app
+        .search_question("¿Dónde está la factura de papel reciclado?")
+        .unwrap();
+    assert_eq!(answer.page.total, 1);
+    let hit = &answer.page.results[0];
+    assert_eq!(hit.kind, SearchKind::Invoice);
+    assert_eq!(hit.task_state, TaskState::Queued);
+    assert_eq!(hit.title, "alfa.txt");
+    assert_eq!(hit.index_status, SearchStatus::Indexed);
+    assert!(hit.party.is_empty() && hit.number.is_empty());
+    assert!(hit.doc_date.is_none() && hit.total_minor.is_none());
+    assert_eq!(answer.page.pending_index, 0);
+    let mail_hits = app.search_question("pedido 2231").unwrap();
+    assert_eq!(mail_hits.page.total, 1);
+    assert_eq!(mail_hits.page.results[0].task_state, TaskState::Queued);
+
+    // Ni estado, ni resultado, ni orden de la cola, ni transiciones, ni la IA ni el conector.
+    assert_eq!(
+        count(&conn, "SELECT count(*) FROM tasks WHERE result IS NOT NULL"),
+        0
+    );
+    assert_eq!(dump(&conn, "tasks"), order);
+    assert_eq!(dump(&conn, "task_transitions"), transitions);
+    assert_eq!(dump(&conn, "audit_log"), audit);
+    assert_eq!(spy.calls(), 0);
+    let mail = app.simulators().0;
+    assert_eq!(
+        (
+            mail.sent_lookups(),
+            mail.thread_lookups(),
+            mail.thread_of_lookups(),
+            mail.sent_body_lookups(),
+        ),
+        lookups
+    );
+    // Repetir la pasada no cambia nada.
+    run_index_pass(&mut app);
+    assert_eq!(count(&conn, "SELECT count(*) FROM search_index"), queued);
+}
+
+#[test]
+fn d179_with_usable_ai_queued_tasks_are_not_indexed_nor_counted() {
+    let dir = tempfile::tempdir().unwrap();
+    let spy = Spy::new();
+    let mut app = open(&dir, &spy);
+    app.import_document("alfa.txt", &invoice("Alfa SL", "F-7", "121.00", "papel"))
+        .unwrap();
+    app.fetch_mail().unwrap();
+    let conn = sql(&dir);
+    assert!(count(&conn, "SELECT count(*) FROM tasks WHERE state = 'queued'") >= 2);
+    assert!(!app.index_backlog().unwrap());
+    assert!(app.index_pending(10).unwrap().is_empty());
+    assert_eq!(count(&conn, "SELECT count(*) FROM search_index"), 0);
+    let page = app.search("", SearchFilters::default(), 0).unwrap();
+    assert_eq!(page.pending_index, 0);
+    assert_eq!(app.search_question("papel").unwrap().page.pending_index, 0);
+}
+
+#[test]
+fn d179_a_running_task_is_never_taken() {
+    let (dir, _spy, mut app) = waiting_fixture();
+    let conn = sql(&dir);
+    conn.execute("UPDATE tasks SET state = 'running'", [])
+        .unwrap();
+    assert!(!app.index_backlog().unwrap());
+    assert!(app.index_pending(10).unwrap().is_empty());
+    assert_eq!(count(&conn, "SELECT count(*) FROM search_index"), 0);
+    assert_eq!(
+        app.search("", SearchFilters::default(), 0)
+            .unwrap()
+            .pending_index,
+        0
+    );
+}
+
+#[test]
+fn d179_when_a_waiting_task_finishes_its_row_becomes_the_complete_one() {
+    let (dir, _spy, mut app) = waiting_fixture();
+    let conn = sql(&dir);
+    run_index_pass(&mut app);
+    let rows = count(&conn, "SELECT count(*) FROM search_index");
+    assert_eq!(hits(&app, "reciclado")[0].party, "");
+
+    // Vuelve la IA y las tareas terminan: la fila provisional se sustituye por la completa.
+    app.set_ai_wait(None);
+    drain(&mut app);
+    assert_eq!(count(&conn, "SELECT count(*) FROM search_index"), rows);
+    assert_eq!(
+        count(&conn, "SELECT count(DISTINCT task_id) FROM search_index"),
+        rows
+    );
+    let found = hits(&app, "reciclado");
+    assert_eq!(found.len(), 1);
+    assert_eq!(found[0].party, "Alfa SL");
+    assert_eq!(found[0].number, "F-7");
+    assert_eq!(found[0].doc_date.as_deref(), Some("2026-10-07"));
+    assert_eq!(found[0].total_minor, Some(12_100));
+    assert_eq!(found[0].index_status, SearchStatus::Indexed);
+    assert_ne!(found[0].task_state, TaskState::Queued);
+    // Lo que se buscaba por el campo nuevo también aparece, y no queda nada pendiente.
+    assert_eq!(hits(&app, "F-7").len(), 1);
+    assert_eq!(
+        app.search("", SearchFilters::default(), 0)
+            .unwrap()
+            .pending_index,
+        0
+    );
+}
+
+#[test]
+fn d179_if_the_task_finishes_before_store_index_the_complete_row_is_not_degraded() {
+    let (dir, _spy, mut app) = waiting_fixture();
+    let conn = sql(&dir);
+    // Fase 1 con la tarea todavía en cola.
+    let pending = app.index_pending(10).unwrap();
+    let alfa = pending
+        .iter()
+        .find(|p| p.task_id == 1)
+        .unwrap_or_else(|| panic!("{pending:?}"));
+    let extractor = app.index_extractor();
+    let outcome = extract_for_index(&extractor, &alfa.path);
+    // Mientras tanto vuelve la IA y la tarea termina, con su fila completa.
+    app.set_ai_wait(None);
+    drain(&mut app);
+    let before = dump(&conn, "search_index");
+    // Fase 2: no pisa la fila completa con la provisional.
+    app.store_index(alfa.task_id, outcome).unwrap();
+    assert_eq!(dump(&conn, "search_index"), before);
+    let found = hits(&app, "reciclado");
+    assert_eq!(found.len(), 1);
+    assert_eq!(found[0].party, "Alfa SL");
+    assert_eq!(found[0].number, "F-7");
 }

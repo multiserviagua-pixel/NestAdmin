@@ -406,10 +406,9 @@ fn unindexed_and_status_counts() {
     s.complete(done, &json!({})).unwrap();
     s.complete(mail, &json!({})).unwrap();
     s.complete(other, &json!({})).unwrap();
-    let _ = queued;
 
     let pending: Vec<i64> = s
-        .unindexed_tasks(10)
+        .unindexed_tasks(10, false)
         .unwrap()
         .iter()
         .map(|t| t.id)
@@ -419,8 +418,25 @@ fn unindexed_and_status_counts() {
         vec![done, mail],
         "ni en cola, ni en curso, ni otros tipos"
     );
-    assert_eq!(s.unindexed_tasks(1).unwrap().len(), 1);
+    assert_eq!(s.unindexed_tasks(1, false).unwrap().len(), 1);
     assert_eq!(s.search(&SearchQuery::default()).unwrap().pending_index, 2);
+
+    // Con `include_queued` entra también la tarea en cola, nunca la que está en curso.
+    let with_queued: Vec<i64> = s
+        .unindexed_tasks(10, true)
+        .unwrap()
+        .iter()
+        .map(|t| t.id)
+        .collect();
+    assert_eq!(with_queued, vec![queued, done, mail]);
+    assert!(!with_queued.contains(&running));
+    let counted = s
+        .search(&SearchQuery {
+            include_queued: true,
+            ..SearchQuery::default()
+        })
+        .unwrap();
+    assert_eq!(counted.pending_index, 3);
 
     s.index_document(&SearchDoc {
         status: SearchStatus::NoText,
@@ -436,7 +452,8 @@ fn unindexed_and_status_counts() {
     .unwrap();
     let page = s.search(&SearchQuery::default()).unwrap();
     assert_eq!((page.pending_index, page.no_text, page.failed), (0, 1, 1));
-    assert!(s.unindexed_tasks(10).unwrap().is_empty());
+    assert!(s.unindexed_tasks(10, false).unwrap().is_empty());
+    assert_eq!(s.unindexed_tasks(10, true).unwrap().len(), 1);
 }
 
 #[test]

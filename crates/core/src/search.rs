@@ -111,6 +111,10 @@ pub struct SearchQuery {
     pub any: bool,
     pub filters: SearchFilters,
     pub offset: usize,
+    /// Cuenta como pendientes de indexar también las tareas en cola (D179, «Lo que espera a la
+    /// IA»). `false` por defecto: las que están en cola o en curso no cuentan.
+    #[serde(default)]
+    pub include_queued: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -281,8 +285,18 @@ fn index_in(tx: &Transaction<'_>, doc: &SearchDoc) -> Result<()> {
 
 /// Las tareas de nueva redacción (`redraft_of`) no se indexan aparte (D179): no cuentan como
 /// pendientes.
+/// Con `include_queued` entran también las tareas en cola; las que están en curso (`running`)
+/// nunca.
+fn unindexed_sql(include_queued: bool) -> String {
+    let excluded = if include_queued {
+        "'running'"
+    } else {
+        "'queued', 'running'"
+    };
+    format!("{UNINDEXED_SQL} AND state NOT IN ({excluded})")
+}
+
 const UNINDEXED_SQL: &str = "kind IN ('invoice', 'email')
-    AND state NOT IN ('queued', 'running')
     AND NOT (kind = 'email' AND CASE WHEN json_valid(tasks.input_ref)
         THEN json_extract(tasks.input_ref, '$.redraft_of') END IS NOT NULL)
     AND NOT EXISTS (SELECT 1 FROM search_index s WHERE s.task_id = tasks.id)";
@@ -408,11 +422,13 @@ impl Store {
         Ok(n)
     }
 
-    /// Tareas de factura o correo sin fila en el índice que ya no están en cola ni en curso,
-    /// por id ascendente.
-    pub fn unindexed_tasks(&self, limit: usize) -> Result<Vec<Task>> {
+    /// Tareas de factura o correo sin fila en el índice que ya no están en cola ni en curso, por
+    /// id ascendente. Con `include_queued` entran también las que esperan en cola; las que están
+    /// en curso nunca.
+    pub fn unindexed_tasks(&self, limit: usize, include_queued: bool) -> Result<Vec<Task>> {
+        let filter = unindexed_sql(include_queued);
         let mut stmt = self.conn.prepare(&format!(
-            "SELECT {TASK_COLUMNS} FROM tasks WHERE {UNINDEXED_SQL} ORDER BY id LIMIT ?1"
+            "SELECT {TASK_COLUMNS} FROM tasks WHERE {filter} ORDER BY id LIMIT ?1"
         ))?;
         let limit = i64::try_from(limit).unwrap_or(i64::MAX);
         let rows = stmt.query_map([limit], task_from_row)?;
@@ -497,7 +513,10 @@ impl Store {
 
         let pending_index = count(
             &self.conn,
-            &format!("SELECT count(*) FROM tasks WHERE {UNINDEXED_SQL}"),
+            &format!(
+                "SELECT count(*) FROM tasks WHERE {}",
+                unindexed_sql(query.include_queued)
+            ),
             [],
         )?;
         let by_status = |status: &str| {

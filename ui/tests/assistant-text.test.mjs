@@ -136,6 +136,10 @@ test("resultado sin texto o que falló lleva su estado", () => {
   assert.equal(T.cardView(hit({ index_status: "no_text", snippet: "" })).note, "Sin texto legible");
   assert.equal(T.cardView(hit({ index_status: "failed" })).note, "No se pudo leer");
   assert.equal(T.cardView(hit({ index_status: "indexed" })).note, null);
+  // D179: una tarea que espera a la IA avisa de que aún no se ha leído; lo que ya terminó, no.
+  assert.equal(T.cardView(hit({ task_state: "queued" })).note, "En espera de la IA: aún no se ha leído");
+  assert.equal(T.cardView(hit({ task_state: "completed" })).note, null);
+  assert.equal(T.cardView(hit({ task_state: "queued", index_status: "failed" })).note, "No se pudo leer");
   assert.equal(T.cardView(hit({ index_status: "no_text", snippet: "" })).snippet, "");
 });
 

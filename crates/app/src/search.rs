@@ -448,18 +448,32 @@ impl App {
         std::sync::Arc::clone(&self.extractor)
     }
 
-    /// Si quedan tareas por indexar (sin fila, ya fuera de la cola).
-    pub fn index_backlog(&self) -> AppResult<bool> {
-        Ok(!self.store.unindexed_tasks(1)?.is_empty())
+    /// Si el indexado debe tomar también las tareas en cola (D179, «Lo que espera a la IA»): solo
+    /// mientras no hay IA utilizable, es decir, con la misma condición con la que `begin_next` no
+    /// deja avanzar a las tareas que la necesitan (`ai_wait`: sin proveedor, sin clave, sin
+    /// destino confirmado, clave rechazada, modelo no disponible o sin crédito). La pausa del
+    /// usuario no cuenta: con IA utilizable lo que está en cola se procesa enseguida.
+    fn index_queued(&self) -> bool {
+        self.ai_wait.is_some()
     }
 
-    /// Fase 1 de la pasada de indexado: toma hasta `limit` tareas sin fila. Las que no necesitan
+    /// Si quedan tareas por indexar (sin fila, ya fuera de la cola o, sin IA utilizable, también
+    /// en ella).
+    pub fn index_backlog(&self) -> AppResult<bool> {
+        Ok(!self
+            .store
+            .unindexed_tasks(1, self.index_queued())?
+            .is_empty())
+    }
+
+    /// Fase 1 de la pasada de indexado: toma hasta `limit` tareas sin fila (las en cola solo sin
+    /// IA utilizable, y nunca las que están en curso). Las que no necesitan
     /// extraer (correos, y facturas sin original) se indexan en el acto; de las facturas con
     /// original devuelve dónde está para extraer fuera del cerrojo. No cambia el estado de
     /// ninguna tarea ni usa la IA, la red o el conector de correo.
     pub fn index_pending(&mut self, limit: usize) -> AppResult<Vec<PendingIndex>> {
         let mut pending = Vec::new();
-        for task in self.store.unindexed_tasks(limit)? {
+        for task in self.store.unindexed_tasks(limit, self.index_queued())? {
             let Some(doc) = doc_for_task(&task) else {
                 continue;
             };
@@ -526,6 +540,7 @@ impl App {
             any: false,
             filters,
             offset,
+            include_queued: self.index_queued(),
         })?)
     }
 
@@ -539,10 +554,12 @@ impl App {
             [one] => Some(*one),
             _ => None,
         };
+        let include_queued = self.index_queued();
         let run = |any: bool, kind: Option<SearchKind>| {
             self.store.search(&SearchQuery {
                 terms: terms.clone(),
                 any,
+                include_queued,
                 filters: SearchFilters {
                     kind,
                     ..SearchFilters::default()
@@ -552,7 +569,10 @@ impl App {
         };
         if terms.is_empty() {
             if kinds.is_empty() {
-                let mut page = self.store.search(&SearchQuery::default())?;
+                let mut page = self.store.search(&SearchQuery {
+                    include_queued,
+                    ..SearchQuery::default()
+                })?;
                 page.results.clear();
                 page.total = 0;
                 return Ok(QuestionAnswer {
@@ -609,6 +629,28 @@ impl App {
         })
     }
 
+    /// Fila con la que termina una tarea. Si no se calculó (`doc` es `None`) pero la tarea tiene
+    /// una fila provisional, de cuando esperaba en cola (D179), se completa con el resultado
+    /// conservando el texto que ya tenía, para que no se quede sin proveedor, número ni importe.
+    fn final_doc(&mut self, id: i64, result: &Value, doc: Option<&SearchDoc>) -> Option<SearchDoc> {
+        if let Some(doc) = doc {
+            return Some(doc.clone());
+        }
+        let existing = self.store.indexed_document(id).ok().flatten()?;
+        let task = self.store.task(id).ok()?;
+        let input: Value = serde_json::from_str(&task.input_ref).unwrap_or(Value::Null);
+        let mut doc = match task.kind.as_str() {
+            INVOICE => invoice_doc(&input, result),
+            EMAIL => email_doc(&input, result)?,
+            _ => return None,
+        };
+        doc.task_id = id;
+        doc.status = existing.status;
+        doc.body = existing.body;
+        doc.detail = existing.detail;
+        Some(doc)
+    }
+
     /// Completa la tarea e indexa su fila en la misma transacción. Si la fila no se pudo calcular
     /// (`doc` es `None`) o el índice falla, la tarea se completa igual y la recoge la pasada.
     pub(crate) fn complete_indexing(
@@ -617,7 +659,8 @@ impl App {
         result: &Value,
         doc: Option<&SearchDoc>,
     ) -> AppResult<Task> {
-        if let Some(doc) = doc {
+        let doc = self.final_doc(id, result, doc);
+        if let Some(doc) = doc.as_ref() {
             if let Ok(task) = self.store.complete_indexed(id, result, doc) {
                 return Ok(task);
             }
@@ -632,7 +675,8 @@ impl App {
         result: &Value,
         doc: Option<&SearchDoc>,
     ) -> AppResult<Task> {
-        if let Some(doc) = doc {
+        let doc = self.final_doc(id, result, doc);
+        if let Some(doc) = doc.as_ref() {
             if let Ok(task) = self.store.await_review_indexed(id, result, doc) {
                 return Ok(task);
             }
