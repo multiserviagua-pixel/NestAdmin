@@ -10,12 +10,12 @@ use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
-use nestadmin_ai::assistant::{Level, DATA_CLOSE, DATA_OPEN, TOOLS};
+use nestadmin_ai::assistant::{notice_text, Level, Notice, DATA_CLOSE, DATA_OPEN, TOOLS};
 use nestadmin_ai::{
     AiError, GenerateRequest, GenerateResult, Provider, ProviderKind, Task as AiTask, Usage,
 };
 use nestadmin_app::assistant::proposals::{Effect, Outcome as ReceiptOutcome, ProposalCard};
-use nestadmin_app::assistant::{AssistantTurn, Outcome};
+use nestadmin_app::assistant::{composed_answer, AssistantTurn, Outcome};
 use nestadmin_app::{App, AppError, AppPaths, EMAIL};
 use nestadmin_core::{AuditEntry, Task, TaskState};
 use nestadmin_extract::{ExtractError, Extractor, Ocr};
@@ -50,6 +50,15 @@ impl Fake {
         let base = self.calls.load(Ordering::SeqCst);
         *self.script.lock().unwrap() =
             Box::new(move |_, n| Ok(values[(n - base).min(values.len() - 1)].clone()));
+    }
+
+    /// Guion libre: la llamada n desde ahora recibe `f(petición, n desde ahora)`.
+    fn script_with(
+        &self,
+        f: impl Fn(&GenerateRequest, usize) -> Result<Value, AiError> + Send + Sync + 'static,
+    ) {
+        let base = self.calls.load(Ordering::SeqCst);
+        *self.script.lock().unwrap() = Box::new(move |r, n| f(r, n - base));
     }
 
     fn requests(&self) -> Vec<GenerateRequest> {
@@ -1308,7 +1317,117 @@ fn deleting_the_conversation_deletes_its_proposals_and_the_audit_has_no_text() {
 fn a_turn_that_does_not_end_in_an_answer_leaves_no_proposals_behind() {
     let mut w = world();
     let mail = first_mail(&mut w);
-    // Una propuesta creada y después un fallo del turno (dos salidas no válidas).
+    // Una propuesta creada y después un fallo del proveedor: el turno termina en error.
+    let reads = [
+        tool("get_document", json!({ "ref": doc(mail) })),
+        approve(mail),
+    ];
+    w.ext.script_with(move |_, n| match reads.get(n) {
+        Some(step) => Ok(step.clone()),
+        None => Err(AiError::Unavailable("sin red".into())),
+    });
+    let turn = ask(&mut w, None, "apruebe", "review");
+    assert_eq!(turn.outcome, Outcome::Error);
+    assert!(!turn.composed);
+    assert!(turn.proposals.is_empty());
+    assert!(
+        w.statuses().is_empty(),
+        "no queda ninguna tarjeta sin turno"
+    );
+}
+
+fn created_events(w: &World) -> usize {
+    w.app
+        .audit_log()
+        .unwrap()
+        .iter()
+        .filter(|e| e.action == "assistant_proposal" && e.status == "created")
+        .count()
+}
+
+fn last_turn_note(w: &World) -> AuditEntry {
+    w.app
+        .audit_log()
+        .unwrap()
+        .into_iter()
+        .rev()
+        .find(|e| e.action == "assistant_turn")
+        .unwrap()
+}
+
+#[test]
+fn a_repeated_proposal_call_closes_the_turn_with_the_app_text_and_keeps_one_pending_card() {
+    let mut w = world();
+    let inv = seed_invoice(
+        &mut w.app,
+        "a.txt",
+        &invoice_json("Transportes Ficticios", "F-10", "121.00"),
+    );
+    let (sent, records) = (w.sent(), w.records());
+    // El caso real: lee, propone y repite exactamente la misma propuesta hasta el tope.
+    w.ext.turn(vec![
+        tool("get_document", json!({ "ref": doc(inv) })),
+        approve(inv),
+    ]);
+    let turn = ask(&mut w, None, "Prepárala para registrarla", "review");
+    assert_eq!(turn.outcome, Outcome::Answered, "{turn:?}");
+    assert!(turn.error_code.is_none());
+    assert!(turn.composed);
+    assert_eq!(turn.answer, composed_answer(1));
+    assert!(turn.citations.is_empty());
+    assert_eq!(turn.steps, 6);
+    assert_eq!(turn.proposals.len(), 1);
+    assert_eq!(
+        w.statuses()
+            .iter()
+            .map(|s| s.1.as_str())
+            .collect::<Vec<_>>(),
+        ["pending"]
+    );
+    assert_eq!((w.sent(), w.records()), (sent, records));
+    // La llamada repetida no volvió a ejecutar la herramienta: un solo evento de creación.
+    assert_eq!(created_events(&w), 1);
+
+    let requests = w.ext.requests();
+    assert_eq!(requests.len(), 6);
+    // Tras la propuesta, el aviso va como texto de la aplicación, fuera de los marcadores.
+    let after = &requests[2].content;
+    assert!(after.contains(notice_text(Notice::ProposalReady)));
+    assert!(blocks(after)
+        .iter()
+        .all(|b| !b.contains(notice_text(Notice::ProposalReady))));
+    assert_eq!(
+        blocks(after).pop().unwrap(),
+        format!(
+            "argumentos: {{\"ref\":\"doc:{inv}\"}}\nresultado: {{\"proposal\":\"prop:{}\",\"status\":\"created\"}}",
+            turn.proposals[0].id
+        )
+    );
+    // La repetición recibe el aviso fijo y no añade un bloque de datos.
+    let repeated = &requests[3].content;
+    assert!(repeated.contains(notice_text(Notice::Repeated)));
+    assert_eq!(blocks(repeated).len(), blocks(after).len());
+
+    // Lo guardado y lo auditado: marca de turno compuesto y motivo del cierre.
+    let saved = w.app.assistant_conversation(None).unwrap().unwrap();
+    let last = saved.turns.last().unwrap();
+    assert!(last.meta.composed);
+    assert_eq!(last.text, composed_answer(1));
+    assert_eq!(last.proposals.len(), 1);
+    let note = last_turn_note(&w);
+    assert_eq!(note.status, "answered");
+    let detail = note.detail.unwrap();
+    assert!(
+        detail.contains("\"close_reason\":\"steps_exhausted\""),
+        "{detail}"
+    );
+    assert!(detail.contains("\"composed\":true"), "{detail}");
+}
+
+#[test]
+fn invalid_outputs_after_a_proposal_also_close_with_the_app_text() {
+    let mut w = world();
+    let mail = first_mail(&mut w);
     w.ext.turn(vec![
         tool("get_document", json!({ "ref": doc(mail) })),
         approve(mail),
@@ -1316,11 +1435,47 @@ fn a_turn_that_does_not_end_in_an_answer_leaves_no_proposals_behind() {
         tool("proposal_confirm", json!({})),
     ]);
     let turn = ask(&mut w, None, "apruebe", "review");
-    assert_eq!(turn.outcome, Outcome::Error);
-    assert!(turn.proposals.is_empty());
-    assert!(
-        w.statuses().is_empty(),
-        "no queda ninguna tarjeta sin turno"
+    assert_eq!(turn.outcome, Outcome::Answered, "{turn:?}");
+    assert!(turn.composed);
+    assert_eq!(turn.answer, composed_answer(1));
+    assert_eq!(turn.proposals.len(), 1);
+    assert!(turn.error_detail.is_none());
+    assert!(last_turn_note(&w)
+        .detail
+        .unwrap()
+        .contains("\"close_reason\":\"invalid_response\""));
+}
+
+#[test]
+fn when_the_model_answers_after_the_notice_its_answer_and_the_card_stay() {
+    let mut w = world();
+    let inv = seed_invoice(
+        &mut w.app,
+        "a.txt",
+        &invoice_json("Transportes Ficticios", "F-11", "121.00"),
+    );
+    let turn = propose(&mut w, None, &[inv], vec![approve(inv)], "review");
+    assert_eq!(turn.outcome, Outcome::Answered, "{turn:?}");
+    assert!(!turn.composed);
+    assert!(turn.answer.starts_with("He preparado la propuesta"));
+    assert_eq!(turn.proposals.len(), 1);
+    assert_eq!(w.statuses().len(), 1);
+    assert_eq!(w.ext.requests().len(), 3);
+    assert!(last_turn_note(&w)
+        .detail
+        .unwrap()
+        .contains("\"close_reason\":null"));
+}
+
+#[test]
+fn the_composed_text_has_singular_and_plural() {
+    assert_eq!(
+        composed_answer(1),
+        "He preparado 1 propuesta. Nada se ha hecho todavía: revise la tarjeta y decida."
+    );
+    assert_eq!(
+        composed_answer(2),
+        "He preparado 2 propuestas. Nada se ha hecho todavía: revise las tarjetas y decida."
     );
 }
 

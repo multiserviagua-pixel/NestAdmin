@@ -1187,6 +1187,8 @@ export interface AssistantTurn {
   words: QuestionAnswer | null;
   /** Tarjetas de las acciones que el asistente preparó en este turno (D185). No se ha ejecutado nada: solo el botón de la tarjeta confirma. */
   proposals: ProposalCard[];
+  /** El texto de `answer` lo compuso la aplicación (cierre del turno con propuestas ya preparadas), no el modelo. */
+  composed?: boolean;
 }
 
 // ---- Propuestas del asistente (E3, D185) ----

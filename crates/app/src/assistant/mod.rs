@@ -28,7 +28,7 @@ use std::time::Instant;
 
 use nestadmin_ai::assistant::{
     assistant_request, doc_id, parse_step, skills_for, tool_spec, tools_for, Entry, HistoryTurn,
-    Rejection, Step, View,
+    Notice, Rejection, Step, View,
 };
 use nestadmin_ai::{AiError, GenerateRequest, GenerateResult, Provider, ProviderKind};
 use nestadmin_core::{NewCall, SearchHit, SentCall};
@@ -148,6 +148,10 @@ pub(crate) enum StoredEntry {
     Invalid {
         rejection: Rejection,
     },
+    /// Aviso fijo de la aplicación (propuesta preparada, llamada repetida).
+    Notice {
+        notice: Notice,
+    },
 }
 
 /// Turno preparado: no toca `App`, se puede ejecutar en otro hilo.
@@ -195,7 +199,58 @@ pub struct AssistantRun {
     fallback: Option<Value>,
     /// Código cerrado del último rechazo de un paso (nunca contenido).
     error_detail: Option<String>,
+    /// Propuestas distintas que las herramientas `propose_*` dejaron preparadas en este turno.
+    proposed: HashSet<String>,
+    /// El turno se cerró con la respuesta fija de la aplicación: código cerrado del motivo.
+    close_reason: Option<String>,
     _guard: TurnGuard,
+}
+
+impl AssistantRun {
+    /// Termina el turno por un fallo del protocolo. Con propuestas ya preparadas no es un error:
+    /// cierra como `answered` con el texto fijo de la aplicación y conserva las propuestas.
+    fn fail(&mut self, code: &str) {
+        if !self.proposed.is_empty() && matches!(code, "steps_exhausted" | "invalid_response") {
+            self.status = RunStatus::Answered;
+            self.answer = composed_answer(self.proposed.len());
+            self.citation_refs.clear();
+            self.close_reason = Some(code.to_owned());
+        } else {
+            self.status = RunStatus::Error(code.to_owned());
+        }
+    }
+}
+
+/// Respuesta fija que compone la aplicación (no el modelo) cuando el turno se cierra con
+/// propuestas ya preparadas.
+pub fn composed_answer(proposals: usize) -> String {
+    if proposals == 1 {
+        "He preparado 1 propuesta. Nada se ha hecho todavía: revise la tarjeta y decida.".to_owned()
+    } else {
+        format!(
+            "He preparado {proposals} propuestas. Nada se ha hecho todavía: revise las tarjetas y decida."
+        )
+    }
+}
+
+/// Forma canónica de unos argumentos (claves ordenadas) para comparar llamadas.
+fn canonical(value: &Value) -> String {
+    match value {
+        Value::Object(map) => {
+            let mut keys: Vec<&String> = map.keys().collect();
+            keys.sort();
+            let parts: Vec<String> = keys
+                .into_iter()
+                .map(|k| format!("{}:{}", Value::String(k.clone()), canonical(&map[k])))
+                .collect();
+            format!("{{{}}}", parts.join(","))
+        }
+        Value::Array(items) => format!(
+            "[{}]",
+            items.iter().map(canonical).collect::<Vec<_>>().join(",")
+        ),
+        other => other.to_string(),
+    }
 }
 
 /// Un turno del asistente tal como llega a la ventana.
@@ -234,6 +289,8 @@ pub struct AssistantTurn {
     /// Tarjetas de las propuestas que el asistente preparó en este turno (D185). La aplicación las
     /// compone con datos del equipo; nada de esto se ejecuta hasta que la persona pulsa el botón.
     pub proposals: Vec<ProposalCard>,
+    /// El texto de `answer` lo compuso la aplicación, no el modelo (cierre con propuestas).
+    pub composed: bool,
 }
 
 /// Lo que se guarda de un turno junto a su texto (en `meta_json`).
@@ -260,6 +317,8 @@ pub struct TurnMeta {
     /// Referencias (`doc:N`, `acct:N`) que las herramientas devolvieron en este turno: las únicas
     /// sobre las que el asistente puede proponer una acción en esta conversación.
     pub returned_refs: Vec<String>,
+    /// El texto del turno lo compuso la aplicación, no el modelo.
+    pub composed: bool,
 }
 
 /// Un turno de una conversación guardada.
@@ -309,7 +368,11 @@ fn fit(
     }
     let over = total(&history, &entries).saturating_sub(MAX_DATA_CHARS);
     if over > 0 {
-        if let Some(Entry::Tool { output, .. }) = entries.last_mut() {
+        if let Some(Entry::Tool { output, .. }) = entries
+            .iter_mut()
+            .rev()
+            .find(|e| matches!(e, Entry::Tool { .. }))
+        {
             let keep = output
                 .chars()
                 .count()
@@ -351,6 +414,7 @@ pub(crate) fn compose(
             StoredEntry::Invalid { rejection } => Entry::Invalid {
                 rejection: *rejection,
             },
+            StoredEntry::Notice { notice } => Entry::Notice { notice: *notice },
         });
     }
     prepared.reverse();
@@ -437,6 +501,8 @@ impl AssistantJob {
             local: false,
             fallback: None,
             error_detail: None,
+            proposed: HashSet::new(),
+            close_reason: None,
             _guard: guard,
         };
         let external = matches!(route, Route::External { .. });
@@ -472,13 +538,15 @@ impl AssistantJob {
             .collect();
         let mut entries: Vec<StoredEntry> = Vec::new();
         let mut invalid = 0usize;
+        // Llamadas ya hechas en este turno (nombre y argumentos canónicos).
+        let mut made: HashSet<(String, String)> = HashSet::new();
         loop {
             if cancel.load(Ordering::SeqCst) {
                 state.status = RunStatus::Cancelled;
                 return state;
             }
             if state.steps >= MAX_STEPS {
-                state.status = RunStatus::Error("steps_exhausted".into());
+                state.fail("steps_exhausted");
                 return state;
             }
             // Justo antes de enviar: si el consentimiento se retiró, no sale nada.
@@ -589,7 +657,7 @@ impl AssistantJob {
                     invalid += 1;
                     state.error_detail = Some(rejection.code.to_owned());
                     if invalid >= MAX_INVALID {
-                        state.status = RunStatus::Error("invalid_response".into());
+                        state.fail("invalid_response");
                         return state;
                     }
                     entries.push(StoredEntry::Invalid { rejection });
@@ -609,7 +677,7 @@ impl AssistantJob {
                         invalid += 1;
                         state.error_detail = Some("tool_not_offered".to_owned());
                         if invalid >= MAX_INVALID {
-                            state.status = RunStatus::Error("invalid_response".into());
+                            state.fail("invalid_response");
                             return state;
                         }
                         entries.push(StoredEntry::Invalid {
@@ -620,9 +688,17 @@ impl AssistantJob {
                         });
                         continue;
                     }
+                    let key = (name.clone(), canonical(&Value::Object(args.clone())));
+                    if made.contains(&key) {
+                        // Misma herramienta y mismos argumentos: no se ejecuta otra vez.
+                        entries.push(StoredEntry::Notice {
+                            notice: Notice::Repeated,
+                        });
+                        continue;
+                    }
                     if state.steps >= MAX_STEPS {
                         // No quedan pasos para usar el resultado: no se ejecuta.
-                        state.status = RunStatus::Error("steps_exhausted".into());
+                        state.fail("steps_exhausted");
                         return state;
                     }
                     if cancel.load(Ordering::SeqCst) {
@@ -644,11 +720,25 @@ impl AssistantJob {
                     if !state.tools.contains(&name) {
                         state.tools.push(name.clone());
                     }
+                    made.insert(key);
+                    let proposed = name.starts_with("propose_")
+                        && out.value["status"] == "created"
+                        && out.value["proposal"].is_string();
+                    if proposed {
+                        if let Some(id) = out.value["proposal"].as_str() {
+                            state.proposed.insert(id.to_owned());
+                        }
+                    }
                     entries.push(StoredEntry::Tool {
                         name,
                         args: Value::Object(args).to_string(),
                         value: out.value,
                     });
+                    if proposed {
+                        entries.push(StoredEntry::Notice {
+                            notice: Notice::ProposalReady,
+                        });
+                    }
                 }
             }
         }
@@ -841,6 +931,8 @@ impl App {
             local,
             fallback,
             error_detail,
+            proposed: _,
+            close_reason,
             _guard,
         } = run;
         let mut turn = AssistantTurn {
@@ -862,6 +954,7 @@ impl App {
             tools,
             words: None,
             proposals: Vec::new(),
+            composed: false,
         };
         let audit_status = match status {
             RunStatus::Answered => {
@@ -879,6 +972,7 @@ impl App {
                 // Una referencia válida que ya no está en el índice tampoco se cita.
                 dropped += ids.len() - cards.len();
                 turn.outcome = Outcome::Answered;
+                turn.composed = close_reason.is_some();
                 turn.answer = answer;
                 turn.dropped_citations = dropped;
                 turn.citations = cards;
@@ -971,6 +1065,7 @@ impl App {
                 error_detail: turn.error_detail.clone(),
                 proposal_ids: proposal_ids.clone(),
                 returned_refs,
+                composed: turn.composed,
             };
             let saved = self.store.assistant_save_exchange(
                 conversation_id,
@@ -1002,6 +1097,8 @@ impl App {
                 "error_code": turn.error_code,
                 "error_detail": turn.error_detail,
                 "proposals": turn.proposals.len(),
+                "composed": turn.composed,
+                "close_reason": close_reason,
             }),
         )?;
         Ok(turn)

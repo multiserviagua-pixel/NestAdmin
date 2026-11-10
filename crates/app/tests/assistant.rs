@@ -12,7 +12,7 @@ use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
-use nestadmin_ai::assistant::{Level, DATA_CLOSE, DATA_OPEN, TOOLS};
+use nestadmin_ai::assistant::{notice_text, Level, Notice, DATA_CLOSE, DATA_OPEN, TOOLS};
 use nestadmin_ai::{
     AiError, GenerateRequest, GenerateResult, ModelUnavailableCause, Provider, ProviderKind,
     Task as AiTask, Usage,
@@ -403,6 +403,40 @@ fn six_steps_at_most_and_nothing_is_saved_when_they_run_out() {
     // Las seis llamadas salieron: quedan disponibles para «Ver lo enviado».
     assert_sent_matches(&w, &turn, 6);
     assert_eq!(last_audit(&w.app, "assistant_turn").0, "error");
+}
+
+#[test]
+fn a_repeated_free_call_is_not_executed_again_and_the_model_gets_the_app_notice() {
+    let mut w = world(ProviderKind::Ollama);
+    seed(&mut w.app, "a.txt", "Alfa SL", "F-1", 100, "");
+    w.ext.steps(vec![
+        tool("search", json!({ "query": "Alfa" })),
+        tool("search", json!({ "query": "Alfa" })),
+        answer("Resultado de la búsqueda."),
+    ]);
+    let job = w.app.begin_assistant_turn(None, "busca", "other").unwrap();
+    let mut executed = 0usize;
+    let run = job.run(&mut |call| {
+        executed += 1;
+        w.app.assistant_tool(call)
+    });
+    let turn = w.app.finish_assistant_turn(run).unwrap();
+    assert_eq!(turn.outcome, Outcome::Answered, "{turn:?}");
+    assert_eq!((executed, turn.steps), (1, 3));
+    let requests = w.ext.requests();
+    let third = &requests[2].content;
+    assert!(third.contains(notice_text(Notice::Repeated)));
+    // El resultado sigue una sola vez, entre marcadores; el aviso no.
+    assert_eq!(blocks(third).len(), 2);
+    assert!(blocks(third)
+        .iter()
+        .all(|b| !b.contains("Ya hizo esta llamada")));
+    // Sin propuestas, agotar los pasos sigue siendo un error sin efectos.
+    w.ext.steps(vec![tool("list_tasks", json!({}))]);
+    let turn = ask(&mut w.app, None, "pregunta", "review");
+    assert_eq!(turn.outcome, Outcome::Error);
+    assert_eq!(turn.error_code.as_deref(), Some("steps_exhausted"));
+    assert!(!turn.composed && turn.proposals.is_empty());
 }
 
 /// `assistant_sent` devuelve exactamente lo que recibió el espía, y el turno tiene `turn_id`.
