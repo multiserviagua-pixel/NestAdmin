@@ -23,7 +23,7 @@ Cada decisión (`D<n>`) tiene un número definitivo desde que se escribe, para q
 | D122–D122 | Lista de modelos de cada proveedor y prueba sintética, 2026-11-08 | Asignado |
 | D123–D135 | `claude/panel-reglas`: panel de reglas, sugerencias y primera lectura (D123–D134; D135, hueco), integrado el 2026-11-09 | Asignado |
 | D136–D145 | `claude/rediseno-ui`: rediseño visual y separación de Pendientes (D136–D138; el resto, hueco), integrado el 2026-11-08 | Asignado |
-| D146–D155 | `claude/tareas-pipelines`: errores del proveedor de IA, vistas de Tareas y plantillas de pipeline | Reservado |
+| D146–D155 | `claude/tareas-pipelines`: errores del proveedor de IA, vistas de Tareas y plantillas de pipeline (D146–D151; D152–D155, hueco), integrado el 2026-11-09 | Asignado |
 | D156–D156 | Reconciliación de Gmail por marca propia en el hilo, 2026-11-09 | Asignado |
 | D157–D166 | Triaje del correo, inyección, preferencias y perfil (D157–D164; D165–D166, hueco), 2026-11-09 | Asignado |
 | D167–D176 | Aprender a responder en la primera carga (D167–D175; D176, reserva), 2026-11-09 | Asignado |
