@@ -81,6 +81,9 @@ CREATE TABLE rules (
     include_str!("migrations/009_learned.sql"),
     // Índice local de búsqueda y su tabla FTS5 (D179); ver search.rs.
     include_str!("migrations/010_search.sql"),
+    // Conversaciones del asistente y lo enviado en cada llamada, solo locales (D188); ver
+    // assistant.rs.
+    include_str!("migrations/011_assistant.sql"),
 ];
 
 /// Base de datos local. Cada operación pública se confirma en una transacción,

@@ -5,6 +5,7 @@
 //! (del externo elegido al local, D101) lo gestiona la capa de aplicación.
 
 pub mod anthropic;
+pub mod assistant;
 pub mod credentials;
 mod http;
 pub mod learn;

@@ -44,6 +44,11 @@ import type {
   RuleView,
   TaskTemplate,
   SenderPreference,
+  AssistantConsentView,
+  AssistantConversation,
+  AssistantPreview,
+  AssistantSentCall,
+  AssistantTurn,
   QuestionAnswer,
   SearchFilters,
   SearchPage,
@@ -140,6 +145,25 @@ export const api = {
   search: (query: string, filters: SearchFilters, offset: number) => invoke<SearchPage>("search", { query, filters, offset }),
   /** Vuelve a poner en el índice los documentos que no se pudieron leer; devuelve cuántos. */
   reindexFailed: () => invoke<number>("reindex_failed"),
+  /** Un turno del asistente (E2, D182): la pregunta, la vista abierta y, opcionalmente, la conversación. */
+  assistantTurn: (conversationId: number | null, text: string, view: string) =>
+    invoke<AssistantTurn>("assistant_turn", { conversationId, text, view }),
+  /** Pide cancelar el turno en curso; se comprueba entre pasos. */
+  assistantCancel: () => invoke<void>("assistant_cancel"),
+  /** Una conversación guardada en el equipo (la indicada o, sin indicar, la última). */
+  assistantConversation: (id: number | null) => invoke<AssistantConversation | null>("assistant_conversation", { id }),
+  /** Lo que se envió en las llamadas de un turno («Ver lo enviado»). */
+  assistantSent: (turnId: number) => invoke<AssistantSentCall[]>("assistant_sent", { turnId }),
+  /** Borra una conversación o, sin indicar, todas; devuelve cuántas. */
+  assistantClear: (id: number | null) => invoke<number>("assistant_clear", { id }),
+  /** Estado del permiso para enviar datos fuera del equipo (D183). */
+  assistantConsent: () => invoke<AssistantConsentView>("assistant_consent"),
+  /** Texto literal de un envío de ejemplo y su destino; no llama al proveedor. */
+  assistantPreview: () => invoke<AssistantPreview>("assistant_preview"),
+  /** Solo desde Configuración: el asistente no tiene vía para concederlo. */
+  grantAssistantConsent: (provider: string, model: string, host: string) =>
+    invoke<AssistantConsentView>("grant_assistant_consent", { provider, model, host }),
+  withdrawAssistantConsent: () => invoke<AssistantConsentView>("withdraw_assistant_consent"),
   /** Plantillas de pipeline (D149): versión vigente de cada una, archivadas incluidas. */
   taskTemplates: () => invoke<TaskTemplate[]>("task_templates"),
   /** Una plantilla nueva nace inactiva; guardar una existente crea una versión nueva y conserva

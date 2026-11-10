@@ -36,6 +36,12 @@ import type {
   RuleStats,
   RuleView,
   SenderPreference,
+  AssistantConsentView,
+  AssistantConversation,
+  AssistantPreview,
+  AssistantSentCall,
+  AssistantStoredTurn,
+  AssistantTurn,
   QuestionAnswer,
   SearchFilters,
   SearchHit,
@@ -2303,6 +2309,22 @@ function mockSearchPage(results: SearchHit[]): SearchPage {
   };
 }
 
+// ---- Asistente del chat (E2, D182-D184, D188): conversaciones y permiso en memoria, con datos inventados ----
+
+let assistantGranted = false;
+let nextConversation = 1;
+let nextAssistantTurn = 1;
+const assistantConversations = new Map<number, AssistantConversation>();
+const assistantSentCalls = new Map<number, AssistantSentCall[]>();
+
+function assistantConsentView(): AssistantConsentView {
+  return assistantGranted
+    ? { required: true, state: "granted", provider: mockDest.provider, model: mockDest.model, host: mockDest.host, at: now() }
+    : { required: true, state: "missing", provider: null, model: null, host: null, at: null };
+}
+
+const ASSISTANT_SAMPLE = "Eres el asistente de NestAdmin (texto de ejemplo de la vista previa).\n\nPregunta actual:\n<<<ASISTENTE-DATOS>>>\n¿Qué factura tengo de Proveedor Ejemplo en octubre?\n<<<FIN-ASISTENTE-DATOS>>>";
+
 const handlers: Record<string, (a: any, options?: any) => unknown> = {
   // Preferencias por remitente (D161): normaliza, rechaza dominios públicos y deja el evento del historial.
   sender_preferences: () => [...mockPrefs].sort((a, b) => (a.scope + a.key < b.scope + b.key ? -1 : 1)),
@@ -2440,6 +2462,82 @@ const handlers: Record<string, (a: any, options?: any) => unknown> = {
     const terms = questionTerms(String(query ?? ""));
     const hits = mockHits.filter((h) => (!filters?.kind || h.kind === filters.kind) && terms.every((t) => hitHaystack(h).includes(t)));
     return mockSearchPage(hits);
+  },
+  assistant_consent: (): AssistantConsentView => assistantConsentView(),
+  assistant_preview: (): AssistantPreview => ({
+    provider: { provider: mockDest.provider as AssistantTurn["provider"], model: mockDest.model },
+    host: mockDest.host,
+    external: true,
+    consent: assistantConsentView(),
+    local_fallback: false,
+    sample: ASSISTANT_SAMPLE,
+    limits: { steps: 6, history_turns: 6, turn_chars: 2000, fragments: 8, fragment_chars: 600, data_chars: 12000 },
+    may_travel: ["las instrucciones y la lista de herramientas", "su pregunta, tal como la escribe", "fragmentos cortos de los documentos, enmascarados"],
+    never_sent: ["archivos e imágenes", "direcciones de buzón y nombres de cuenta", "credenciales"],
+    notice: "La pregunta sale tal como usted la escribe; los correos, teléfonos, IBAN y claves se sustituyen antes de salir.",
+  }),
+  grant_assistant_consent: ({ provider, model, host }): AssistantConsentView => {
+    if (provider !== mockDest.provider || model !== mockDest.model || host !== (mockDest.host ?? "")) throw "El proveedor, el modelo o el servidor han cambiado desde que lo vio: revise la vista previa de nuevo antes de aceptar.";
+    assistantGranted = true;
+    return assistantConsentView();
+  },
+  withdraw_assistant_consent: (): AssistantConsentView => {
+    assistantGranted = false;
+    return assistantConsentView();
+  },
+  assistant_turn: ({ conversationId, text }: { conversationId: number | null; text: string; view: string }): AssistantTurn => {
+    const question = String(text ?? "").trim();
+    if (!question) throw "Escriba una pregunta.";
+    if (conversationId != null && !assistantConversations.has(conversationId)) throw `la conversación ${conversationId} no existe`;
+    const provider = mockDest.provider as AssistantTurn["provider"];
+    const base = { error_code: null, dropped_citations: 0, withheld: 0, navigate: null, provider, model: mockDest.model, local: false, fallback: null };
+    const words = assistantGranted ? null : (handlers.search_question({ text: question }) as QuestionAnswer);
+    const { terms } = questionParts(question);
+    const found = mockHits.filter((h) => terms.length === 0 || terms.every((t) => hitHaystack(h).includes(t))).slice(0, 3);
+    const answered = assistantGranted;
+    const answer = answered
+      ? found.length
+        ? `He encontrado ${found.length} documento(s) de muestra.`
+        : "No encuentro ningún documento con esos datos."
+      : "El asistente no puede usar el proveedor externo sin su permiso: active la opción en Configuración. Le muestro una búsqueda por palabras.";
+    const turn: AssistantTurn = {
+      ...base,
+      conversation_id: null,
+      turn_id: null,
+      outcome: answered ? "answered" : "consent_required",
+      answer,
+      citations: answered ? structuredClone(found) : [],
+      steps: answered ? 2 : 0,
+      tools: answered ? ["search"] : [],
+      words,
+    };
+    const id = conversationId ?? nextConversation++;
+    const conversation = assistantConversations.get(id) ?? { id, created_at: now(), updated_at: now(), turns: [] };
+    const stored = (role: "user" | "assistant", body: string, extra: Partial<AssistantStoredTurn> = {}): AssistantStoredTurn => ({
+      id: nextAssistantTurn++, role, text: body, created_at: now(), outcome: null, citation_refs: [], dropped_citations: 0, withheld: 0, navigate: null, provider: null, model: null, local: false, fallback: null, steps: 0, tools: [], citations: [], ...extra,
+    });
+    conversation.turns.push(stored("user", question));
+    const reply = stored("assistant", answer, { outcome: turn.outcome, provider, model: mockDest.model, steps: turn.steps, tools: turn.tools, citations: turn.citations, citation_refs: turn.citations.map((c) => `doc:${c.task_id}`) });
+    conversation.turns.push(reply);
+    conversation.updated_at = now();
+    assistantConversations.set(id, conversation);
+    assistantSentCalls.set(reply.id, [{ step: 1, provider, model: mockDest.model, host: mockDest.host ?? "", local: false, sent_text: ASSISTANT_SAMPLE, at: now() }]);
+    return { ...turn, conversation_id: id, turn_id: reply.id };
+  },
+  assistant_cancel: (): void => undefined,
+  assistant_conversation: ({ id }: { id: number | null }): AssistantConversation | null => {
+    const found = id != null ? assistantConversations.get(id) : [...assistantConversations.values()].sort((a, b) => b.updated_at - a.updated_at)[0];
+    return found ? structuredClone(found) : null;
+  },
+  assistant_sent: ({ turnId }: { turnId: number }): AssistantSentCall[] => structuredClone(assistantSentCalls.get(turnId) ?? []),
+  assistant_clear: ({ id }: { id: number | null }): number => {
+    if (id == null) {
+      const all = assistantConversations.size;
+      assistantConversations.clear();
+      assistantSentCalls.clear();
+      return all;
+    }
+    return assistantConversations.delete(id) ? 1 : 0;
   },
   reindex_failed: (): number => {
     const failed = mockHits.filter((h) => h.index_status === "failed");
