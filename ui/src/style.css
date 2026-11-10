@@ -2583,3 +2583,119 @@ tr.is-located > td {
   user-select: text;
   overflow-wrap: anywhere;
 }
+
+/* Propuestas del asistente (E3, D185): tarjeta compuesta con los datos reales; solo su botón ejecuta algo. */
+.proposal-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s3);
+  margin-top: var(--s1);
+}
+
+.proposal-card {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s2);
+  min-width: 0;
+  padding: var(--s3);
+  background: var(--surface);
+  border: 1px solid var(--line-strong);
+  border-left: 4px solid var(--brand);
+  border-radius: var(--radius);
+}
+
+.proposal-card.status-confirmed {
+  border-left-color: var(--ok);
+}
+
+.proposal-card.status-rejected,
+.proposal-card.status-expired,
+.proposal-card.status-stale,
+.proposal-card.status-failed {
+  border-left-color: var(--line-strong);
+}
+
+.proposal-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s2);
+}
+
+.proposal-head h4 {
+  margin: 0;
+  font-size: var(--fs-body);
+  overflow-wrap: anywhere;
+}
+
+.proposal-card h5 {
+  margin: var(--s2) 0 0;
+  font-size: var(--fs-small);
+  color: var(--muted);
+}
+
+/* La línea fija nunca debe dejar dudas, aunque el texto del modelo diga que algo «se ha enviado». */
+.proposal-fixed {
+  margin: 0;
+  padding: var(--s2) var(--s3);
+  font-weight: 700;
+  color: var(--text);
+  background: var(--warn-soft);
+  border-left: 3px solid var(--warn);
+  border-radius: var(--radius-sm);
+}
+
+.proposal-effect {
+  margin: 0;
+  font-weight: 600;
+}
+
+.proposal-card dl {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: var(--s1) var(--s3);
+  margin: 0;
+  font-size: var(--fs-small);
+}
+
+.proposal-card dt {
+  color: var(--muted);
+}
+
+.proposal-card dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.proposal-body {
+  max-height: 220px;
+  margin: 0;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  user-select: text;
+}
+
+.proposal-notice {
+  margin: 0;
+  font-size: var(--fs-small);
+}
+
+.proposal-live:empty {
+  display: none;
+}
+
+.proposal-live p {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.proposal-live:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+
+.proposal-final {
+  font-weight: 600;
+}

@@ -369,3 +369,191 @@ test("el indicador de progreso muestra un texto por herramienta y nunca contenid
   assert.equal(T.progressText({ kind: "tool", name: "toString" }), T.ASSISTANT_BUSY);
   for (const text of Object.values(T.TOOL_PROGRESS)) assert.ok(!/[<>]|&\w+;/.test(text), text);
 });
+
+// ---- Propuestas del asistente (E3, D185-D187) ----
+
+const card = (kind, over = {}) => ({
+  kind,
+  status: "pending",
+  effect: "none",
+  summary: { task: { title: "Cambio de horario" } },
+  receipt: null,
+  ...over,
+});
+
+/** Una tarjeta de cada tipo, con datos inventados. */
+const CARDS = [
+  card("approve", { effect: "send_mail", summary: { type: "email", to: ["cliente.beta@ejemplo.test"] } }),
+  card("approve", { effect: "register_invoice", summary: { type: "invoice", supplier: "Alfa SL", invoice_number: "F-2" } }),
+  card("reject"),
+  card("retry"),
+  card("archive"),
+  card("confirm_not_sent"),
+  card("edit_draft"),
+  card("fetch_mail", { summary: { type: "fetch_mail", accounts: 2, limit: 50 } }),
+  card("mail_limit", { summary: { type: "mail_limit", current: 50, new: 100 } }),
+  card("rename_account", { summary: { type: "rename_account", current_label: "Cuenta A", new_label: "Cuenta B" } }),
+  card("sender_preference", { summary: { type: "sender_preference", key: "ventas@ejemplo.test" } }),
+];
+
+test("cada tipo de propuesta tiene encabezado, efecto, verbo y nombre de botón propios", () => {
+  for (const kind of T.PROPOSAL_KINDS) assert.ok(CARDS.some((c) => c.kind === kind), kind);
+  const headings = new Set();
+  const verbs = new Set();
+  const effects = new Set();
+  for (const c of CARDS) {
+    const heading = T.proposalHeading(c.kind, c.effect);
+    assert.ok(heading.startsWith("Propuesta: "), heading);
+    headings.add(heading);
+    verbs.add(T.proposalVerb(c.kind, c.effect));
+    effects.add(T.proposalEffectText(c.kind, c.effect, c.summary));
+    assert.ok(T.proposalButtonName(c).length > 0);
+  }
+  assert.equal(headings.size, CARDS.length);
+  assert.equal(verbs.size, CARDS.length);
+  assert.equal(effects.size, CARDS.length);
+});
+
+test("ningún verbo de botón es genérico y el nombre accesible empieza por el verbo visible", () => {
+  const generic = /^(aceptar|ok|sí|si|confirmar|continuar|aprobar)$/i;
+  for (const c of CARDS) {
+    const verb = T.proposalVerb(c.kind, c.effect);
+    assert.ok(!generic.test(verb), verb);
+    assert.ok(T.proposalButtonName(c).startsWith(verb), `${verb} / ${T.proposalButtonName(c)}`);
+  }
+  assert.equal(T.proposalVerb("approve", "send_mail"), "Enviar");
+  assert.equal(T.proposalVerb("approve", "register_invoice"), "Registrar");
+  assert.equal(T.proposalVerb("edit_draft", "none"), "Guardar borrador");
+  assert.equal(T.proposalVerb("reject", "none"), "Descartar tarea");
+});
+
+test("el nombre del botón incluye la acción y su destino", () => {
+  assert.equal(T.proposalButtonName(CARDS[0]), "Enviar la respuesta a cliente.beta@ejemplo.test");
+  assert.equal(T.proposalButtonName(CARDS[1]), "Registrar la factura Alfa SL F-2");
+  assert.ok(T.proposalButtonName(card("reject")).includes("«Cambio de horario»"));
+  assert.ok(T.proposalDismissName(CARDS[0]).startsWith("No hacerlo: "));
+  assert.ok(T.proposalDismissName(CARDS[0]).includes("enviar esta respuesta"));
+});
+
+test("las acciones con efecto externo nombran el efecto", () => {
+  assert.ok(T.proposalEffectText("approve", "send_mail").includes("enviará"));
+  assert.ok(T.proposalEffectText("approve", "register_invoice").includes("registrará"));
+  // Guardar un borrador no envía nada, y lo dice.
+  const edit = T.proposalEffectText("edit_draft", "none");
+  assert.ok(edit.includes("solo guardará") && edit.includes("No enviará nada"));
+  assert.equal(T.proposalTone("approve"), "primary");
+  assert.equal(T.proposalTone("reject"), "danger");
+  assert.equal(T.proposalTone("mail_limit"), "plain");
+});
+
+test("la línea fija dice que nada se ha hecho y que solo cuenta el botón", () => {
+  assert.equal(T.PROPOSAL_NOTHING_DONE, "Nada se ha hecho todavía. Solo se ejecuta si usted pulsa el botón.");
+});
+
+test("cada estado final tiene su texto", () => {
+  assert.equal(T.proposalFinalText(card("approve", { status: "rejected" })), "No se hizo: usted la descartó.");
+  assert.equal(T.proposalFinalText(card("approve", { status: "expired" })), "Caducó sin confirmarse. Pídala de nuevo si la necesita.");
+  assert.equal(
+    T.proposalFinalText(card("approve", { status: "stale" })),
+    "La tarea cambió después de preparar esta propuesta. Pídala de nuevo para ver los datos actuales.",
+  );
+  assert.ok(T.proposalFinalText(card("approve", { status: "failed" })).startsWith("No se hizo nada"));
+  assert.equal(T.proposalFinalText(card("approve", { status: "pending" })), null);
+  assert.equal(T.proposalFinalText(card("approve", { status: "confirmed" })), null);
+  for (const status of ["pending", "executing", "confirmed", "rejected", "expired", "stale", "failed"]) assert.notEqual(T.proposalStatusLabel(status), status);
+  assert.equal(T.proposalIsOpen("pending"), true);
+  assert.equal(T.proposalIsOpen("executing"), true);
+  assert.equal(T.proposalIsOpen("confirmed"), false);
+});
+
+test("el recibo dice qué se hizo, cuándo y si ya constaba hecho", () => {
+  const confirmed = (kind, effect, result = {}, reconciled = false) =>
+    card(kind, { status: "confirmed", effect, receipt: { confirmed_at: Date.UTC(2026, 10, 10, 9, 30), reconciled, result } });
+  const sent = T.proposalReceiptLines(confirmed("approve", "send_mail"));
+  assert.ok(sent[0].startsWith("Enviado el "), sent[0]);
+  assert.ok(sent.some((l) => l.includes("entrega al destinatario no se comprueba")));
+  assert.ok(T.proposalReceiptLines(confirmed("approve", "register_invoice"))[0].startsWith("Registrada el "));
+  assert.ok(T.proposalReceiptLines(confirmed("edit_draft", "none"))[0].startsWith("Borrador guardado el "));
+  assert.ok(T.proposalReceiptLines(confirmed("edit_draft", "none")).some((l) => l.includes("No se ha enviado nada")));
+  assert.ok(T.proposalReceiptLines(confirmed("mail_limit", "none", { limit: 100 }))[0].includes("a 100"));
+  const again = T.proposalReceiptLines(confirmed("archive", "none", {}, true));
+  assert.ok(again.includes("La acción ya constaba como hecha y no se repitió."));
+  assert.ok(!T.proposalReceiptLines(confirmed("archive", "none")).some((l) => l.includes("no se repitió")));
+  // Sin confirmar no hay recibo.
+  assert.deepEqual(T.proposalReceiptLines(card("approve")), []);
+});
+
+test("el mensaje de error dice qué pasó con la propuesta", () => {
+  assert.equal(
+    T.proposalErrorText("hay importes que no se leen sin duda.", "pending"),
+    "Hay importes que no se leen sin duda. La propuesta sigue pendiente: no se ha hecho nada.",
+  );
+  assert.ok(T.proposalErrorText("sin conexión", "executing").includes("lo comprobará antes de repetirlo"));
+  assert.equal(T.proposalErrorText("la propuesta caducó; pídala de nuevo", "expired"), "La propuesta caducó; pídala de nuevo.");
+  assert.equal(T.proposalErrorText("", null), "No se pudo confirmar.");
+  assert.ok(T.proposalDismissErrorText("x").startsWith("No se pudo descartar"));
+});
+
+test("avisos del correo: destinatario automático e intento sin confirmar", () => {
+  assert.equal(T.recipientSignalsText(null), null);
+  assert.equal(T.recipientSignalsText([]), null);
+  assert.ok(T.recipientSignalsText(["noreply_address"]).includes("no admite respuestas"));
+  assert.ok(T.recipientSignalsText(["algo_nuevo"]).includes("dirección automática"));
+  assert.ok(T.emailIssueText("unconfirmed_attempt", 2).includes("versión 2"));
+  assert.ok(T.emailIssueText("no_recipient").includes("no tiene destinatario"));
+  assert.equal(T.emailIssueText("otra"), null);
+});
+
+test("detecta las marcas de datos protegidos sin repetirlas y en orden", () => {
+  assert.deepEqual(T.maskedMarksIn("El IBAN es [IBAN] y el teléfono [TELÉFONO]; otra vez [IBAN]."), ["[IBAN]", "[TELÉFONO]"]);
+  assert.deepEqual(T.maskedMarksIn("Escriba a [CORREO] o vea [URL]."), ["[CORREO]", "[URL]"]);
+  assert.deepEqual(T.maskedMarksIn("Sin datos protegidos. [otra cosa] [iban]"), []);
+  assert.deepEqual(T.maskedMarksIn(""), []);
+  assert.deepEqual(T.maskedMarksIn(undefined), []);
+  for (const mark of ["[ID]", "[CLAVE]", "[TARJETA]"]) assert.deepEqual(T.maskedMarksIn(`dato ${mark}`), [mark]);
+  assert.equal(T.maskedNote([]), null);
+  const note = T.maskedNote(["[IBAN]", "[TELÉFONO]"]);
+  assert.ok(note.includes("[IBAN] y [TELÉFONO]") && note.includes("no se enviaron a la IA") && note.includes("abriendo el documento"));
+});
+
+test("historial: etiquetas de las propuestas y marca «Desde el chat»", () => {
+  assert.equal(T.ASSISTANT_ACTION_LABEL.assistant_proposal, "Propuesta del asistente");
+  for (const status of ["created", "confirmed", "rejected", "expired", "stale", "failed"]) {
+    const label = auditStatusLabel("assistant_proposal", status);
+    assert.notEqual(label, status);
+    assert.ok(!/[<>]/.test(label));
+  }
+  assert.equal(T.CHAT_ORIGIN_LABEL, "Desde el chat");
+  assert.equal(T.isFromChat("chat"), true);
+  assert.equal(T.isFromChat(null), false);
+  assert.equal(T.isFromChat(undefined), false);
+  const detail = T.assistantAuditText("assistant_proposal", JSON.stringify({ kind: "approve", task_id: 4, effect: "send_mail", code: null }), "confirmed");
+  assert.equal(detail, "Enviar esta respuesta · envía un correo");
+  const reconciled = T.assistantAuditText("assistant_proposal", JSON.stringify({ kind: "archive", task_id: 4, effect: "none", code: "reconciled" }), "confirmed");
+  assert.ok(reconciled.includes("ya constaba hecha"));
+});
+
+test("los textos de las propuestas no contienen HTML", () => {
+  const texts = [
+    T.PROPOSAL_NOTHING_DONE,
+    T.CARD_DISMISS,
+    T.PROPOSAL_EXECUTING,
+    T.PROPOSAL_OPEN_TASK,
+    T.PROPOSAL_STUCK_TEXT,
+    T.AMOUNTS_CHECKED_LABEL,
+    T.AMOUNTS_REQUIRED_HINT,
+    T.BODY_LABEL,
+    T.CURRENT_TEXT_LABEL,
+    T.NEW_TEXT_LABEL,
+    T.PROPOSAL_LIVE_LABEL,
+    T.CHAT_ORIGIN_LABEL,
+    T.maskedNote(T.MASK_MARKS.slice()),
+    ...CARDS.flatMap((c) => [T.proposalHeading(c.kind, c.effect), T.proposalVerb(c.kind, c.effect), T.proposalEffectText(c.kind, c.effect, c.summary), T.proposalButtonName(c), T.proposalDismissName(c)]),
+    ...["rejected", "expired", "stale", "failed"].map((status) => T.proposalFinalText(card("approve", { status }))),
+    ...["pending", "executing", "confirmed", "rejected", "expired", "stale", "failed"].map(T.proposalStatusLabel),
+    T.proposalErrorText("x", "pending"),
+    T.recipientSignalsText(["noreply_address"]),
+    T.emailIssueText("unconfirmed_attempt", 1),
+  ];
+  for (const text of texts) assert.ok(!/[<>]|&\w+;/.test(text), text);
+});

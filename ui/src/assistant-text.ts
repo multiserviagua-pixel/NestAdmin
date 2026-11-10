@@ -501,7 +501,16 @@ export function localFallbackLine(on: boolean): string {
 export const ASSISTANT_ACTION_LABEL: Record<string, string> = {
   assistant_turn: "Pregunta al asistente",
   assistant_cleared: "Conversaciones del asistente borradas",
+  assistant_proposal: "Propuesta del asistente",
 };
+
+/** Marca junto a una acción del Historial ejecutada desde una tarjeta del chat (`origin` = `chat`, D185). */
+export const CHAT_ORIGIN_LABEL = "Desde el chat";
+
+/** ¿La entrada del Historial viene de una tarjeta del chat? */
+export function isFromChat(origin: string | null | undefined): boolean {
+  return origin === "chat";
+}
 
 const TOOL_LABEL: Record<string, string> = {
   search: "buscar documentos",
@@ -524,6 +533,7 @@ export function assistantAuditText(action: string, detail: string | null, status
       const n = typeof d.conversations === "number" ? d.conversations : 0;
       return `${d.scope === "all" ? "Todas las conversaciones" : "Una conversación"}. ${clearedText(n)}`;
     }
+    if (action === "assistant_proposal") return proposalAuditText(d);
     if (action !== "assistant_turn") return detail;
     const parts: string[] = [];
     const steps = typeof d.steps === "number" ? d.steps : 0;
@@ -549,4 +559,340 @@ export function assistantAuditText(action: string, detail: string | null, status
   } catch {
     return detail;
   }
+}
+
+// ---- Propuestas del asistente (E3, D185-D187): tarjetas con botón ----
+// La aplicación compone la tarjeta con los datos reales del equipo; el modelo no la redacta ni la confirma.
+// Nada se ejecuta hasta que la persona pulsa el botón de la tarjeta: un «sí» escrito en el chat no confirma nada.
+
+export interface ProposalLike {
+  kind: string;
+  status: string;
+  effect: string;
+  summary: Record<string, any>;
+  receipt?: { confirmed_at: number; reconciled: boolean; result: Record<string, any> } | null;
+}
+
+export const PROPOSAL_KINDS = [
+  "approve",
+  "reject",
+  "retry",
+  "archive",
+  "confirm_not_sent",
+  "edit_draft",
+  "fetch_mail",
+  "mail_limit",
+  "rename_account",
+  "sender_preference",
+] as const;
+
+export const PROPOSAL_NOTHING_DONE = "Nada se ha hecho todavía. Solo se ejecuta si usted pulsa el botón.";
+export const CARD_DISMISS = "No hacerlo";
+export const PROPOSAL_EXECUTING = "Ejecutando…";
+export const PROPOSAL_OPEN_TASK = "Abrir la tarea";
+export const PROPOSAL_LIVE_LABEL = "Estado de la propuesta";
+export const AMOUNTS_CHECKED_LABEL = "He comprobado los importes con el documento";
+export const AMOUNTS_REQUIRED_HINT = "Para registrar la factura, marque antes que ha comprobado los importes con el documento.";
+export const BODY_LABEL = "Texto completo del correo";
+export const CURRENT_TEXT_LABEL = "Texto actual";
+export const NEW_TEXT_LABEL = "Texto propuesto por la IA";
+export const PROPOSAL_STUCK_TEXT =
+  "Un intento anterior no terminó y no consta si se hizo. Si pulsa el botón, NestAdmin comprobará primero si ya se hizo y no lo repetirá.";
+
+/** Qué es la propuesta, dicho con claridad y sin dar nada por hecho. */
+export function proposalHeading(kind: string, effect?: string): string {
+  switch (kind) {
+    case "approve":
+      return effect === "register_invoice" ? "Propuesta: registrar esta factura" : "Propuesta: enviar esta respuesta";
+    case "reject":
+      return "Propuesta: descartar esta tarea";
+    case "retry":
+      return "Propuesta: reintentar esta tarea";
+    case "archive":
+      return "Propuesta: archivar este correo";
+    case "confirm_not_sent":
+      return "Propuesta: confirmar que el correo no se envió";
+    case "edit_draft":
+      return "Propuesta: cambiar el borrador";
+    case "fetch_mail":
+      return "Propuesta: consultar el correo ahora";
+    case "mail_limit":
+      return "Propuesta: cambiar el límite de lectura";
+    case "rename_account":
+      return "Propuesta: cambiar el nombre de una cuenta";
+    case "sender_preference":
+      return "Propuesta: guardar una preferencia de remitente";
+    default:
+      return "Propuesta del asistente";
+  }
+}
+
+/** Verbo exacto del botón principal; nunca un genérico. */
+export function proposalVerb(kind: string, effect?: string): string {
+  switch (kind) {
+    case "approve":
+      return effect === "register_invoice" ? "Registrar" : "Enviar";
+    case "reject":
+      return "Descartar tarea";
+    case "retry":
+      return "Reintentar";
+    case "archive":
+      return "Archivar";
+    case "confirm_not_sent":
+      return "Confirmar que no se envió";
+    case "edit_draft":
+      return "Guardar borrador";
+    case "fetch_mail":
+      return "Consultar correo";
+    case "mail_limit":
+      return "Cambiar límite";
+    case "rename_account":
+      return "Cambiar nombre";
+    case "sender_preference":
+      return "Guardar preferencia";
+    default:
+      return "Confirmar";
+  }
+}
+
+/** Estilo del botón principal: enviar y registrar son `primary`, descartar es `danger`, el resto es corriente. */
+export function proposalTone(kind: string): "primary" | "danger" | "plain" {
+  if (kind === "approve") return "primary";
+  if (kind === "reject") return "danger";
+  return "plain";
+}
+
+const numberText = (n: unknown): string => (typeof n === "number" && Number.isFinite(n) ? String(n) : "?");
+
+/** Lo que ocurrirá al confirmar; nombra el efecto externo cuando lo hay. */
+export function proposalEffectText(kind: string, effect?: string, summary: Record<string, any> = {}): string {
+  switch (kind) {
+    case "approve":
+      return effect === "register_invoice" ? "Al confirmar, NestAdmin registrará esta factura." : "Al confirmar, NestAdmin enviará este correo.";
+    case "reject":
+      return "Al confirmar, la tarea se descartará y dejará de estar pendiente. No se envía ni se registra nada.";
+    case "retry":
+      return "Al confirmar, NestAdmin volverá a procesar esta tarea desde el principio.";
+    case "archive":
+      return "Al confirmar, NestAdmin archivará el correo sin responderlo y sin enviar nada.";
+    case "confirm_not_sent":
+      return "Al confirmar, NestAdmin dará por no enviado el intento anterior y se podrá preparar otra versión. Confírmelo solo si ha comprobado que el correo no salió.";
+    case "edit_draft":
+      return "Al confirmar, NestAdmin solo guardará el texto propuesto como borrador nuevo. No enviará nada: enviar es otro paso, con su propia revisión.";
+    case "fetch_mail":
+      return `Al confirmar, NestAdmin consultará ahora el correo de ${numberText(summary.accounts)} ${plural(Number(summary.accounts), "cuenta", "cuentas")} y traerá los mensajes nuevos. Límite de lectura actual: ${numberText(summary.limit)}.`;
+    case "mail_limit":
+      return `Al confirmar, el límite de lectura pasará de ${numberText(summary.current)} a ${numberText(summary.new)}.`;
+    case "rename_account":
+      return `Al confirmar, la cuenta pasará a llamarse «${String(summary.new_label ?? "")}»${summary.current_label ? ` en lugar de «${String(summary.current_label)}»` : ""}.`;
+    case "sender_preference":
+      return "Al confirmar, NestAdmin guardará esta preferencia para los correos nuevos de ese remitente. No cambia los que ya están en la lista.";
+    default:
+      return "Al confirmar, NestAdmin hará lo que indica esta tarjeta.";
+  }
+}
+
+const quoted = (text: unknown): string => `«${String(text ?? "").trim()}»`;
+
+/** Título de la tarea de la propuesta, si la hay. */
+export function proposalTaskTitle(summary: Record<string, any>): string {
+  const title = String(summary?.task?.title ?? "").trim();
+  return title || "sin título";
+}
+
+/** Nombre accesible del botón principal: la acción y su destino. */
+export function proposalButtonName(card: ProposalLike): string {
+  const s = card.summary ?? {};
+  switch (card.kind) {
+    case "approve":
+      if (card.effect === "register_invoice") {
+        const what = [s.supplier, s.invoice_number]
+          .map((x) => String(x ?? "").trim())
+          .filter(Boolean)
+          .join(" ");
+        return what ? `Registrar la factura ${what}` : "Registrar la factura";
+      }
+      return Array.isArray(s.to) && s.to.length ? `Enviar la respuesta a ${s.to.join(", ")}` : "Enviar la respuesta";
+    case "reject":
+      return `Descartar tarea: ${quoted(proposalTaskTitle(s))}`;
+    case "retry":
+      return `Reintentar la tarea ${quoted(proposalTaskTitle(s))}`;
+    case "archive":
+      return `Archivar el correo ${quoted(proposalTaskTitle(s))}`;
+    case "confirm_not_sent":
+      return `Confirmar que no se envió el correo ${quoted(proposalTaskTitle(s))}`;
+    case "edit_draft":
+      return `Guardar borrador nuevo de ${quoted(proposalTaskTitle(s))}`;
+    case "fetch_mail":
+      return "Consultar correo ahora";
+    case "mail_limit":
+      return `Cambiar límite de lectura de ${numberText(s.current)} a ${numberText(s.new)}`;
+    case "rename_account":
+      return `Cambiar nombre de la cuenta ${quoted(s.current_label)} a ${quoted(s.new_label)}`;
+    case "sender_preference":
+      return `Guardar preferencia del remitente ${String(s.key ?? "")}`;
+    default:
+      return proposalVerb(card.kind, card.effect);
+  }
+}
+
+/** Nombre accesible de «No hacerlo»: dice qué propuesta se descarta. */
+export function proposalDismissName(card: ProposalLike): string {
+  return `${CARD_DISMISS}: ${proposalHeading(card.kind, card.effect).replace(/^Propuesta: /, "")}`;
+}
+
+/** La propuesta sigue esperando a la persona (o a que termine la ejecución). */
+export function proposalIsOpen(status: string): boolean {
+  return status === "pending" || status === "executing";
+}
+
+/** Texto de los estados finales que no son un recibo; `null` si no aplica. */
+export function proposalFinalText(card: ProposalLike): string | null {
+  switch (card.status) {
+    case "rejected":
+      return "No se hizo: usted la descartó.";
+    case "expired":
+      return "Caducó sin confirmarse. Pídala de nuevo si la necesita.";
+    case "stale":
+      return "La tarea cambió después de preparar esta propuesta. Pídala de nuevo para ver los datos actuales.";
+    case "failed":
+      return "No se hizo nada: la acción ya no era posible con el estado actual de la tarea. Pídala de nuevo si la necesita.";
+    default:
+      return null;
+  }
+}
+
+/** Etiqueta corta del estado, para el chip de la tarjeta. */
+export function proposalStatusLabel(status: string): string {
+  switch (status) {
+    case "pending":
+      return "Pendiente de su decisión";
+    case "executing":
+      return "Ejecutándose";
+    case "confirmed":
+      return "Hecho";
+    case "rejected":
+      return "Descartada";
+    case "expired":
+      return "Caducada";
+    case "stale":
+      return "Obsoleta";
+    case "failed":
+      return "No se pudo hacer";
+    default:
+      return status;
+  }
+}
+
+function receiptHeadline(card: ProposalLike): string {
+  const result = card.receipt?.result ?? {};
+  switch (card.kind) {
+    case "approve":
+      return card.effect === "register_invoice" ? "Registrada" : "Enviado";
+    case "edit_draft":
+      return "Borrador guardado";
+    case "reject":
+      return "Tarea descartada";
+    case "retry":
+      return "Tarea puesta a reintentar";
+    case "archive":
+      return "Correo archivado";
+    case "confirm_not_sent":
+      return "Confirmado que el correo no se envió";
+    case "fetch_mail":
+      return typeof result.added === "number" ? `Correo consultado: ${result.added} ${plural(result.added, "mensaje nuevo", "mensajes nuevos")}` : "Correo consultado";
+    case "mail_limit":
+      return typeof result.limit === "number" ? `Límite de lectura cambiado a ${result.limit}` : "Límite de lectura cambiado";
+    case "rename_account":
+      return result.label ? `Cuenta renombrada a «${String(result.label)}»` : "Cuenta renombrada";
+    case "sender_preference":
+      return result.changed === false ? "La preferencia ya estaba así" : "Preferencia guardada";
+    default:
+      return "Hecho";
+  }
+}
+
+/** Qué se hizo y cuándo, tomado del recibo; vacío si la propuesta no está confirmada. */
+export function proposalReceiptLines(card: ProposalLike): string[] {
+  if (card.status !== "confirmed" || !card.receipt) return [];
+  const when = formatStamp(card.receipt.confirmed_at);
+  const lines = [`${receiptHeadline(card)}${when ? ` el ${when}` : ""}.`];
+  if (card.kind === "approve" && card.effect === "send_mail") lines.push("La entrega al destinatario no se comprueba.");
+  if (card.kind === "edit_draft") lines.push("No se ha enviado nada: enviar es otro paso.");
+  if (card.receipt.reconciled) lines.push("La acción ya constaba como hecha y no se repitió.");
+  return lines;
+}
+
+const trimmedReason = (error: unknown): string => String(error ?? "").trim().replace(/[.\s]+$/, "");
+
+/** Mensaje de un fallo al confirmar: el motivo del fondo y qué pasó con la propuesta. */
+export function proposalErrorText(error: unknown, status: string | null): string {
+  const raw = trimmedReason(error);
+  const reason = raw ? `${raw.charAt(0).toUpperCase()}${raw.slice(1)}.` : "No se pudo confirmar.";
+  if (status === "executing") return `${reason} No consta si llegó a hacerse: al volver a pulsar el botón, NestAdmin lo comprobará antes de repetirlo.`;
+  if (status === "pending") return `${reason} La propuesta sigue pendiente: no se ha hecho nada.`;
+  return reason;
+}
+
+export function proposalDismissErrorText(error: unknown): string {
+  const raw = trimmedReason(error);
+  return raw ? `No se pudo descartar: ${raw}.` : "No se pudo descartar la propuesta.";
+}
+
+/** Aviso sobre los destinatarios de un borrador (señales de dirección automática); `null` si no hay. */
+export function recipientSignalsText(signals: unknown): string | null {
+  const codes = Array.isArray(signals) ? signals.filter((c): c is string => typeof c === "string") : [];
+  if (!codes.length) return null;
+  const reasons: Record<string, string> = {
+    noreply_address: "una dirección que no admite respuestas",
+    bounce_address: "una dirección de rebotes",
+    null_return_path: "una dirección de rebotes",
+    auto_submitted: "un remitente automático",
+    precedence_junk: "un remitente de correo no solicitado",
+    list_id: "una lista de distribución",
+    list_unsubscribe: "una lista de distribución",
+    precedence_bulk: "un envío masivo",
+    precedence_list: "una lista de distribución",
+  };
+  const known = [...new Set(codes.map((c) => reasons[c]).filter((r): r is string => Boolean(r)))];
+  const what = known.length ? known.join(", ") : "una dirección automática";
+  return `Algún destinatario parece ${what}: es probable que nadie lea la respuesta. Compruébelo antes de enviar.`;
+}
+
+/** Texto de las incidencias propias de una propuesta de correo, por su código. */
+export function emailIssueText(code: string, version?: unknown): string | null {
+  if (code === "unconfirmed_attempt") return `Ya se intentó la versión ${numberText(version)} y no consta confirmado: confirmar reintenta sin repetirlo.`;
+  if (code === "no_recipient") return "El borrador no tiene destinatario y no se puede enviar.";
+  return null;
+}
+
+/** Detalle del Historial de un evento `assistant_proposal`, en palabras; sin texto de correos ni de documentos. */
+export function proposalAuditText(d: Record<string, unknown>): string {
+  const what = typeof d.kind === "string" ? proposalHeading(d.kind, typeof d.effect === "string" ? d.effect : undefined).replace(/^Propuesta: /, "") : "propuesta";
+  const effect = d.effect === "send_mail" ? "envía un correo" : d.effect === "register_invoice" ? "registra una factura" : "sin envío ni registro";
+  const code = typeof d.code === "string" && d.code ? (d.code === "reconciled" ? " · ya constaba hecha y no se repitió" : ` · motivo: ${d.code}`) : "";
+  return `${what.charAt(0).toUpperCase()}${what.slice(1)} · ${effect}${code}`;
+}
+
+// ---- Datos protegidos en las respuestas (D183) ----
+
+/** Marcas con las que el enmascarado local sustituye los datos protegidos antes de enviarlos a la IA. */
+export const MASK_MARKS = ["[IBAN]", "[TELÉFONO]", "[CORREO]", "[ID]", "[CLAVE]", "[TARJETA]", "[URL]"] as const;
+
+/** Las marcas de enmascarado que contiene el texto, sin repetir y en el orden en que aparecen. */
+export function maskedMarksIn(text: string): string[] {
+  const body = String(text ?? "");
+  const found: Array<{ mark: string; at: number }> = [];
+  for (const mark of MASK_MARKS) {
+    const at = body.indexOf(mark);
+    if (at >= 0) found.push({ mark, at });
+  }
+  return found.sort((a, b) => a.at - b.at).map((f) => f.mark);
+}
+
+/** Nota bajo una respuesta que contiene marcas: el dato no se envió a la IA y se ve en el documento. */
+export function maskedNote(marks: readonly string[]): string | null {
+  if (!marks.length) return null;
+  const list = marks.length > 1 ? `${marks.slice(0, -1).join(", ")} y ${marks[marks.length - 1]}` : marks[0];
+  return `Los datos que aparecen como ${list} no se enviaron a la IA, para protegerlos. Puede verlos abriendo el documento en su tarjeta.`;
 }

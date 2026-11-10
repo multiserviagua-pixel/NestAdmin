@@ -2339,37 +2339,99 @@ const proposalCards = new Map<number, ProposalCard>();
 /** Propuestas de cada turno de respuesta, por su identificador. */
 const proposalsByTurn = new Map<number, number[]>();
 
-/** Tres propuestas de ejemplo: aprobar un correo, aprobar una factura con importe dudoso y editar un borrador. */
-function newMockProposals(): ProposalCard[] {
+/** Tarea de correo en revisión con un borrador, para que la propuesta apunte a una tarea que existe en la vista previa. */
+function mockProposalEmail(subject: string, from: string, body: string, draftBody: string): Task {
+  const id = `simulador:M-prop-${nextProposal}-${tasks.length}`;
+  return task("email", { message_id: id, account: "simulador" }, "awaiting_review", {
+    type: "email", version: 1, origin: origin("simulador"),
+    message: { id, subject, from, to: ["administracion@nestadmin.test"], body, date: "2026-10-06", signals: [] },
+    category: "consulta_pago", needs_reply: true, draft_flags: [],
+    draft: { to: [from], subject: `Re: ${subject}`, body: draftBody },
+    provider: "ollama", model: "qwen3:8b", review_reason: "ninguna regla activa coincide", action: { kind: "send_draft" },
+  });
+}
+
+function mockProposalInvoice(): Task {
+  const name = "factura-alfa-f2.pdf";
+  return task("invoice", { document: name }, "awaiting_review", {
+    ...invoiceResult(name, "1210.00", ["amount_to_review"], fileOrigin(name, null, 3)),
+    fields: { supplier: "Alfa SL", invoice_number: "F-2", date: "2026-10-02", subtotal: "1000.00", tax: "210.00", total: "1210.00", currency: "EUR" },
+    recovered: [{ field: "subtotal", literal: "1.000", evidence: "1.000", value: "1000.00", reason: "ambiguous_separator" }],
+    amount_review: "Hay importes que no se leen sin duda en «factura-alfa-f2.pdf»: la base imponible dice «1.000» y se propone 1000.00. Compruébelos con el original antes de aprobar.",
+    review_reason: "importe dudoso",
+  });
+}
+
+/**
+ * Propuestas de ejemplo (todo inventado). `kinds` elige cuáles: `send` (enviar un correo), `invoice` (factura con
+ * importe dudoso: casilla obligatoria), `edit` (cambiar un borrador) y `reject` (descartar una tarea). `edit` y
+ * `reject` juntos apuntan a la misma tarea: confirmar una deja la otra obsoleta.
+ */
+function newMockProposals(kinds: ReadonlySet<string>): ProposalCard[] {
   const created = now();
   const expires = created + 24 * 3600 * 1000;
-  const block = (id: number, kind: string, title: string) => ({ id, kind, title, state: "awaiting_review", version: 1 });
-  const cards: ProposalCard[] = [
-    {
-      id: nextProposal++, kind: "approve", status: "pending", task_id: 901, seen_version: 1, created_at: created, expires_at: expires, effect: "send_mail", receipt: null,
+  const block = (t: Task, title: string) => ({ id: t.id, kind: t.kind, title, state: t.state, version: t.result?.version ?? 1 });
+  const base = { status: "pending" as const, created_at: created, expires_at: expires, receipt: null };
+  const cards: ProposalCard[] = [];
+  if (kinds.has("send")) {
+    const t = mockProposalEmail("Consulta sobre el pedido 2231", "cliente.beta@ejemplo.test", "¿Cuándo saldrá mi pedido 2231?", "Buenos días:\n\nLe confirmamos que el pedido 2231 saldrá el jueves.\n\nUn saludo.");
+    cards.push({
+      ...base, id: nextProposal++, kind: "approve", task_id: t.id, seen_version: 1, effect: "send_mail",
       summary: {
-        type: "email", version: 1, task: block(901, "email", "Consulta sobre el pedido 2231"), from: "cliente.beta@ejemplo.test", original_subject: "Consulta sobre el pedido 2231",
-        to: ["cliente.beta@ejemplo.test"], subject: "Re: Consulta sobre el pedido 2231",
-        body: "Buenos días:\n\nLe confirmamos que el pedido 2231 saldrá el jueves.\n\nUn saludo.", category: "consulta_pago", issues: [], draft_flags: [], recipient_signals: null, review_reason: "ninguna regla activa coincide",
+        type: "email", version: 1, task: block(t, "Consulta sobre el pedido 2231"), from: "cliente.beta@ejemplo.test", original_subject: "Consulta sobre el pedido 2231",
+        to: ["cliente.beta@ejemplo.test", "logistica@transportes-delta.test"], subject: "Re: Consulta sobre el pedido 2231",
+        body: t.result?.draft.body, category: "consulta_pago", issues: [], draft_flags: [], recipient_signals: ["noreply_address"], review_reason: "ninguna regla activa coincide",
       },
-    },
-    {
-      id: nextProposal++, kind: "approve", status: "pending", task_id: 902, seen_version: 1, created_at: created, expires_at: expires, effect: "register_invoice", receipt: null,
+    });
+  }
+  if (kinds.has("invoice")) {
+    const t = mockProposalInvoice();
+    cards.push({
+      ...base, id: nextProposal++, kind: "approve", task_id: t.id, seen_version: 1, effect: "register_invoice",
       summary: {
-        type: "invoice", version: 1, task: block(902, "invoice", "Alfa SL F-2"), document: "factura-alfa-f2.pdf", supplier: "Alfa SL", invoice_number: "F-2", date: "2026-10-02",
-        subtotal: "1.000", tax: "210,00", total: "1.210,00", currency: "EUR", issues: ["amount_to_review"], duplicates: [],
-        amount_review: "Hay importes que no se leen sin duda en «factura-alfa-f2.pdf»: el documento dice «1.000» y se propone 1000.00. Compruébelos con el original antes de aprobar.",
-        recovered: [{ field: "subtotal", literal: "1.000", value: "1000.00", reason: "thousands_or_decimal" }], unreadable: [], recovery: null, review_reason: "importe dudoso",
+        type: "invoice", version: 1, task: block(t, "Alfa SL F-2"), document: "factura-alfa-f2.pdf", supplier: "Alfa SL", invoice_number: "F-2", date: "2026-10-02",
+        subtotal: "1000.00", tax: "210.00", total: "1210.00", currency: "EUR", issues: ["amount_to_review"], duplicates: [],
+        amount_review: t.result?.amount_review, recovered: t.result?.recovered, unreadable: [], recovery: null, review_reason: "importe dudoso",
       },
-    },
-    {
-      id: nextProposal++, kind: "edit_draft", status: "pending", task_id: 903, seen_version: 1, created_at: created, expires_at: expires, effect: "none", receipt: null,
+    });
+  }
+  let shared: Task | null = null;
+  if (kinds.has("edit")) {
+    shared = mockProposalEmail("Cambio de horario", "logistica@transportes-delta.test", "El horario de recogida cambia a partir del lunes.", "Recibido, gracias.");
+    cards.push({
+      ...base, id: nextProposal++, kind: "edit_draft", task_id: shared.id, seen_version: 1, effect: "none",
       summary: {
-        type: "edit_draft", version: 1, task: block(903, "email", "Cambio de horario"), to: ["logistica@transportes-delta.test"], subject: "Re: Cambio de horario",
-        current_body: "Recibido, gracias.", new_body: "Recibido, gracias. Tomamos nota del nuevo horario de recogida a partir del lunes.",
+        type: "edit_draft", version: 1, task: block(shared, "Cambio de horario"), to: ["logistica@transportes-delta.test"], subject: "Re: Cambio de horario",
+        current_body: "Recibido, gracias.", new_body: "Recibido, gracias. Tomamos nota del nuevo horario de recogida a partir del lunes.\n\nUn saludo.",
       },
-    },
-  ];
+    });
+  }
+  if (kinds.has("reject")) {
+    const t = shared ?? mockProposalEmail("Oferta de seguros", "ventas@seguros-ejemplo.test", "Le ofrecemos un seguro.", "No nos interesa, gracias.");
+    cards.push({ ...base, id: nextProposal++, kind: "reject", task_id: t.id, seen_version: 1, effect: "none", summary: { type: "reject", task: block(t, t.result?.message?.subject ?? "Oferta de seguros") } });
+  }
+  for (const card of cards) proposalCards.set(card.id, card);
+  return cards;
+}
+
+/** Una tarjeta en cada estado final, sobre una tarea ya completada (pregunta «estados»). */
+function mockFinalStateCards(): ProposalCard[] {
+  const t = task("email", { message_id: `simulador:M-fin-${nextProposal}`, account: "simulador" }, "completed", {
+    type: "email", version: 1, origin: origin("simulador"),
+    message: { id: "simulador:M-fin", subject: "Pedido de material", from: "compras@cliente-gamma.test", to: ["administracion@nestadmin.test"], body: "Necesitamos 10 cajas.", date: "2026-10-05", signals: [] },
+    draft: { to: ["compras@cliente-gamma.test"], subject: "Re: Pedido de material", body: "Recibido, las enviamos el lunes." }, review_reason: "ninguna regla activa coincide",
+  });
+  const created = now() - 3600 * 1000;
+  const block = { id: t.id, kind: "email", title: "Pedido de material", state: "completed", version: 1 };
+  const summary = { type: "email", version: 1, task: block, from: "compras@cliente-gamma.test", original_subject: "Pedido de material", to: ["compras@cliente-gamma.test"], subject: "Re: Pedido de material", body: "Recibido, las enviamos el lunes.", category: "otros", issues: [], draft_flags: [], recipient_signals: null, review_reason: "ninguna regla activa coincide" };
+  const make = (status: ProposalCard["status"], extra: Partial<ProposalCard> = {}): ProposalCard => ({
+    id: nextProposal++, kind: "approve", status, task_id: t.id, seen_version: 1, created_at: created, expires_at: created + 24 * 3600 * 1000, effect: "send_mail", summary, receipt: null, ...extra,
+  });
+  const confirmed = make("confirmed");
+  confirmed.receipt = { proposal_id: confirmed.id, kind: "approve", task_id: t.id, task_state: "completed", effect: "send_mail", confirmed_at: created + 60_000, reconciled: false, result: { version: 1 } };
+  const reconciled = make("confirmed", { kind: "archive", effect: "none", summary: { type: "archive", task: block } });
+  reconciled.receipt = { proposal_id: reconciled.id, kind: "archive", task_id: t.id, task_state: "completed", effect: "none", confirmed_at: created + 120_000, reconciled: true, result: {} };
+  const cards = [confirmed, reconciled, make("rejected"), make("expired"), make("stale"), make("failed")];
   for (const card of cards) proposalCards.set(card.id, card);
   return cards;
 }
@@ -2635,13 +2697,31 @@ const handlers: Record<string, (a: any, options?: any) => unknown> = {
         [sentFor(1, false), sentFor(2, true)],
         true,
       );
-    // «propón…» o «prepara…»: tres tarjetas de ejemplo. No se ha ejecutado nada hasta pulsar el botón.
-    if (/propon|prepara/.test(flat))
+    // Datos protegidos: con un proveedor externo la respuesta trae las marcas de enmascarado (D183).
+    if (/protegid|iban|telefono/.test(flat))
       return finish(
-        { ...base, answer: "He preparado tres propuestas. No se ha ejecutado nada: usted decide con el botón de cada tarjeta.", steps: 4, tools: ["list_tasks", "propose_approve", "propose_edit_draft"], proposals: newMockProposals() },
+        { ...base, answer: "El IBAN de Suministros Ejemplo S.L. es [IBAN] y su teléfono de contacto es [TELÉFONO].", citations: structuredClone(found), steps: 2, tools: ["search", "get_document"] },
         [sentFor(1, false), sentFor(2, false)],
         true,
       );
+    // «estados»: una tarjeta en cada estado final (hecha, ya constaba, descartada, caducada, obsoleta, fallida).
+    if (flat.includes("estados"))
+      return finish({ ...base, answer: "Estas son propuestas de ejemplo ya resueltas.", steps: 1, tools: ["list_tasks"], proposals: mockFinalStateCards() }, [sentFor(1, false)], true);
+    // «propón…» o «prepara…»: tarjetas de ejemplo. No se ha ejecutado nada hasta pulsar el botón.
+    if (/propon|prepara/.test(flat)) {
+      const kinds = new Set<string>();
+      if (/enviar|envio|correo|responder/.test(flat)) kinds.add("send");
+      if (/factura|importe|registr/.test(flat)) kinds.add("invoice");
+      if (/borrador|edit|cambi/.test(flat)) kinds.add("edit");
+      if (/descart/.test(flat)) kinds.add("reject");
+      if (!kinds.size) ["send", "invoice", "edit"].forEach((k) => kinds.add(k));
+      return finish(
+        // El texto del modelo puede afirmar que algo se ha hecho: la línea fija de la tarjeta manda.
+        { ...base, answer: "Ya he enviado la respuesta y he registrado la factura, como pidió.\nNota: es un texto de ejemplo del modelo; la tarjeta dice lo que ocurre de verdad.", steps: 4, tools: ["list_tasks", "propose_approve"], proposals: newMockProposals(kinds) },
+        [sentFor(1, false), sentFor(2, false)],
+        true,
+      );
+    }
     const sensitive = flat.includes("sensible");
     return finish(
       {
@@ -2685,12 +2765,25 @@ const handlers: Record<string, (a: any, options?: any) => unknown> = {
     // Como el fondo (D186): sin la casilla de importes, una factura dudosa no se registra y la propuesta sigue pendiente.
     if (card.kind === "approve" && card.summary.amount_review && !amountsChecked)
       throw "hay importes que no se leen sin duda: confirme antes los importes con el documento";
+    // Si la tarea cambió de versión desde que se preparó la propuesta, queda obsoleta y no se ejecuta.
+    const target = card.task_id === null ? undefined : tasks.find((t) => t.id === card.task_id);
+    if (target && (target.result?.version ?? 1) !== card.seen_version) {
+      card.status = "stale";
+      throw "la tarea cambió después de preparar esta propuesta";
+    }
+    if (target) {
+      if (card.kind === "approve") target.state = "completed";
+      else if (card.kind === "reject") target.state = "cancelled";
+      else if (card.kind === "edit_draft") target.result = { ...target.result, version: (target.result?.version ?? 1) + 1, draft: { ...target.result?.draft, body: card.summary.new_body } };
+    }
     const receipt: ProposalReceipt = {
-      proposal_id: card.id, kind: card.kind, task_id: card.task_id, task_state: card.kind === "edit_draft" ? "awaiting_review" : "completed", effect: card.effect,
+      proposal_id: card.id, kind: card.kind, task_id: card.task_id, task_state: target?.state ?? null, effect: card.effect,
       confirmed_at: now(), reconciled: false, result: card.kind === "edit_draft" ? { new_version: 2 } : { version: card.seen_version },
     };
     card.status = "confirmed";
     card.receipt = receipt;
+    // Confirmar cambia la tarea: las demás propuestas pendientes sobre ella quedan obsoletas.
+    for (const other of proposalCards.values()) if (other.id !== card.id && other.task_id !== null && other.task_id === card.task_id && other.status === "pending") other.status = "stale";
     if (card.effect !== "none")
       audit.push({
         task_id: card.task_id, action: card.effect === "send_mail" ? "send_draft" : "register_invoice", status: "confirmed", authorization: "aprobación",

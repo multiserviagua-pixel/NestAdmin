@@ -309,6 +309,7 @@ import {
   REDRAFT_NOTICE,
   REDRAFT_TITLE,
   informativeReason,
+  draftFlagsText,
   informativeTasks,
   isBounce,
   redraftConfirmText,
@@ -319,8 +320,37 @@ import {
   triageNotices,
 } from "./triage-text";
 import { AI_SETTING_ACTION, AI_SETTING_ACTION_LABEL, aiSettingAuditText, aiSettingStatusLabel } from "./ai-settings-text";
-import type { AssistantConsentView, AssistantPreview, AssistantProgress, AssistantSentCall, AssistantStoredTurn, AssistantTurn, QuestionAnswer, SearchHit } from "./types";
+import type { AssistantConsentView, AssistantPreview, AssistantProgress, AssistantSentCall, AssistantStoredTurn, AssistantTurn, ProposalCard, QuestionAnswer, SearchHit } from "./types";
 import {
+  AMOUNTS_CHECKED_LABEL,
+  AMOUNTS_REQUIRED_HINT,
+  BODY_LABEL,
+  CHAT_ORIGIN_LABEL,
+  CURRENT_TEXT_LABEL,
+  NEW_TEXT_LABEL,
+  CARD_DISMISS,
+  PROPOSAL_EXECUTING,
+  PROPOSAL_LIVE_LABEL,
+  PROPOSAL_NOTHING_DONE,
+  PROPOSAL_OPEN_TASK,
+  PROPOSAL_STUCK_TEXT,
+  emailIssueText,
+  isFromChat,
+  maskedMarksIn,
+  maskedNote,
+  proposalButtonName,
+  proposalDismissErrorText,
+  proposalDismissName,
+  proposalEffectText,
+  proposalErrorText,
+  proposalFinalText,
+  proposalHeading,
+  proposalIsOpen,
+  proposalReceiptLines,
+  proposalStatusLabel,
+  proposalTone,
+  proposalVerb,
+  recipientSignalsText,
   ASSISTANT_ACCEPT,
   ASSISTANT_ACTION_LABEL,
   progressText,
@@ -545,6 +575,8 @@ const state = {
     loading: false,
     // «Ver lo enviado»: vista del propio panel con «Volver»; guarda el desplazamiento al que volver.
     sent: null as null | { turnId: number; calls: AssistantSentCall[] | null; error: string | null; scroll: number },
+    // E3 (D185): estado de pantalla de cada tarjeta de propuesta (casilla de importes, ejecución en curso, aviso).
+    proposalUi: {} as Record<number, { checked: boolean; busy: boolean; note: string | null }>,
   },
   // Opción del asistente en Configuración (D183).
   assistantConsent: null as AssistantConsentView | null,
@@ -4421,7 +4453,7 @@ function historyView() {
             [{ label: "Tarea", numeric: true }, { label: "Acción" }, { label: "Resultado" }, { label: "Autorización" }, { label: "Detalle" }],
             entries.map((e) => [
               e.task_id ?? missing("Sin tarea"),
-              ACTION_LABEL[e.action] ?? e.action,
+              isFromChat(e.origin) ? h("span", {}, ACTION_LABEL[e.action] ?? e.action, " ", statusChip(CHAT_ORIGIN_LABEL, "info")) : (ACTION_LABEL[e.action] ?? e.action),
               e.action === AI_SETTING_ACTION ? aiSettingStatusLabel(e.status) : auditStatusLabel(e.action, e.status),
               e.authorization ?? missing(),
               h("div", { class: "detail-cell" }, (e.action === "sender_preference" ? preferenceAuditText(e.detail) : e.action.startsWith("assistant_") ? assistantAuditText(e.action, e.detail, e.status) : e.action === AI_SETTING_ACTION ? aiSettingAuditText(e.action, e.status, e.detail) : e.detail) ?? missing()),
@@ -6787,6 +6819,8 @@ interface AiView {
   words: QuestionAnswer | null;
   /** La pregunta, para ofrecer «Buscar por palabras» tras un error. */
   question: string;
+  /** Tarjetas de las acciones que el asistente preparó en este turno (D185), con su estado actual. */
+  proposals: ProposalCard[];
 }
 
 type ChatTurn =
@@ -6826,6 +6860,7 @@ function aiFromTurn(t: AssistantTurn, question: string, navigated: string | null
     turnId: t.turn_id,
     words: t.words,
     question,
+    proposals: t.proposals ?? [],
   };
 }
 
@@ -6845,6 +6880,7 @@ function aiFromStored(t: AssistantStoredTurn, question: string): AiView {
     turnId: t.id,
     words: null,
     question,
+    proposals: t.proposals ?? [],
   };
 }
 
@@ -6898,6 +6934,8 @@ function openChat() {
   setChatExpanded();
   renderChat({ focus: "chat:input", end: true });
   void loadLastConversation();
+  // Las tarjetas de una conversación ya cargada pueden haber cambiado (la tarea, la caducidad) desde que se cerró el chat.
+  if (state.chat.loaded && state.chat.conversationId !== null) void refreshProposals().then((ok) => ok && renderChat());
 }
 
 /** Primera apertura de la sesión: recupera la última conversación guardada en el equipo (D188). */
@@ -7113,11 +7151,16 @@ function reviewTabOf(task: Task): ReviewTab | null {
  * Informativo; en cualquier otro estado, en la vista Tareas, con su fila resaltada.
  */
 async function openHit(hit: SearchHit, key: string) {
-  let task = state.tasks.find((t) => t.id === hit.task_id);
+  return openTask(hit.task_id, key);
+}
+
+/** Abre la tarea por su identificador (tarjeta de un documento o de una propuesta ya confirmada). */
+async function openTask(taskId: number, key: string) {
+  let task = state.tasks.find((t) => t.id === taskId);
   if (!task) {
     // La lista puede estar desactualizada: se refresca una vez antes de darla por perdida.
     await refresh(true);
-    task = state.tasks.find((t) => t.id === hit.task_id);
+    task = state.tasks.find((t) => t.id === taskId);
   }
   if (!task) {
     state.chat.cardNote = { key, text: NOT_FOUND_TASK };
@@ -7154,13 +7197,17 @@ function locateTask(task: Task) {
 }
 
 async function openOriginalHit(hit: SearchHit, key: string) {
+  return openOriginalTask(hit.task_id, key);
+}
+
+async function openOriginalTask(taskId: number, key: string) {
   if (isPreview) {
     state.chat.cardNote = { key, text: OPEN_ORIGINAL_PREVIEW };
     renderChat();
     return;
   }
   try {
-    await api.openOriginal(hit.task_id);
+    await api.openOriginal(taskId);
     state.chat.cardNote = null;
   } catch (error) {
     state.chat.cardNote = { key, text: originalErrorText(error) };
@@ -7187,6 +7234,329 @@ function chatCard(hit: SearchHit, key: string): HTMLElement {
       : null,
     note ? h("p", { class: "chat-card-error", role: "status" }, note) : null,
   );
+}
+
+// ---- Tarjetas de propuesta del asistente (E3, D185-D187) ----
+// El asistente prepara; la aplicación compone la tarjeta con los datos reales del equipo; solo el botón de la
+// tarjeta confirma. Todo el contenido (también el borrador del modelo y los textos de documentos) se pinta como
+// texto plano. El foco nunca se coloca solo en el botón de confirmar.
+
+const propKey = (id: number, part: string) => `chat:prop:${id}:${part}`;
+
+function proposalUi(id: number) {
+  return (state.chat.proposalUi[id] ??= { checked: false, busy: false, note: null });
+}
+
+function proposalById(id: number): ProposalCard | null {
+  for (const turn of state.chat.turns) {
+    if (turn.role !== "ai") continue;
+    const found = turn.view.proposals.find((c) => c.id === id);
+    if (found) return found;
+  }
+  return null;
+}
+
+/** Pone al día las tarjetas de la conversación con las que llegan del fondo (mismo identificador). */
+function applyProposalCards(cards: ProposalCard[]) {
+  const byId = new Map(cards.map((c) => [c.id, c] as const));
+  for (const turn of state.chat.turns) if (turn.role === "ai") turn.view.proposals = turn.view.proposals.map((c) => byId.get(c.id) ?? c);
+}
+
+/** Estado actual de las tarjetas de la conversación: confirmar una puede dejar obsoletas otras de la misma tarea. */
+async function refreshProposals(): Promise<boolean> {
+  const id = state.chat.conversationId;
+  if (id === null) return false;
+  try {
+    applyProposalCards(await api.assistantProposals(id));
+    return true;
+  } catch {
+    // Se conserva lo que ya se muestra.
+    return false;
+  }
+}
+
+/** Una factura con importe dudoso exige la casilla de importes antes de registrarla (D120, D186). */
+function proposalNeedsAck(card: ProposalCard): boolean {
+  return card.kind === "approve" && card.summary?.type === "invoice" && Boolean(card.summary?.amount_review);
+}
+
+async function confirmProposal(card: ProposalCard) {
+  const ui = proposalUi(card.id);
+  if (ui.busy || !proposalIsOpen(card.status)) return;
+  const ack = proposalNeedsAck(card);
+  if (ack && !ui.checked) return;
+  ui.busy = true;
+  ui.note = null;
+  // El foco pasa al estado de la propia tarjeta (no al botón): quien usa el teclado no pierde su sitio.
+  renderChat({ focus: propKey(card.id, "live") });
+  let failure: unknown = null;
+  let confirmed = false;
+  try {
+    const receipt = await api.proposalConfirm(card.id, ack ? ui.checked : undefined);
+    card.status = "confirmed";
+    card.receipt = receipt;
+    confirmed = true;
+  } catch (error) {
+    failure = error;
+  }
+  const refreshed = await refreshProposals();
+  ui.busy = false;
+  if (!confirmed) ui.note = proposalErrorText(failure, refreshed ? (proposalById(card.id)?.status ?? null) : null);
+  renderChat({ focus: propKey(card.id, "live") });
+  // La tarea ha cambiado: se refrescan las listas, como tras aprobar en la pantalla de revisión.
+  if (confirmed) await refresh(true);
+}
+
+async function dismissProposal(card: ProposalCard) {
+  const ui = proposalUi(card.id);
+  if (ui.busy || !proposalIsOpen(card.status)) return;
+  ui.busy = true;
+  ui.note = null;
+  renderChat({ focus: propKey(card.id, "live") });
+  try {
+    applyProposalCards([await api.proposalDismiss(card.id)]);
+  } catch (error) {
+    ui.note = proposalDismissErrorText(error);
+    await refreshProposals();
+  }
+  ui.busy = false;
+  renderChat({ focus: propKey(card.id, "live") });
+}
+
+/** Par «rótulo: valor» de una tarjeta, con el valor siempre como texto. */
+function proposalRow(label: string, value: Child): HTMLElement[] {
+  return [h("dt", {}, label), h("dd", {}, value ?? missing())];
+}
+
+/** Bloque de texto largo con desplazamiento propio: nunca recortado ni resumido. */
+function proposalText(label: string, text: string): HTMLElement {
+  return h("pre", { class: "mono block proposal-body", tabindex: "0", "aria-label": label }, text);
+}
+
+/** Importe con su moneda; si el texto no es numérico, se deja tal cual y se le añade la moneda. */
+function proposalAmount(value: unknown, currency: unknown): Child {
+  const text = formatAmount(value, currency);
+  if (text === null) return missing();
+  const code = typeof currency === "string" ? currency.trim() : "";
+  return code && !text.includes(code) && !/[€$£]/.test(text) ? `${text} ${code}` : text;
+}
+
+function proposalEmail(s: Record<string, any>): Child[] {
+  const to: string[] = Array.isArray(s.to) ? s.to : [];
+  const body = String(s.body ?? "");
+  const issues = ((s.issues ?? []) as string[]).map((code) => emailIssueText(code, s.version)).filter((t): t is string => t !== null);
+  const notices = [draftFlagsText(s.draft_flags), recipientSignalsText(s.recipient_signals), ...issues].filter((t): t is string => t !== null);
+  return [
+    s.review_reason ? h("p", { class: "reason" }, `Motivo de la revisión: ${s.review_reason}`) : null,
+    h(
+      "dl",
+      { class: "origin" },
+      ...(s.category ? proposalRow("Categoría", statusChip(CATEGORY_LABEL[s.category] ?? s.category)) : []),
+      ...proposalRow("Responde a", s.from ? `${s.from}${s.original_subject ? ` · «${s.original_subject}»` : ""}` : null),
+      ...proposalRow("Para", to.length ? to.join(", ") : missing("Sin destinatario: no se puede enviar")),
+      ...proposalRow("Asunto", s.subject ?? null),
+    ),
+    ...notices.map((text) => h("p", { class: "notice warn proposal-notice" }, text)),
+    h("p", { class: "meta" }, BODY_LABEL),
+    body ? proposalText(BODY_LABEL, body) : missing("Sin texto"),
+  ];
+}
+
+function proposalInvoice(card: ProposalCard, s: Record<string, any>, ui: { checked: boolean; busy: boolean }): Child[] {
+  const recovered: Array<{ field: string; literal: string; value: string; reason: string }> = s.recovered ?? [];
+  const unreadable: Array<{ field: string }> = s.unreadable ?? [];
+  const pseudo = {
+    fields: { subtotal: s.subtotal, tax: s.tax, total: s.total },
+    issues: s.issues ?? [],
+    duplicates: ((s.duplicates ?? []) as unknown[]).map((id) => ({ existing_id: String(id) })),
+    recovered,
+    unreadable,
+  };
+  const flags = invoiceFlags(pseudo);
+  const doubtful = Boolean(s.amount_review);
+  const flagsBox = flagList(flags);
+  const value = (key: string, content: Child) =>
+    h(
+      "span",
+      {},
+      content,
+      unreadable.some((u) => u.field === key) ? h("span", { class: "missing" }, " (ilegible)") : null,
+      recovered.some((a) => a.field === key) ? h("span", { class: "proposed" }, " (propuesta: revísela)") : null,
+    );
+  const ackId = `chat-prop-ack-${card.id}`;
+  return [
+    s.review_reason && !doubtful ? h("p", { class: "reason" }, `Motivo de la revisión: ${s.review_reason}`) : null,
+    h(
+      "dl",
+      { class: "origin" },
+      ...proposalRow("Documento", s.document ?? null),
+      ...proposalRow(FIELD_LABEL.supplier!, s.supplier ?? null),
+      ...proposalRow(FIELD_LABEL.invoice_number!, s.invoice_number ?? null),
+      ...proposalRow(FIELD_LABEL.date!, s.date ?? null),
+      ...proposalRow(FIELD_LABEL.subtotal!, value("subtotal", proposalAmount(s.subtotal, s.currency))),
+      ...proposalRow(FIELD_LABEL.tax!, value("tax", proposalAmount(s.tax, s.currency))),
+      ...proposalRow(FIELD_LABEL.total!, value("total", proposalAmount(s.total, s.currency))),
+      ...proposalRow(FIELD_LABEL.currency!, s.currency ?? null),
+    ),
+    doubtful
+      ? h(
+          "div",
+          { class: "amount-review", role: "group", "aria-label": "Importes dudosos" },
+          h("strong", {}, "Revise los importes antes de registrar"),
+          h("p", {}, String(s.amount_review)),
+          recovered.length
+            ? h(
+                "ul",
+                {},
+                ...recovered.map((a) => h("li", {}, `${AMOUNT_LABEL[a.field] ?? a.field}: el documento dice «${a.literal}»; se propone ${a.value} (${RECOVERY_LABEL[a.reason] ?? a.reason}).`)),
+              )
+            : null,
+          h(
+            "label",
+            { class: "confirm", for: ackId },
+            h("input", {
+              type: "checkbox",
+              id: ackId,
+              "data-focus-key": propKey(card.id, "ack"),
+              ...(ui.checked ? { checked: "" } : {}),
+              ...(ui.busy ? { disabled: "" } : {}),
+              onchange: (e: Event) => {
+                proposalUi(card.id).checked = (e.target as HTMLInputElement).checked;
+                renderChat();
+              },
+            }),
+            ` ${AMOUNTS_CHECKED_LABEL}`,
+          ),
+        )
+      : null,
+    s.recovery === "unconfirmed_attempt" ? h("p", { class: "notice warn proposal-notice" }, emailIssueText("unconfirmed_attempt", s.version)) : null,
+    flagsBox ?? (flags.length || doubtful ? null : h("p", { class: "ok-line" }, "Sin incidencias en los importes.")),
+    card.task_id !== null
+      ? h("button", { type: "button", class: "chat-card-original", "data-focus-key": `${propKey(card.id, "open")}:original`, "aria-label": `${OPEN_ORIGINAL_LABEL}: ${s.document ?? "factura"}`, onclick: () => void openOriginalTask(card.task_id!, propKey(card.id, "open")) }, OPEN_ORIGINAL_LABEL)
+      : null,
+  ];
+}
+
+function proposalDetail(card: ProposalCard, ui: { checked: boolean; busy: boolean }): Child[] {
+  const s = card.summary ?? {};
+  switch (s.type) {
+    case "email":
+      return proposalEmail(s);
+    case "invoice":
+      return proposalInvoice(card, s, ui);
+    case "edit_draft":
+      return [
+        h("dl", { class: "origin" }, ...proposalRow("Para", Array.isArray(s.to) && s.to.length ? s.to.join(", ") : null), ...proposalRow("Asunto", s.subject ?? null)),
+        h("h5", {}, CURRENT_TEXT_LABEL),
+        proposalText(CURRENT_TEXT_LABEL, String(s.current_body ?? "")),
+        h("h5", {}, NEW_TEXT_LABEL),
+        proposalText(NEW_TEXT_LABEL, String(s.new_body ?? "")),
+      ];
+    case "reject":
+    case "retry":
+    case "archive":
+    case "confirm_not_sent":
+      return [
+        h(
+          "dl",
+          { class: "origin" },
+          ...proposalRow("Tarea", `${kindLabel(String(s.task?.kind ?? ""))} · ${s.task?.title ?? "sin título"}`),
+          ...proposalRow("Estado", STATE_LABEL[String(s.task?.state ?? "")] ?? String(s.task?.state ?? "")),
+          ...(s.type === "retry" && s.error_code ? proposalRow("Fallo anterior", String(s.error_code)) : []),
+        ),
+        s.recovery ? h("p", { class: "notice warn proposal-notice" }, emailIssueText(String(s.recovery), s.task?.version) ?? "Hay un intento anterior sin confirmar.") : null,
+      ];
+    case "fetch_mail":
+      return [h("dl", { class: "origin" }, ...proposalRow("Cuentas", String(s.accounts ?? "?")), ...proposalRow("Límite de lectura", String(s.limit ?? "?")))];
+    case "mail_limit":
+      return [h("dl", { class: "origin" }, ...proposalRow("Límite actual", String(s.current ?? "?")), ...proposalRow("Límite nuevo", String(s.new ?? "?")))];
+    case "rename_account":
+      return [
+        h(
+          "dl",
+          { class: "origin" },
+          ...proposalRow("Cuenta", PROVIDER_LABEL[s.provider as MailProviderKind] ?? String(s.provider ?? "")),
+          ...proposalRow("Nombre actual", s.current_label ?? null),
+          ...proposalRow("Nombre nuevo", s.new_label ?? null),
+        ),
+      ];
+    case "sender_preference": {
+      const route = (r: unknown) => (r === "review" || r === "informative" ? ROUTE_LABEL[r] : null);
+      return [
+        h(
+          "dl",
+          { class: "origin" },
+          ...proposalRow("Remitente", scopeText({ scope: s.scope === "domain" ? "domain" : "address", key: String(s.key ?? "") })),
+          ...proposalRow("Ahora", route(s.current) ?? "Sin preferencia"),
+          ...proposalRow("Después", route(s.new)),
+        ),
+      ];
+    }
+    default:
+      return [h("p", { class: "missing" }, "Esta propuesta no se puede mostrar con detalle; no la confirme.")];
+  }
+}
+
+/** Tarjeta compuesta de una propuesta: qué va a ocurrir con los datos reales, y los botones. Nada ocurre hasta pulsar. */
+function proposalCard(card: ProposalCard): HTMLElement {
+  const ui = proposalUi(card.id);
+  const open = proposalIsOpen(card.status);
+  const heading = proposalHeading(card.kind, card.effect);
+  const stuck = card.status === "executing" && !ui.busy;
+  const needsAck = proposalNeedsAck(card);
+  const blockedByAck = needsAck && !ui.checked;
+  const final = proposalFinalText(card);
+  const receipt = proposalReceiptLines(card);
+  const tone = proposalTone(card.kind);
+  const hintId = `chat-prop-hint-${card.id}`;
+  const live = h(
+    "div",
+    { class: "proposal-live", role: "status", "aria-live": "polite", "aria-label": PROPOSAL_LIVE_LABEL, tabindex: "-1", "data-focus-key": propKey(card.id, "live") },
+    ui.busy ? h("p", { class: "meta" }, PROPOSAL_EXECUTING) : null,
+    !ui.busy && stuck ? h("p", { class: "warn-text" }, PROPOSAL_STUCK_TEXT) : null,
+    ui.note ? h("p", { class: "error-text", role: "alert" }, ui.note) : null,
+    final ? h("p", { class: "proposal-final" }, final) : null,
+    ...receipt.map((line) => h("p", { class: "proposal-final ok-line" }, line)),
+  );
+  const openNote = state.chat.cardNote?.key === propKey(card.id, "open") ? state.chat.cardNote.text : null;
+  return h(
+    "section",
+    { class: `proposal-card status-${card.status}`, role: "region", "aria-label": heading, "aria-busy": String(ui.busy) },
+    h("div", { class: "proposal-head" }, h("h4", {}, heading), statusChip(proposalStatusLabel(card.status), card.status === "confirmed" ? "ok" : open ? "warn" : "neutral")),
+    open ? h("p", { class: "proposal-fixed" }, PROPOSAL_NOTHING_DONE) : null,
+    ...proposalDetail(card, ui),
+    open ? h("p", { class: "proposal-effect" }, proposalEffectText(card.kind, card.effect, card.summary ?? {})) : null,
+    open && blockedByAck ? h("p", { class: "meta", id: hintId }, AMOUNTS_REQUIRED_HINT) : null,
+    open
+      ? h(
+          "div",
+          { class: "buttons proposal-actions" },
+          h(
+            "button",
+            {
+              type: "button",
+              ...(tone === "plain" ? {} : { class: tone }),
+              "data-focus-key": propKey(card.id, "confirm"),
+              "aria-label": proposalButtonName(card),
+              ...(blockedByAck ? { "aria-describedby": hintId } : {}),
+              disabled: ui.busy || blockedByAck,
+              onclick: () => void confirmProposal(card),
+            },
+            proposalVerb(card.kind, card.effect),
+          ),
+          h("button", { type: "button", "data-focus-key": propKey(card.id, "dismiss"), "aria-label": proposalDismissName(card), disabled: ui.busy, onclick: () => void dismissProposal(card) }, CARD_DISMISS),
+        )
+      : null,
+    live,
+    card.status === "confirmed" && card.task_id !== null
+      ? h("div", { class: "buttons" }, h("button", { type: "button", "data-focus-key": propKey(card.id, "open"), "aria-label": `${PROPOSAL_OPEN_TASK}: ${proposalTaskTitleOf(card)}`, onclick: () => void openTask(card.task_id!, propKey(card.id, "open")) }, PROPOSAL_OPEN_TASK))
+      : null,
+    openNote ? h("p", { class: "chat-card-error", role: "status" }, openNote) : null,
+  );
+}
+
+function proposalTaskTitleOf(card: ProposalCard): string {
+  return String(card.summary?.task?.title ?? "").trim() || "sin título";
 }
 
 /** Texto plano en párrafos: respeta los saltos de línea y no interpreta nada (sin HTML, imágenes ni enlaces activos). */
@@ -7217,13 +7587,17 @@ function aiTurn(v: AiView, index: number, last: boolean): HTMLElement {
   const who = answered ? whoAnswered(v) : "";
   const notes = answered ? [droppedCitationsText(v.dropped), withheldText(v.withheld)].filter((n): n is string => n !== null) : [];
   const sendHint = v.outcome === "consent_required" || v.outcome === "not_configured";
+  // Con un proveedor externo el dato protegido nunca llega a la IA: la respuesta trae su marca y se dice dónde verlo.
+  const maskedNoteText = answered ? maskedNote(maskedMarksIn(v.text)) : null;
   return h(
     "div",
     { class: `chat-turn assistant${v.outcome === "error" ? " error" : ""}` },
     h("span", { class: "chat-who" }, ASSISTANT_LABEL),
     plainText(v.text, v.outcome === "error" ? "alert" : undefined),
+    maskedNoteText ? h("p", { class: "chat-notice", role: "note" }, maskedNoteText) : null,
     v.navigated ? h("p", { class: "chat-notice", role: "status" }, navigatedText(v.navigated)) : null,
     v.citations.length ? h("ul", { class: "chat-cards" }, ...v.citations.map((hit) => chatCard(hit, `chat:card:${index}:${hit.task_id}`))) : null,
+    v.proposals.length ? h("div", { class: "proposal-list" }, ...v.proposals.map(proposalCard)) : null,
     who ? h("p", { class: "chat-notice chat-source" }, who) : null,
     ...notes.map((note) => h("p", { class: "chat-notice" }, note)),
     sendHint

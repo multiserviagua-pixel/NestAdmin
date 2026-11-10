@@ -1409,11 +1409,22 @@ const ASSISTANT_AUDIT_STATUS: Record<string, string> = {
   cleared: "Borradas",
 };
 
+/** Estados de los eventos `assistant_proposal` (D185): lo que pasó con una propuesta del asistente. */
+const PROPOSAL_AUDIT_STATUS: Record<string, string> = {
+  created: "Propuesta preparada",
+  confirmed: "Confirmada por la persona",
+  rejected: "Descartada por la persona",
+  expired: "Caducada sin confirmar",
+  stale: "Obsoleta: la tarea cambió",
+  failed: "No se pudo hacer",
+};
+
 /** Estado en palabras de una entrada del historial que viene de una regla; el resto se deja tal cual. */
 export function auditStatusLabel(action: string, status: string): string {
   if (action === "mail" && status === "replied_outside") return "Tarea cerrada: ya estaba respondido fuera de NestAdmin";
   if (action === "sender_preference") return status === "set" ? "Fijada" : status === "removed" ? "Quitada" : status;
   if (action === "assistant_turn" || action === "assistant_cleared") return ASSISTANT_AUDIT_STATUS[status] ?? status;
+  if (action === "assistant_proposal") return PROPOSAL_AUDIT_STATUS[status] ?? status;
   return action.startsWith("rule") ? (RULE_AUDIT_STATUS[status] ?? status) : status;
 }
 
