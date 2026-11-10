@@ -62,9 +62,31 @@ Con `npm run dev` de `ui/` y los datos sintéticos de `ui/src/mock.ts`:
 
 Tiempos: con el modelo en CPU, la primera llamada tras cargarlo tardó 79 s y un intento con el modelo descargado agotó el plazo de 180 s; con el modelo cargado, cada paso tardó entre 5 y 40 s.
 
+## Recorrido en `tauri dev` con el proveedor externo (T36b, T36c, T36e)
+
+2026-11-10, commit `0a3764e`, misma carpeta sintética, con autorización expresa del usuario para enviar datos inventados a su proveedor. Proveedor: Ollama cloud, `gemma4:31b`, servidor `ollama.com`, con la clave que ya estaba guardada (no se introdujo ninguna). Respaldo local activado y Ollama local en marcha.
+
+Antes de cambiar de proveedor se importó, con la IA local, una factura inventada con datos sensibles de prueba: un IBAN, un teléfono, un correo y un NIF.
+
+| Paso | Resultado |
+|---|---|
+| Elegir Ollama cloud, sin autorizar el asistente | estado de la opción: `missing` |
+| Preguntar sin la opción | respondió la IA local; las 2 llamadas guardadas son locales, ninguna a `ollama.com` |
+| Configuración → «Ver qué saldría y autorizar…» | muestra el destino (Ollama cloud · gemma4:31b · servidor ollama.com), el texto literal de ejemplo, «Puede salir», «Nunca sale» y los límites, y solo entonces «Aceptar y autorizar» |
+| «Aceptar y autorizar» | opción activada para ese proveedor, modelo y servidor, con fecha |
+| «¿A qué cuenta hay que pagar la factura de Transportes Ficticios y cuál es su teléfono?» | respondió Ollama cloud en 3 pasos (`search`, `get_document`) y 3 s, con la tarjeta del documento citado |
+| Lo enviado a `ollama.com` en esas 3 llamadas | no contiene el IBAN ni ninguna de sus mitades, ni el teléfono, ni el correo, ni el NIF, ni rutas; en su lugar van `[IBAN]`, `[TELÉFONO]`, `[CORREO]` e `[ID]` |
+| La respuesta | «…a la cuenta [IBAN] y el teléfono de contacto es [TELÉFONO]»; el dato completo está en la tarjeta, que se pinta en el equipo |
+| «Retirar autorización» | estado `missing`; el turno siguiente lo atendió entero la IA local |
+| Volver a la IA local | la opción pasa a `not_needed` |
+| Historial | «consentimiento del asistente concedido: proveedor ollama_cloud, modelo gemma4:31b, servidor ollama.com» y «consentimiento del asistente retirado» |
+
+Los datos sensibles se buscaron en el texto guardado para «Ver lo enviado», que las pruebas automáticas comprueban que coincide con lo que recibe el proveedor; no se interceptó el tráfico hacia `ollama.com`.
+
 ## Pendiente
 
-- **Con un proveedor externo no se ha probado en la aplicación**: ni conceder la opción en Configuración ni un turno real contra él. Exige enviar datos (sintéticos) a ese proveedor y no se hizo sin pedirlo. El camino externo solo está cubierto por las pruebas automáticas con el espía.
+- No se provocó en la aplicación un fallo del proveedor externo para ver el respaldo a la IA local en vivo, ni un cambio de modelo o servidor con un turno en curso; están cubiertos por las pruebas automáticas.
+- La respuesta muestra las marcas (`[IBAN]`, `[TELÉFONO]`) tal cual; convendría explicar que el dato está protegido y se ve en la tarjeta.
 - En el turno que agotó el plazo, el historial marca `local: false` aunque el proveedor era la IA local.
 - El indicador de progreso solo mostró «Pensando…» en el recorrido; no se comprobó el texto por herramienta.
 - Con la IA local en CPU los tiempos son altos y la primera pregunta tras un rato puede agotar el plazo.
