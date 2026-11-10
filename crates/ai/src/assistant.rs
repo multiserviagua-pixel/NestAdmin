@@ -410,11 +410,18 @@ pub enum Entry {
     Invalid { code: String },
 }
 
+/// Rótulos fijos del bloque de datos de una herramienta.
+const TOOL_BLOCK_FRAME: &str = "argumentos: \nresultado: ";
+
 impl Entry {
     /// Caracteres de datos que aporta.
     pub fn chars(&self) -> usize {
         match self {
-            Self::Tool { args, output, .. } => args.chars().count() + output.chars().count(),
+            // Con el rótulo de los dos campos del bloque: también son datos que salen, y el tope
+            // de D183 se cumple sobre lo que de verdad viaja.
+            Self::Tool { args, output, .. } => {
+                TOOL_BLOCK_FRAME.chars().count() + args.chars().count() + output.chars().count()
+            }
             Self::Invalid { code } => code.chars().count(),
         }
     }

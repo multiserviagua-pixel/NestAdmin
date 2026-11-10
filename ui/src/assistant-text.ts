@@ -248,6 +248,25 @@ export interface SentLike {
 }
 
 export const ASSISTANT_BUSY = "Pensando…";
+
+/** Lo que hace cada herramienta del asistente, para el indicador mientras trabaja (D182). */
+export const TOOL_PROGRESS: Record<string, string> = {
+  search: "Buscando en sus documentos…",
+  get_document: "Leyendo un documento…",
+  aggregate: "Calculando…",
+  list_tasks: "Repasando las tareas…",
+  list_rules: "Consultando las reglas…",
+  history: "Consultando el historial…",
+  mail_accounts: "Consultando las cuentas de correo…",
+  ai_status: "Comprobando la IA…",
+  open_view: "Preparando la vista…",
+};
+
+/** Texto del indicador según el paso en curso; sin paso o con una herramienta desconocida, «Pensando…». */
+export function progressText(step: { kind: string; name?: string } | null | undefined): string {
+  if (step?.kind === "tool" && step.name && Object.hasOwn(TOOL_PROGRESS, step.name)) return TOOL_PROGRESS[step.name];
+  return ASSISTANT_BUSY;
+}
 export const CHAT_CANCEL = "Cancelar";
 export const CHAT_CANCELLING = "Cancelando…";
 export const CANCELLED_TEXT = "Pregunta cancelada.";

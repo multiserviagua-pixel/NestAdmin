@@ -26,10 +26,15 @@ pub const MAX_RESULTS: usize = 8;
 pub const MAX_DOC_FRAGMENTS: usize = 3;
 /// Caracteres de un campo corto (título, proveedor, número, nombre de regla…).
 const FIELD_CHARS: usize = 120;
+/// Caracteres de un fragmento de búsqueda.
+const SNIPPET_CHARS: usize = 200;
 /// Eventos de una tarea como mucho.
 const MAX_EVENTS: usize = 20;
 /// Reglas como mucho.
 const MAX_RULES: usize = 20;
+/// Nombre del grupo de `aggregate` cuyos documentos no indican moneda: el modelo debe explicarlo
+/// así a la persona, sin suponer una.
+pub const NO_CURRENCY: &str = "moneda no indicada en el documento";
 /// Lo que ocupa el lugar de un texto que no supera el enmascarado.
 pub const WITHHELD_MARK: &str = "[retenido]";
 
@@ -71,32 +76,63 @@ impl Text {
     }
 
     /// Texto de como mucho `max` caracteres, sin saltos de línea ni caracteres de control en los
-    /// campos cortos, y enmascarado si sale del equipo.
+    /// campos cortos. Con un destino externo se enmascara el texto ENTERO y solo después se
+    /// recorta (nunca antes: un dato partido por el corte quedaría en dos mitades por debajo del
+    /// umbral de los detectores y saldría sin enmascarar), y lo que sale se vuelve a comprobar.
     fn clipped(&self, raw: &str, max: usize, keep_lines: bool) -> String {
-        let clean: String = raw
-            .chars()
-            .map(|c| {
-                if c == '\n' && keep_lines {
-                    c
-                } else if c.is_control() {
-                    ' '
-                } else {
-                    c
-                }
-            })
-            .take(max)
-            .collect();
-        let clean = clean.trim().to_owned();
-        if !self.external || clean.is_empty() {
+        let clean = sanitize(raw, keep_lines);
+        if clean.is_empty() {
             return clean;
         }
+        if !self.external {
+            return clean
+                .chars()
+                .take(max)
+                .collect::<String>()
+                .trim()
+                .to_owned();
+        }
         let masked = mask(&clean);
-        if is_masked(&masked) {
-            masked
+        let (head, _) = split_masked(masked.trim(), max);
+        self.vet(head)
+    }
+
+    /// El texto entero, limpio y enmascarado (sin recortar).
+    fn masked(&self, raw: &str) -> String {
+        mask(&sanitize(raw, true))
+    }
+
+    /// Un texto ya enmascarado que sale: si los detectores aún marcan algo, no sale.
+    fn vet(&self, masked: &str) -> String {
+        if masked.is_empty() || is_masked(masked) {
+            masked.to_owned()
         } else {
             self.withheld.set(self.withheld.get() + 1);
             WITHHELD_MARK.to_owned()
         }
+    }
+
+    /// Los primeros `count` fragmentos de `max` caracteres de un texto largo. Con un destino
+    /// externo se enmascara el texto entero ANTES de trocearlo; se corta por espacios y nunca
+    /// dentro de un marcador (`[IBAN]`…), y cada fragmento se comprueba por separado.
+    pub(crate) fn fragments(&self, raw: &str, max: usize, count: usize) -> Vec<String> {
+        let clean = sanitize(raw, true);
+        let body = if self.external { mask(&clean) } else { clean };
+        let mut rest = body.trim();
+        let mut out = Vec::new();
+        while out.len() < count && !rest.is_empty() {
+            let (head, tail) = split_masked(rest, max);
+            let head = head.trim();
+            if !head.is_empty() {
+                out.push(if self.external {
+                    self.vet(head)
+                } else {
+                    head.to_owned()
+                });
+            }
+            rest = tail;
+        }
+        out
     }
 
     pub(crate) fn field(&self, raw: &str) -> String {
@@ -110,6 +146,88 @@ impl Text {
     pub(crate) fn withheld(&self) -> usize {
         self.withheld.get()
     }
+}
+
+/// Sin caracteres de control (los saltos de línea solo si `keep_lines`) y sin espacios en los
+/// extremos.
+fn sanitize(raw: &str, keep_lines: bool) -> String {
+    let clean: String = raw
+        .chars()
+        .map(|c| {
+            if c == '\n' && keep_lines {
+                c
+            } else if c.is_control() {
+                ' '
+            } else {
+                c
+            }
+        })
+        .collect();
+    clean.trim().to_owned()
+}
+
+/// Parte un texto YA enmascarado en un primer trozo de como mucho `max` caracteres y el resto.
+/// Corta por un espacio (los marcadores `[IBAN]`, `[TELÉFONO]`… no llevan espacios, así que nunca
+/// se parten); solo un «token» más largo que `max` se corta a la fuerza, y entonces sin dejar un
+/// marcador abierto.
+pub(crate) fn split_masked(text: &str, max: usize) -> (&str, &str) {
+    let Some((end, _)) = text.char_indices().nth(max) else {
+        return (text, "");
+    };
+    let clean_cut = text[end..].chars().next().is_some_and(char::is_whitespace);
+    let mut cut = end;
+    if !clean_cut {
+        match text[..end].rfind(char::is_whitespace) {
+            Some(space) if space > 0 => cut = space,
+            _ => {
+                if let Some(open) = text[..end].rfind('[') {
+                    if open > 0 && !text[open..end].contains(']') {
+                        cut = open;
+                    }
+                }
+            }
+        }
+    }
+    (text[..cut].trim_end(), text[cut..].trim_start())
+}
+
+/// Fragmento de búsqueda de un documento construido sobre su cuerpo ya enmascarado: una ventana
+/// de «tokens» enteros alrededor de la primera coincidencia con los términos (o del principio),
+/// de como mucho `SNIPPET_CHARS` caracteres. No parte ningún dato ni marcador.
+fn snippet_window(masked_body: &str, terms: &[String]) -> String {
+    let tokens: Vec<&str> = masked_body.split_whitespace().collect();
+    let found = tokens.iter().position(|token| {
+        let token = token.to_lowercase();
+        terms
+            .iter()
+            .any(|t| !t.is_empty() && token.contains(t.as_str()))
+    });
+    let start = found.map_or(0, |i| i.saturating_sub(6));
+    let mut out = String::new();
+    let mut used = 0;
+    let mut taken = 0;
+    for token in &tokens[start..] {
+        let len = token.chars().count();
+        if used > 0 && used + 1 + len > SNIPPET_CHARS {
+            break;
+        }
+        if used > 0 {
+            out.push(' ');
+            used += 1;
+        }
+        out.push_str(token);
+        used += len;
+        taken += 1;
+    }
+    if out.chars().count() > SNIPPET_CHARS {
+        out = split_masked(&out, SNIPPET_CHARS).0.to_owned();
+    }
+    let more = start + taken < tokens.len();
+    format!(
+        "{}{out}{}",
+        if start > 0 { "… " } else { "" },
+        if more { " …" } else { "" }
+    )
 }
 
 fn output(value: Value, refs: Vec<String>, text: &Text) -> ToolOutput {
@@ -361,26 +479,38 @@ impl App {
         for kind in attempts {
             let page = run(false, kind)?;
             if page.total > 0 || terms.is_empty() {
-                return Ok(self.search_output(&page, "all", text));
+                return Ok(self.search_output(page, "all", &terms, text));
             }
             if terms.len() > 1 {
                 let any = run(true, kind)?;
                 if any.total > 0 {
-                    return Ok(self.search_output(&any, "any", text));
+                    return Ok(self.search_output(any, "any", &terms, text));
                 }
             }
             last = Some(page);
         }
         let page = last.expect("al menos un intento");
-        Ok(self.search_output(&page, "none", text))
+        Ok(self.search_output(page, "none", &terms, text))
     }
 
     fn search_output(
         &self,
-        page: &nestadmin_core::SearchPage,
+        mut page: nestadmin_core::SearchPage,
         matched: &str,
+        terms: &[String],
         text: &Text,
     ) -> ToolOutput {
+        if text.external {
+            // El fragmento de la búsqueda (FTS5) es un trozo del cuerpo que puede empezar o acabar
+            // a mitad de un dato. Con un destino externo se rehace sobre el cuerpo ya enmascarado.
+            for (i, hit) in page.results.iter_mut().enumerate() {
+                let body = (i < MAX_FRAGMENTS)
+                    .then(|| self.store.indexed_document(hit.task_id).ok().flatten())
+                    .flatten()
+                    .map(|doc| text.masked(&doc.body));
+                hit.snippet = body.map_or_else(String::new, |b| snippet_window(&b, terms));
+            }
+        }
         let (value, refs) = search_value(
             &page.results,
             page.total,
@@ -416,14 +546,9 @@ impl App {
         value["total"] = json!(doc.total_minor.map(format_minor));
         value["currency"] = json!(doc.currency);
         value["index_status"] = json!(status_text(doc.status));
-        // Los primeros fragmentos del texto, de como mucho `MAX_FRAGMENT_CHARS` cada uno.
-        let chars: Vec<char> = doc.body.chars().collect();
-        let fragments: Vec<String> = chars
-            .chunks(MAX_FRAGMENT_CHARS)
-            .take(MAX_DOC_FRAGMENTS)
-            .map(|chunk| text.fragment(&chunk.iter().collect::<String>()))
-            .filter(|f| !f.is_empty())
-            .collect();
+        // Los primeros fragmentos del texto, de como mucho `MAX_FRAGMENT_CHARS` cada uno: el texto
+        // entero se enmascara antes de trocearlo.
+        let fragments = text.fragments(&doc.body, MAX_FRAGMENT_CHARS, MAX_DOC_FRAGMENTS);
         value["fragments"] = json!(fragments);
         Ok(output(value, vec![reference], text))
     }
@@ -453,7 +578,8 @@ impl App {
                     .iter()
                     .map(|c| {
                         json!({
-                            "currency": if c.currency.is_empty() { "sin_moneda" } else { c.currency.as_str() },
+                            "currency": if c.currency.is_empty() { NO_CURRENCY } else { c.currency.as_str() },
+                            "currency_known": !c.currency.is_empty(),
                             "documents": c.documents,
                             "total_minor": c.total_minor,
                             "total": format_minor(c.total_minor),
@@ -612,6 +738,61 @@ mod tests {
         let external = Text::new(true);
         assert_eq!(external.field("Escriba a ana@x.test"), "Escriba a [CORREO]");
         assert_eq!(external.withheld(), 0);
+    }
+
+    #[test]
+    fn masking_comes_before_cutting_and_never_splits_a_datum() {
+        let iban = "ES91 2100 0418 4502 0005 1332";
+        let body = format!("{} {iban} {}", "ab ".repeat(195), "cd ".repeat(100));
+        // Troceado a ciegas, el corte deja media cuenta por debajo del umbral del detector.
+        let naive: String = body.chars().take(600).collect();
+        assert!(naive.contains("ES91 2100 0418") && !naive.contains(iban));
+        let fragments = Text::new(true).fragments(&body, 600, 3);
+        assert_eq!(fragments.len(), 2);
+        for fragment in &fragments {
+            assert!(fragment.chars().count() <= 600);
+            assert!(!fragment.contains("ES91") && !fragment.contains("5332"));
+        }
+        assert!(fragments.concat().contains("[IBAN]"));
+        // Con la IA local no se toca el texto.
+        assert!(Text::new(false)
+            .fragments(&body, 600, 3)
+            .concat()
+            .contains("ES91"));
+    }
+
+    #[test]
+    fn a_cut_goes_by_a_space_and_never_inside_a_marker() {
+        let spaced = format!("{} [TELÉFONO] fin", "x".repeat(595));
+        let (head, tail) = split_masked(&spaced, 600);
+        assert_eq!((head.chars().count(), tail), (595, "[TELÉFONO] fin"));
+        // Un «token» sin espacios más largo que el tope se corta a la fuerza, sin dejar un marcador abierto.
+        let long = format!("{}[IBAN]", "y".repeat(597));
+        let (head, tail) = split_masked(&long, 600);
+        assert_eq!((head.chars().count(), tail), (597, "[IBAN]"));
+        assert_eq!(split_masked("abc def", 100), ("abc def", ""));
+    }
+
+    #[test]
+    fn the_search_fragment_is_built_on_the_masked_body_around_the_match() {
+        let body = format!(
+            "{} proveedor {} ES91 2100 0418 4502 0005 1332 {}",
+            "ab ".repeat(40),
+            "cd ".repeat(50),
+            "ef ".repeat(80)
+        );
+        let masked = Text::new(true).masked(&body);
+        let snippet = snippet_window(&masked, &["proveedor".to_owned()]);
+        assert!(snippet.contains("proveedor"));
+        assert!(snippet.chars().count() <= SNIPPET_CHARS + 4);
+        assert!(snippet.starts_with("… ") && snippet.ends_with(" …"));
+        // La ventana acaba en el borde de un «token»: el dato o está entero (enmascarado) o no está.
+        let around = Text::new(true).masked(&format!(
+            "proveedor {} ES91 2100 0418 4502 0005 1332",
+            "ab ".repeat(60)
+        ));
+        let window = snippet_window(&around, &["proveedor".to_owned()]);
+        assert!(!window.contains("ES91") && !window.contains("0418"));
     }
 
     #[test]

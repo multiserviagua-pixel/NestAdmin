@@ -3,6 +3,9 @@
 //! topes y cancelación), qué sale hacia un proveedor externo y con qué permiso, que lo guardado
 //! para «Ver lo enviado» es lo recibido, el respaldo (solo del externo a la IA local, una vez) y
 //! que las conversaciones se guardan y se borran en el equipo sin dejar texto en el historial.
+//! Tras la revisión de arquitecto: enmascarar antes de recortar, rastro de lo enviado en errores y
+//! cancelaciones, un asistente que no arranca procesos, respaldo decidido una vez por turno y puerta
+//! cerrada al cambiar de destino.
 
 use std::collections::BTreeSet;
 use std::path::Path;
@@ -94,7 +97,8 @@ impl Provider for Fake {
                 (self.script.lock().unwrap())(request, n)?
             }
             AiTask::Extraction => {
-                serde_json::from_str(nestadmin_ai::tasks::document_text(&request.content)).unwrap()
+                serde_json::from_str(nestadmin_ai::tasks::document_text(&request.content))
+                    .unwrap_or_else(|_| json!({}))
             }
             _ => json!({}),
         };
@@ -324,9 +328,14 @@ fn an_unknown_tool_or_an_argument_outside_the_list_is_an_invalid_output_and_two_
             "{bad}"
         );
         assert_eq!((turn.steps, w.ext.calls()), (2, 2), "{bad}");
-        // Sin efectos: nada guardado salvo el evento de error.
-        assert!(turn.turn_id.is_none() && turn.conversation_id.is_none());
-        assert!(w.app.assistant_conversation(None).unwrap().is_none());
+        // Salieron dos llamadas: el turno se guarda con su error y «Ver lo enviado» las muestra.
+        assert_sent_matches(&w, &turn, 2);
+        let saved = w.app.assistant_conversation(None).unwrap().unwrap();
+        assert_eq!(saved.turns[1].meta.outcome.as_deref(), Some("error"));
+        assert_eq!(
+            saved.turns[1].meta.error_code.as_deref(),
+            Some("invalid_response")
+        );
         let (status, detail) = last_audit(&w.app, "assistant_turn");
         assert_eq!(status, "error");
         assert!(detail.contains("invalid_response"));
@@ -349,8 +358,65 @@ fn six_steps_at_most_and_nothing_is_saved_when_they_run_out() {
     assert_eq!(turn.outcome, Outcome::Error);
     assert_eq!(turn.error_code.as_deref(), Some("steps_exhausted"));
     assert_eq!(w.ext.calls(), 6);
-    assert!(w.app.assistant_conversation(None).unwrap().is_none());
+    // Las seis llamadas salieron: quedan disponibles para «Ver lo enviado».
+    assert_sent_matches(&w, &turn, 6);
     assert_eq!(last_audit(&w.app, "assistant_turn").0, "error");
+}
+
+/// `assistant_sent` devuelve exactamente lo que recibió el espía, y el turno tiene `turn_id`.
+fn assert_sent_matches(w: &World, turn: &AssistantTurn, expected: usize) {
+    let turn_id = turn.turn_id.expect("el turno se guardó con sus llamadas");
+    let sent = w.app.assistant_sent(turn_id).unwrap();
+    let received = w.ext.requests();
+    assert_eq!(sent.len(), expected);
+    assert_eq!(received.len(), expected);
+    for (saved, request) in sent.iter().zip(&received) {
+        assert_eq!(saved.sent_text, sent_text(request));
+    }
+}
+
+#[test]
+fn a_turn_saved_after_an_error_or_a_cancellation_is_not_sent_back_nor_cited() {
+    let mut w = world(ProviderKind::Ollama);
+    w.ext.steps(vec![json!({ "answer": "" })]);
+    let failed = ask(&mut w.app, None, "PREGUNTA-FALLIDA-7731", "other");
+    assert_eq!(failed.error_code.as_deref(), Some("invalid_response"));
+    let conversation = failed.conversation_id.unwrap();
+    w.ext.steps(vec![answer("Bien.")]);
+    let before = w.ext.requests().len();
+    let next = ask(&mut w.app, Some(conversation), "otra pregunta", "other");
+    assert_eq!(next.outcome, Outcome::Answered);
+    let request = &w.ext.requests()[before];
+    assert!(!sent_text(request).contains("PREGUNTA-FALLIDA-7731"));
+    assert!(!request.content.contains("Turno de la persona:"));
+    // La conversación sí los muestra a la persona, con su resultado.
+    let saved = w
+        .app
+        .assistant_conversation(Some(conversation))
+        .unwrap()
+        .unwrap();
+    assert_eq!(saved.turns.len(), 4);
+    assert_eq!(saved.turns[0].text, "PREGUNTA-FALLIDA-7731");
+    assert_eq!(saved.turns[1].meta.outcome.as_deref(), Some("error"));
+    assert!(saved.turns[1].citations.is_empty());
+
+    // Cancelado tras una llamada ya hecha: queda lo enviado y el resultado «cancelled».
+    let mut w = world(ProviderKind::Ollama);
+    w.ext
+        .steps(vec![tool("list_tasks", json!({})), answer("No llega.")]);
+    let job = w
+        .app
+        .begin_assistant_turn(None, "pregunta", "review")
+        .unwrap();
+    let run = job.run(&mut |call| {
+        w.app.assistant_cancel();
+        w.app.assistant_tool(call)
+    });
+    let turn = w.app.finish_assistant_turn(run).unwrap();
+    assert_eq!(turn.outcome, Outcome::Cancelled);
+    assert_sent_matches(&w, &turn, 1);
+    let saved = w.app.assistant_conversation(None).unwrap().unwrap();
+    assert_eq!(saved.turns[1].meta.outcome.as_deref(), Some("cancelled"));
 }
 
 #[test]
@@ -373,18 +439,18 @@ fn cancelling_stops_between_steps_and_saves_no_answer() {
     let turn = w.app.finish_assistant_turn(run).unwrap();
     assert_eq!(turn.outcome, Outcome::Cancelled);
     assert_eq!((turn.steps, w.ext.calls()), (1, 1));
-    assert!(turn.turn_id.is_none());
-    assert!(w.app.assistant_conversation(None).unwrap().is_none());
+    // Salió una llamada: el turno queda guardado (cancelado) para «Ver lo enviado».
+    assert_sent_matches(&w, &turn, 1);
     assert_eq!(last_audit(&w.app, "assistant_turn").0, "cancelled");
 
     // Cancelada antes de empezar: no sale ninguna llamada. El turno siguiente no hereda la marca.
     let job = w.app.begin_assistant_turn(None, "otra", "review").unwrap();
     w.app.assistant_cancel();
     let run = job.run(&mut |call| w.app.assistant_tool(call));
-    assert_eq!(
-        w.app.finish_assistant_turn(run).unwrap().outcome,
-        Outcome::Cancelled
-    );
+    let before_any_call = w.app.finish_assistant_turn(run).unwrap();
+    assert_eq!(before_any_call.outcome, Outcome::Cancelled);
+    // Sin ninguna llamada no hay nada que guardar.
+    assert!(before_any_call.turn_id.is_none());
     assert_eq!(w.ext.calls(), 1);
     w.ext.steps(vec![answer("Vuelve.")]);
     assert_eq!(
@@ -424,10 +490,40 @@ fn the_figures_of_the_answer_come_from_aggregate() {
     assert_eq!(out.value["documents"], 2);
     assert_eq!(out.value["with_total"], 2);
     assert_eq!(out.value["without_total"], 0);
-    // El índice guarda la moneda solo si el documento la indica: aquí no, y se dice, sin suponer euros.
-    assert_eq!(out.value["by_currency"][0]["currency"], "sin_moneda");
+    // Las facturas sintéticas muestran el euro en su texto: la moneda sale de esa evidencia local (D127).
+    assert_eq!(out.value["by_currency"][0]["currency"], "EUR");
+    assert_eq!(out.value["by_currency"][0]["currency_known"], true);
     assert_eq!(out.value["by_currency"][0]["total_minor"], 36_300);
     assert_eq!(out.value["by_currency"][0]["total"], "363.00");
+    // Una factura sin ninguna marca de moneda en su texto queda en su propio grupo, sin suponer euros.
+    let bare = json!({ "supplier": "Gamma SL", "invoice_number": "F-9", "date": "2026-10-06",
+                       "subtotal": "10.00", "tax": "2.10", "total": "12.10" })
+    .to_string();
+    w.app.import_document("g.txt", &bare).unwrap();
+    w.app.process_next().unwrap().unwrap();
+    let mixed = w.app.assistant_tool(&ToolCall {
+        name: "aggregate".into(),
+        args: serde_json::from_value(json!({ "op": "sum_total" })).unwrap(),
+        external: true,
+    });
+    let groups = mixed.value["by_currency"].as_array().unwrap();
+    assert_eq!(groups.len(), 2, "{groups:?}");
+    assert_eq!(groups[0]["currency"], "moneda no indicada en el documento");
+    assert_eq!(groups[0]["currency_known"], false);
+    assert_eq!(
+        (
+            groups[0]["documents"].clone(),
+            groups[0]["total_minor"].clone()
+        ),
+        (json!(1), json!(1_210))
+    );
+    assert_eq!(
+        (
+            groups[1]["currency"].clone(),
+            groups[1]["documents"].clone()
+        ),
+        (json!("EUR"), json!(2))
+    );
     let count = w.app.assistant_tool(&ToolCall {
         name: "aggregate".into(),
         args: serde_json::from_value(json!({ "op": "count", "kind": "email" })).unwrap(),
@@ -441,11 +537,15 @@ fn the_figures_of_the_answer_come_from_aggregate() {
         tool("aggregate", json!({ "op": "sum_total" })),
         answer("Suman 363,00 EUR."),
     ]);
+    // (la tercera factura, sin moneda, va aparte)
     let turn = ask(&mut w.app, None, "¿Cuánto suman mis facturas?", "other");
     assert_eq!(turn.outcome, Outcome::Answered);
     let second = &w.ext.requests()[1];
     assert!(second.content.contains("\"total\":\"363.00\""));
     assert!(second.content.contains("\"total_minor\":36300"));
+    assert!(second
+        .content
+        .contains("moneda no indicada en el documento"));
 }
 
 #[test]
@@ -524,11 +624,11 @@ fn an_external_provider_without_consent_receives_nothing_and_the_local_ai_answer
         let mut w = world(ProviderKind::OllamaCloud);
         let local = Fake::new(ProviderKind::Ollama);
         let source = resolver(&local);
+        // Con el respaldo local activado (o la local ya en marcha) el resolvedor del asistente la da.
         if via_fallback {
-            w.app.set_local_fallback(Some(source));
-        } else {
-            w.app.set_local_ai(Some(source));
+            w.app.set_local_fallback(Some(resolver(&local)));
         }
+        w.app.set_assistant_local(Some(source));
         seed(&mut w.app, "a.txt", "Alfa SL", "F-1", 100, "uno");
         assert_eq!(w.app.assistant_consent().unwrap().state, "missing");
         w.ext.steps(vec![answer("NO DEBE SALIR")]);
@@ -565,7 +665,7 @@ fn without_consent_and_without_local_ai_the_turn_returns_consent_required_with_w
 
     // Una IA que no es Ollama, por mucho que el resolvedor la devuelva, no vale de local.
     let spy = Fake::new(ProviderKind::OllamaCloud);
-    w.app.set_local_ai(Some(resolver(&spy)));
+    w.app.set_assistant_local(Some(resolver(&spy)));
     let turn = ask(&mut w.app, None, "otra vez", "other");
     assert_eq!(turn.outcome, Outcome::ConsentRequired);
     assert_eq!((w.ext.calls(), spy.calls()), (0, 0));
@@ -586,7 +686,7 @@ fn without_a_usable_ai_the_turn_is_not_configured_and_never_calls_a_provider() {
 
     // Con la IA local preparada, contesta la local.
     let local = Fake::new(ProviderKind::Ollama);
-    w.app.set_local_ai(Some(resolver(&local)));
+    w.app.set_assistant_local(Some(resolver(&local)));
     let turn = ask(&mut w.app, None, "factura de Alfa", "other");
     assert_eq!(turn.outcome, Outcome::Answered);
     assert!(turn.local);
@@ -994,11 +1094,10 @@ fn other_provider_errors_never_fall_back_and_leave_no_effects() {
         assert_eq!(turn.error_code.as_deref(), Some(code));
         assert!(!turn.answer.is_empty());
         assert_eq!((w.ext.calls(), local.calls()), (1, 0), "{code}");
-        assert!(turn.turn_id.is_none() && turn.fallback.is_none());
-        assert!(
-            w.app.assistant_conversation(None).unwrap().is_none(),
-            "{code}"
-        );
+        assert!(turn.fallback.is_none());
+        // La llamada salió (y falló): queda para «Ver lo enviado», sin respuesta ni citas.
+        assert_sent_matches(&w, &turn, 1);
+        assert!(!w.app.fallback_period_active(), "{code}");
         assert_eq!(last_audit(&w.app, "assistant_turn").0, "error");
         // Ni siquiera cambia la espera global: el turno no tiene efectos.
         assert_eq!(w.app.ai_wait(), None, "{code}");
@@ -1021,7 +1120,7 @@ fn it_never_goes_from_the_local_ai_to_an_external_one() {
     let mut w = world(ProviderKind::OllamaCloud);
     let local = Fake::new(ProviderKind::Ollama);
     local.fail_with(AiError::Timeout);
-    w.app.set_local_ai(Some(resolver(&local)));
+    w.app.set_assistant_local(Some(resolver(&local)));
     let turn = ask(&mut w.app, None, "pregunta", "other");
     assert_eq!(turn.outcome, Outcome::Error);
     assert_eq!(turn.error_code.as_deref(), Some("timeout"));
@@ -1232,4 +1331,425 @@ fn injected_text_arrives_as_delimited_data_and_nothing_hostile_is_run_or_accepte
     let added: Vec<_> = audit_after.difference(&audit_before).collect();
     assert_eq!(added.len(), 1);
     assert_eq!(added[0].as_str(), "assistant_turn");
+}
+
+// ======================================================================================
+// Revisión de arquitecto: enmascarar antes de recortar
+// ======================================================================================
+
+/// Texto de relleno de exactamente `n` caracteres, con espacios.
+fn pad(n: usize) -> String {
+    "ab ".chars().cycle().take(n).collect()
+}
+
+/// Notas de una factura con el dato `sentinel` colocado de modo que su mitad caiga en el carácter
+/// `at` del cuerpo (el cuerpo es el JSON del documento).
+fn straddle(sentinel: &str, at: usize) -> String {
+    let probe = invoice_json("Proveedor Ejemplo", "F-0000", 100, "@");
+    let start = probe.find('@').unwrap();
+    let from = at.saturating_sub(sentinel.len() / 2);
+    format!(
+        "{} {sentinel} fin del texto {}",
+        pad(from.saturating_sub(start + 1)),
+        pad(300)
+    )
+}
+
+/// Las mitades de cada dato sintético: ninguna debe salir, ni siquiera sola.
+const HALVES: [&str; 10] = [
+    "ES91 2100 0418",
+    "4502 0005 1332",
+    "ES91 2100",
+    "0005 1332",
+    "612 345",
+    "345 678",
+    "B12345",
+    "45674",
+    "ES912100",
+    "04184502",
+];
+
+fn without_spaces(text: &str) -> String {
+    text.chars().filter(|c| !c.is_whitespace()).collect()
+}
+
+fn assert_nothing_leaks(requests: &[GenerateRequest]) {
+    for request in requests {
+        let text = sent_text(request);
+        let compact = without_spaces(&text);
+        for sentinel in [IBAN, PHONE, TAX_ID] {
+            assert!(!text.contains(sentinel), "salió {sentinel:?}");
+            assert!(
+                !compact.contains(&without_spaces(sentinel)),
+                "salió {sentinel:?} sin espacios"
+            );
+        }
+        for half in HALVES {
+            assert!(!text.contains(half), "salió la mitad {half:?}");
+        }
+    }
+}
+
+/// Pasa el guion `values` al espía desde la llamada actual.
+fn script_from_now(w: &World, values: Vec<Value>) {
+    let before = w.ext.calls();
+    w.ext
+        .script(move |_, n| Ok(values[(n - before).min(values.len() - 1)].clone()));
+}
+
+#[test]
+fn a_sensitive_datum_crossing_a_cut_never_leaves_in_two_halves() {
+    let mut w = world(ProviderKind::OllamaCloud);
+    let mut ids = Vec::new();
+    let mut kinds = Vec::new();
+    // Cada dato cae a ambos lados del carácter 600 del cuerpo (los trozos de `get_document`) y del
+    // 200 (el fragmento de la búsqueda), en varias posiciones para no depender de un byte exacto.
+    for (k, sentinel) in [IBAN, PHONE, TAX_ID].into_iter().enumerate() {
+        for at in [200usize, 590, 600, 610] {
+            let notes = straddle(sentinel, at);
+            ids.push(seed(
+                &mut w.app,
+                &format!("s{k}{at}.txt"),
+                "Proveedor Ejemplo",
+                &format!("F-{k}{at:03}"),
+                100,
+                &notes,
+            ));
+            kinds.push(sentinel);
+        }
+    }
+    grant(&mut w.app);
+    // Con la IA local el texto es completo: el dato sí está en el cuerpo.
+    for (id, sentinel) in ids.iter().zip(&kinds) {
+        let out = w.app.assistant_tool(&ToolCall {
+            name: "get_document".into(),
+            args: serde_json::from_value(json!({ "ref": format!("doc:{id}") })).unwrap(),
+            external: false,
+        });
+        let joined: String = out.value["fragments"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(Value::as_str)
+            .map(without_spaces)
+            .collect();
+        assert!(
+            joined.contains(&without_spaces(sentinel)),
+            "doc {id}: {joined}"
+        );
+    }
+    let mut external_requests = Vec::new();
+    for chunk in ids.chunks(4) {
+        let mut values = vec![tool("search", json!({ "query": "Proveedor" }))];
+        values.extend(
+            chunk
+                .iter()
+                .map(|id| tool("get_document", json!({ "ref": format!("doc:{id}") }))),
+        );
+        values.push(answer("Visto."));
+        script_from_now(&w, values);
+        let before = w.ext.requests().len();
+        let turn = ask(&mut w.app, None, "Lee los documentos de Proveedor", "other");
+        assert_eq!(turn.outcome, Outcome::Answered);
+        external_requests.extend(w.ext.requests()[before..].to_vec());
+    }
+    assert_nothing_leaks(&external_requests);
+    // Salieron los marcadores y, en la búsqueda, un fragmento: el dato se sustituyó, no se perdió el texto.
+    let all: String = external_requests.iter().map(sent_text).collect();
+    for marker in ["[IBAN]", "[TELÉFONO]", "[ID]"] {
+        assert!(all.contains(marker), "falta {marker}");
+    }
+    assert!(all.contains("\"snippet\""));
+    assert!(all.contains("\"fragments\""));
+}
+
+#[test]
+fn a_previous_local_answer_with_an_iban_is_masked_whole_before_the_external_turn() {
+    let mut w = world(ProviderKind::OllamaCloud);
+    let local = Fake::new(ProviderKind::Ollama);
+    w.app.set_assistant_local(Some(resolver(&local)));
+    // El IBAN cae a ambos lados del carácter 2.000 del turno.
+    local.steps(vec![answer(&format!(
+        "{} {IBAN} y {}",
+        pad(1985),
+        pad(100)
+    ))]);
+    let first = ask(&mut w.app, None, "¿Cómo pago?", "other");
+    assert!(first.local && first.outcome == Outcome::Answered);
+    grant(&mut w.app);
+    w.ext.steps(vec![answer("Vale.")]);
+    let turn = ask(&mut w.app, first.conversation_id, "¿Y ahora?", "other");
+    assert_eq!(turn.outcome, Outcome::Answered);
+    assert_eq!(local.calls(), 1);
+    let requests = w.ext.requests();
+    assert_eq!(requests.len(), 1);
+    assert_nothing_leaks(&requests);
+    assert!(requests[0].content.contains("[IBAN]"));
+    assert!(requests[0].content.contains("Turno del asistente:"));
+}
+
+#[test]
+fn no_tool_returns_a_file_path_an_account_name_or_a_mailbox_address() {
+    let mut w = world(ProviderKind::OllamaCloud);
+    let account = w.app.add_simulated_mail_account().unwrap();
+    w.app
+        .rename_mail_account(&account.id, ACCOUNT_NAME)
+        .unwrap();
+    let notes = format!("Contacto {DOC_EMAIL}");
+    let imported = w
+        .app
+        .import_file_from(
+            "ruta.txt",
+            Some(Path::new(PATH)),
+            invoice_json("Proveedor Ejemplo", "F-77", 5, &notes).as_bytes(),
+        )
+        .unwrap();
+    w.app.fetch_mail().unwrap();
+    while w.app.process_next().unwrap().is_some() {}
+    let tasks = w.app.tasks().unwrap();
+    let inputs: String = tasks.iter().map(|t| t.input_ref.clone()).collect();
+    // Lo que no debe salir existe de verdad en las tareas.
+    assert!(inputs.contains("centinela-ruta"), "{inputs}");
+    let secrets = ["centinela-ruta".to_owned(), ACCOUNT_NAME.to_owned()]
+        .into_iter()
+        .chain(account.address.clone())
+        .collect::<Vec<_>>();
+    assert!(
+        secrets.iter().skip(1).any(|s| inputs.contains(s.as_str())),
+        "alguna tarea lleva el origen de la cuenta: {inputs}"
+    );
+    let mut seen = String::new();
+    for external in [false, true] {
+        let mut run = |name: &str, args: Value| {
+            let out = w.app.assistant_tool(&ToolCall {
+                name: name.to_owned(),
+                args: serde_json::from_value(args).unwrap(),
+                external,
+            });
+            seen.push_str(&out.value.to_string());
+        };
+        run("mail_accounts", json!({}));
+        for state in [None, Some("awaiting_review"), Some("completed")] {
+            run(
+                "list_tasks",
+                state.map_or(json!({}), |s| json!({ "state": s })),
+            );
+        }
+        run("search", json!({ "query": "Proveedor" }));
+        run("search", json!({ "query": "" }));
+        run("aggregate", json!({ "op": "count" }));
+        for task in &tasks {
+            let reference = json!({ "ref": format!("doc:{}", task.id) });
+            run("get_document", reference.clone());
+            run("history", reference);
+        }
+    }
+    assert!(seen.contains(&format!("doc:{}", imported.id)));
+    for secret in &secrets {
+        assert!(
+            !seen.contains(secret.as_str()),
+            "una herramienta devolvió {secret:?}"
+        );
+    }
+}
+
+// ======================================================================================
+// Revisión de arquitecto: el asistente no arranca procesos
+// ======================================================================================
+
+/// Un resolvedor que cuenta cuántas veces se le pregunta.
+fn counting(local: Option<&Arc<Fake>>, asked: &Arc<AtomicUsize>) -> LocalFallback {
+    let local = local.map(Arc::clone);
+    let asked = Arc::clone(asked);
+    Arc::new(move || {
+        asked.fetch_add(1, Ordering::SeqCst);
+        local.as_ref().map(|l| Arc::clone(l) as Arc<dyn Provider>)
+    })
+}
+
+#[test]
+fn without_consent_and_a_local_ai_that_is_not_running_nothing_is_called() {
+    let mut w = world(ProviderKind::OllamaCloud);
+    seed(&mut w.app, "a.txt", "Alfa SL", "F-1", 100, "uno");
+    let local = Fake::new(ProviderKind::Ollama);
+    let asked = Arc::new(AtomicUsize::new(0));
+    // El resolvedor del asistente dice «no en marcha»: ni una llamada a ninguna IA.
+    w.app.set_assistant_local(Some(counting(None, &asked)));
+    let turn = ask(&mut w.app, None, "factura de Alfa", "other");
+    assert_eq!(turn.outcome, Outcome::ConsentRequired);
+    assert_eq!((w.ext.calls(), local.calls()), (0, 0));
+    assert_eq!(asked.load(Ordering::SeqCst), 1);
+    assert_eq!(turn.words.unwrap().page.total, 1);
+
+    // Sin IA utilizable: igual, `not_configured`.
+    w.app.set_ai_wait(Some(AiWait::NeedsKey));
+    let turn = ask(&mut w.app, None, "factura de Alfa", "other");
+    assert_eq!(turn.outcome, Outcome::NotConfigured);
+    assert_eq!((w.ext.calls(), local.calls()), (0, 0));
+}
+
+#[test]
+fn with_the_local_fallback_off_the_local_ai_is_never_asked_even_if_it_is_running() {
+    let mut w = world(ProviderKind::OllamaCloud);
+    let local = Fake::new(ProviderKind::Ollama);
+    let (fallback_asked, learning_asked) =
+        (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)));
+    // Los resolvedores que pueden arrancar Ollama (respaldo de D101 y «usar IA local» de aprender)
+    // no sirven al asistente: sin resolvedor propio, no se pregunta por ellos ni se llama a la local.
+    w.app
+        .set_local_fallback(Some(counting(Some(&local), &fallback_asked)));
+    w.app
+        .set_local_ai(Some(counting(Some(&local), &learning_asked)));
+    w.app.set_assistant_local(None);
+    let turn = ask(&mut w.app, None, "pregunta", "other");
+    assert_eq!(turn.outcome, Outcome::ConsentRequired);
+    assert_eq!((w.ext.calls(), local.calls()), (0, 0));
+    assert_eq!(
+        (
+            fallback_asked.load(Ordering::SeqCst),
+            learning_asked.load(Ordering::SeqCst)
+        ),
+        (0, 0),
+        "no se pregunta por un resolvedor que puede arrancar procesos"
+    );
+    w.app.set_ai_wait(Some(AiWait::NeedsKey));
+    let turn = ask(&mut w.app, None, "pregunta", "other");
+    assert_eq!(turn.outcome, Outcome::NotConfigured);
+    assert_eq!(
+        (local.calls(), fallback_asked.load(Ordering::SeqCst)),
+        (0, 0)
+    );
+}
+
+// ======================================================================================
+// Revisión de arquitecto: el respaldo se decide una vez por turno y no toca la cola
+// ======================================================================================
+
+#[test]
+fn after_the_first_fallback_the_rest_of_the_turn_stays_local_and_the_queue_period_is_untouched() {
+    for error in [
+        AiError::Unavailable("x".into()),
+        AiError::Timeout,
+        AiError::RateLimited {
+            retry_after_ms: None,
+        },
+    ] {
+        let code = error.code();
+        let mut w = world(ProviderKind::OllamaCloud);
+        seed(&mut w.app, "a.txt", "Alfa SL", "F-1", 100, "uno");
+        let local = Fake::new(ProviderKind::Ollama);
+        w.app.set_local_fallback(Some(resolver(&local)));
+        grant(&mut w.app);
+        w.ext.fail_with(error);
+        local.steps(vec![
+            tool("list_tasks", json!({})),
+            tool("search", json!({ "query": "Alfa" })),
+            answer("Con la local."),
+        ]);
+        assert!(!w.app.fallback_period_active());
+        let turn = ask(&mut w.app, None, "pregunta", "review");
+        assert_eq!(turn.outcome, Outcome::Answered, "{code}");
+        // Exactamente UN intento al externo en todo el turno; el resto, local.
+        assert_eq!((w.ext.calls(), local.calls()), (1, 3), "{code}");
+        assert_eq!(turn.steps, 3);
+        assert!(
+            turn.local && turn.provider == ProviderKind::Ollama,
+            "{code}"
+        );
+        assert_eq!(turn.fallback.as_ref().unwrap()["reason"], code);
+        // El periodo compartido con la cola ni se abre ni se lee.
+        assert!(!w.app.fallback_period_active(), "{code}");
+        // Cada llamada dice quién la atendió: la primera ya fue la local.
+        let sent = w.app.assistant_sent(turn.turn_id.unwrap()).unwrap();
+        assert_eq!(sent.len(), 3);
+        assert!(sent
+            .iter()
+            .all(|c| c.local && c.host.is_empty() && c.provider == "ollama"));
+    }
+}
+
+#[test]
+fn a_mixed_turn_does_not_go_back_to_the_external_after_falling_back() {
+    let mut w = world(ProviderKind::OllamaCloud);
+    let local = Fake::new(ProviderKind::Ollama);
+    w.app.set_local_fallback(Some(resolver(&local)));
+    grant(&mut w.app);
+    // Paso 1 por el externo; el paso 2 falla y cae a la local; el paso 3 sigue en la local.
+    w.ext.script(|_, n| {
+        if n == 0 {
+            Ok(tool("list_tasks", json!({})))
+        } else {
+            Err(AiError::Unavailable("x".into()))
+        }
+    });
+    local.steps(vec![tool("list_tasks", json!({})), answer("Fin.")]);
+    let turn = ask(&mut w.app, None, "pregunta", "review");
+    assert_eq!(turn.outcome, Outcome::Answered);
+    assert_eq!((w.ext.calls(), local.calls()), (2, 2));
+    assert!(turn.local && turn.fallback.is_some());
+    assert!(!w.app.fallback_period_active());
+    let sent = w.app.assistant_sent(turn.turn_id.unwrap()).unwrap();
+    let who: Vec<(bool, &str)> = sent
+        .iter()
+        .map(|c| (c.local, c.provider.as_str()))
+        .collect();
+    assert_eq!(
+        who,
+        [(false, "ollama_cloud"), (true, "ollama"), (true, "ollama")]
+    );
+    assert_eq!(sent[0].host, HOST);
+    assert!(sent[1].host.is_empty());
+}
+
+#[test]
+fn an_unavailable_provider_without_a_local_ai_is_an_error_that_opens_no_period() {
+    let mut w = world(ProviderKind::OllamaCloud);
+    let asked = Arc::new(AtomicUsize::new(0));
+    w.app.set_local_fallback(Some(counting(None, &asked)));
+    grant(&mut w.app);
+    w.ext.fail_with(AiError::Unavailable("x".into()));
+    let turn = ask(&mut w.app, None, "pregunta", "other");
+    assert_eq!(turn.outcome, Outcome::Error);
+    assert_eq!(turn.error_code.as_deref(), Some("unavailable"));
+    assert_eq!(w.ext.calls(), 1);
+    assert!(turn.fallback.is_none() && !turn.local);
+    assert!(!w.app.fallback_period_active());
+    assert_eq!(w.app.ai_wait(), None);
+}
+
+// ======================================================================================
+// Revisión de arquitecto: la puerta se cierra siempre que cambia el destino
+// ======================================================================================
+
+#[test]
+fn a_destination_change_between_begin_and_run_sends_nothing_to_the_old_or_the_new_one() {
+    let changes: Vec<(&str, Arc<Fake>)> = vec![
+        (
+            "modelo",
+            Fake::at(ProviderKind::OllamaCloud, "otro-modelo", HOST),
+        ),
+        (
+            "servidor",
+            Fake::at(ProviderKind::OllamaCloud, MODEL, "host-b.test"),
+        ),
+        ("proveedor", Fake::at(ProviderKind::Anthropic, MODEL, HOST)),
+    ];
+    for (what, replacement) in changes {
+        let mut w = world(ProviderKind::OllamaCloud);
+        grant(&mut w.app);
+        let job = w
+            .app
+            .begin_assistant_turn(None, "pregunta", "other")
+            .unwrap();
+        w.app
+            .select_provider(Arc::clone(&replacement) as Arc<dyn Provider>);
+        let run = job.run(&mut |call| w.app.assistant_tool(call));
+        assert_eq!(
+            (w.ext.calls(), replacement.calls()),
+            (0, 0),
+            "{what}: no sale nada al destino anterior ni al nuevo"
+        );
+        let turn = w.app.finish_assistant_turn(run).unwrap();
+        assert_eq!(turn.outcome, Outcome::ConsentRequired, "{what}");
+    }
 }

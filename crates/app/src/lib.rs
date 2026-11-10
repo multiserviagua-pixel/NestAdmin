@@ -306,6 +306,10 @@ pub struct App {
     ai_wait: Option<AiWait>,
     /// Respaldo del proveedor externo elegido al local (D101); `None` desactiva el respaldo.
     fallback: Option<LocalFallback>,
+    /// La IA local que puede usar el asistente del chat sin consentimiento o sin IA externa
+    /// utilizable (D183): solo si ya está en marcha, sin arrancar nada, y solo si el respaldo local
+    /// está activado. Independiente de `fallback` y de `learning.local_ai`, que pueden arrancarla.
+    assistant_local: Option<LocalFallback>,
     /// Hasta cuándo las tareas van directas al local tras un `unavailable` del externo.
     fallback_until: Arc<Mutex<Option<Instant>>>,
     /// Hay un afinado de sugerencias con IA en curso (D134): no se lanza otro.
@@ -934,6 +938,7 @@ impl App {
             paused: false,
             ai_wait: None,
             fallback: None,
+            assistant_local: None,
             fallback_until: Arc::new(Mutex::new(None)),
             refining: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             auto_skip: None,
@@ -1177,7 +1182,7 @@ impl App {
         self.drop_consent_if_destination_changed();
         self.drop_profile_consent_if_destination_changed();
         self.drop_learning_consent_if_destination_changed();
-        self.drop_assistant_consent_if_destination_changed();
+        self.drop_assistant_consent_if_destination_changed(!same);
         self.expire_fallback_period();
     }
 
@@ -1230,6 +1235,14 @@ impl App {
     pub fn set_local_fallback(&mut self, fallback: Option<LocalFallback>) {
         self.fallback = fallback;
         self.expire_fallback_period();
+    }
+
+    /// Fija la IA local del asistente del chat (D183): un resolvedor que NO arranca nada y que
+    /// devuelve la IA local solo si ya está en marcha. Quien lo llama lo da solo si el proveedor
+    /// elegido es la IA local o el respaldo local está activado; con `None` el asistente no usa
+    /// ninguna IA local fuera del caso en que esta es el proveedor elegido.
+    pub fn set_assistant_local(&mut self, local: Option<LocalFallback>) {
+        self.assistant_local = local;
     }
 
     /// Si las tareas van directas al local por un `unavailable` reciente del externo.

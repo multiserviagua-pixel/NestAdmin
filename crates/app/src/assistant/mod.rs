@@ -10,7 +10,12 @@
 //! valida las citas, guarda y audita. Ninguna llamada a la IA se hace con el cerrojo tomado.
 //!
 //! Nunca de local a externa ni a otro externo: el único respaldo es el de D101 (externo elegido
-//! a la IA local), una vez, a cargo de `generate_with_fallback`.
+//! a la IA local), a cargo de `generate_with_fallback`. Se decide UNA vez por turno: tras el primer
+//! respaldo, el resto del turno sigue con la IA local sin volver a intentar el externo, y el periodo
+//! de 10 minutos del turno es propio: el asistente nunca lee ni escribe el de la cola.
+//!
+//! Sin consentimiento o sin IA externa utilizable, el asistente no arranca nada: solo usa la IA
+//! local si el resolvedor `assistant_local` (que no arranca procesos) la da ya en marcha.
 
 pub mod consent;
 pub mod tools;
@@ -28,7 +33,9 @@ use nestadmin_core::{NewCall, SearchHit, SentCall};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
-use self::tools::{fragment_count, strip_fragments, ToolCall, ToolOutput, WITHHELD_MARK};
+use self::tools::{
+    fragment_count, split_masked, strip_fragments, ToolCall, ToolOutput, WITHHELD_MARK,
+};
 use crate::learn::{is_masked, mask};
 use crate::refine::now_ms;
 use crate::search::QuestionAnswer;
@@ -84,6 +91,17 @@ impl Drop for TurnGuard {
     }
 }
 
+/// Lo que el asistente está haciendo, para mostrarlo mientras trabaja (D182): un código cerrado y
+/// nunca contenido (ni la pregunta, ni los argumentos, ni los resultados).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum Progress {
+    /// Espera la respuesta del modelo.
+    Thinking,
+    /// Ejecuta una herramienta del catálogo cerrado.
+    Tool { name: String },
+}
+
 /// Resultado de un turno.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -103,12 +121,11 @@ enum Route {
     External {
         provider: Arc<dyn Provider>,
         fallback: Option<LocalFallback>,
-        until: Arc<Mutex<Option<Instant>>>,
     },
     /// La IA local es el proveedor elegido y es utilizable.
     Local(Arc<dyn Provider>),
-    /// Sin consentimiento o sin IA externa utilizable: solo la IA local, si está preparada al
-    /// llamar (el mismo recurso que usa «aprender»); si no, el resultado `otherwise`.
+    /// Sin consentimiento o sin IA externa utilizable: solo la IA local si ya está en marcha al
+    /// llamar (`assistant_local`, que no arranca nada); si no, el resultado `otherwise`.
     LocalOr {
         resolver: Option<LocalFallback>,
         otherwise: Outcome,
@@ -220,6 +237,8 @@ pub struct TurnMeta {
     pub fallback: Option<Value>,
     pub steps: usize,
     pub tools: Vec<String>,
+    /// Código del fallo si el turno terminó con `error`.
+    pub error_code: Option<String>,
 }
 
 /// Un turno de una conversación guardada.
@@ -354,6 +373,16 @@ impl AssistantJob {
     /// respaldo de D101 y comprobando justo antes que el consentimiento sigue vigente; sin él,
     /// no sale nada. Un fallo del proveedor termina el turno con su código y sin efectos.
     pub fn run(self, tools: &mut dyn FnMut(&ToolCall) -> ToolOutput) -> AssistantRun {
+        self.run_with_progress(tools, &mut |_| {})
+    }
+
+    /// Como `run`, y avisa a `progress` al empezar cada paso: `Thinking` antes de cada llamada al
+    /// modelo y `Tool` antes de cada herramienta.
+    pub fn run_with_progress(
+        self,
+        tools: &mut dyn FnMut(&ToolCall) -> ToolOutput,
+        progress: &mut dyn FnMut(Progress),
+    ) -> AssistantRun {
         let AssistantJob {
             conversation_id,
             question,
@@ -385,6 +414,10 @@ impl AssistantJob {
             _guard: guard,
         };
         let external = matches!(route, Route::External { .. });
+        // Periodo de respaldo propio del turno: nunca el compartido con la cola.
+        let turn_until: Mutex<Option<Instant>> = Mutex::new(None);
+        // Tras el primer respaldo del turno, todo lo que queda va a la IA local.
+        let mut pinned_local = false;
         let local_target: Option<Arc<dyn Provider>> = match &route {
             Route::External { .. } => None,
             Route::Local(provider) => Some(Arc::clone(provider)),
@@ -423,11 +456,12 @@ impl AssistantJob {
                 return state;
             }
             // Justo antes de enviar: si el consentimiento se retiró, no sale nada.
-            if external && !gate.load(Ordering::SeqCst) {
+            if external && !pinned_local && !gate.load(Ordering::SeqCst) {
                 state.status = RunStatus::ConsentRequired;
                 return state;
             }
             state.steps += 1;
+            progress(Progress::Thinking);
             let request = compose(
                 &format!("assistant-{}-{}", now_ms(), state.steps),
                 view,
@@ -435,49 +469,67 @@ impl AssistantJob {
                 &question,
                 &entries,
             );
+            let step_local: bool;
             let (result, fallback, host) = match (&route, &local_target) {
-                (
-                    Route::External {
-                        provider,
-                        fallback,
-                        until,
-                    },
-                    _,
-                ) => {
-                    let attempt =
-                        generate_with_fallback(&**provider, fallback.as_ref(), until, &request);
+                (Route::External { fallback, .. }, _) if pinned_local => {
+                    // Ya cayó a la local en este turno: no se vuelve a intentar el externo.
+                    step_local = true;
+                    let result = fallback
+                        .as_ref()
+                        .and_then(|resolve| resolve())
+                        .filter(|p| p.kind() == ProviderKind::Ollama)
+                        .map_or_else(
+                            || Err("unavailable".to_owned()),
+                            |local| {
+                                local
+                                    .generate(&request)
+                                    .map_err(|e: AiError| e.code().to_owned())
+                            },
+                        );
+                    (result, None, String::new())
+                }
+                (Route::External { provider, fallback }, _) => {
+                    let attempt = generate_with_fallback(
+                        &**provider,
+                        fallback.as_ref(),
+                        &turn_until,
+                        &request,
+                    );
+                    step_local = attempt.fallback.is_some();
                     (
                         attempt.result.map_err(|e| e.code),
                         attempt.fallback,
                         provider.destination().unwrap_or_default(),
                     )
                 }
-                (_, Some(local)) => (
-                    local
-                        .generate(&request)
-                        .map_err(|e: AiError| e.code().to_owned()),
-                    None,
-                    String::new(),
-                ),
+                (_, Some(local)) => {
+                    step_local = true;
+                    (
+                        local
+                            .generate(&request)
+                            .map_err(|e: AiError| e.code().to_owned()),
+                        None,
+                        String::new(),
+                    )
+                }
                 _ => unreachable!("sin destino se salió antes"),
             };
+            if fallback.is_some() {
+                pinned_local = true;
+            }
             let (call_provider, call_model, local_answered) = match &result {
                 Ok(r) => (
                     r.provider,
                     r.model.clone(),
                     r.provider == ProviderKind::Ollama,
                 ),
-                Err(_) => (state.provider, state.model.clone(), !external),
+                Err(_) => (state.provider, state.model.clone(), step_local),
             };
             state.calls.push(NewCall {
                 step: u32::try_from(state.steps).unwrap_or(u32::MAX),
                 provider: call_provider.to_string(),
                 model: call_model.clone(),
-                host: if local_answered && external && result.is_ok() {
-                    String::new()
-                } else {
-                    host
-                },
+                host: if local_answered { String::new() } else { host },
                 local: local_answered,
                 sent_text: sent_text(&request),
             });
@@ -549,6 +601,7 @@ impl AssistantJob {
                         state.status = RunStatus::Cancelled;
                         return state;
                     }
+                    progress(Progress::Tool { name: name.clone() });
                     let call = ToolCall {
                         name: name.clone(),
                         args: args.clone(),
@@ -600,17 +653,19 @@ fn history_for(
     let mut withheld = 0;
     let mut out = Vec::new();
     for (from_user, text) in keep {
-        let text = clip(&text, MAX_TURN_CHARS);
         let text = if external && !from_user {
+            // Se enmascara el turno ENTERO y después se recorta: un dato partido por el corte
+            // quedaría en dos mitades sin enmascarar.
             let masked = mask(&text);
-            if is_masked(&masked) {
-                masked
+            let (head, _) = split_masked(masked.trim(), MAX_TURN_CHARS);
+            if is_masked(head) {
+                head.to_owned()
             } else {
                 withheld += 1;
                 WITHHELD_MARK.to_owned()
             }
         } else {
-            text
+            clip(&text, MAX_TURN_CHARS)
         };
         out.push(HistoryTurn { from_user, text });
     }
@@ -624,9 +679,9 @@ impl App {
     /// 1. IA local elegida y utilizable: la local; sin consentimiento.
     /// 2. Proveedor externo utilizable y con consentimiento vigente: el externo (con el respaldo
     ///    de D101).
-    /// 3. Externo sin consentimiento: solo la IA local si está preparada al llamar; si no,
-    ///    `consent_required`.
-    /// 4. Sin IA utilizable: solo la IA local si está preparada; si no, `not_configured`.
+    /// 3. Externo sin consentimiento: solo la IA local si el resolvedor del asistente la da ya en
+    ///    marcha (sin arrancar nada); si no, `consent_required`.
+    /// 4. Sin IA utilizable: igual con la IA local; si no, `not_configured`.
     pub fn begin_assistant_turn(
         &mut self,
         conversation_id: Option<i64>,
@@ -660,11 +715,9 @@ impl App {
         };
         let external_provider = self.provider.kind() != ProviderKind::Ollama;
         let consent_granted = external_provider && self.assistant_consent()?.state == "granted";
-        let local_source = self
-            .learning
-            .local_ai
-            .clone()
-            .or_else(|| self.fallback.clone());
+        // La IA local del asistente no arranca nada y solo existe con el respaldo local activado:
+        // ni `learning.local_ai` ni `fallback` valen, porque pueden arrancar Ollama.
+        let local_source = self.assistant_local.clone();
         let route = if !external_provider {
             if self.ai_wait.is_none() {
                 Route::Local(Arc::clone(&self.provider))
@@ -685,7 +738,6 @@ impl App {
             Route::External {
                 provider: Arc::clone(&self.provider),
                 fallback: self.fallback.clone(),
-                until: Arc::clone(&self.fallback_until),
             }
         } else {
             Route::LocalOr {
@@ -720,7 +772,9 @@ impl App {
     }
 
     /// Cierra el turno (con el cerrojo): valida las citas, guarda la conversación y audita. Un
-    /// error o una cancelación no guardan nada salvo el evento del historial.
+    /// error o una cancelación guardan el turno (con su resultado y la pregunta) solo si llegó a
+    /// salir alguna llamada, para que «Ver lo enviado» la muestre (D183); ese turno no entra en el
+    /// historial que se envía después ni en la validación de citas.
     pub fn finish_assistant_turn(&mut self, run: AssistantRun) -> AppResult<AssistantTurn> {
         let AssistantRun {
             conversation_id,
@@ -818,17 +872,21 @@ impl App {
                 "error"
             }
         };
-        // Guarda solo lo que la persona puede seguir leyendo: una respuesta o su motivo.
+        // Guarda lo que la persona puede seguir leyendo (una respuesta o su motivo) y, aunque no
+        // sea una respuesta, todo turno del que salió alguna llamada.
         if matches!(
             turn.outcome,
             Outcome::Answered | Outcome::ConsentRequired | Outcome::NotConfigured
-        ) {
+        ) || !calls.is_empty()
+        {
             let meta = TurnMeta {
                 outcome: Some(
                     match turn.outcome {
                         Outcome::Answered => "answered",
                         Outcome::ConsentRequired => "consent_required",
-                        _ => "not_configured",
+                        Outcome::NotConfigured => "not_configured",
+                        Outcome::Cancelled => "cancelled",
+                        Outcome::Error => "error",
                     }
                     .to_owned(),
                 ),
@@ -846,6 +904,7 @@ impl App {
                 fallback: turn.fallback.clone(),
                 steps: turn.steps,
                 tools: turn.tools.clone(),
+                error_code: turn.error_code.clone(),
             };
             let saved = self.store.assistant_save_exchange(
                 conversation_id,

@@ -240,8 +240,14 @@ impl App {
     }
 
     /// Retira el consentimiento si el proveedor, el modelo o el servidor ya no son los suyos. Se
-    /// llama al cambiar de proveedor, de modelo o de servidor (`select_provider`).
-    pub(crate) fn drop_assistant_consent_if_destination_changed(&mut self) {
+    /// llama al cambiar de proveedor, de modelo o de servidor (`select_provider`). `changed` dice
+    /// si el destino cambió: entonces la puerta se cierra ANTES de leer nada, de modo que ni un
+    /// fallo al leer el ajuste deja a un turno ya preparado enviando al destino anterior (ni al
+    /// nuevo: el siguiente turno la vuelve a abrir si hay consentimiento).
+    pub(crate) fn drop_assistant_consent_if_destination_changed(&mut self, changed: bool) {
+        if changed {
+            self.assistant.gate.store(false, Ordering::SeqCst);
+        }
         let Ok(Some(json)) = self.store.rule_setting(CONSENT_KEY) else {
             return;
         };

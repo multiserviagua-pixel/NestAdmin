@@ -1,5 +1,5 @@
 import "./style.css";
-import { api, isPreview, onChanged, onMailSignIn, onSetup, onSetupDone, onStartup } from "./api";
+import { api, isPreview, onAssistantProgress, onChanged, onMailSignIn, onSetup, onSetupDone, onStartup } from "./api";
 import type {
   AiWait,
   AuditEntry,
@@ -316,11 +316,11 @@ import {
   isInformative,
   triageNotices,
 } from "./triage-text";
-import type { AssistantConsentView, AssistantPreview, AssistantSentCall, AssistantStoredTurn, AssistantTurn, QuestionAnswer, SearchHit } from "./types";
+import type { AssistantConsentView, AssistantPreview, AssistantProgress, AssistantSentCall, AssistantStoredTurn, AssistantTurn, QuestionAnswer, SearchHit } from "./types";
 import {
   ASSISTANT_ACCEPT,
   ASSISTANT_ACTION_LABEL,
-  ASSISTANT_BUSY,
+  progressText,
   ASSISTANT_CANCEL,
   ASSISTANT_CLEAR_ALL,
   ASSISTANT_CLEAR_ALL_CONFIRM,
@@ -530,6 +530,8 @@ const state = {
     /** `assistant`: el asistente piensa (se puede cancelar); `words`: búsqueda por palabras. */
     busyKind: "assistant" as "assistant" | "words",
     cancelling: false,
+    /** Paso en curso del asistente (código cerrado del evento de progreso). */
+    progress: null as null | AssistantProgress,
     reindexing: false,
     turns: [] as ChatTurn[],
     cardNote: null as null | { key: string; text: string },
@@ -6968,6 +6970,7 @@ async function sendChat() {
   chat.busy = true;
   chat.busyKind = "assistant";
   chat.cancelling = false;
+  chat.progress = null;
   chat.cardNote = null;
   chat.sent = null;
   renderChat({ focus: "chat:input", end: true });
@@ -6983,6 +6986,7 @@ async function sendChat() {
   } finally {
     chat.busy = false;
     chat.cancelling = false;
+    chat.progress = null;
     renderChat({ focus: "chat:input", end: true });
   }
 }
@@ -7340,7 +7344,7 @@ function chatPanel(): HTMLElement {
             ? h(
                 "div",
                 { class: "chat-busy" },
-                h("span", { class: "meta", role: "status" }, chat.busyKind === "assistant" ? ASSISTANT_BUSY : CHAT_BUSY),
+                h("span", { class: "meta", role: "status" }, chat.busyKind === "assistant" ? progressText(chat.progress) : CHAT_BUSY),
                 chat.busyKind === "assistant"
                   ? h("button", { type: "button", "data-focus-key": "chat:cancel", disabled: chat.cancelling, onclick: () => void cancelChat() }, chat.cancelling ? CHAT_CANCELLING : CHAT_CANCEL)
                   : null,
@@ -7500,6 +7504,11 @@ void (async () => {
     return;
   }
   onChanged(() => void refresh(true));
+  onAssistantProgress((step) => {
+    if (!state.chat.busy || state.chat.busyKind !== "assistant") return;
+    state.chat.progress = step;
+    renderChat();
+  });
   onMailSignIn((url) => {
     state.signInUrl = url;
     render(true);

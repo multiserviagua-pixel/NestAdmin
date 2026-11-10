@@ -21,7 +21,7 @@ use nestadmin_app::accounts::{
 };
 use nestadmin_app::assistant::consent::{AssistantConsentView, AssistantPreview};
 use nestadmin_app::assistant::tools::ToolOutput;
-use nestadmin_app::assistant::{AssistantConversation, AssistantTurn};
+use nestadmin_app::assistant::{AssistantConversation, AssistantTurn, Progress};
 use nestadmin_app::initial_read::{
     FolderPreview, InitialReadOverview, InitialReadStatus, ReadExpectation, ReadStep,
 };
@@ -62,6 +62,9 @@ use crate::settings::{credential_store, Settings};
 
 /// Evento que indica a la ventana que vuelva a leer tareas e historial.
 const CHANGED: &str = "nestadmin://changed";
+/// Paso en curso del asistente del chat: `{kind: "thinking"}` o `{kind: "tool", name}`; un código
+/// cerrado, nunca contenido (D182).
+const ASSISTANT_PROGRESS: &str = "nestadmin://assistant-progress";
 /// Progreso de cada paso de preparación.
 const SETUP: &str = "nestadmin://setup";
 /// Final de una preparación, con su informe o su error.
@@ -191,15 +194,20 @@ async fn assistant_turn<R: Runtime>(
             .app()?
             .begin_assistant_turn(conversation_id, &text, &view)
             .map_err(self::text)?;
-        let run = job.run(&mut |call| match shared.app() {
-            Ok(app) => app.assistant_tool(call),
-            Err(_) => ToolOutput {
-                value: serde_json::json!({ "error": "unavailable" }),
-                refs: Vec::new(),
-                navigate: None,
-                withheld: 0,
+        let run = job.run_with_progress(
+            &mut |call| match shared.app() {
+                Ok(app) => app.assistant_tool(call),
+                Err(_) => ToolOutput {
+                    value: serde_json::json!({ "error": "unavailable" }),
+                    refs: Vec::new(),
+                    navigate: None,
+                    withheld: 0,
+                },
             },
-        });
+            &mut |step: Progress| {
+                let _ = handle.emit(ASSISTANT_PROGRESS, step);
+            },
+        );
         let turn = shared.app()?.finish_assistant_turn(run).map_err(self::text);
         changed(&handle);
         turn
@@ -1866,7 +1874,7 @@ fn settings(shared: State<'_, SharedState>) -> CmdResult<SettingsView> {
 /// proveedor que no puede enviar y las tareas con IA esperan en la cola; si no, se construye
 /// el elegido y se retoman. Se llama al arrancar y tras cada cambio de proveedor o de clave.
 fn refresh_provider(shared: &Shared) -> CmdResult<()> {
-    let (provider, wait, fallback) = {
+    let (provider, wait, fallback, settings_local_fallback) = {
         let settings = shared.settings.lock().map_err(text)?;
         let (provider, wait) = settings::resolve(&settings, shared.credentials.as_ref());
         // Respaldo solo del externo elegido (y utilizable) a la IA local, y solo si está
@@ -1874,7 +1882,7 @@ fn refresh_provider(shared: &Shared) -> CmdResult<()> {
         let external = settings.provider.as_ref().is_some_and(|c| !c.is_local());
         let fallback =
             (external && wait.is_none() && settings.local_fallback).then(|| local_fallback(shared));
-        (provider, wait, fallback)
+        (provider, wait, fallback, settings.local_fallback)
     };
     {
         let mut app = shared.app()?;
@@ -1884,6 +1892,9 @@ fn refresh_provider(shared: &Shared) -> CmdResult<()> {
         // «Usar IA local» en aprender es una elección explícita, no un respaldo: no depende del
         // interruptor `local_fallback`.
         app.set_local_ai(Some(local_fallback(shared)));
+        // El asistente del chat no arranca procesos: solo usa la IA local si el respaldo local
+        // está activado y Ollama ya está en marcha.
+        app.set_assistant_local(settings_local_fallback.then(|| assistant_local(shared)));
     }
     shared.wake();
     Ok(())
@@ -1899,6 +1910,20 @@ fn local_fallback(shared: &Shared) -> LocalFallback {
             settings::build(&local_choice(), credentials.as_ref()).ok()
         }
         _ => None,
+    })
+}
+
+/// IA local del asistente del chat: a diferencia de `local_fallback`, NO arranca nada. Solo
+/// devuelve el proveedor local si Ollama ya está en marcha, es compatible y tiene el modelo (una
+/// consulta de menos de dos segundos); si no, `None` y el turno termina sin IA.
+fn assistant_local(shared: &Shared) -> LocalFallback {
+    let setup = Arc::clone(&shared.local_setup);
+    let credentials = Arc::clone(&shared.credentials);
+    Arc::new(move || {
+        setup
+            .local_ai_running()
+            .then(|| settings::build(&local_choice(), credentials.as_ref()).ok())
+            .flatten()
     })
 }
 

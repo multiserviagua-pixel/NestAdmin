@@ -440,17 +440,41 @@ impl Store {
 
     /// Borra una conversación con sus turnos y llamadas (en cascada). Devuelve si existía.
     pub fn assistant_delete(&mut self, id: i64) -> Result<bool> {
-        let tx = self.conn.transaction()?;
-        let removed = tx.execute("DELETE FROM assistant_conversations WHERE id = ?1", [id])? > 0;
-        tx.commit()?;
-        Ok(removed)
+        self.erase(|tx| {
+            Ok(tx.execute("DELETE FROM assistant_conversations WHERE id = ?1", [id])? > 0)
+        })
     }
 
     /// Borra todas las conversaciones. Devuelve cuántas había.
     pub fn assistant_delete_all(&mut self) -> Result<usize> {
-        let tx = self.conn.transaction()?;
-        let removed = tx.execute("DELETE FROM assistant_conversations", [])?;
-        tx.commit()?;
+        self.erase(|tx| Ok(tx.execute("DELETE FROM assistant_conversations", [])?))
+    }
+
+    /// Ejecuta un borrado de conversaciones sin dejar el texto enviado en páginas libres ni en el
+    /// WAL: `secure_delete` solo durante este borrado (activarlo en toda la conexión sobrescribiría
+    /// también cada borrado del índice de búsqueda, sin necesidad) y después un `wal_checkpoint`
+    /// que vacía el WAL. El punto de control es de mejor esfuerzo: si hay un lector, el borrado ya
+    /// está hecho y el WAL se vaciará en el siguiente.
+    fn erase<T>(
+        &mut self,
+        delete: impl FnOnce(&rusqlite::Transaction<'_>) -> Result<T>,
+    ) -> Result<T> {
+        let previous: i64 = self
+            .conn
+            .query_row("PRAGMA secure_delete", [], |r| r.get(0))?;
+        self.conn.pragma_update(None, "secure_delete", 1)?;
+        let outcome: Result<T> = (|| {
+            let tx = self.conn.transaction()?;
+            let removed = delete(&tx)?;
+            tx.commit()?;
+            Ok(removed)
+        })();
+        let restored = self.conn.pragma_update(None, "secure_delete", previous);
+        let removed = outcome?;
+        restored?;
+        let _ = self
+            .conn
+            .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()));
         Ok(removed)
     }
 }

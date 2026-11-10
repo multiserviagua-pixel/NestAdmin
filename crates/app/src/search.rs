@@ -261,6 +261,28 @@ fn minor_units(total: &str) -> Option<i64> {
     i64::try_from(minor).ok()
 }
 
+/// Moneda de una factura para el índice. Primero la que consta en los campos; si no, la que
+/// reconoce la aplicación a partir de la evidencia local del texto (D127, la misma que usan las
+/// reglas de registro): `EUR` si el documento muestra el euro y ninguna otra moneda, o el código
+/// de la única otra moneda mencionada si no muestra el euro. Sin evidencia, o con varias monedas,
+/// queda vacía: nunca se supone una moneda.
+fn invoice_currency(result: &Value, explicit: String) -> String {
+    if !explicit.is_empty() {
+        return explicit;
+    }
+    let Some(foreign) = crate::rules::foreign_currencies(result) else {
+        return String::new();
+    };
+    let euro = crate::rules::shows_euro(result);
+    match foreign.as_slice() {
+        [] if euro => "EUR".to_owned(),
+        [code] if !euro && code.len() == 3 && code.chars().all(|c| c.is_ascii_uppercase()) => {
+            code.clone()
+        }
+        _ => String::new(),
+    }
+}
+
 /// Fila de una factura a partir de su entrada y su resultado, sin texto (`no_text`). Los campos
 /// ausentes quedan vacíos o `None`.
 pub(crate) fn invoice_doc(input: &Value, result: &Value) -> SearchDoc {
@@ -294,7 +316,7 @@ pub(crate) fn invoice_doc(input: &Value, result: &Value) -> SearchDoc {
         number: field("invoice_number", "number"),
         doc_date: iso_date(&field("date", "date")),
         total_minor: minor_units(&total),
-        currency: field("currency", "currency"),
+        currency: invoice_currency(result, field("currency", "currency")),
         body: String::new(),
         detail: String::new(),
     }
@@ -738,6 +760,26 @@ mod tests {
         assert_eq!(doc.total_minor, Some(121_050));
         assert_eq!(doc.currency, "EUR");
         assert_eq!(doc.status, SearchStatus::NoText);
+    }
+
+    #[test]
+    fn invoice_currency_comes_from_the_local_evidence_and_is_never_assumed() {
+        let row = |evidence: Value| {
+            let result = json!({ "fields": { "total": "10.00" }, "currency_evidence": evidence });
+            invoice_doc(&json!({ "document": "f.pdf" }), &result).currency
+        };
+        assert_eq!(row(json!({ "foreign": [], "euro": true })), "EUR");
+        assert_eq!(row(json!({ "foreign": ["USD"], "euro": false })), "USD");
+        // Sin evidencia positiva, con varias monedas o con una corona sin país: sin moneda.
+        assert_eq!(row(json!({ "foreign": [], "euro": false })), "");
+        assert_eq!(row(json!({ "foreign": ["USD"], "euro": true })), "");
+        assert_eq!(row(json!({ "foreign": ["GBP", "USD"], "euro": false })), "");
+        assert_eq!(row(json!({ "foreign": ["KR"], "euro": false })), "");
+        assert_eq!(row(Value::Null), "");
+        // La moneda de los campos manda.
+        let result = json!({ "fields": { "currency": "GBP" },
+                              "currency_evidence": { "foreign": [], "euro": true } });
+        assert_eq!(invoice_doc(&Value::Null, &result).currency, "GBP");
     }
 
     #[test]

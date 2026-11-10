@@ -387,6 +387,27 @@ impl Setup {
         }
     }
 
+    /// ¿Ollama está en marcha, es compatible y tiene el modelo? Solo consulta con un tiempo de
+    /// espera corto: no arranca, instala ni descarga nada (a diferencia de `startup`). La usa el
+    /// asistente del chat para no lanzar procesos en cada turno.
+    pub fn local_ai_running(&self) -> bool {
+        let short = Duration::from_secs(1);
+        let version = self
+            .get_json("/api/version", short)
+            .and_then(|v| v["version"].as_str().map(str::to_owned));
+        version.is_some_and(|v| compatible(&v))
+            && self
+                .get_json("/api/tags", short)
+                .and_then(|tags| {
+                    tags["models"].as_array()?.iter().find(|m| {
+                        m["name"].as_str() == Some(&self.config.model)
+                            || m["model"].as_str() == Some(&self.config.model)
+                    })?;
+                    Some(())
+                })
+                .is_some()
+    }
+
     /// Memoria física del equipo y su aviso (D46). Instantánea; no bloquea nada.
     pub fn memory(&self) -> Memory {
         Memory::assess(self.system.memory())

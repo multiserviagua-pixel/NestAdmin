@@ -1146,6 +1146,9 @@ export interface QuestionAnswer {
 
 // ---- Asistente del chat (E2, D182-D184, D188) ----
 
+/** Paso en curso del asistente (D182): un código cerrado, nunca contenido. */
+export type AssistantProgress = { kind: "thinking" } | { kind: "tool"; name: string };
+
 export type AssistantOutcome = "answered" | "consent_required" | "not_configured" | "cancelled" | "error";
 
 /** Un turno del asistente tal como lo devuelve `assistant_turn`. */
@@ -1195,6 +1198,8 @@ export interface AssistantStoredTurn {
   fallback: { from: string; reason: string } | null;
   steps: number;
   tools: string[];
+  /** Código del fallo si el turno guardado terminó con `error`. */
+  error_code?: string | null;
   /** Tarjetas de los documentos citados, tal como están ahora en el índice. */
   citations: SearchHit[];
 }

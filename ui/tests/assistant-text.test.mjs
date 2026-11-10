@@ -357,3 +357,15 @@ test("ningún texto nuevo contiene HTML", () => {
   ];
   for (const text of texts) assert.ok(!/[<>]|&\w+;/.test(text), text);
 });
+
+test("el indicador de progreso muestra un texto por herramienta y nunca contenido", () => {
+  assert.equal(T.progressText(null), T.ASSISTANT_BUSY);
+  assert.equal(T.progressText({ kind: "thinking" }), "Pensando…");
+  assert.equal(T.progressText({ kind: "tool", name: "search" }), "Buscando en sus documentos…");
+  assert.equal(T.progressText({ kind: "tool", name: "aggregate" }), "Calculando…");
+  assert.equal(T.progressText({ kind: "tool", name: "history" }), "Consultando el historial…");
+  // Una herramienta que no se conoce (p. ej. un nombre con marcas) no se muestra tal cual.
+  assert.equal(T.progressText({ kind: "tool", name: "<b>x</b>" }), T.ASSISTANT_BUSY);
+  assert.equal(T.progressText({ kind: "tool", name: "toString" }), T.ASSISTANT_BUSY);
+  for (const text of Object.values(T.TOOL_PROGRESS)) assert.ok(!/[<>]|&\w+;/.test(text), text);
+});

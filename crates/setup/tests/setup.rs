@@ -1087,3 +1087,23 @@ fn this_machine_memory_is_read() {
     assert_ne!(memory.level, MemoryLevel::Unknown);
     println!("memoria: {}", serde_json::to_string(&memory).unwrap());
 }
+
+#[test]
+fn t08b_15_local_ai_running_only_asks_and_never_starts_anything() {
+    let running = scenario(true, true, "0.40.14", true);
+    assert!(running.setup.local_ai_running());
+    let stopped = scenario(false, true, "0.40.14", true);
+    assert!(!stopped.setup.local_ai_running());
+    let outdated = scenario(true, true, "0.5.7", true);
+    assert!(!outdated.setup.local_ai_running());
+    let no_model = scenario(true, true, "0.40.14", false);
+    assert!(!no_model.setup.local_ai_running());
+    for s in [&running, &stopped, &outdated, &no_model] {
+        assert!(
+            s.calls().is_empty(),
+            "no arranca ni instala: {:?}",
+            s.calls()
+        );
+        assert_eq!(s.ollama.lock().unwrap().pulls, 0);
+    }
+}

@@ -47,6 +47,7 @@ import type {
   AssistantConsentView,
   AssistantConversation,
   AssistantPreview,
+  AssistantProgress,
   AssistantSentCall,
   AssistantTurn,
   QuestionAnswer,
@@ -76,6 +77,7 @@ let onSetup: ListenTo<SetupEvent>;
 let onSetupDone: ListenTo<SetupDone>;
 let onStartup: ListenTo<Startup>;
 let onMailSignIn: ListenTo<string>;
+let onAssistantProgress: ListenTo<AssistantProgress>;
 
 if (inTauri) {
   const core = await import("@tauri-apps/api/core");
@@ -90,6 +92,7 @@ if (inTauri) {
   onSetupDone = listenTo("nestadmin://setup-done");
   onStartup = listenTo("nestadmin://startup");
   onMailSignIn = listenTo("nestadmin://mail-sign-in");
+  onAssistantProgress = listenTo("nestadmin://assistant-progress");
 } else if (import.meta.env.DEV) {
   // Solo en desarrollo: la compilación de producción elimina esta rama y el simulado.
   const mock = await import("./mock");
@@ -99,6 +102,7 @@ if (inTauri) {
   onSetupDone = mock.onSetupDone;
   onStartup = mock.onStartup;
   onMailSignIn = mock.onMailSignIn;
+  onAssistantProgress = mock.onAssistantProgress;
 } else {
   invoke = () => Promise.reject("NestAdmin debe abrirse como aplicación de escritorio");
   onChanged = () => {};
@@ -106,10 +110,11 @@ if (inTauri) {
   onSetupDone = () => {};
   onStartup = () => {};
   onMailSignIn = () => {};
+  onAssistantProgress = () => {};
 }
 
 export const isPreview = !inTauri;
-export { onChanged, onMailSignIn, onSetup, onSetupDone, onStartup };
+export { onAssistantProgress, onChanged, onMailSignIn, onSetup, onSetupDone, onStartup };
 
 export const api = {
   tasks: () => invoke<Task[]>("tasks"),

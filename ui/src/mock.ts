@@ -39,6 +39,7 @@ import type {
   AssistantConsentView,
   AssistantConversation,
   AssistantPreview,
+  AssistantProgress,
   AssistantSentCall,
   AssistantStoredTurn,
   AssistantTurn,
@@ -246,6 +247,7 @@ const clientsConfigured = !params.has("sin-cliente");
 let mailLimit = 25;
 let signingIn: { cancelled: boolean } | null = null;
 const signInListeners: Array<(url: string) => void> = [];
+const progressListeners: Array<(step: AssistantProgress) => void> = [];
 const mailAccounts: MailAccount[] = params.has("sin-cuentas")
   ? []
   : [
@@ -2497,6 +2499,9 @@ const handlers: Record<string, (a: any, options?: any) => unknown> = {
     const question = String(text ?? "").trim();
     if (!question) throw "Escriba una pregunta.";
     if (conversationId != null && !assistantConversations.has(conversationId)) throw `la conversación ${conversationId} no existe`;
+    // Progreso mínimo: pensando y, enseguida, la búsqueda (solo códigos, como el real).
+    progressListeners.forEach((l) => l({ kind: "thinking" }));
+    setTimeout(() => progressListeners.forEach((l) => l({ kind: "tool", name: "search" })), 300);
     const provider = mockDest.provider as AssistantTurn["provider"];
     const flat = question.normalize("NFD").replace(/[̀-ͯ]/g, "").toLowerCase();
     const external = { provider, model: mockDest.model, local: false, fallback: null as AssistantTurn["fallback"] };
@@ -3523,6 +3528,10 @@ export function onSetupDone(handler: (done: SetupDone) => void) {
 
 export function onStartup(handler: (startup: Startup) => void) {
   startupListeners.push(handler);
+}
+
+export function onAssistantProgress(handler: (step: AssistantProgress) => void) {
+  progressListeners.push(handler);
 }
 
 export function onMailSignIn(handler: (url: string) => void) {
