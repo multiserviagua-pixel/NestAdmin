@@ -44,6 +44,9 @@ import type {
   RuleView,
   TaskTemplate,
   SenderPreference,
+  QuestionAnswer,
+  SearchFilters,
+  SearchPage,
   SettingsView,
   Simulation,
   Suggestions,
@@ -131,6 +134,12 @@ export const api = {
   /** Crea la tarea que solo redacta la respuesta a un informativo, un rebote o un correo sin respuesta necesaria (D159). */
   redraft: (id: number) => invoke<Task>("redraft", { id }),
   retry: (id: number) => invoke<Task>("retry", { id }),
+  /** Chat sin IA (E1, D181): busca en el equipo por las palabras de la pregunta; no llama a la red. */
+  searchQuestion: (text: string) => invoke<QuestionAnswer>("search_question", { text }),
+  /** Búsqueda con filtros (D180); la usará el asistente con IA (E2), no la ventana todavía. */
+  search: (query: string, filters: SearchFilters, offset: number) => invoke<SearchPage>("search", { query, filters, offset }),
+  /** Vuelve a poner en el índice los documentos que no se pudieron leer; devuelve cuántos. */
+  reindexFailed: () => invoke<number>("reindex_failed"),
   /** Plantillas de pipeline (D149): versión vigente de cada una, archivadas incluidas. */
   taskTemplates: () => invoke<TaskTemplate[]>("task_templates"),
   /** Una plantilla nueva nace inactiva; guardar una existente crea una versión nueva y conserva

@@ -1099,3 +1099,45 @@ export interface LearnExpectation {
 }
 
 export type LearnChoice = { kind: "send"; expect: LearnExpectation } | { kind: "use_local"; input_fp: string };
+
+// ---- Chat y búsqueda en el equipo (E1, D179-D181) ----
+
+export type IndexStatus = "indexed" | "no_text" | "failed";
+
+export interface SearchHit {
+  task_id: number;
+  kind: "invoice" | "email";
+  title: string;
+  party: string;
+  number: string;
+  doc_date: string | null;
+  total_minor: number | null;
+  currency: string;
+  task_state: string;
+  index_status: IndexStatus;
+  snippet: string;
+}
+
+export interface SearchPage {
+  results: SearchHit[];
+  total: number;
+  pending_index: number;
+  no_text: number;
+  failed: number;
+}
+
+export interface SearchFilters {
+  kind?: "invoice" | "email";
+  from?: string;
+  to?: string;
+  party?: string;
+  min_total_minor?: number;
+  max_total_minor?: number;
+  status?: string;
+}
+
+export interface QuestionAnswer {
+  page: SearchPage;
+  terms: string[];
+  matched: "all" | "any" | "none";
+}

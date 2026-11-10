@@ -312,8 +312,40 @@ import {
   redraftFor,
   redraftNeedsConfirm,
   reviewEmailActions,
+  isInformative,
   triageNotices,
 } from "./triage-text";
+import type { QuestionAnswer, SearchHit } from "./types";
+import {
+  ASSISTANT_LABEL,
+  CHAT_BUSY,
+  CHAT_BUTTON,
+  CHAT_BUTTON_TITLE,
+  CHAT_CLOSE,
+  CHAT_EMPTY_HINT,
+  CHAT_EMPTY_TITLE,
+  CHAT_EXAMPLES,
+  CHAT_EXAMPLES_LABEL,
+  CHAT_INPUT_LABEL,
+  CHAT_INPUT_PLACEHOLDER,
+  CHAT_LABEL,
+  CHAT_SEND,
+  CHAT_TITLE,
+  NOT_FOUND_TASK,
+  NOT_OPENABLE,
+  REINDEX_BUSY,
+  REINDEX_BUTTON,
+  SEARCH_NOTICE,
+  YOU_LABEL,
+  answerText,
+  cardLabel,
+  cardView,
+  countLines,
+  reindexErrorText,
+  reindexLine,
+  searchErrorText,
+  shownLine,
+} from "./assistant-text";
 import {
   PREFERENCE_CANCEL,
   PREFERENCE_INFORMATIVE_TITLE,
@@ -427,6 +459,9 @@ const state = {
   confirmPreference: null as null | { task: number; route: PreferenceRoute },
   // Clave del control que debe recibir el foco tras el repintado (flechas de la lista).
   focusAfterRender: null as string | null,
+  // Chat (E1, D181): solo en memoria; las conversaciones no se guardan. Vive en su propio contenedor,
+  // fuera del repintado de la aplicación, para que este no le quite lo escrito, el foco ni el desplazamiento.
+  chat: { open: false, input: "", busy: false, reindexing: false, turns: [] as ChatTurn[], cardNote: null as null | { key: string; text: string } },
   // Filtro de la lista de pendientes por origen: "" (todo), "file" o el ID de una cuenta.
   originFilter: "",
   tasks: [] as Task[],
@@ -828,8 +863,7 @@ function announceDoubtfulAmounts() {
 }
 
 /** Abre una tarea en su pestaña de Pendientes, quitando el filtro si la ocultara. */
-function openInReview(task: Task) {
-  const tab = tabOf(task.kind);
+function openInReview(task: Task, tab: ReviewTab = tabOf(task.kind)) {
   state.view = "review";
   state.reviewTab = tab;
   state.selected[tab] = task.id;
@@ -912,6 +946,17 @@ function header() {
             }),
         },
         "Consultar correo",
+      ),
+      h(
+        "button",
+        {
+          "data-focus-key": "chat:button",
+          "aria-expanded": String(state.chat.open),
+          "aria-controls": "chat-panel",
+          title: CHAT_BUTTON_TITLE,
+          onclick: () => (state.chat.open ? closeChat() : openChat()),
+        },
+        CHAT_BUTTON,
       ),
     ),
   );
@@ -6436,12 +6481,283 @@ function setupView() {
   );
 }
 
+// ---- Chat (E1, D181) ----
+// Sin asistente con IA todavía, cada pregunta se contesta con una búsqueda por palabras hecha en este
+// equipo. Nada se busca mientras se escribe: solo al enviar. El panel no es modal y vive en su propio
+// contenedor (`#chat-root`), así que el repintado de la aplicación no lo toca.
+
+type ChatTurn =
+  | { role: "user"; text: string }
+  | { role: "assistant"; text: string; answer: QuestionAnswer }
+  | { role: "info"; text: string; error?: boolean };
+
+const chatHost = (() => {
+  const el = document.createElement("div");
+  el.id = "chat-root";
+  document.body.append(el);
+  return el;
+})();
+/** Quién tenía el foco al abrir: se le devuelve al cerrar. */
+let chatOpener: { el: HTMLElement | null; key: string | null } = { el: null, key: null };
+
+/** El chat se puede abrir salvo en el asistente de primer uso y en la preparación de la IA local. */
+function chatAllowed(): boolean {
+  return !state.prepareOnly && !state.wizard && state.view !== "setup";
+}
+
+/** Con una confirmación en pantalla abierta el chat no se abre; la del sistema es modal y no deja pasar el teclado. */
+function confirmationOpen(): boolean {
+  return state.confirmRedraft !== null || state.confirmPreference !== null || state.readConfirm !== null || state.learnedDeactivating || state.profileConfirming;
+}
+
+function appField(key: string): HTMLElement | null {
+  return [...root.querySelectorAll<HTMLElement>("[data-focus-key]")].find((el) => el.dataset.focusKey === key) ?? null;
+}
+
+function setChatExpanded() {
+  appField("chat:button")?.setAttribute("aria-expanded", String(state.chat.open));
+}
+
+function chatField(key: string): HTMLElement | null {
+  return [...chatHost.querySelectorAll<HTMLElement>("[data-focus-key]")].find((el) => el.dataset.focusKey === key) ?? null;
+}
+
+function focusChatInput() {
+  const input = chatField("chat:input") as HTMLInputElement | null;
+  input?.focus();
+  input?.setSelectionRange(input.value.length, input.value.length);
+}
+
+function openChat() {
+  if (!chatAllowed() || confirmationOpen()) return;
+  if (state.chat.open) return focusChatInput();
+  const active = document.activeElement as HTMLElement | null;
+  const usable = active !== null && active !== document.body && root.contains(active);
+  chatOpener = { el: usable ? active : null, key: usable ? (active.dataset.focusKey ?? null) : "chat:button" };
+  state.chat.open = true;
+  setChatExpanded();
+  renderChat({ focus: "chat:input" });
+}
+
+/** `restoreFocus` es falso cuando el cierre viene de un cambio de vista que ya reparte el foco. */
+function closeChat(restoreFocus = true) {
+  if (!state.chat.open) return;
+  state.chat.open = false;
+  chatHost.replaceChildren();
+  setChatExpanded();
+  if (!restoreFocus) return;
+  const { el, key } = chatOpener;
+  const target = el?.isConnected ? el : key ? appField(key) : null;
+  (target ?? appField("chat:button"))?.focus();
+}
+
+/** Repinta solo el panel y conserva lo escrito, el foco y el desplazamiento (D138); `end` baja al último turno. */
+function renderChat(options: { focus?: string; end?: boolean } = {}) {
+  if (!state.chat.open) return;
+  const scroll = chatHost.querySelector<HTMLElement>('[data-scroll-key="chat:turns"]')?.scrollTop ?? 0;
+  const active = document.activeElement as HTMLElement | null;
+  const inside = active !== null && chatHost.contains(active);
+  const focusKey = options.focus ?? (inside ? (active.dataset.focusKey ?? null) : null);
+  const selection = inside && active instanceof HTMLInputElement ? ([active.selectionStart, active.selectionEnd] as const) : null;
+  chatHost.replaceChildren(chatPanel());
+  const list = chatHost.querySelector<HTMLElement>('[data-scroll-key="chat:turns"]');
+  if (list) list.scrollTop = options.end ? list.scrollHeight : scroll;
+  if (!focusKey) return;
+  const target = chatField(focusKey);
+  if (!target) return;
+  target.focus();
+  if (target instanceof HTMLInputElement) {
+    if (selection && !options.focus) target.setSelectionRange(selection[0], selection[1]);
+    else target.setSelectionRange(target.value.length, target.value.length);
+  }
+}
+
+async function sendChat() {
+  const chat = state.chat;
+  const text = chat.input.trim();
+  if (!text || chat.busy) return;
+  chat.turns.push({ role: "user", text });
+  chat.input = "";
+  chat.busy = true;
+  chat.cardNote = null;
+  renderChat({ focus: "chat:input", end: true });
+  try {
+    const answer = await api.searchQuestion(text);
+    chat.turns.push({ role: "assistant", text: answerText(answer.matched, answer.page.total, answer.terms), answer });
+  } catch (error) {
+    chat.turns.push({ role: "info", text: searchErrorText(error), error: true });
+  } finally {
+    chat.busy = false;
+    renderChat({ end: true });
+  }
+}
+
+async function retryFailedIndex() {
+  const chat = state.chat;
+  if (chat.reindexing) return;
+  chat.reindexing = true;
+  renderChat();
+  try {
+    chat.turns.push({ role: "info", text: reindexLine(await api.reindexFailed()) });
+  } catch (error) {
+    chat.turns.push({ role: "info", text: reindexErrorText(error), error: true });
+  } finally {
+    chat.reindexing = false;
+    renderChat({ end: true });
+  }
+}
+
+/** Pestaña de Pendientes que muestra la tarea, o `null` si no tiene vista de revisión. */
+function reviewTabOf(task: Task): ReviewTab | null {
+  if (isInformative(task)) return "informative";
+  return task.state === "awaiting_review" && isKnownKind(task.kind) ? tabOf(task.kind) : null;
+}
+
+function openHit(hit: SearchHit, key: string) {
+  const task = state.tasks.find((t) => t.id === hit.task_id);
+  const tab = task ? reviewTabOf(task) : null;
+  if (!task || !tab) {
+    state.chat.cardNote = { key, text: task ? NOT_OPENABLE : NOT_FOUND_TASK };
+    renderChat();
+    return;
+  }
+  state.chat.cardNote = null;
+  openInReview(task, tab);
+}
+
+function chatCard(hit: SearchHit, key: string): HTMLElement {
+  const v = cardView(hit);
+  const note = state.chat.cardNote?.key === key ? state.chat.cardNote.text : null;
+  return h(
+    "li",
+    {},
+    h(
+      "button",
+      { type: "button", class: "chat-card", "data-focus-key": key, "aria-label": cardLabel(hit), onclick: () => openHit(hit, key) },
+      h("span", { class: "chat-card-head" }, statusChip(v.kind, "info"), h("span", { class: "chat-card-title" }, v.title)),
+      v.meta.length ? h("span", { class: "chat-card-meta" }, v.meta.join(" · ")) : null,
+      v.note ? h("span", { class: "chat-card-note" }, statusChip(v.note, "warn")) : null,
+      v.snippet ? h("span", { class: "chat-card-snippet" }, v.snippet) : null,
+    ),
+    note ? h("p", { class: "chat-card-error", role: "status" }, note) : null,
+  );
+}
+
+function chatTurn(turn: ChatTurn, index: number, last: boolean): HTMLElement {
+  if (turn.role === "user") return h("div", { class: "chat-turn user" }, h("span", { class: "chat-who" }, YOU_LABEL), h("p", {}, turn.text));
+  if (turn.role === "info")
+    return h("div", { class: `chat-turn assistant${turn.error ? " error" : ""}` }, h("span", { class: "chat-who" }, ASSISTANT_LABEL), h("p", { role: turn.error ? "alert" : undefined }, turn.text));
+  const { page } = turn.answer;
+  const counts = countLines(page);
+  const shown = shownLine(page.results.length, page.total);
+  return h(
+    "div",
+    { class: "chat-turn assistant" },
+    h("span", { class: "chat-who" }, ASSISTANT_LABEL),
+    h("p", {}, turn.text),
+    h("p", { class: "chat-notice" }, SEARCH_NOTICE),
+    page.results.length ? h("ul", { class: "chat-cards" }, ...page.results.map((hit) => chatCard(hit, `chat:card:${index}:${hit.task_id}`))) : null,
+    shown ? h("p", { class: "meta" }, shown) : null,
+    counts.length ? h("p", { class: "meta" }, counts.join(" ")) : null,
+    page.failed > 0 && last
+      ? h("button", { type: "button", "data-focus-key": "chat:reindex", disabled: state.chat.reindexing, onclick: () => void retryFailedIndex() }, state.chat.reindexing ? REINDEX_BUSY : REINDEX_BUTTON)
+      : null,
+  );
+}
+
+function chatPanel(): HTMLElement {
+  const chat = state.chat;
+  const input = h("input", {
+    type: "text",
+    id: "chat-input",
+    "data-focus-key": "chat:input",
+    placeholder: CHAT_INPUT_PLACEHOLDER,
+    autocomplete: "off",
+    spellcheck: "false",
+    oninput: (event) => {
+      chat.input = (event.target as HTMLInputElement).value;
+    },
+  }) as HTMLInputElement;
+  input.value = chat.input;
+  const lastAnswer = chat.turns.map((t) => t.role).lastIndexOf("assistant");
+  const list = chat.turns.length
+    ? chat.turns.map((turn, i) => chatTurn(turn, i, i === lastAnswer))
+    : [
+        h(
+          "div",
+          { class: "chat-empty" },
+          h("p", { class: "chat-empty-title" }, CHAT_EMPTY_TITLE),
+          h("p", { class: "meta" }, CHAT_EMPTY_HINT),
+          h(
+            "ul",
+            { class: "chat-examples", "aria-label": CHAT_EXAMPLES_LABEL },
+            ...CHAT_EXAMPLES.map((text, i) =>
+              h(
+                "li",
+                {},
+                h(
+                  "button",
+                  {
+                    type: "button",
+                    "data-focus-key": `chat:example:${i}`,
+                    // Solo rellena el cuadro: no se envía nada hasta pulsar Intro o «Preguntar».
+                    onclick: () => {
+                      chat.input = text;
+                      renderChat({ focus: "chat:input" });
+                    },
+                  },
+                  text,
+                ),
+              ),
+            ),
+          ),
+        ),
+      ];
+  return h(
+    "section",
+    { id: "chat-panel", class: "chat-panel", role: "dialog", "aria-label": CHAT_LABEL },
+    h("div", { class: "chat-head" }, h("h2", {}, CHAT_TITLE), h("button", { type: "button", class: "close", "data-focus-key": "chat:close", "aria-label": CHAT_CLOSE, title: CHAT_CLOSE, onclick: () => closeChat() }, "×")),
+    h("div", { class: "chat-turns", "data-scroll-key": "chat:turns", "aria-live": "polite", "aria-busy": String(chat.busy) }, ...list, chat.busy ? h("p", { class: "meta", role: "status" }, CHAT_BUSY) : null),
+    // Un formulario: Intro en el cuadro y el botón «Preguntar» envían igual (una sola vía).
+    h(
+      "form",
+      {
+        class: "chat-form",
+        onsubmit: (event) => {
+          event.preventDefault();
+          void sendChat();
+        },
+      },
+      h("label", { for: "chat-input", class: "chat-label" }, CHAT_INPUT_LABEL),
+      h("div", { class: "chat-row" }, input, h("button", { type: "submit", class: "primary", "data-focus-key": "chat:send", disabled: chat.busy }, CHAT_SEND)),
+    ),
+  );
+}
+
+// Un único `keydown` global: Ctrl+K abre el chat (o lleva el foco a su cuadro) y Esc lo cierra.
+document.addEventListener("keydown", (event) => {
+  if ((event.ctrlKey || event.metaKey) && !event.altKey && !event.shiftKey && event.key.toLowerCase() === "k") {
+    event.preventDefault();
+    openChat();
+    return;
+  }
+  if (event.key === "Escape" && state.chat.open && !event.defaultPrevented) {
+    const target = event.target as Node | null;
+    if (!target || target === document.body || target === document.documentElement || chatHost.contains(target)) {
+      event.preventDefault();
+      closeChat();
+    }
+  }
+});
+
 function render(background = false) {
   // Modo instalador (D36): solo el asistente, sin secciones ni datos.
   if (state.prepareOnly) {
     root.replaceChildren(h("main", { class: "wizard-only" }, setupView()));
     return;
   }
+  // El chat no acompaña al asistente de primer uso ni a la preparación de la IA local.
+  if (state.chat.open && !chatAllowed()) closeChat(false);
   const views: Record<View, () => HTMLElement> = {
     review: reviewView,
     tasks: tasksView,

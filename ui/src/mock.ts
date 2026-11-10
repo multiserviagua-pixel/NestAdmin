@@ -36,6 +36,10 @@ import type {
   RuleStats,
   RuleView,
   SenderPreference,
+  QuestionAnswer,
+  SearchFilters,
+  SearchHit,
+  SearchPage,
   PreferenceChange,
   SettingsView,
   Simulation,
@@ -2218,6 +2222,47 @@ function learningPreview(account: string): LearningPreview {
   };
 }
 
+// Documentos inventados para el chat de la vista previa (dominio .test, ninguna persona real).
+const mockHits: SearchHit[] = [
+  { task_id: 1, kind: "invoice", title: "Factura F-2026-014", party: "Suministros Ejemplo S.L.", number: "F-2026-014", doc_date: "2026-03-05", total_minor: 123456, currency: "EUR", task_state: "completed", index_status: "indexed", snippet: "Suministro de material de oficina, marzo de 2026." },
+  { task_id: 2, kind: "invoice", title: "Factura A-0097", party: "Taller Demo", number: "A-0097", doc_date: "2026-02-18", total_minor: 48050, currency: "EUR", task_state: "awaiting_review", index_status: "indexed", snippet: "Reparación de la furgoneta, mano de obra y piezas." },
+  { task_id: 3, kind: "invoice", title: "Factura 2026/221", party: "Papelería Muestra", number: "2026/221", doc_date: "2026-03-22", total_minor: 9990, currency: "EUR", task_state: "completed", index_status: "indexed", snippet: "Cuadernos y bolígrafos para la oficina." },
+  { task_id: 4, kind: "email", title: "Presupuesto de pintura", party: "Taller Demo <hola@taller.test>", number: "", doc_date: "2026-03-10", total_minor: null, currency: "", task_state: "awaiting_review", index_status: "indexed", snippet: "Le enviamos el presupuesto de pintura de la nave." },
+  { task_id: 5, kind: "email", title: "Aviso de vencimiento", party: "Suministros Ejemplo <avisos@suministros.test>", number: "", doc_date: "2026-03-28", total_minor: null, currency: "", task_state: "completed", index_status: "indexed", snippet: "Recordatorio: la factura F-2026-014 vence a fin de mes." },
+  { task_id: 6, kind: "invoice", title: "Factura escaneada sin texto", party: "", number: "", doc_date: null, total_minor: null, currency: "", task_state: "completed", index_status: "no_text", snippet: "" },
+  { task_id: 7, kind: "invoice", title: "Factura de la asesoría", party: "Asesoría Prueba", number: "AP-31", doc_date: "2026-01-30", total_minor: 0, currency: "", task_state: "completed", index_status: "failed", snippet: "" },
+  { task_id: 8, kind: "email", title: "Cita de revisión", party: "Clínica Piloto <citas@clinica.test>", number: "", doc_date: "2026-04-02", total_minor: null, currency: "", task_state: "completed", index_status: "indexed", snippet: "Su cita de revisión es el jueves a las 10:00." },
+];
+
+const QUESTION_STOP = new Set(["donde", "esta", "estan", "que", "cual", "cuales", "del", "los", "las", "una", "uno", "unos", "unas", "con", "sobre", "para", "por", "mi", "mis", "el", "la", "de", "en", "es", "un", "y", "o", "a", "me", "se", "he", "hay", "tengo", "factura", "facturas", "correo", "correos"]);
+
+function plainText(text: string): string {
+  return text.normalize("NFD").replace(/[̀-ͯ]/g, "").toLowerCase();
+}
+
+function questionTerms(text: string): string[] {
+  const words = plainText(text).split(/[^a-z0-9]+/).filter((w) => w.length >= 2 && !QUESTION_STOP.has(w));
+  return [...new Set(words)];
+}
+
+function hitHaystack(h: SearchHit): string {
+  return plainText(`${h.title} ${h.party} ${h.number} ${h.doc_date ?? ""} ${h.snippet}`);
+}
+
+function emptySearchPage(): SearchPage {
+  return { results: [], total: 0, pending_index: 0, no_text: 0, failed: 0 };
+}
+
+function mockSearchPage(results: SearchHit[]): SearchPage {
+  return {
+    results: results.slice(0, 50),
+    total: results.length,
+    pending_index: 2,
+    no_text: mockHits.filter((h) => h.index_status === "no_text").length,
+    failed: mockHits.filter((h) => h.index_status === "failed").length,
+  };
+}
+
 const handlers: Record<string, (a: any, options?: any) => unknown> = {
   // Preferencias por remitente (D161): normaliza, rechaza dominios públicos y deja el evento del historial.
   sender_preferences: () => [...mockPrefs].sort((a, b) => (a.scope + a.key < b.scope + b.key ? -1 : 1)),
@@ -2327,6 +2372,29 @@ const handlers: Record<string, (a: any, options?: any) => unknown> = {
     return retried;
   },
   tasks: () => structuredClone(tasks),
+  // Chat sin IA (E1, D181): búsqueda por palabras sobre unos documentos inventados, sin tildes.
+  search_question: ({ text }: { text: string }): QuestionAnswer => {
+    const terms = questionTerms(String(text ?? ""));
+    if (terms.length === 0) return { page: emptySearchPage(), terms, matched: "none" };
+    const all = mockHits.filter((h) => terms.every((t) => hitHaystack(h).includes(t)));
+    if (all.length) return { page: mockSearchPage(all), terms, matched: "all" };
+    const any = mockHits
+      .map((h) => ({ h, n: terms.filter((t) => hitHaystack(h).includes(t)).length }))
+      .filter((x) => x.n > 0)
+      .sort((a, b) => b.n - a.n)
+      .map((x) => x.h);
+    return any.length ? { page: mockSearchPage(any), terms, matched: "any" } : { page: emptySearchPage(), terms, matched: "none" };
+  },
+  search: ({ query, filters }: { query: string; filters: SearchFilters; offset: number }): SearchPage => {
+    const terms = questionTerms(String(query ?? ""));
+    const hits = mockHits.filter((h) => (!filters?.kind || h.kind === filters.kind) && terms.every((t) => hitHaystack(h).includes(t)));
+    return mockSearchPage(hits);
+  },
+  reindex_failed: (): number => {
+    const failed = mockHits.filter((h) => h.index_status === "failed");
+    for (const h of failed) h.index_status = "indexed";
+    return failed.length;
+  },
   import_file: (bytes: Uint8Array, options?: { headers: Record<string, string> }) => {
     const name = decodeURIComponent(options?.headers["x-nestadmin-name"] ?? "");
     if (!/\.(txt|pdf|jpe?g|png|tiff?|bmp|webp)$/i.test(name)) throw `«${name}»: solo se admiten texto (.txt), PDF e imágenes (.jpg, .png, .tif, .bmp, .webp)`;
