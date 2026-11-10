@@ -42,9 +42,32 @@ Con `npm run dev` de `ui/` y los datos sintéticos de `ui/src/mock.ts`:
 | Autorizar y repetir la pregunta | respuesta con la tarjeta del documento citado, «Respondió Ollama cloud · gemma4:31b» y «Ver lo enviado» |
 | Una URL en la respuesta | se ve como texto, no como enlace |
 
+## Recorrido en `tauri dev` con la IA local (T36e)
+
+2026-11-10, `tauri dev --features lectura-bajo-demanda` sobre la carpeta de datos sintética de T35, con la IA local como proveedor (Ollama 0.40.16, `qwen3:8b`, en CPU). Nada salió del equipo. La ventana se manejó por su puerto de depuración; para ver la salida en bruto del modelo se puso delante de Ollama un intermediario local de diagnóstico, que se retiró al terminar.
+
+**Fallo encontrado y corregido.** En el primer intento el asistente no conseguía responder: `invalid_response` en dos pasos. El esquema del paso viajaba a Ollama con las claves en orden alfabético (`answer`, `args`, `citations`, `tool`); Ollama impone ese orden al modelo, que escribía `{"tool": "search" }` y ya no podía añadir `args`. El aviso para corregirse era solo el código `missing_arg`. Ninguna prueba con proveedor simulado podía verlo. Corrección: el esquema enviado es `{"type": "object"}` (la validación estricta la hace `parse_step`, D105), el aviso dice en español qué herramienta y qué argumento faltan, fuera de los marcadores de datos, y las instrucciones llevan un ejemplo de cada forma. Tras ella: `cargo test --workspace --locked` 1303 pasan, 0 fallan; `npm test` 289.
+
+| Paso | Resultado |
+|---|---|
+| Elegir la IA local | las 3 tareas que esperaban se procesaron; la factura del agua pasó de fila provisional a completa (proveedor, número, fecha, 66,00 EUR) |
+| Opción de enviar datos fuera | `not_needed`: con la IA local no hace falta |
+| Chat en la pantalla de preparación y en el asistente de primer uso | no se abre |
+| Primer intento (antes de la corrección) | error explicado, nada cambiado, y «Ver lo enviado» con las 2 llamadas |
+| «¿Tengo alguna factura del agua y de cuánto es?» | `search` y respuesta: una factura, número AI-2026-0912, 66.00 EUR, con la tarjeta del documento citado; 35 s |
+| «¿Cuánto suman en total mis facturas?» | `aggregate` y respuesta: 66.00 EUR, avisando de que dos facturas no tienen total; el modelo inventó la referencia `aggregate:1` y se descartó con su nota; 37 s |
+| «Llévame a la pantalla de reglas» | `open_view` y la ventana pasó a Reglas con el chat abierto; 87 s |
+| Quién contestó | «Respondió la IA local de este equipo» en cada respuesta |
+| Historial | eventos `assistant_turn` con pasos, herramientas, proveedor y modelo, sin texto de preguntas ni respuestas |
+
+Tiempos: con el modelo en CPU, la primera llamada tras cargarlo tardó 79 s y un intento con el modelo descargado agotó el plazo de 180 s; con el modelo cargado, cada paso tardó entre 5 y 40 s.
+
 ## Pendiente
 
-- **Recorrido en `tauri dev` con una IA real** (T36e): no se ha hecho. Falta ver un turno completo contra un proveedor o contra la IA local, «Ver lo enviado» con el texto real y la opción de Configuración en la aplicación.
+- **Con un proveedor externo no se ha probado en la aplicación**: ni conceder la opción en Configuración ni un turno real contra él. Exige enviar datos (sintéticos) a ese proveedor y no se hizo sin pedirlo. El camino externo solo está cubierto por las pruebas automáticas con el espía.
+- En el turno que agotó el plazo, el historial marca `local: false` aunque el proveedor era la IA local.
+- El indicador de progreso solo mostró «Pensando…» en el recorrido; no se comprobó el texto por herramienta.
+- Con la IA local en CPU los tiempos son altos y la primera pregunta tras un rato puede agotar el plazo.
 - Las correcciones de la revisión no han pasado una segunda revisión de `arquitecto`.
 - El panel del chat, al no ser modal, tapa parte del contenido en ventanas estrechas (visto a 800 px).
 - Las filas ya indexadas antes de esta etapa conservan la moneda vacía hasta que se vuelvan a indexar.
