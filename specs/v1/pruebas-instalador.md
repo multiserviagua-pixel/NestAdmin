@@ -49,7 +49,7 @@ Reglas comunes:
 | T08e-04 | Elegir «Instalar IA local» desde el asistente o Configuración. | Se ejecuta la preparación de T08b (con progreso, firmas, reintentos y aviso de memoria); al terminar, el respaldo local figura como disponible y la selección principal no cambia salvo que el usuario elija la IA local. |
 | T08e-05 | Instalar encima de una versión anterior con la IA local elegida y preparada. | Se conserva la elección local, Ollama y el modelo no se tocan, la comprobación al abrir de D39 sigue actuando y la ventana ofrece una sola vez pasar al externo sin cambiar nada por sí misma. |
 | T08e-06 | Abrir con un proveedor externo elegido tras quitar a mano un componente del OCR del paquete (por ejemplo `tessdata\spa.traineddata`). | La comprobación al abrir solo mira el OCR (sin descargar, sin arrancar ni consultar Ollama) y la ventana muestra un aviso visible pidiendo reinstalar; con el OCR completo no muestra nada. Cubierta en `crates/setup` por `t08c_03f`; falta ejecutarla en el paquete instalado. |
-| T08e-07 | Primer arranque tras T08e-01, antes y después de guardar la clave. | La opción «Permitir que el asistente envíe datos fuera de este equipo» está desactivada; el panel abierto con Ctrl+K busca sin IA y el asistente no envía nada hasta activarla (D181, D183). |
+| T08e-07 | Primer arranque tras T08e-01, antes y después de guardar la clave. | La opción «Permitir que el asistente envíe datos fuera de este equipo» está desactivada; el chat abierto con Ctrl+K contesta con la búsqueda por palabras, sin IA, y no envía nada hasta activarla (D181, D183). |
 
 ## T08d — Construcción del paquete (D51, D52)
 
