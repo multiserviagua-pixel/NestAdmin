@@ -104,6 +104,17 @@ impl App {
         Ok(())
     }
 
+    /// Quita el productor (el archivo local desapareció o dejó de ser válido): emitir una
+    /// factura vuelve a fallar con `verifactu_not_configured`.
+    pub fn clear_verifactu_producer(&mut self) {
+        self.verifactu_producer = None;
+    }
+
+    /// Si hay un productor configurado.
+    pub fn has_verifactu_producer(&self) -> bool {
+        self.verifactu_producer.is_some()
+    }
+
     /// Contexto Verifactu para registrar ahora: productor configurado, número de instalación
     /// (se genera la primera vez y no cambia) y hora del reloj.
     fn verifactu_context(&mut self) -> AppResult<VerifactuContext> {

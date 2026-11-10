@@ -21,9 +21,13 @@ tauri-build = { version = "=2.7.4", features = [] }
 nestadmin-ai = { path = "../ai" }
 nestadmin-app = { path = "../app" }
 nestadmin-core = { path = "../core" }
+nestadmin-documents = { path = "../documents" }
 nestadmin-extract = { path = "../extract" }
 nestadmin-mail = { path = "../mail" }
+nestadmin-sales = { path = "../sales" }
 nestadmin-setup = { path = "../setup" }
+# Mismos importes decimales que la venta (como cadenas en la ventana); ya estaba en Cargo.lock.
+rust_decimal = { version = "1", default-features = false, features = ["std", "serde"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tauri = { version = "=2.12.5", features = ["tray-icon"] }
@@ -36,3 +40,5 @@ nestadmin-simulators = { path = "../simulators" }
 # Runtime simulado de Tauri para los recorridos desde la ventana (D53); no añade paquetes.
 tauri = { version = "=2.12.5", features = ["tray-icon", "test"] }
 tempfile = "3"
+# Reloj fijo de la prueba de venta (D197); ya enlazado por nestadmin-app.
+nestadmin-verifactu = { path = "../verifactu" }

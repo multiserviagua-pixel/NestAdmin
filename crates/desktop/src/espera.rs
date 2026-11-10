@@ -116,6 +116,7 @@ fn world(
         local_setup: Arc::new(windows_setup(dir.path())),
         sign_in: Mutex::new(None),
         mail_clients_error: None,
+        producer: Mutex::default(),
         wake: Mutex::new(sender),
         stopping: AtomicBool::new(false),
     });

@@ -6,7 +6,9 @@
 
 mod mail_clients;
 mod probe;
+mod productor;
 mod settings;
+mod ventas;
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -84,6 +86,8 @@ struct Shared {
     sign_in: Mutex<Option<SignIn>>,
     /// Motivo por el que no se pudo leer `correo-oauth.json`, si lo hay.
     mail_clients_error: Option<String>,
+    /// Productor de Verifactu leído de `verifactu-productor.json` (E3a).
+    producer: Mutex<productor::ProducerState>,
     wake: Mutex<Sender<()>>,
     stopping: AtomicBool,
 }
@@ -2565,6 +2569,11 @@ fn start<R: Runtime>(
         mail,
     )?;
     app.set_ai_wait(ai_wait);
+    // Sin archivo no hay error: el productor queda «no configurado» (E3a).
+    let producer = productor::load(&mut app, &data_dir);
+    if let Some(problem) = &producer.problem {
+        eprintln!("productor de Verifactu no válido: {problem}");
+    }
     if let Err(error) = app.set_mail_limit(settings.mail_limit) {
         eprintln!("límite de correo no válido en la configuración: {error}");
     }
@@ -2581,6 +2590,7 @@ fn start<R: Runtime>(
         local_setup,
         sign_in: Mutex::new(None),
         mail_clients_error,
+        producer: Mutex::new(producer),
         wake: Mutex::new(sender),
         stopping: AtomicBool::new(false),
     });
@@ -2657,112 +2667,122 @@ fn on_window_event<R: Runtime>(window: &Window<R>, event: &WindowEvent, prepare_
 /// Eventos de ventana y comandos que se exponen a la interfaz; las pruebas de recorrido usan
 /// esta misma función con el runtime simulado de Tauri.
 fn configure<R: Runtime>(builder: Builder<R>, prepare_only: bool) -> Builder<R> {
+    // Dos listas: la principal, que contrasta `ui/src/api.ts` (la primera `generate_handler!`
+    // de este archivo), y la de venta (`ventas`), que se reparte por nombre.
+    let main = ventas::typed::<R, _>(tauri::generate_handler![
+        tasks,
+        search,
+        search_question,
+        reindex_failed,
+        import_file,
+        import_dialog,
+        open_original,
+        fetch_mail,
+        mail_accounts,
+        set_mail_limit,
+        mail_sign_in,
+        mail_sign_in_cancel,
+        remove_mail_account,
+        rename_mail_account,
+        add_simulated_mail_account,
+        approve,
+        confirm_not_sent,
+        edit_draft,
+        reject,
+        archive,
+        sender_preferences,
+        set_sender_preference,
+        remove_sender_preference,
+        redraft,
+        retry,
+        task_templates,
+        save_task_template,
+        set_task_template_active,
+        archive_task_template,
+        pipeline_overview,
+        waive_pipeline_step,
+        rules,
+        rule_views,
+        create_rule,
+        rename_rule,
+        update_rule,
+        update_rule_with_ack,
+        set_rule_active,
+        set_rule_any_sender,
+        archive_rule,
+        unarchive_rule,
+        rule_stats,
+        simulate_rule,
+        rule_findings,
+        rule_suggestions,
+        learned_suggestions_batch,
+        accept_and_activate_learned,
+        deactivate_learned_rules,
+        continuous_learning_overview,
+        set_continuous_learning,
+        business_profile,
+        business_profile_prefill,
+        save_business_profile,
+        learned_profile_proposal,
+        accept_learned_profile,
+        dismiss_learned_profile,
+        clear_business_profile,
+        business_profile_preview,
+        grant_profile_consent,
+        withdraw_profile_consent,
+        suggestion_refinement,
+        refinement_preview,
+        refine_suggestions,
+        initial_read_overview,
+        initial_read_folder_preview,
+        pick_read_folder,
+        start_initial_read,
+        start_initial_read_folder,
+        retry_initial_read,
+        stop_initial_read,
+        continue_initial_read,
+        learning_overview,
+        learning_preview,
+        grant_learning_consent,
+        run_learning,
+        retry_learning,
+        seen_invoices,
+        grant_refine_consent,
+        withdraw_refine_consent,
+        accept_suggestion,
+        discard_suggestion,
+        suggestion_thresholds,
+        set_suggestion_threshold,
+        rule_seed_for_task,
+        preview_merge,
+        preview_restore,
+        merge_rules,
+        audit_log,
+        settings,
+        select_provider,
+        delete_provider_key,
+        provider_key_saved,
+        dismiss_external_offer,
+        list_models,
+        test_provider,
+        set_local_fallback,
+        launch_mode,
+        setup_check,
+        setup_prepare,
+        setup_cancel,
+        setup_abandon,
+    ]);
+    let sales = ventas::handler::<R>();
     builder
         .plugin(tauri_plugin_dialog::init())
         .on_window_event(move |window, event| on_window_event(window, event, prepare_only))
-        .invoke_handler(tauri::generate_handler![
-            tasks,
-            search,
-            search_question,
-            reindex_failed,
-            import_file,
-            import_dialog,
-            open_original,
-            fetch_mail,
-            mail_accounts,
-            set_mail_limit,
-            mail_sign_in,
-            mail_sign_in_cancel,
-            remove_mail_account,
-            rename_mail_account,
-            add_simulated_mail_account,
-            approve,
-            confirm_not_sent,
-            edit_draft,
-            reject,
-            archive,
-            sender_preferences,
-            set_sender_preference,
-            remove_sender_preference,
-            redraft,
-            retry,
-            task_templates,
-            save_task_template,
-            set_task_template_active,
-            archive_task_template,
-            pipeline_overview,
-            waive_pipeline_step,
-            rules,
-            rule_views,
-            create_rule,
-            rename_rule,
-            update_rule,
-            update_rule_with_ack,
-            set_rule_active,
-            set_rule_any_sender,
-            archive_rule,
-            unarchive_rule,
-            rule_stats,
-            simulate_rule,
-            rule_findings,
-            rule_suggestions,
-            learned_suggestions_batch,
-            accept_and_activate_learned,
-            deactivate_learned_rules,
-            continuous_learning_overview,
-            set_continuous_learning,
-            business_profile,
-            business_profile_prefill,
-            save_business_profile,
-            learned_profile_proposal,
-            accept_learned_profile,
-            dismiss_learned_profile,
-            clear_business_profile,
-            business_profile_preview,
-            grant_profile_consent,
-            withdraw_profile_consent,
-            suggestion_refinement,
-            refinement_preview,
-            refine_suggestions,
-            initial_read_overview,
-            initial_read_folder_preview,
-            pick_read_folder,
-            start_initial_read,
-            start_initial_read_folder,
-            retry_initial_read,
-            stop_initial_read,
-            continue_initial_read,
-            learning_overview,
-            learning_preview,
-            grant_learning_consent,
-            run_learning,
-            retry_learning,
-            seen_invoices,
-            grant_refine_consent,
-            withdraw_refine_consent,
-            accept_suggestion,
-            discard_suggestion,
-            suggestion_thresholds,
-            set_suggestion_threshold,
-            rule_seed_for_task,
-            preview_merge,
-            preview_restore,
-            merge_rules,
-            audit_log,
-            settings,
-            select_provider,
-            delete_provider_key,
-            provider_key_saved,
-            dismiss_external_offer,
-            list_models,
-            test_provider,
-            set_local_fallback,
-            launch_mode,
-            setup_check,
-            setup_prepare,
-            setup_cancel,
-            setup_abandon,
-        ])
+        .invoke_handler(move |invoke| {
+            if ventas::is_sales_command(invoke.message.command()) {
+                sales(invoke)
+            } else {
+                main(invoke)
+            }
+        })
 }
 
 fn main() {
@@ -2791,3 +2811,5 @@ fn main() {
 mod espera;
 #[cfg(test)]
 mod recorrido;
+#[cfg(test)]
+mod recorrido_venta;

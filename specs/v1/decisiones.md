@@ -329,6 +329,12 @@ Etapa E2: capa de aplicación de venta (`crates/app/src/sales.rs`).
 - **D201 Reloj de la venta.** La fecha de hoy y la fecha-hora con huso de los registros salen de la hora local de Windows (`chrono` con la característica `clock`, versión ya fijada en `Cargo.lock`). El reloj se puede sustituir en las pruebas. Un reloj atrasado respecto al último registro lo detecta D195.
 - **D202 Pruebas de la E2.** En archivos propios (D197): `crates/app/tests/sales.rs` para la capa de aplicación y `crates/core/tests/installation_store.rs` para el número de instalación.
 
+### Etapa E3a: comandos de la ventana
+
+- **D203 Productor desde un archivo local.** El nombre y el NIF del productor del software (D199) se leen de `verifactu-productor.json`, en la carpeta de datos junto a `configuracion.json`, al arrancar y con el comando `reload_verifactu_producer`. Si falta, el productor queda sin configurar y la aplicación arranca igual. Si está roto, tiene un NIF no válido o conserva los marcadores `PONER-AQUI` del ejemplo `docs/verifactu-productor.ejemplo.json`, ocurre lo mismo y la ventana muestra el motivo, nunca el contenido del archivo. Recargar un archivo ausente o inválido quita el productor anterior. El archivo está en `.gitignore` y nunca se versiona con datos reales.
+- **D204 Errores de los comandos de venta.** Cada comando de venta devuelve un error de texto que empieza por el código estable entre corchetes (`[verifactu_not_configured]`, `[verifactu_chain_broken]`, `[verifactu_clock_behind]`, `[invalid_input]`, `[conflict]`, `[not_found]`, `[storage]`, etc.). La ventana reacciona al código y muestra el resto tal cual. Fechas `AAAA-MM-DD`; importes, cantidades y porcentajes como cadenas decimales con punto. Emitir y anular son siempre acciones explícitas del usuario (`sales_issue`, `sales_void`), y los recurrentes solo crean borradores para revisar (D87).
+- **D205 Registro y pruebas de la E3a.** Los comandos de venta se registran en una lista propia (`crates/desktop/src/ventas.rs`), separada de la lista principal que se contrasta con `ui/src/api.ts`. Una prueba exige que cada comando de venta esté en su lista y en ninguna otra. El recorrido simulado de venta (`recorrido_venta.rs`) y las pruebas del productor (`productor.rs`) van en archivos propios (D197).
+
 ## Versiones de desarrollo fijadas
 
 | Componente | Versión | Licencia | Dónde se fija |

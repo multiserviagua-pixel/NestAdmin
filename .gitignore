@@ -31,3 +31,6 @@ vendor/
 !.claude/agents/
 !.claude/skills/
 !.claude/settings.json
+
+# Productor de Verifactu del equipo (nombre y NIF del editor): local, nunca se versiona.
+verifactu-productor.json
