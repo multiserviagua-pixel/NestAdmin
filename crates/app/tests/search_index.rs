@@ -692,7 +692,7 @@ fn t35c_question_terms_keep_the_useful_words() {
     );
     assert_eq!(
         question_terms("Muéstrame las facturas de Aguas del Sur, por favor."),
-        ["aguas", "sur", "favor"]
+        ["aguas", "sur"]
     );
     assert_eq!(question_terms("Busca el pedido 2231"), ["pedido", "2231"]);
     assert!(question_terms("¿Qué tengo?").is_empty());

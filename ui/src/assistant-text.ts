@@ -173,7 +173,23 @@ export function cardLabel(hit: HitLike): string {
   return `Abrir ${v.kind.toLowerCase()}: ${[v.title, ...v.meta].join(", ")}`;
 }
 
-export const NOT_OPENABLE = "Esta tarea ya no está en Pendientes ni tiene vista de revisión.";
+/** Acción secundaria de la tarjeta de una factura: abre la copia guardada con el programa del sistema. */
+export const OPEN_ORIGINAL_LABEL = "Abrir el documento";
+export const OPEN_ORIGINAL_PREVIEW = "Vista previa: en la aplicación se abriría la copia guardada con el programa del sistema.";
+
+export function canOpenOriginal(hit: Pick<HitLike, "kind">): boolean {
+  return hit.kind === "invoice";
+}
+
+export function originalLabel(hit: HitLike): string {
+  return `${OPEN_ORIGINAL_LABEL}: ${cardView(hit).title}`;
+}
+
+/** El mensaje del fondo tal cual (por ejemplo, que la copia ya no está); con vacío, uno genérico. */
+export function originalErrorText(error: unknown): string {
+  const text = String(error ?? "").trim();
+  return text || "No se pudo abrir el documento.";
+}
 export const NOT_FOUND_TASK = "Esta tarea ya no está en la lista de la aplicación.";
 
 export function searchErrorText(error: unknown): string {

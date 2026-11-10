@@ -163,8 +163,22 @@ test("ningún texto fijo ni generado contiene HTML", () => {
     ...T.countLines({ pending_index: 2, no_text: 1, failed: 2 }),
     T.shownLine(50, 90),
     T.reindexLine(3),
-    T.NOT_OPENABLE,
+    T.OPEN_ORIGINAL_LABEL,
+    T.OPEN_ORIGINAL_PREVIEW,
+    T.originalErrorText(""),
+    T.originalErrorText("la copia ya no está"),
     T.NOT_FOUND_TASK,
   ];
   for (const text of texts) assert.ok(!/[<>]|&\w+;/.test(text), text);
+});
+
+test("solo la tarjeta de una factura ofrece abrir el documento, y el error del fondo se muestra tal cual", () => {
+  const invoice = { kind: "invoice", title: "Factura F-1", party: "", number: "", doc_date: null, total_minor: null, currency: "", index_status: "indexed", snippet: "" };
+  assert.equal(T.canOpenOriginal(invoice), true);
+  assert.equal(T.canOpenOriginal({ ...invoice, kind: "email" }), false);
+  assert.equal(T.originalLabel(invoice), "Abrir el documento: Factura F-1");
+  assert.equal(T.originalErrorText("la copia ya no está"), "la copia ya no está");
+  assert.equal(T.originalErrorText(new Error("x")), "Error: x");
+  assert.equal(T.originalErrorText(""), "No se pudo abrir el documento.");
+  assert.equal(T.originalErrorText(null), "No se pudo abrir el documento.");
 });

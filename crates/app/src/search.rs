@@ -123,6 +123,43 @@ const STOP_WORDS: &[&str] = &[
     "ver",
     "localiza",
     "localizar",
+    "existe",
+    "existen",
+    "tienen",
+    "ensename",
+    "saber",
+    "puede",
+    "podrias",
+    "podria",
+    "favor",
+    "gracias",
+    "hola",
+    "fue",
+    "era",
+    "ser",
+    // Negación y cuantificadores.
+    "no",
+    "si",
+    "algo",
+    "algun",
+    "alguna",
+    "alguno",
+    "algunos",
+    "algunas",
+    "todo",
+    "toda",
+    "todos",
+    "todas",
+    "nada",
+    "ningun",
+    "ninguna",
+    // Conectores y demostrativos restantes.
+    "pero",
+    "segun",
+    "esos",
+    "esas",
+    "aquel",
+    "aquella",
 ];
 
 /// Palabras de tipo de `question_parts` (D181): listas cerradas, sin tildes y en minúsculas.
@@ -786,6 +823,21 @@ mod tests {
         assert_eq!(kinds, [SearchKind::Email, SearchKind::Invoice]);
         let (terms, kinds) = question_parts("mis documentos");
         assert!(terms.is_empty() && kinds.is_empty());
+    }
+
+    #[test]
+    fn question_parts_drop_negations_quantifiers_and_polite_words() {
+        assert_eq!(question_terms("algo que no existe zzzqqq"), ["zzzqqq"]);
+        assert_eq!(
+            question_terms("Hola, ¿puedes enseñame todos los pedidos de Ana? Gracias"),
+            ["pedidos", "ana"]
+        );
+        assert_eq!(
+            question_terms("Sí, tenemos algún presupuesto pendiente"),
+            ["presupuesto", "pendiente"]
+        );
+        // Meses y datos habituales no son palabras vacías.
+        assert_eq!(question_terms("total de marzo"), ["total", "marzo"]);
     }
 
     #[test]

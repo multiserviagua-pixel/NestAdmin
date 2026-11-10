@@ -2234,7 +2234,24 @@ const mockHits: SearchHit[] = [
   { task_id: 8, kind: "email", title: "Cita de revisión", party: "Clínica Piloto <citas@clinica.test>", number: "", doc_date: "2026-04-02", total_minor: null, currency: "", task_state: "completed", index_status: "indexed", snippet: "Su cita de revisión es el jueves a las 10:00." },
 ];
 
-const QUESTION_STOP = new Set(["donde", "esta", "estan", "que", "cual", "cuales", "del", "los", "las", "una", "uno", "unos", "unas", "con", "sobre", "para", "por", "mi", "mis", "el", "la", "de", "en", "es", "un", "y", "o", "a", "me", "se", "he", "hay", "tengo"]);
+// Misma lista cerrada que `STOP_WORDS` de crates/app/src/search.rs (D181): la vista previa y el fondo se comportan igual.
+// Cada resultado apunta a una tarea del mock con el mismo tipo y estado, para probar los dos caminos de la
+// tarjeta: en revisión (abre Pendientes) y terminada (localiza la fila en Tareas).
+{
+  const used = new Set<number>();
+  const plainEmail = (t: Task) => t.kind === "email" && !["informativo", "rebote"].includes(t.result?.triage?.route);
+  for (const hit of mockHits) {
+    const match = tasks.find(
+      (t) => !used.has(t.id) && t.kind === hit.kind && t.state === (hit.task_state === "awaiting_review" ? "awaiting_review" : "completed") && (hit.kind === "invoice" || plainEmail(t)),
+    );
+    if (!match) continue;
+    used.add(match.id);
+    hit.task_id = match.id;
+    hit.task_state = match.state;
+  }
+}
+
+const QUESTION_STOP = new Set(["el", "la", "lo", "los", "las", "un", "una", "unos", "unas", "al", "del", "de", "a", "en", "con", "por", "para", "sin", "sobre", "entre", "desde", "hasta", "y", "o", "u", "e", "que", "me", "te", "se", "le", "les", "nos", "mi", "mis", "tu", "tus", "su", "sus", "yo", "ese", "esa", "eso", "esto", "este", "estos", "estas", "donde", "cual", "cuales", "como", "cuando", "cuanto", "cuantos", "cuanta", "cuantas", "quien", "quienes", "porque", "esta", "estan", "estoy", "es", "son", "hay", "tengo", "tiene", "tienes", "tenemos", "ha", "he", "han", "busca", "buscar", "busco", "buscame", "encuentra", "encontrar", "encuentro", "encuentrame", "muestra", "muestrame", "mostrar", "dame", "dar", "dime", "decir", "quiero", "necesito", "puedes", "puedo", "ver", "localiza", "localizar", "existe", "existen", "tienen", "ensename", "saber", "puede", "podrias", "podria", "favor", "gracias", "hola", "fue", "era", "ser", "no", "si", "algo", "algun", "alguna", "alguno", "algunos", "algunas", "todo", "toda", "todos", "todas", "nada", "ningun", "ninguna", "pero", "segun", "esos", "esas", "aquel", "aquella"]);
 const QUESTION_INVOICE = new Set(["factura", "facturas", "recibo", "recibos"]);
 const QUESTION_EMAIL = new Set(["correo", "correos", "email", "emails", "mail", "mails", "mensaje", "mensajes"]);
 const QUESTION_GENERIC = new Set(["documento", "documentos", "archivo", "archivos", "fichero", "ficheros"]);

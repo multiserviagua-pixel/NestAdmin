@@ -2483,6 +2483,26 @@ pre.learn-preview:focus-visible {
   overflow-wrap: anywhere;
 }
 
+.chat-card-original {
+  align-self: flex-start;
+  margin-top: var(--s1);
+  font-size: var(--fs-small);
+}
+
+.task-card.is-located,
+tr.is-located > td {
+  background: var(--brand-soft);
+}
+
+.task-card.is-located {
+  box-shadow: inset 3px 0 0 var(--brand);
+}
+
+.is-located:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: -2px;
+}
+
 .chat-card-error {
   margin: var(--s1) 0 0;
   font-size: var(--fs-small);

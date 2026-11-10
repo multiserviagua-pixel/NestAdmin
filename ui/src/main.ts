@@ -236,6 +236,7 @@ import {
   CANCEL_ALSO_DONE,
   BLOCKED_FILTER,
   actionLabel,
+  boardColumnOf,
   attemptsText,
   downloadFailureText,
   CANCEL_ALSO_LABEL,
@@ -332,13 +333,17 @@ import {
   CHAT_SEND,
   CHAT_TITLE,
   NOT_FOUND_TASK,
-  NOT_OPENABLE,
+  OPEN_ORIGINAL_LABEL,
+  OPEN_ORIGINAL_PREVIEW,
   REINDEX_BUSY,
   REINDEX_BUTTON,
   SEARCH_NOTICE,
   YOU_LABEL,
   answerText,
   cardLabel,
+  canOpenOriginal,
+  originalLabel,
+  originalErrorText,
   cardView,
   countLines,
   reindexErrorText,
@@ -552,6 +557,8 @@ const state = {
   reasonsOpen: new Set<number>(),
   // «Cerradas» empieza plegada aunque tenga tarjetas; solo en memoria, no se guarda.
   closedOpen: false,
+  // Tarea localizada desde el chat: la fila o tarjeta se resalta y recibe el foco (D181).
+  taskLocate: null as number | null,
   // Panel de reglas: pestaña, filtros de «Mis reglas» y formulario abierto.
   rulesTab: "mine" as "mine" | "categories" | "suggested",
   // Sugerencias calculadas por código (D132), su error si no se pudieron calcular, las que se
@@ -1000,6 +1007,7 @@ function nav() {
             onclick: () => {
               state.view = view;
               state.notice = null;
+              state.taskLocate = null;
               if (view === "settings") resetBlocks();
               render();
               if (view === "tasks") void loadPipeline().then(() => render(true));
@@ -1932,7 +1940,7 @@ function taskCard(t: Task): HTMLElement {
   const open = state.reasonsOpen.has(t.id);
   const long = reason !== null && reason.text.length > CARD_REASON_CHARS;
   const fallback = t.result?.fallback;
-  return h(
+  const card = h(
     "li",
     { class: "task-card" },
     h("p", { class: "task-card-title" }, ...breakable(title(t))),
@@ -1967,6 +1975,16 @@ function taskCard(t: Task): HTMLElement {
     taskActions(t),
     state.stepsOpen.has(t.id) ? stepsPanel(t) : null,
   );
+  if (state.taskLocate === t.id) markLocated(card, t.id);
+  return card;
+}
+
+/** Resalta la fila o tarjeta de la tarea localizada y la hace enfocable (D138: `data-focus-key`). */
+function markLocated(el: Element | undefined, id: number) {
+  if (!el) return;
+  el.classList.add("is-located");
+  el.setAttribute("tabindex", "-1");
+  el.setAttribute("data-focus-key", `task:row:${id}`);
 }
 
 function boardColumn(key: BoardColumn, label: string, items: Task[]): HTMLElement {
@@ -2067,6 +2085,7 @@ function tasksList(): HTMLElement {
   // «Ver pasos»: una fila más bajo la tarea, a todo el ancho de la tabla.
   const bodyRows = [...table.querySelectorAll("tbody > tr")];
   rows.forEach((t, i) => {
+    if (state.taskLocate === t.id) markLocated(bodyRows[i], t.id);
     const panel = state.stepsOpen.has(t.id) ? stepsPanel(t) : null;
     if (panel) bodyRows[i]?.after(h("tr", { class: "run-row" }, h("td", { colspan: "4" }, panel)));
   });
@@ -6613,16 +6632,64 @@ function reviewTabOf(task: Task): ReviewTab | null {
   return task.state === "awaiting_review" && isKnownKind(task.kind) ? tabOf(task.kind) : null;
 }
 
-function openHit(hit: SearchHit, key: string) {
-  const task = state.tasks.find((t) => t.id === hit.task_id);
-  const tab = task ? reviewTabOf(task) : null;
-  if (!task || !tab) {
-    state.chat.cardNote = { key, text: task ? NOT_OPENABLE : NOT_FOUND_TASK };
+/**
+ * Abre la tarea de una tarjeta del chat: en su pestaña de Pendientes si está en revisión o es un
+ * Informativo; en cualquier otro estado, en la vista Tareas, con su fila resaltada.
+ */
+async function openHit(hit: SearchHit, key: string) {
+  let task = state.tasks.find((t) => t.id === hit.task_id);
+  if (!task) {
+    // La lista puede estar desactualizada: se refresca una vez antes de darla por perdida.
+    await refresh(true);
+    task = state.tasks.find((t) => t.id === hit.task_id);
+  }
+  if (!task) {
+    state.chat.cardNote = { key, text: NOT_FOUND_TASK };
     renderChat();
     return;
   }
   state.chat.cardNote = null;
-  openInReview(task, tab);
+  const tab = reviewTabOf(task);
+  if (tab) {
+    openInReview(task, tab);
+    return;
+  }
+  locateTask(task);
+}
+
+/** Lleva a la vista Tareas con la tarea visible: quita el filtro que la oculte y despliega su columna. */
+function locateTask(task: Task) {
+  state.view = "tasks";
+  state.tasksPane = "view";
+  state.notice = null;
+  state.taskLocate = task.id;
+  if (state.tasksView === "list") {
+    if (!filterTasks([task], state.taskFilter, state.pipelineIndex).length) state.taskFilter = "";
+  } else {
+    const column = boardColumnOf(task);
+    if (column === "closed") state.closedOpen = true;
+    const at = groupForBoard(state.tasks)[column].findIndex((t) => t.id === task.id);
+    if (at >= (state.boardShown[column] ?? BOARD_PAGE)) state.boardShown[column] = Math.ceil((at + 1) / BOARD_PAGE) * BOARD_PAGE;
+  }
+  state.focusAfterRender = `task:row:${task.id}`;
+  render();
+  root.querySelector(`[data-focus-key="task:row:${task.id}"]`)?.scrollIntoView({ block: "center" });
+  void loadPipeline().then(() => render(true));
+}
+
+async function openOriginalHit(hit: SearchHit, key: string) {
+  if (isPreview) {
+    state.chat.cardNote = { key, text: OPEN_ORIGINAL_PREVIEW };
+    renderChat();
+    return;
+  }
+  try {
+    await api.openOriginal(hit.task_id);
+    state.chat.cardNote = null;
+  } catch (error) {
+    state.chat.cardNote = { key, text: originalErrorText(error) };
+  }
+  renderChat({ focus: `${key}:original` });
 }
 
 function chatCard(hit: SearchHit, key: string): HTMLElement {
@@ -6633,12 +6700,15 @@ function chatCard(hit: SearchHit, key: string): HTMLElement {
     {},
     h(
       "button",
-      { type: "button", class: "chat-card", "data-focus-key": key, "aria-label": cardLabel(hit), onclick: () => openHit(hit, key) },
+      { type: "button", class: "chat-card", "data-focus-key": key, "aria-label": cardLabel(hit), onclick: () => void openHit(hit, key) },
       h("span", { class: "chat-card-head" }, statusChip(v.kind, "info"), h("span", { class: "chat-card-title" }, v.title)),
       v.meta.length ? h("span", { class: "chat-card-meta" }, v.meta.join(" · ")) : null,
       v.note ? h("span", { class: "chat-card-note" }, statusChip(v.note, "warn")) : null,
       v.snippet ? h("span", { class: "chat-card-snippet" }, v.snippet) : null,
     ),
+    canOpenOriginal(hit)
+      ? h("button", { type: "button", class: "chat-card-original", "data-focus-key": `${key}:original`, "aria-label": originalLabel(hit), onclick: () => void openOriginalHit(hit, key) }, OPEN_ORIGINAL_LABEL)
+      : null,
     note ? h("p", { class: "chat-card-error", role: "status" }, note) : null,
   );
 }
