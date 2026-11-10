@@ -41,7 +41,8 @@ INSTRUCTION_PHRASES = (
     'no inventes importes', 'quedará pendiente de revisión humana', 'queda pendiente de revisión humana',
     'información del negocio (de confianza',
 )
-INTERNAL_NAMES = triage.CATEGORIES[:-1] + ('needs_reply',)  # `otros` is an ordinary word
+# Only the identifiers with an underscore: the other category names are ordinary words (D177).
+INTERNAL_NAMES = tuple(c for c in triage.CATEGORIES if '_' in c) + ('needs_reply',)
 MARKERS = ('<<<', '>>>', '[[[', ']]]')
 
 EMAIL = re.compile(r'[\w.+-]+@[\w-]+(?:\.[\w-]+)+')

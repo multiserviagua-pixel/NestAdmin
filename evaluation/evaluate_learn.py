@@ -30,7 +30,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
 NAME = 'learn.json'
-CATEGORIES = ('solicitud_factura', 'consulta_pago', 'incidencia_factura', 'documentacion', 'otros')
+CATEGORIES = ('solicitud_factura', 'consulta_pago', 'incidencia_factura', 'documentacion', 'presupuesto', 'pedido', 'cita',
+              'informacion', 'acuse', 'reclamacion', 'otros')
 REPLY_KINDS = ('confirm', 'inform', 'schedule', 'quote', 'decline', 'other')
 # Codes of `LearnCounts` (crates/app/src/learn.rs) that discard a case.
 DISCARD_CODES = (

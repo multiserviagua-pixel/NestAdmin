@@ -1829,5 +1829,357 @@
         }
       ]
     }
+  },
+  {
+    "id": "L049",
+    "expected": {
+      "group": "normal_catalogo",
+      "discard": null,
+      "category": "presupuesto",
+      "needs_reply": true,
+      "reply_kind": "quote",
+      "forbidden": [
+        {
+          "kind": "name",
+          "text": "Raúl Benítez"
+        },
+        {
+          "kind": "name",
+          "text": "Raúl"
+        },
+        {
+          "kind": "name",
+          "text": "Benítez"
+        },
+        {
+          "kind": "email",
+          "text": "raul.benitez@tallerlaprueba.test"
+        },
+        {
+          "kind": "signature",
+          "text": "Elena Duarte"
+        },
+        {
+          "kind": "signature",
+          "text": "Administración · Taller Ficticio S.L."
+        },
+        {
+          "kind": "phone",
+          "text": "900000111"
+        },
+        {
+          "kind": "signature",
+          "text": "tallerficticio.test"
+        }
+      ]
+    }
+  },
+  {
+    "id": "L050",
+    "expected": {
+      "group": "normal_catalogo",
+      "discard": null,
+      "category": "presupuesto",
+      "needs_reply": true,
+      "reply_kind": "quote",
+      "forbidden": [
+        {
+          "kind": "name",
+          "text": "Teresa Cuesta"
+        },
+        {
+          "kind": "name",
+          "text": "Teresa"
+        },
+        {
+          "kind": "name",
+          "text": "Cuesta"
+        },
+        {
+          "kind": "email",
+          "text": "teresa.cuesta@tallerlaprueba.test"
+        },
+        {
+          "kind": "signature",
+          "text": "Elena Duarte"
+        },
+        {
+          "kind": "signature",
+          "text": "Administración · Taller Ficticio S.L."
+        },
+        {
+          "kind": "phone",
+          "text": "900000111"
+        },
+        {
+          "kind": "signature",
+          "text": "tallerficticio.test"
+        }
+      ]
+    }
+  },
+  {
+    "id": "L051",
+    "expected": {
+      "group": "normal_catalogo",
+      "discard": null,
+      "category": "pedido",
+      "needs_reply": true,
+      "reply_kind": "inform",
+      "forbidden": [
+        {
+          "kind": "name",
+          "text": "Ismael Varela"
+        },
+        {
+          "kind": "name",
+          "text": "Ismael"
+        },
+        {
+          "kind": "name",
+          "text": "Varela"
+        },
+        {
+          "kind": "email",
+          "text": "ismael.varela@tallerlaprueba.test"
+        },
+        {
+          "kind": "signature",
+          "text": "Elena Duarte"
+        },
+        {
+          "kind": "signature",
+          "text": "Administración · Taller Ficticio S.L."
+        },
+        {
+          "kind": "phone",
+          "text": "900000111"
+        },
+        {
+          "kind": "signature",
+          "text": "tallerficticio.test"
+        }
+      ]
+    }
+  },
+  {
+    "id": "L052",
+    "expected": {
+      "group": "normal_catalogo",
+      "discard": null,
+      "category": "cita",
+      "needs_reply": true,
+      "reply_kind": "schedule",
+      "forbidden": [
+        {
+          "kind": "name",
+          "text": "Olga Sierra"
+        },
+        {
+          "kind": "name",
+          "text": "Olga"
+        },
+        {
+          "kind": "name",
+          "text": "Sierra"
+        },
+        {
+          "kind": "email",
+          "text": "olga.sierra@tallerlaprueba.test"
+        },
+        {
+          "kind": "signature",
+          "text": "Elena Duarte"
+        },
+        {
+          "kind": "signature",
+          "text": "Administración · Taller Ficticio S.L."
+        },
+        {
+          "kind": "phone",
+          "text": "900000111"
+        },
+        {
+          "kind": "signature",
+          "text": "tallerficticio.test"
+        }
+      ]
+    }
+  },
+  {
+    "id": "L053",
+    "expected": {
+      "group": "normal_catalogo",
+      "discard": null,
+      "category": "cita",
+      "needs_reply": true,
+      "reply_kind": "confirm",
+      "forbidden": [
+        {
+          "kind": "name",
+          "text": "Lucas Ferrer"
+        },
+        {
+          "kind": "name",
+          "text": "Lucas"
+        },
+        {
+          "kind": "name",
+          "text": "Ferrer"
+        },
+        {
+          "kind": "email",
+          "text": "lucas.ferrer@tallerlaprueba.test"
+        },
+        {
+          "kind": "signature",
+          "text": "Elena Duarte"
+        },
+        {
+          "kind": "signature",
+          "text": "Administración · Taller Ficticio S.L."
+        },
+        {
+          "kind": "phone",
+          "text": "900000111"
+        },
+        {
+          "kind": "signature",
+          "text": "tallerficticio.test"
+        }
+      ]
+    }
+  },
+  {
+    "id": "L054",
+    "expected": {
+      "group": "normal_catalogo",
+      "discard": null,
+      "category": "informacion",
+      "needs_reply": true,
+      "reply_kind": "inform",
+      "forbidden": [
+        {
+          "kind": "name",
+          "text": "Natalia Rey"
+        },
+        {
+          "kind": "name",
+          "text": "Natalia"
+        },
+        {
+          "kind": "name",
+          "text": "Rey"
+        },
+        {
+          "kind": "email",
+          "text": "natalia.rey@tallerlaprueba.test"
+        },
+        {
+          "kind": "signature",
+          "text": "Elena Duarte"
+        },
+        {
+          "kind": "signature",
+          "text": "Administración · Taller Ficticio S.L."
+        },
+        {
+          "kind": "phone",
+          "text": "900000111"
+        },
+        {
+          "kind": "signature",
+          "text": "tallerficticio.test"
+        }
+      ]
+    }
+  },
+  {
+    "id": "L055",
+    "expected": {
+      "group": "normal_catalogo",
+      "discard": null,
+      "category": "acuse",
+      "needs_reply": true,
+      "reply_kind": "confirm",
+      "forbidden": [
+        {
+          "kind": "name",
+          "text": "Gonzalo Ibáñez"
+        },
+        {
+          "kind": "name",
+          "text": "Gonzalo"
+        },
+        {
+          "kind": "name",
+          "text": "Ibáñez"
+        },
+        {
+          "kind": "email",
+          "text": "gonzalo.ibanez@tallerlaprueba.test"
+        },
+        {
+          "kind": "signature",
+          "text": "Elena Duarte"
+        },
+        {
+          "kind": "signature",
+          "text": "Administración · Taller Ficticio S.L."
+        },
+        {
+          "kind": "phone",
+          "text": "900000111"
+        },
+        {
+          "kind": "signature",
+          "text": "tallerficticio.test"
+        }
+      ]
+    }
+  },
+  {
+    "id": "L056",
+    "expected": {
+      "group": "normal_catalogo",
+      "discard": null,
+      "category": "reclamacion",
+      "needs_reply": true,
+      "reply_kind": "inform",
+      "forbidden": [
+        {
+          "kind": "name",
+          "text": "Sara Montero"
+        },
+        {
+          "kind": "name",
+          "text": "Sara"
+        },
+        {
+          "kind": "name",
+          "text": "Montero"
+        },
+        {
+          "kind": "email",
+          "text": "sara.montero@tallerlaprueba.test"
+        },
+        {
+          "kind": "signature",
+          "text": "Elena Duarte"
+        },
+        {
+          "kind": "signature",
+          "text": "Administración · Taller Ficticio S.L."
+        },
+        {
+          "kind": "phone",
+          "text": "900000111"
+        },
+        {
+          "kind": "signature",
+          "text": "tallerficticio.test"
+        }
+      ]
+    }
   }
 ]

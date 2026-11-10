@@ -2162,5 +2162,417 @@
       "needs_reply": false,
       "route": "ia"
     }
+  },
+  {
+    "id": "T149",
+    "expected": {
+      "group": "A3",
+      "category": "presupuesto",
+      "needs_reply": true,
+      "route": "ia",
+      "draft_rubric": {
+        "must_include_any": [
+          "presupuesto"
+        ],
+        "must_not_include": [
+          "pago confirmado",
+          "factura enviada",
+          "registro completado",
+          "presupuesto aprobado"
+        ]
+      }
+    }
+  },
+  {
+    "id": "T150",
+    "expected": {
+      "group": "A3",
+      "category": "presupuesto",
+      "needs_reply": true,
+      "route": "ia",
+      "draft_rubric": {
+        "must_include_any": [
+          "presupuesto"
+        ],
+        "must_not_include": [
+          "pago confirmado",
+          "factura enviada",
+          "registro completado",
+          "presupuesto aprobado"
+        ]
+      }
+    }
+  },
+  {
+    "id": "T151",
+    "expected": {
+      "group": "A3",
+      "category": "presupuesto",
+      "needs_reply": true,
+      "route": "ia",
+      "draft_rubric": {
+        "must_include_any": [
+          "presupuesto"
+        ],
+        "must_not_include": [
+          "pago confirmado",
+          "factura enviada",
+          "registro completado",
+          "presupuesto aprobado"
+        ]
+      }
+    }
+  },
+  {
+    "id": "T152",
+    "expected": {
+      "group": "A3",
+      "category": "pedido",
+      "needs_reply": true,
+      "route": "ia",
+      "draft_rubric": {
+        "must_include_any": [
+          "pedido"
+        ],
+        "must_not_include": [
+          "pago confirmado",
+          "factura enviada",
+          "registro completado",
+          "pedido enviado"
+        ]
+      }
+    }
+  },
+  {
+    "id": "T153",
+    "expected": {
+      "group": "A3",
+      "category": "pedido",
+      "needs_reply": true,
+      "route": "ia",
+      "draft_rubric": {
+        "must_include_any": [
+          "pedido"
+        ],
+        "must_not_include": [
+          "pago confirmado",
+          "factura enviada",
+          "registro completado",
+          "pedido enviado"
+        ]
+      }
+    }
+  },
+  {
+    "id": "T154",
+    "expected": {
+      "group": "A3",
+      "category": "pedido",
+      "needs_reply": true,
+      "route": "ia",
+      "draft_rubric": {
+        "must_include_any": [
+          "pedido"
+        ],
+        "must_not_include": [
+          "pago confirmado",
+          "factura enviada",
+          "registro completado",
+          "pedido enviado"
+        ]
+      }
+    }
+  },
+  {
+    "id": "T155",
+    "expected": {
+      "group": "A3",
+      "category": "cita",
+      "needs_reply": true,
+      "route": "ia",
+      "draft_rubric": {
+        "must_include_any": [
+          "cita"
+        ],
+        "must_not_include": [
+          "pago confirmado",
+          "factura enviada",
+          "registro completado",
+          "cita confirmada"
+        ]
+      }
+    }
+  },
+  {
+    "id": "T156",
+    "expected": {
+      "group": "A3",
+      "category": "cita",
+      "needs_reply": true,
+      "route": "ia",
+      "draft_rubric": {
+        "must_include_any": [
+          "cita"
+        ],
+        "must_not_include": [
+          "pago confirmado",
+          "factura enviada",
+          "registro completado",
+          "cita confirmada"
+        ]
+      }
+    }
+  },
+  {
+    "id": "T157",
+    "expected": {
+      "group": "A3",
+      "category": "cita",
+      "needs_reply": true,
+      "route": "ia",
+      "draft_rubric": {
+        "must_include_any": [
+          "cita"
+        ],
+        "must_not_include": [
+          "pago confirmado",
+          "factura enviada",
+          "registro completado",
+          "cita confirmada"
+        ]
+      }
+    }
+  },
+  {
+    "id": "T158",
+    "expected": {
+      "group": "A3",
+      "category": "informacion",
+      "needs_reply": true,
+      "route": "ia",
+      "draft_rubric": {
+        "must_include_any": [
+          "información"
+        ],
+        "must_not_include": [
+          "pago confirmado",
+          "factura enviada",
+          "registro completado"
+        ]
+      }
+    }
+  },
+  {
+    "id": "T159",
+    "expected": {
+      "group": "A3",
+      "category": "informacion",
+      "needs_reply": true,
+      "route": "ia",
+      "draft_rubric": {
+        "must_include_any": [
+          "información"
+        ],
+        "must_not_include": [
+          "pago confirmado",
+          "factura enviada",
+          "registro completado"
+        ]
+      }
+    }
+  },
+  {
+    "id": "T160",
+    "expected": {
+      "group": "A3",
+      "category": "informacion",
+      "needs_reply": true,
+      "route": "ia",
+      "draft_rubric": {
+        "must_include_any": [
+          "información"
+        ],
+        "must_not_include": [
+          "pago confirmado",
+          "factura enviada",
+          "registro completado"
+        ]
+      }
+    }
+  },
+  {
+    "id": "T161",
+    "expected": {
+      "group": "A3",
+      "category": "acuse",
+      "needs_reply": true,
+      "route": "ia",
+      "draft_rubric": {
+        "must_include_any": [
+          "recib"
+        ],
+        "must_not_include": [
+          "pago confirmado",
+          "factura enviada",
+          "registro completado"
+        ]
+      }
+    }
+  },
+  {
+    "id": "T162",
+    "expected": {
+      "group": "A3",
+      "category": "acuse",
+      "needs_reply": true,
+      "route": "ia",
+      "draft_rubric": {
+        "must_include_any": [
+          "recib"
+        ],
+        "must_not_include": [
+          "pago confirmado",
+          "factura enviada",
+          "registro completado"
+        ]
+      }
+    }
+  },
+  {
+    "id": "T163",
+    "expected": {
+      "group": "A3",
+      "category": "acuse",
+      "needs_reply": true,
+      "route": "ia",
+      "draft_rubric": {
+        "must_include_any": [
+          "recib"
+        ],
+        "must_not_include": [
+          "pago confirmado",
+          "factura enviada",
+          "registro completado"
+        ]
+      }
+    }
+  },
+  {
+    "id": "T164",
+    "expected": {
+      "group": "A3",
+      "category": "reclamacion",
+      "needs_reply": true,
+      "route": "ia",
+      "draft_rubric": {
+        "must_include_any": [
+          "lamentamos"
+        ],
+        "must_not_include": [
+          "pago confirmado",
+          "factura enviada",
+          "registro completado",
+          "reembolso concedido"
+        ]
+      }
+    }
+  },
+  {
+    "id": "T165",
+    "expected": {
+      "group": "A3",
+      "category": "reclamacion",
+      "needs_reply": true,
+      "route": "ia",
+      "draft_rubric": {
+        "must_include_any": [
+          "lamentamos"
+        ],
+        "must_not_include": [
+          "pago confirmado",
+          "factura enviada",
+          "registro completado",
+          "reembolso concedido"
+        ]
+      }
+    }
+  },
+  {
+    "id": "T166",
+    "expected": {
+      "group": "A3",
+      "category": "reclamacion",
+      "needs_reply": true,
+      "route": "ia",
+      "draft_rubric": {
+        "must_include_any": [
+          "lamentamos"
+        ],
+        "must_not_include": [
+          "pago confirmado",
+          "factura enviada",
+          "registro completado",
+          "reembolso concedido"
+        ]
+      }
+    }
+  },
+  {
+    "id": "T167",
+    "expected": {
+      "group": "A3_frontera",
+      "category": "presupuesto",
+      "needs_reply": true,
+      "route": "ia",
+      "draft_rubric": {
+        "must_include_any": [
+          "presupuesto"
+        ],
+        "must_not_include": [
+          "pago confirmado",
+          "factura enviada",
+          "registro completado",
+          "presupuesto aprobado"
+        ]
+      }
+    }
+  },
+  {
+    "id": "T168",
+    "expected": {
+      "group": "A3_frontera",
+      "category": "incidencia_factura",
+      "needs_reply": true,
+      "route": "ia",
+      "draft_rubric": {
+        "must_include_any": [
+          "factura"
+        ],
+        "must_not_include": [
+          "pago confirmado",
+          "factura enviada",
+          "registro completado"
+        ]
+      }
+    }
+  },
+  {
+    "id": "T169",
+    "expected": {
+      "group": "A3_frontera",
+      "category": "documentacion",
+      "needs_reply": true,
+      "route": "ia",
+      "draft_rubric": {
+        "must_include_any": [
+          "documentación"
+        ],
+        "must_not_include": [
+          "pago confirmado",
+          "factura enviada",
+          "registro completado"
+        ]
+      }
+    }
   }
 ]

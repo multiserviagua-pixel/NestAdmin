@@ -1239,5 +1239,213 @@
         "body": "Hola Nora,\n\nSí, el pago de la factura F-2031 consta como recibido. Gracias por avisar.\n\nUn saludo,\nElena Duarte\nAdministración · Taller Ficticio S.L.\nTel. 900 000 111\nhttps://tallerficticio.test"
       }
     }
+  },
+  {
+    "id": "L049",
+    "kind": "learn",
+    "input": {
+      "from": "Raúl Benítez <raul.benitez@tallerlaprueba.test>",
+      "to": [
+        "administracion@tallerficticio.test"
+      ],
+      "date": "2026-10-23T09:10:00Z",
+      "subject": "Presupuesto de una puerta",
+      "body": "Hola, ¿cuánto costaría cambiar la puerta del almacén por una metálica de 2 x 3 metros?",
+      "headers": [
+        {
+          "name": "Content-Type",
+          "value": "text/plain; charset=utf-8"
+        }
+      ],
+      "thread_key": "hilo-L049",
+      "own_reply": {
+        "to": [
+          "Raúl Benítez <raul.benitez@tallerlaprueba.test>"
+        ],
+        "body": "Hola Raúl,\n\nEl presupuesto sería de 980 euros más IVA, con instalación incluida.\n\nUn saludo,\nElena Duarte\nAdministración · Taller Ficticio S.L.\nTel. 900 000 111\nhttps://tallerficticio.test"
+      }
+    }
+  },
+  {
+    "id": "L050",
+    "kind": "learn",
+    "input": {
+      "from": "Teresa Cuesta <teresa.cuesta@tallerlaprueba.test>",
+      "to": [
+        "administracion@tallerficticio.test"
+      ],
+      "date": "2026-10-23T10:13:00Z",
+      "subject": "Tarifa del servicio",
+      "body": "Buenas, ¿qué tarifa tenéis para una visita de mantenimiento trimestral?",
+      "headers": [
+        {
+          "name": "Content-Type",
+          "value": "text/plain; charset=utf-8"
+        }
+      ],
+      "thread_key": "hilo-L050",
+      "own_reply": {
+        "to": [
+          "Teresa Cuesta <teresa.cuesta@tallerlaprueba.test>"
+        ],
+        "body": "Hola Teresa,\n\nLa tarifa es de 65 euros por visita, sin permanencia.\n\nUn saludo,\nElena Duarte\nAdministración · Taller Ficticio S.L.\nTel. 900 000 111\nhttps://tallerficticio.test"
+      }
+    }
+  },
+  {
+    "id": "L051",
+    "kind": "learn",
+    "input": {
+      "from": "Ismael Varela <ismael.varela@tallerlaprueba.test>",
+      "to": [
+        "administracion@tallerficticio.test"
+      ],
+      "date": "2026-10-23T11:16:00Z",
+      "subject": "Mi pedido 7731",
+      "body": "Hola, ¿cuándo llegará mi pedido 7731? Lo hice hace una semana.",
+      "headers": [
+        {
+          "name": "Content-Type",
+          "value": "text/plain; charset=utf-8"
+        }
+      ],
+      "thread_key": "hilo-L051",
+      "own_reply": {
+        "to": [
+          "Ismael Varela <ismael.varela@tallerlaprueba.test>"
+        ],
+        "body": "Hola Ismael,\n\nTu pedido 7731 salió ayer y llegará entre el jueves y el viernes.\n\nUn saludo,\nElena Duarte\nAdministración · Taller Ficticio S.L.\nTel. 900 000 111\nhttps://tallerficticio.test"
+      }
+    }
+  },
+  {
+    "id": "L052",
+    "kind": "learn",
+    "input": {
+      "from": "Olga Sierra <olga.sierra@tallerlaprueba.test>",
+      "to": [
+        "administracion@tallerficticio.test"
+      ],
+      "date": "2026-10-23T12:19:00Z",
+      "subject": "Cita para revisión",
+      "body": "Buenos días, ¿puedo pedir cita para una revisión la semana próxima?",
+      "headers": [
+        {
+          "name": "Content-Type",
+          "value": "text/plain; charset=utf-8"
+        }
+      ],
+      "thread_key": "hilo-L052",
+      "own_reply": {
+        "to": [
+          "Olga Sierra <olga.sierra@tallerlaprueba.test>"
+        ],
+        "body": "Hola Olga,\n\nTe propongo el martes a las 11:00 o el miércoles a las 16:00. Dime cuál te va mejor.\n\nUn saludo,\nElena Duarte\nAdministración · Taller Ficticio S.L.\nTel. 900 000 111\nhttps://tallerficticio.test"
+      }
+    }
+  },
+  {
+    "id": "L053",
+    "kind": "learn",
+    "input": {
+      "from": "Lucas Ferrer <lucas.ferrer@tallerlaprueba.test>",
+      "to": [
+        "administracion@tallerficticio.test"
+      ],
+      "date": "2026-10-24T13:22:00Z",
+      "subject": "Anular la cita del viernes",
+      "body": "Hola, tengo que anular la cita del viernes. Lo siento.",
+      "headers": [
+        {
+          "name": "Content-Type",
+          "value": "text/plain; charset=utf-8"
+        }
+      ],
+      "thread_key": "hilo-L053",
+      "own_reply": {
+        "to": [
+          "Lucas Ferrer <lucas.ferrer@tallerlaprueba.test>"
+        ],
+        "body": "Hola Lucas,\n\nSin problema, queda anulada la cita del viernes. Avísanos cuando quieras otra.\n\nUn saludo,\nElena Duarte\nAdministración · Taller Ficticio S.L.\nTel. 900 000 111\nhttps://tallerficticio.test"
+      }
+    }
+  },
+  {
+    "id": "L054",
+    "kind": "learn",
+    "input": {
+      "from": "Natalia Rey <natalia.rey@tallerlaprueba.test>",
+      "to": [
+        "administracion@tallerficticio.test"
+      ],
+      "date": "2026-10-24T14:25:00Z",
+      "subject": "Horario de verano",
+      "body": "¿Tenéis horario especial en verano?",
+      "headers": [
+        {
+          "name": "Content-Type",
+          "value": "text/plain; charset=utf-8"
+        }
+      ],
+      "thread_key": "hilo-L054",
+      "own_reply": {
+        "to": [
+          "Natalia Rey <natalia.rey@tallerlaprueba.test>"
+        ],
+        "body": "Hola Natalia,\n\nEn verano abrimos de 8:00 a 15:00, de lunes a viernes.\n\nUn saludo,\nElena Duarte\nAdministración · Taller Ficticio S.L.\nTel. 900 000 111\nhttps://tallerficticio.test"
+      }
+    }
+  },
+  {
+    "id": "L055",
+    "kind": "learn",
+    "input": {
+      "from": "Gonzalo Ibáñez <gonzalo.ibanez@tallerlaprueba.test>",
+      "to": [
+        "administracion@tallerficticio.test"
+      ],
+      "date": "2026-10-24T15:28:00Z",
+      "subject": "Documentos enviados",
+      "body": "Os he enviado hoy los documentos del alta. Confirmad que los habéis recibido, por favor.",
+      "headers": [
+        {
+          "name": "Content-Type",
+          "value": "text/plain; charset=utf-8"
+        }
+      ],
+      "thread_key": "hilo-L055",
+      "own_reply": {
+        "to": [
+          "Gonzalo Ibáñez <gonzalo.ibanez@tallerlaprueba.test>"
+        ],
+        "body": "Hola Gonzalo,\n\nRecibidos correctamente, gracias por enviarlos.\n\nUn saludo,\nElena Duarte\nAdministración · Taller Ficticio S.L.\nTel. 900 000 111\nhttps://tallerficticio.test"
+      }
+    }
+  },
+  {
+    "id": "L056",
+    "kind": "learn",
+    "input": {
+      "from": "Sara Montero <sara.montero@tallerlaprueba.test>",
+      "to": [
+        "administracion@tallerficticio.test"
+      ],
+      "date": "2026-10-24T16:31:00Z",
+      "subject": "Queja por la entrega",
+      "body": "Quiero quejarme: la entrega llegó con dos días de retraso y la caja estaba abierta.",
+      "headers": [
+        {
+          "name": "Content-Type",
+          "value": "text/plain; charset=utf-8"
+        }
+      ],
+      "thread_key": "hilo-L056",
+      "own_reply": {
+        "to": [
+          "Sara Montero <sara.montero@tallerlaprueba.test>"
+        ],
+        "body": "Hola Sara,\n\nLamentamos lo ocurrido. Vamos a revisar la entrega con el transportista y te contaremos el resultado.\n\nUn saludo,\nElena Duarte\nAdministración · Taller Ficticio S.L.\nTel. 900 000 111\nhttps://tallerficticio.test"
+      }
+    }
   }
 ]

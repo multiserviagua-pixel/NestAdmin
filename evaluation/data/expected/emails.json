@@ -318,5 +318,205 @@
         ]
       }
     }
+  },
+  {
+    "id": "E21",
+    "expected": {
+      "category": "presupuesto",
+      "draft_rubric": {
+        "must_include_any": [
+          "presupuesto"
+        ],
+        "must_not_include": [
+          "pago confirmado",
+          "factura enviada",
+          "registro completado",
+          "presupuesto aprobado"
+        ]
+      }
+    }
+  },
+  {
+    "id": "E22",
+    "expected": {
+      "category": "presupuesto",
+      "draft_rubric": {
+        "must_include_any": [
+          "presupuesto"
+        ],
+        "must_not_include": [
+          "pago confirmado",
+          "factura enviada",
+          "registro completado",
+          "presupuesto aprobado"
+        ]
+      }
+    }
+  },
+  {
+    "id": "E23",
+    "expected": {
+      "category": "pedido",
+      "draft_rubric": {
+        "must_include_any": [
+          "pedido"
+        ],
+        "must_not_include": [
+          "pago confirmado",
+          "factura enviada",
+          "registro completado",
+          "pedido enviado"
+        ]
+      }
+    }
+  },
+  {
+    "id": "E24",
+    "expected": {
+      "category": "pedido",
+      "draft_rubric": {
+        "must_include_any": [
+          "pedido"
+        ],
+        "must_not_include": [
+          "pago confirmado",
+          "factura enviada",
+          "registro completado",
+          "pedido enviado"
+        ]
+      }
+    }
+  },
+  {
+    "id": "E25",
+    "expected": {
+      "category": "cita",
+      "draft_rubric": {
+        "must_include_any": [
+          "cita"
+        ],
+        "must_not_include": [
+          "pago confirmado",
+          "factura enviada",
+          "registro completado",
+          "cita confirmada"
+        ]
+      }
+    }
+  },
+  {
+    "id": "E26",
+    "expected": {
+      "category": "cita",
+      "draft_rubric": {
+        "must_include_any": [
+          "cita"
+        ],
+        "must_not_include": [
+          "pago confirmado",
+          "factura enviada",
+          "registro completado",
+          "cita confirmada"
+        ]
+      }
+    }
+  },
+  {
+    "id": "E27",
+    "expected": {
+      "category": "informacion",
+      "draft_rubric": {
+        "must_include_any": [
+          "información"
+        ],
+        "must_not_include": [
+          "pago confirmado",
+          "factura enviada",
+          "registro completado"
+        ]
+      }
+    }
+  },
+  {
+    "id": "E28",
+    "expected": {
+      "category": "informacion",
+      "draft_rubric": {
+        "must_include_any": [
+          "información"
+        ],
+        "must_not_include": [
+          "pago confirmado",
+          "factura enviada",
+          "registro completado"
+        ]
+      }
+    }
+  },
+  {
+    "id": "E29",
+    "expected": {
+      "category": "acuse",
+      "draft_rubric": {
+        "must_include_any": [
+          "recib"
+        ],
+        "must_not_include": [
+          "pago confirmado",
+          "factura enviada",
+          "registro completado"
+        ]
+      }
+    }
+  },
+  {
+    "id": "E30",
+    "expected": {
+      "category": "acuse",
+      "draft_rubric": {
+        "must_include_any": [
+          "recib"
+        ],
+        "must_not_include": [
+          "pago confirmado",
+          "factura enviada",
+          "registro completado"
+        ]
+      }
+    }
+  },
+  {
+    "id": "E31",
+    "expected": {
+      "category": "reclamacion",
+      "draft_rubric": {
+        "must_include_any": [
+          "lamentamos"
+        ],
+        "must_not_include": [
+          "pago confirmado",
+          "factura enviada",
+          "registro completado",
+          "reembolso concedido"
+        ]
+      }
+    }
+  },
+  {
+    "id": "E32",
+    "expected": {
+      "category": "reclamacion",
+      "draft_rubric": {
+        "must_include_any": [
+          "lamentamos"
+        ],
+        "must_not_include": [
+          "pago confirmado",
+          "factura enviada",
+          "registro completado",
+          "reembolso concedido"
+        ]
+      }
+    }
   }
 ]

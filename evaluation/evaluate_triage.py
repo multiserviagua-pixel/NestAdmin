@@ -25,7 +25,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
 NAME = 'triage.json'
-CATEGORIES = ('solicitud_factura', 'consulta_pago', 'incidencia_factura', 'documentacion', 'otros')
+CATEGORIES = ('solicitud_factura', 'consulta_pago', 'incidencia_factura', 'documentacion', 'presupuesto', 'pedido', 'cita',
+              'informacion', 'acuse', 'reclamacion', 'otros')
 ROUTES = ('informativo', 'rebote', 'ia')
 # Provisional internal gates (D164); not promises.
 GATE_NEEDS_REPLY_RECALL = 0.95

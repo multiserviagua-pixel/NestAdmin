@@ -2882,5 +2882,404 @@
         }
       ]
     }
+  },
+  {
+    "id": "T149",
+    "kind": "triage",
+    "input": {
+      "from": "Raquel Ibarra <raquel@carpinteriaoeste.test>",
+      "to": [
+        "administracion@nestadmin.test"
+      ],
+      "date": "2026-10-09T08:00:00Z",
+      "subject": "Presupuesto de una cocina",
+      "body": "Buenos días, quisiera un presupuesto para una cocina de unos 12 metros lineales, con encimera de madera. ¿Podéis decirme cuánto costaría y en qué plazo?",
+      "headers": [
+        {
+          "name": "Content-Type",
+          "value": "text/plain; charset=utf-8"
+        }
+      ]
+    }
+  },
+  {
+    "id": "T150",
+    "kind": "triage",
+    "input": {
+      "from": "Hugo Seijas <hugo@clinicaramos.test>",
+      "to": [
+        "administracion@nestadmin.test"
+      ],
+      "date": "2026-10-09T09:07:00Z",
+      "subject": "Tarifas de mantenimiento",
+      "body": "Hola, ¿qué tarifa tenéis para el mantenimiento mensual de dos equipos informáticos? Necesitamos un precio para decidir esta semana.",
+      "headers": [
+        {
+          "name": "Content-Type",
+          "value": "text/plain; charset=utf-8"
+        }
+      ]
+    }
+  },
+  {
+    "id": "T151",
+    "kind": "triage",
+    "input": {
+      "from": "Lidia Cano <lidia@floristeriacano.test>",
+      "to": [
+        "administracion@nestadmin.test"
+      ],
+      "date": "2026-10-09T10:14:00Z",
+      "subject": "Precio de un servicio de reparto",
+      "body": "¿Podéis pasarme una oferta para repartir unas treinta cajas al mes por el centro? Gracias.",
+      "headers": [
+        {
+          "name": "Content-Type",
+          "value": "text/plain; charset=utf-8"
+        }
+      ]
+    }
+  },
+  {
+    "id": "T152",
+    "kind": "triage",
+    "input": {
+      "from": "Tomás Vidal <tomas@ferreteriavidal.test>",
+      "to": [
+        "administracion@nestadmin.test"
+      ],
+      "date": "2026-10-10T11:21:00Z",
+      "subject": "Cambio en mi pedido 4410",
+      "body": "Buenas tardes, quiero cambiar la cantidad de tornillos del pedido 4410: en lugar de 500, necesito 800. ¿Estáis a tiempo?",
+      "headers": [
+        {
+          "name": "Content-Type",
+          "value": "text/plain; charset=utf-8"
+        }
+      ]
+    }
+  },
+  {
+    "id": "T153",
+    "kind": "triage",
+    "input": {
+      "from": "Noelia Prado <noelia@estudioprado.test>",
+      "to": [
+        "administracion@nestadmin.test"
+      ],
+      "date": "2026-10-10T12:28:00Z",
+      "subject": "¿Cuándo llega mi pedido?",
+      "body": "Hola, hice un pedido hace nueve días y no sé nada del envío. ¿Me podéis decir cuándo llegará?",
+      "headers": [
+        {
+          "name": "Content-Type",
+          "value": "text/plain; charset=utf-8"
+        }
+      ]
+    }
+  },
+  {
+    "id": "T154",
+    "kind": "triage",
+    "input": {
+      "from": "Álvaro Mena <alvaro@mueblesmena.test>",
+      "to": [
+        "administracion@nestadmin.test"
+      ],
+      "date": "2026-10-10T13:35:00Z",
+      "subject": "Nuevo pedido de sillas",
+      "body": "Queremos hacer un pedido de 24 sillas de oficina, modelo ergonómico. ¿Cuál sería el plazo de entrega?",
+      "headers": [
+        {
+          "name": "Content-Type",
+          "value": "text/plain; charset=utf-8"
+        }
+      ]
+    }
+  },
+  {
+    "id": "T155",
+    "kind": "triage",
+    "input": {
+      "from": "Beatriz Lozano <beatriz@asesorialozano.test>",
+      "to": [
+        "administracion@nestadmin.test"
+      ],
+      "date": "2026-10-11T14:42:00Z",
+      "subject": "Cita para la próxima semana",
+      "body": "Buenos días, me gustaría pedir una cita el martes o el miércoles por la mañana para revisar unos contratos.",
+      "headers": [
+        {
+          "name": "Content-Type",
+          "value": "text/plain; charset=utf-8"
+        }
+      ]
+    }
+  },
+  {
+    "id": "T156",
+    "kind": "triage",
+    "input": {
+      "from": "Ignacio Barrio <ignacio@tallerbarrio.test>",
+      "to": [
+        "administracion@nestadmin.test"
+      ],
+      "date": "2026-10-11T15:49:00Z",
+      "subject": "Cambiar la cita del jueves",
+      "body": "Hola, no podré ir a la cita del jueves a las 10:00. ¿Podemos pasarla al viernes?",
+      "headers": [
+        {
+          "name": "Content-Type",
+          "value": "text/plain; charset=utf-8"
+        }
+      ]
+    }
+  },
+  {
+    "id": "T157",
+    "kind": "triage",
+    "input": {
+      "from": "Paula Rentería <paula@dentalrenteria.test>",
+      "to": [
+        "administracion@nestadmin.test"
+      ],
+      "date": "2026-10-11T16:56:00Z",
+      "subject": "Anular mi cita",
+      "body": "Tengo cita el día 20 por la tarde y tengo que anularla por un viaje. Perdonad las molestias.",
+      "headers": [
+        {
+          "name": "Content-Type",
+          "value": "text/plain; charset=utf-8"
+        }
+      ]
+    }
+  },
+  {
+    "id": "T158",
+    "kind": "triage",
+    "input": {
+      "from": "Sergio Nieto <sergio@gimnasionieto.test>",
+      "to": [
+        "administracion@nestadmin.test"
+      ],
+      "date": "2026-10-12T08:03:00Z",
+      "subject": "Horario en agosto",
+      "body": "¿Cuál es vuestro horario en agosto? ¿Abrís por las tardes?",
+      "headers": [
+        {
+          "name": "Content-Type",
+          "value": "text/plain; charset=utf-8"
+        }
+      ]
+    }
+  },
+  {
+    "id": "T159",
+    "kind": "triage",
+    "input": {
+      "from": "Carmen Olmo <carmen@academiaolmo.test>",
+      "to": [
+        "administracion@nestadmin.test"
+      ],
+      "date": "2026-10-12T09:10:00Z",
+      "subject": "Qué servicios incluye la cuota",
+      "body": "Buenas, querría saber qué servicios incluye la cuota mensual y si hay permanencia mínima.",
+      "headers": [
+        {
+          "name": "Content-Type",
+          "value": "text/plain; charset=utf-8"
+        }
+      ]
+    }
+  },
+  {
+    "id": "T160",
+    "kind": "triage",
+    "input": {
+      "from": "Fernando Gil <fernando@logisticagil.test>",
+      "to": [
+        "administracion@nestadmin.test"
+      ],
+      "date": "2026-10-12T10:17:00Z",
+      "subject": "Disponibilidad de almacén",
+      "body": "Hola, ¿tenéis disponibilidad para guardar veinte palés durante dos meses? ¿En qué condiciones?",
+      "headers": [
+        {
+          "name": "Content-Type",
+          "value": "text/plain; charset=utf-8"
+        }
+      ]
+    }
+  },
+  {
+    "id": "T161",
+    "kind": "triage",
+    "input": {
+      "from": "Inés Calvo <ines@imprentacalvo.test>",
+      "to": [
+        "administracion@nestadmin.test"
+      ],
+      "date": "2026-10-13T11:24:00Z",
+      "subject": "Muestras enviadas",
+      "body": "Os enviamos esta mañana las muestras de papel que pedisteis. Avisadnos cuando las recibáis, por favor.",
+      "headers": [
+        {
+          "name": "Content-Type",
+          "value": "text/plain; charset=utf-8"
+        }
+      ]
+    }
+  },
+  {
+    "id": "T162",
+    "kind": "triage",
+    "input": {
+      "from": "Rubén Soler <ruben@instalacionessoler.test>",
+      "to": [
+        "administracion@nestadmin.test"
+      ],
+      "date": "2026-10-13T12:31:00Z",
+      "subject": "Envío de los planos",
+      "body": "Hola, adjunto los planos de la nave en PDF. Confirmadme que os han llegado bien.",
+      "headers": [
+        {
+          "name": "Content-Type",
+          "value": "text/plain; charset=utf-8"
+        }
+      ]
+    }
+  },
+  {
+    "id": "T163",
+    "kind": "triage",
+    "input": {
+      "from": "Alba Marín <alba@consultoramarin.test>",
+      "to": [
+        "administracion@nestadmin.test"
+      ],
+      "date": "2026-10-13T13:38:00Z",
+      "subject": "Contrato firmado remitido",
+      "body": "Le hemos remitido el contrato firmado por mensajería. Le agradeceremos que confirme la recepción.",
+      "headers": [
+        {
+          "name": "Content-Type",
+          "value": "text/plain; charset=utf-8"
+        }
+      ]
+    }
+  },
+  {
+    "id": "T164",
+    "kind": "triage",
+    "input": {
+      "from": "Joaquín Sanz <joaquin@cafeteriasanz.test>",
+      "to": [
+        "administracion@nestadmin.test"
+      ],
+      "date": "2026-10-14T14:45:00Z",
+      "subject": "Queja por el servicio",
+      "body": "Estoy muy descontento: el técnico llegó dos horas tarde, no terminó el trabajo y dejó la cocina sucia. Espero una explicación.",
+      "headers": [
+        {
+          "name": "Content-Type",
+          "value": "text/plain; charset=utf-8"
+        }
+      ]
+    }
+  },
+  {
+    "id": "T165",
+    "kind": "triage",
+    "input": {
+      "from": "Marina Duque <marina@boutiqueduque.test>",
+      "to": [
+        "administracion@nestadmin.test"
+      ],
+      "date": "2026-10-14T15:52:00Z",
+      "subject": "Producto defectuoso",
+      "body": "La estantería que compré llegó con una balda rota y nadie contesta al teléfono. Quiero presentar una reclamación.",
+      "headers": [
+        {
+          "name": "Content-Type",
+          "value": "text/plain; charset=utf-8"
+        }
+      ]
+    }
+  },
+  {
+    "id": "T166",
+    "kind": "triage",
+    "input": {
+      "from": "Pilar Escudero <pilar@tintoreriaescudero.test>",
+      "to": [
+        "administracion@nestadmin.test"
+      ],
+      "date": "2026-10-14T16:59:00Z",
+      "subject": "Mal trato en la tienda",
+      "body": "Quiero dejar constancia de la mala atención que recibí ayer en mostrador. Exijo que lo revisen.",
+      "headers": [
+        {
+          "name": "Content-Type",
+          "value": "text/plain; charset=utf-8"
+        }
+      ]
+    }
+  },
+  {
+    "id": "T167",
+    "kind": "triage",
+    "input": {
+      "from": "Samuel Torres <samuel@reformastorres.test>",
+      "to": [
+        "administracion@nestadmin.test"
+      ],
+      "date": "2026-10-15T08:06:00Z",
+      "subject": "Presupuesto y factura anterior",
+      "body": "Buenas, antes de aprobar el presupuesto de la reforma del baño, ¿podéis mandarme el importe actualizado? De paso, tengo la factura F-2204 de la obra anterior y la quiero cerrar cuanto antes.",
+      "headers": [
+        {
+          "name": "Content-Type",
+          "value": "text/plain; charset=utf-8"
+        }
+      ]
+    }
+  },
+  {
+    "id": "T168",
+    "kind": "triage",
+    "input": {
+      "from": "Gloria Peña <gloria@libreriapena.test>",
+      "to": [
+        "administracion@nestadmin.test"
+      ],
+      "date": "2026-10-15T09:13:00Z",
+      "subject": "Queja por la factura",
+      "body": "Estoy muy molesta: en la factura F-2290 me cobráis dos veces el mismo artículo y nadie me responde. Quiero que lo corrijáis.",
+      "headers": [
+        {
+          "name": "Content-Type",
+          "value": "text/plain; charset=utf-8"
+        }
+      ]
+    }
+  },
+  {
+    "id": "T169",
+    "kind": "triage",
+    "input": {
+      "from": "Diego Ramos <diego@aseguradoraramos.test>",
+      "to": [
+        "administracion@nestadmin.test"
+      ],
+      "date": "2026-10-15T10:20:00Z",
+      "subject": "Recibido, adjunto certificado",
+      "body": "Os confirmo que hemos recibido vuestro escrito. Adjunto el certificado de estar al corriente de pago, que me pedisteis, en PDF. Un saludo.",
+      "headers": [
+        {
+          "name": "Content-Type",
+          "value": "text/plain; charset=utf-8"
+        }
+      ]
+    }
   }
 ]

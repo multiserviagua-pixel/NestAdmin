@@ -158,5 +158,101 @@
       "subject": "Mensaje de prueba 20",
       "body": "Querría información general de vuestros servicios."
     }
+  },
+  {
+    "id": "E21",
+    "kind": "email",
+    "input": {
+      "subject": "Mensaje de prueba 21",
+      "body": "Hola, ¿me podéis hacer un presupuesto para cambiar las ventanas de dos habitaciones?"
+    }
+  },
+  {
+    "id": "E22",
+    "kind": "email",
+    "input": {
+      "subject": "Mensaje de prueba 22",
+      "body": "Necesito saber la tarifa por hora de vuestro servicio de mantenimiento."
+    }
+  },
+  {
+    "id": "E23",
+    "kind": "email",
+    "input": {
+      "subject": "Mensaje de prueba 23",
+      "body": "Quiero hacer un pedido de diez cajas de folios. ¿Cuándo me llegarían?"
+    }
+  },
+  {
+    "id": "E24",
+    "kind": "email",
+    "input": {
+      "subject": "Mensaje de prueba 24",
+      "body": "¿En qué estado está mi pedido 5521? Aún no ha llegado."
+    }
+  },
+  {
+    "id": "E25",
+    "kind": "email",
+    "input": {
+      "subject": "Mensaje de prueba 25",
+      "body": "Querría una cita para la semana que viene, mejor por la tarde."
+    }
+  },
+  {
+    "id": "E26",
+    "kind": "email",
+    "input": {
+      "subject": "Mensaje de prueba 26",
+      "body": "Tengo que cambiar la cita del lunes. ¿Os va bien el miércoles?"
+    }
+  },
+  {
+    "id": "E27",
+    "kind": "email",
+    "input": {
+      "subject": "Mensaje de prueba 27",
+      "body": "¿Cuál es vuestro horario de atención los sábados?"
+    }
+  },
+  {
+    "id": "E28",
+    "kind": "email",
+    "input": {
+      "subject": "Mensaje de prueba 28",
+      "body": "Me gustaría saber qué condiciones tiene el servicio de recogida."
+    }
+  },
+  {
+    "id": "E29",
+    "kind": "email",
+    "input": {
+      "subject": "Mensaje de prueba 29",
+      "body": "Os he enviado los documentos por correo. Confirmad que los habéis recibido."
+    }
+  },
+  {
+    "id": "E30",
+    "kind": "email",
+    "input": {
+      "subject": "Mensaje de prueba 30",
+      "body": "Le mandamos hoy el albarán firmado. Avísenos de su recepción, por favor."
+    }
+  },
+  {
+    "id": "E31",
+    "kind": "email",
+    "input": {
+      "subject": "Mensaje de prueba 31",
+      "body": "Estoy descontento con el servicio: el trabajo quedó mal hecho y quiero una reclamación."
+    }
+  },
+  {
+    "id": "E32",
+    "kind": "email",
+    "input": {
+      "subject": "Mensaje de prueba 32",
+      "body": "El producto llegó roto y nadie me atiende. Presento una queja formal."
+    }
   }
 ]

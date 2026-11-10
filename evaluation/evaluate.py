@@ -23,8 +23,8 @@ def load_cases():
             raise ValueError(f'IDs inválidos en {name}')
         cases.extend({**case, 'expected': expected[case['id']]} for case in inputs)
     ids = [case['id'] for case in cases]
-    if len(ids) != len(set(ids)) or len(cases) != 30:
-        raise ValueError('Se requieren exactamente 30 identificadores únicos')
+    if len(ids) != len(set(ids)) or len(cases) != 42:
+        raise ValueError('Se requieren exactamente 42 identificadores únicos')
     return cases
 
 
@@ -123,7 +123,7 @@ def score(cases, predictions):
             draft = norm(result.get('draft', '')) or ''
             rubric = exp['draft_rubric']
             # D158: con `needs_reply` falso no hay borrador. Solo se admite si el caso esperado lo permite
-            # (`needs_reply: false`); los 20 correos de R10 no lo llevan y siguen exigiendo borrador.
+            # (`needs_reply: false`); los correos de `emails.json` (R10 y D177) no lo llevan y siguen exigiendo borrador.
             no_reply_allowed = exp.get('needs_reply') is False and result.get('needs_reply') is False and not draft
             draft_ok = status == 'ok' and (no_reply_allowed or (bool(draft) and any(norm(word) in draft for word in rubric['must_include_any']) and not any(norm(word) in draft for word in rubric['must_not_include'])))
             drafts_total += 1

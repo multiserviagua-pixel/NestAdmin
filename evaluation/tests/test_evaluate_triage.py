@@ -31,6 +31,16 @@ class LocalLayerTests(unittest.TestCase):
             self.assertIn(case['expected']['category'], triage.CATEGORIES)
             self.assertEqual('draft_rubric' in case['expected'], case['expected']['needs_reply'])
 
+    def test_d177_categories_are_covered(self):
+        # D177: tres casos por categoria nueva, todos con respuesta, mas tres de frontera.
+        for cat in ('presupuesto', 'pedido', 'cita', 'informacion', 'acuse', 'reclamacion'):
+            plain = [c for c in self.cases if c['expected']['category'] == cat and c['expected']['group'] == 'A3']
+            self.assertEqual(len(plain), 3, cat)
+            self.assertTrue(all(c['expected']['needs_reply'] for c in plain), cat)
+        border = [c for c in self.cases if c['expected']['group'] == 'A3_frontera']
+        self.assertEqual(sorted(c['expected']['category'] for c in border),
+                         ['documentacion', 'incidencia_factura', 'presupuesto'])
+
     def test_corpus_is_synthetic(self):
         text = (MODULE.parent / 'data' / 'inputs' / 'triage.json').read_text(encoding='utf-8')
         for case in json.loads(text):
