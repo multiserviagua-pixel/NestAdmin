@@ -1143,3 +1143,101 @@ export interface QuestionAnswer {
   /** Tipo por el que se filtró la búsqueda; `null` si no se filtró. */
   kind: "invoice" | "email" | null;
 }
+
+// ---- Asistente del chat (E2, D182-D184, D188) ----
+
+export type AssistantOutcome = "answered" | "consent_required" | "not_configured" | "cancelled" | "error";
+
+/** Un turno del asistente tal como lo devuelve `assistant_turn`. */
+export interface AssistantTurn {
+  /** `null` si el turno no se guardó y no había conversación. */
+  conversation_id: number | null;
+  /** Turno de respuesta guardado, para «Ver lo enviado»; `null` si no se guardó. */
+  turn_id: number | null;
+  outcome: AssistantOutcome;
+  /** Código del proveedor o del protocolo cuando `outcome` es `error`. */
+  error_code: string | null;
+  /** Texto plano: la respuesta o el motivo si no la hay. */
+  answer: string;
+  /** Tarjetas de los documentos citados. */
+  citations: SearchHit[];
+  dropped_citations: number;
+  /** Textos que no superaron el enmascarado y no salieron. */
+  withheld: number;
+  /** Vista a la que navegar (`open_view`). */
+  navigate: string | null;
+  provider: ProviderId;
+  model: string;
+  /** Contestó la IA local. */
+  local: boolean;
+  /** `{from, reason}` si respondió el respaldo local (D101). */
+  fallback: { from: string; reason: string } | null;
+  steps: number;
+  tools: string[];
+  /** Búsqueda por palabras, solo con `consent_required` y `not_configured` (D181). */
+  words: QuestionAnswer | null;
+}
+
+/** Turno guardado de una conversación. Los de la persona solo llevan `role`, `text` y la fecha. */
+export interface AssistantStoredTurn {
+  id: number;
+  role: "user" | "assistant";
+  text: string;
+  created_at: number;
+  outcome: AssistantOutcome | null;
+  citation_refs: string[];
+  dropped_citations: number;
+  withheld: number;
+  navigate: string | null;
+  provider: ProviderId | null;
+  model: string | null;
+  local: boolean;
+  fallback: { from: string; reason: string } | null;
+  steps: number;
+  tools: string[];
+  /** Tarjetas de los documentos citados, tal como están ahora en el índice. */
+  citations: SearchHit[];
+}
+
+export interface AssistantConversation {
+  id: number;
+  created_at: number;
+  updated_at: number;
+  turns: AssistantStoredTurn[];
+}
+
+/** Lo enviado en una llamada a un proveedor, guardado solo en el equipo («Ver lo enviado»). */
+export interface AssistantSentCall {
+  step: number;
+  provider: string;
+  model: string;
+  host: string;
+  local: boolean;
+  sent_text: string;
+  at: number;
+}
+
+/** Permiso para que el asistente envíe datos fuera del equipo (D183). */
+export interface AssistantConsentView {
+  required: boolean;
+  /** `not_needed` (IA local), `missing`, `granted` o `stale` (cambió el destino). */
+  state: "not_needed" | "missing" | "granted" | "stale";
+  provider: string | null;
+  model: string | null;
+  host: string | null;
+  at: number | null;
+}
+
+export interface AssistantPreview {
+  provider: ProviderInfo;
+  host: string | null;
+  external: boolean;
+  consent: AssistantConsentView;
+  local_fallback: boolean;
+  /** Texto literal de un envío de ejemplo. */
+  sample: string;
+  limits: { steps: number; history_turns: number; turn_chars: number; fragments: number; fragment_chars: number; data_chars: number };
+  may_travel: string[];
+  never_sent: string[];
+  notice: string;
+}

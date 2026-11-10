@@ -6,7 +6,7 @@
 //! * [`documents`]: borradores, emisión, transiciones, revisión, anulación, rectificativas y
 //!   conversión.
 //! * [`collections`]: cobros (D88) y plantillas recurrentes (D87).
-//! * [`verifactu`]: registros Verifactu de alta y anulación, encadenados (fase 11, migración 11).
+//! * [`verifactu`]: registros Verifactu de alta y anulación, encadenados (fase 11, migración 12).
 
 use std::str::FromStr;
 

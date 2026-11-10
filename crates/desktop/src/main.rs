@@ -21,6 +21,9 @@ use nestadmin_ai::{CredentialStore, ProviderChoice, Secret};
 use nestadmin_app::accounts::{
     AccountView, FetchReport, MailAccountsView, MailEnv, MailProviderKind,
 };
+use nestadmin_app::assistant::consent::{AssistantConsentView, AssistantPreview};
+use nestadmin_app::assistant::tools::ToolOutput;
+use nestadmin_app::assistant::{AssistantConversation, AssistantTurn};
 use nestadmin_app::initial_read::{
     FolderPreview, InitialReadOverview, InitialReadStatus, ReadExpectation, ReadStep,
 };
@@ -45,7 +48,7 @@ use nestadmin_app::suggest::{RuleSeed, SeenInvoice, Suggestions, ThresholdSettin
 use nestadmin_app::{AiWait, App, AppPaths, LocalFallback, ProviderInfo};
 use nestadmin_core::{
     AuditEntry, BusinessProfile, Rule, RuleStats, SearchFilters, SearchPage, SenderPreference,
-    Task, TaskTemplate,
+    SentCall, Task, TaskTemplate,
 };
 use nestadmin_extract::{Extractor, Tesseract};
 use nestadmin_mail::PendingAuthorization;
@@ -171,6 +174,117 @@ fn reindex_failed<R: Runtime>(
     shared.wake();
     changed(&handle);
     Ok(count)
+}
+
+// ---- Asistente del chat (D182–D184, D188, R33) ----
+
+/// Un turno del asistente: pregunta de la persona y respuesta de la IA en uso con herramientas de
+/// solo lectura. La llamada al modelo se hace sin el cerrojo de la aplicación y fuera del hilo de
+/// la ventana; cada herramienta toma el cerrojo solo mientras lee.
+#[tauri::command]
+async fn assistant_turn<R: Runtime>(
+    shared: State<'_, SharedState>,
+    handle: AppHandle<R>,
+    conversation_id: Option<i64>,
+    text: String,
+    view: String,
+) -> CmdResult<AssistantTurn> {
+    let shared = Arc::clone(shared.inner());
+    tauri::async_runtime::spawn_blocking(move || {
+        let job = shared
+            .app()?
+            .begin_assistant_turn(conversation_id, &text, &view)
+            .map_err(self::text)?;
+        let run = job.run(&mut |call| match shared.app() {
+            Ok(app) => app.assistant_tool(call),
+            Err(_) => ToolOutput {
+                value: serde_json::json!({ "error": "unavailable" }),
+                refs: Vec::new(),
+                navigate: None,
+                withheld: 0,
+            },
+        });
+        let turn = shared.app()?.finish_assistant_turn(run).map_err(self::text);
+        changed(&handle);
+        turn
+    })
+    .await
+    .map_err(self::text)?
+}
+
+/// Pide cancelar el turno del asistente en curso; se comprueba entre pasos.
+#[tauri::command]
+fn assistant_cancel(shared: State<'_, SharedState>) -> CmdResult<()> {
+    shared.app()?.assistant_cancel();
+    Ok(())
+}
+
+/// Una conversación del asistente guardada en este equipo: la indicada o, sin indicar, la última.
+#[tauri::command]
+fn assistant_conversation(
+    shared: State<'_, SharedState>,
+    id: Option<i64>,
+) -> CmdResult<Option<AssistantConversation>> {
+    shared.app()?.assistant_conversation(id).map_err(text)
+}
+
+/// Lo que se envió en las llamadas de un turno («Ver lo enviado»).
+#[tauri::command]
+fn assistant_sent(shared: State<'_, SharedState>, turn_id: i64) -> CmdResult<Vec<SentCall>> {
+    shared.app()?.assistant_sent(turn_id).map_err(text)
+}
+
+/// Borra una conversación del asistente o todas; responde cuántas.
+#[tauri::command]
+fn assistant_clear<R: Runtime>(
+    shared: State<'_, SharedState>,
+    handle: AppHandle<R>,
+    id: Option<i64>,
+) -> CmdResult<usize> {
+    let removed = shared.app()?.assistant_clear(id).map_err(text)?;
+    changed(&handle);
+    Ok(removed)
+}
+
+/// Estado del permiso para enviar datos fuera del equipo (D183) y su destino.
+#[tauri::command]
+fn assistant_consent(shared: State<'_, SharedState>) -> CmdResult<AssistantConsentView> {
+    shared.app()?.assistant_consent().map_err(text)
+}
+
+/// Vista previa literal de un envío de ejemplo y del destino (D183). No llama al proveedor.
+#[tauri::command]
+fn assistant_preview(shared: State<'_, SharedState>) -> CmdResult<AssistantPreview> {
+    shared.app()?.assistant_preview().map_err(text)
+}
+
+/// Concede el permiso para el proveedor, modelo y servidor de la vista previa (D183). Solo lo
+/// llama la pantalla de Configuración: el asistente no tiene herramienta que lo conceda.
+#[tauri::command]
+fn grant_assistant_consent<R: Runtime>(
+    shared: State<'_, SharedState>,
+    handle: AppHandle<R>,
+    provider: String,
+    model: String,
+    host: String,
+) -> CmdResult<AssistantConsentView> {
+    let consent = shared
+        .app()?
+        .grant_assistant_consent(&provider, &model, &host)
+        .map_err(text)?;
+    changed(&handle);
+    Ok(consent)
+}
+
+/// Retira el permiso del asistente.
+#[tauri::command]
+fn withdraw_assistant_consent<R: Runtime>(
+    shared: State<'_, SharedState>,
+    handle: AppHandle<R>,
+) -> CmdResult<AssistantConsentView> {
+    let consent = shared.app()?.withdraw_assistant_consent().map_err(text)?;
+    changed(&handle);
+    Ok(consent)
 }
 
 /// Recibe el archivo como cuerpo binario de la llamada y su nombre, codificado con
@@ -2674,6 +2788,15 @@ fn configure<R: Runtime>(builder: Builder<R>, prepare_only: bool) -> Builder<R> 
         search,
         search_question,
         reindex_failed,
+        assistant_turn,
+        assistant_cancel,
+        assistant_conversation,
+        assistant_sent,
+        assistant_clear,
+        assistant_consent,
+        assistant_preview,
+        grant_assistant_consent,
+        withdraw_assistant_consent,
         import_file,
         import_dialog,
         open_original,

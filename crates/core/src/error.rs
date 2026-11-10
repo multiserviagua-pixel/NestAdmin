@@ -49,6 +49,8 @@ pub enum CoreError {
     RuleChanged(String),
     #[error("filtro de búsqueda no válido: {0}")]
     InvalidFilter(String),
+    #[error("la conversación {0} no existe")]
+    ConversationNotFound(i64),
     #[error("conector: {0}")]
     Connector(#[from] crate::actions::ConnectorError),
 }

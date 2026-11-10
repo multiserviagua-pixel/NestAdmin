@@ -52,21 +52,21 @@ fn ids(store: &Store, query: &SearchQuery) -> Vec<i64> {
 
 #[test]
 fn migration_applies_on_new_and_on_v9_database() {
-    assert_eq!(SCHEMA_VERSION, 12);
+    assert_eq!(SCHEMA_VERSION, 13);
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("n.db");
     let mut store = Store::open(&path).unwrap();
-    assert_eq!(store.schema_version().unwrap(), 12);
+    assert_eq!(store.schema_version().unwrap(), SCHEMA_VERSION);
     add(&mut store, "Factura", "Acme", "texto");
     drop(store);
 
     // Una base v9: sin el índice y sin su FTS.
     let conn = rusqlite::Connection::open(&path).unwrap();
-    conn.execute_batch("DROP TABLE installation; DROP TABLE verifactu_records; DROP TABLE search_fts; DROP TABLE search_index; PRAGMA user_version = 9;")
+    conn.execute_batch("DROP TABLE installation; DROP TABLE verifactu_records; DROP TABLE assistant_calls; DROP TABLE assistant_turns; DROP TABLE assistant_conversations; DROP TABLE search_fts; DROP TABLE search_index; PRAGMA user_version = 9;")
         .unwrap();
     drop(conn);
     let mut store = Store::open(&path).unwrap();
-    assert_eq!(store.schema_version().unwrap(), 12);
+    assert_eq!(store.schema_version().unwrap(), SCHEMA_VERSION);
     let id = store.enqueue("invoice", "y").unwrap().id;
     store
         .index_document(&doc(id, "Tras migrar", "Acme", ""))

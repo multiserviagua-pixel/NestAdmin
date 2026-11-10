@@ -36,6 +36,12 @@ import type {
   RuleStats,
   RuleView,
   SenderPreference,
+  AssistantConsentView,
+  AssistantConversation,
+  AssistantPreview,
+  AssistantSentCall,
+  AssistantStoredTurn,
+  AssistantTurn,
   QuestionAnswer,
   SearchFilters,
   SearchHit,
@@ -2303,6 +2309,24 @@ function mockSearchPage(results: SearchHit[]): SearchPage {
   };
 }
 
+// ---- Asistente del chat (E2, D182-D184, D188): conversaciones y permiso en memoria, con datos inventados ----
+
+let assistantGranted = false;
+let nextConversation = 1;
+let nextAssistantTurn = 1;
+const assistantConversations = new Map<number, AssistantConversation>();
+const assistantSentCalls = new Map<number, AssistantSentCall[]>();
+/** Cancela el turno lento en curso (la pregunta con «lento»). */
+let assistantCancel: (() => void) | null = null;
+
+function assistantConsentView(): AssistantConsentView {
+  return assistantGranted
+    ? { required: true, state: "granted", provider: mockDest.provider, model: mockDest.model, host: mockDest.host, at: now() }
+    : { required: true, state: "missing", provider: null, model: null, host: null, at: null };
+}
+
+const ASSISTANT_SAMPLE = "Eres el asistente de NestAdmin (texto de ejemplo de la vista previa).\n\nPregunta actual:\n<<<ASISTENTE-DATOS>>>\n¿Qué factura tengo de Proveedor Ejemplo en octubre?\n<<<FIN-ASISTENTE-DATOS>>>";
+
 const handlers: Record<string, (a: any, options?: any) => unknown> = {
   // Preferencias por remitente (D161): normaliza, rechaza dominios públicos y deja el evento del historial.
   sender_preferences: () => [...mockPrefs].sort((a, b) => (a.scope + a.key < b.scope + b.key ? -1 : 1)),
@@ -2440,6 +2464,142 @@ const handlers: Record<string, (a: any, options?: any) => unknown> = {
     const terms = questionTerms(String(query ?? ""));
     const hits = mockHits.filter((h) => (!filters?.kind || h.kind === filters.kind) && terms.every((t) => hitHaystack(h).includes(t)));
     return mockSearchPage(hits);
+  },
+  assistant_consent: (): AssistantConsentView => assistantConsentView(),
+  assistant_preview: (): AssistantPreview => ({
+    provider: { provider: mockDest.provider as AssistantTurn["provider"], model: mockDest.model },
+    host: mockDest.host,
+    external: true,
+    consent: assistantConsentView(),
+    local_fallback: false,
+    sample: ASSISTANT_SAMPLE,
+    limits: { steps: 6, history_turns: 6, turn_chars: 2000, fragments: 8, fragment_chars: 600, data_chars: 12000 },
+    may_travel: ["las instrucciones y la lista de herramientas", "su pregunta, tal como la escribe", "fragmentos cortos de los documentos, enmascarados"],
+    never_sent: ["archivos e imágenes", "direcciones de buzón y nombres de cuenta", "credenciales"],
+    notice: "La pregunta sale tal como usted la escribe; los correos, teléfonos, IBAN y claves se sustituyen antes de salir.",
+  }),
+  grant_assistant_consent: ({ provider, model, host }): AssistantConsentView => {
+    if (provider !== mockDest.provider || model !== mockDest.model || host !== (mockDest.host ?? "")) throw "El proveedor, el modelo o el servidor han cambiado desde que lo vio: revise la vista previa de nuevo antes de aceptar.";
+    assistantGranted = true;
+    return assistantConsentView();
+  },
+  withdraw_assistant_consent: (): AssistantConsentView => {
+    assistantGranted = false;
+    return assistantConsentView();
+  },
+  // Recorrido del asistente en la vista previa (preguntas que provocan cada caso; todo inventado):
+  //  - sin permiso concedido: cualquier pregunta devuelve `consent_required` con su búsqueda por palabras;
+  //  - con permiso: «factura de Suministros» (respuesta con citas), «respaldo» (contesta la IA local por
+  //    un fallo del proveedor), «error» (fallo del proveedor), «lento» (6 s, se puede cancelar),
+  //    «llévame a reglas|historial|configuración|tareas|correo» (navega), «sensible» (referencia descartada y
+  //    fragmentos retenidos).
+  assistant_turn: ({ conversationId, text }: { conversationId: number | null; text: string; view: string }): AssistantTurn | Promise<AssistantTurn> => {
+    const question = String(text ?? "").trim();
+    if (!question) throw "Escriba una pregunta.";
+    if (conversationId != null && !assistantConversations.has(conversationId)) throw `la conversación ${conversationId} no existe`;
+    const provider = mockDest.provider as AssistantTurn["provider"];
+    const flat = question.normalize("NFD").replace(/[̀-ͯ]/g, "").toLowerCase();
+    const external = { provider, model: mockDest.model, local: false, fallback: null as AssistantTurn["fallback"] };
+    const words = handlers.search_question({ text: question }) as QuestionAnswer;
+    const found = words.page.results.slice(0, 3);
+    const base: AssistantTurn = {
+      conversation_id: conversationId, turn_id: null, outcome: "answered", error_code: null, answer: "", citations: [], dropped_citations: 0, withheld: 0,
+      navigate: null, ...external, steps: 0, tools: [], words: null,
+    };
+    // Guarda el turno (y, si se indica, lo enviado) y deja el evento del historial, sin el texto.
+    const finish = (turn: AssistantTurn, calls: AssistantSentCall[], saved: boolean): AssistantTurn => {
+      let result = turn;
+      if (saved) {
+        const id = conversationId ?? nextConversation++;
+        const conversation = assistantConversations.get(id) ?? { id, created_at: now(), updated_at: now(), turns: [] };
+        const stored = (role: "user" | "assistant", body: string, extra: Partial<AssistantStoredTurn> = {}): AssistantStoredTurn => ({
+          id: nextAssistantTurn++, role, text: body, created_at: now(), outcome: null, citation_refs: [], dropped_citations: 0, withheld: 0, navigate: null, provider: null, model: null, local: false, fallback: null, steps: 0, tools: [], citations: [], ...extra,
+        });
+        conversation.turns.push(stored("user", question));
+        const reply = stored("assistant", turn.answer || "Sin respuesta.", {
+          outcome: turn.outcome, provider: turn.provider, model: turn.model, local: turn.local, fallback: turn.fallback, steps: turn.steps, tools: turn.tools,
+          dropped_citations: turn.dropped_citations, withheld: turn.withheld, navigate: turn.navigate, citations: turn.citations, citation_refs: turn.citations.map((c) => `doc:${c.task_id}`),
+        });
+        conversation.turns.push(reply);
+        conversation.updated_at = now();
+        assistantConversations.set(id, conversation);
+        if (calls.length) assistantSentCalls.set(reply.id, calls);
+        result = { ...turn, conversation_id: id, turn_id: calls.length ? reply.id : null };
+      }
+      audit.push({
+        task_id: null,
+        action: "assistant_turn",
+        status: result.fallback && result.outcome === "answered" ? "fallback" : result.outcome,
+        authorization: null,
+        detail: JSON.stringify({ steps: result.steps, tools: result.tools, provider: result.provider, model: result.model, local: result.local, fallback: result.fallback?.reason ?? null, citations: result.citations.length, dropped_citations: result.dropped_citations, withheld: result.withheld, error_code: result.error_code }),
+      });
+      return result;
+    };
+    const sentFor = (step: number, local: boolean): AssistantSentCall => ({
+      step, provider: local ? "ollama" : provider, model: local ? "gemma3:4b" : mockDest.model, host: local ? "127.0.0.1" : (mockDest.host ?? ""), local,
+      sent_text: `${ASSISTANT_SAMPLE.split("\n\nPregunta actual:")[0]}\n\nPregunta actual:\n<<<ASISTENTE-DATOS>>>\n${question}\n<<<FIN-ASISTENTE-DATOS>>>\n\nResultados de herramientas:\n<<<ASISTENTE-DATOS>>>\n[doc:1] Factura F-2026-014 · Suministros Ejemplo S.L. · 1.234,56 €\n<<<FIN-ASISTENTE-DATOS>>>`,
+      at: now(),
+    });
+    if (!assistantGranted) {
+      return finish({ ...base, outcome: "consent_required", answer: "Falta el permiso del asistente.", words }, [], true);
+    }
+    if (flat.includes("error")) return finish({ ...base, outcome: "error", error_code: "timeout", steps: 1 }, [], false);
+    if (flat.includes("lento"))
+      return new Promise<AssistantTurn>((resolve) => {
+        const timer = setTimeout(() => {
+          assistantCancel = null;
+          resolve(finish({ ...base, answer: "Respuesta lenta de ejemplo: no hay nada más que contar.", steps: 1 }, [sentFor(1, false)], true));
+        }, 6000);
+        assistantCancel = () => {
+          clearTimeout(timer);
+          assistantCancel = null;
+          resolve(finish({ ...base, outcome: "cancelled", steps: 1 }, [], false));
+        };
+      });
+    const view = /llevame|llevarme|abre/.test(flat)
+      ? flat.includes("regla") ? "rules" : flat.includes("histor") ? "history" : flat.includes("config") ? "settings" : flat.includes("tarea") ? "tasks" : flat.includes("correo") || flat.includes("cuenta") ? "mail" : "review"
+      : null;
+    if (view) return finish({ ...base, answer: "Abro esa pantalla. No hago nada más en ella.", steps: 1, tools: ["open_view"], navigate: view }, [sentFor(1, false)], true);
+    if (flat.includes("respaldo"))
+      return finish(
+        { ...base, answer: found.length ? `Encontré ${found.length} documento(s) de muestra.\nEsta respuesta la ha redactado la IA local.` : "No encuentro ningún documento con esos datos.", citations: structuredClone(found), steps: 2, tools: ["search"], provider: "ollama", model: "gemma3:4b", local: true, fallback: { from: provider, reason: "timeout" } },
+        [sentFor(1, false), sentFor(2, true)],
+        true,
+      );
+    const sensitive = flat.includes("sensible");
+    return finish(
+      {
+        ...base,
+        answer: found.length
+          ? `Encontré ${found.length} documento(s) de muestra con lo que pregunta.\n\nLa referencia está en https://ejemplo.test/facturas (se muestra como texto, no como enlace).`
+          : "No encuentro ningún documento con esos datos.",
+        citations: structuredClone(found),
+        dropped_citations: sensitive ? 1 : 0,
+        withheld: sensitive ? 2 : 0,
+        steps: 2,
+        tools: ["search"],
+      },
+      [sentFor(1, false), sentFor(2, false)],
+      true,
+    );
+  },
+  assistant_cancel: (): void => {
+    assistantCancel?.();
+  },
+  assistant_conversation: ({ id }: { id: number | null }): AssistantConversation | null => {
+    const found = id != null ? assistantConversations.get(id) : [...assistantConversations.values()].sort((a, b) => b.updated_at - a.updated_at)[0];
+    return found ? structuredClone(found) : null;
+  },
+  assistant_sent: ({ turnId }: { turnId: number }): AssistantSentCall[] => structuredClone(assistantSentCalls.get(turnId) ?? []),
+  assistant_clear: ({ id }: { id: number | null }): number => {
+    let removed: number;
+    if (id == null) {
+      removed = assistantConversations.size;
+      assistantConversations.clear();
+      assistantSentCalls.clear();
+    } else removed = assistantConversations.delete(id) ? 1 : 0;
+    audit.push({ task_id: null, action: "assistant_cleared", status: "cleared", authorization: null, detail: JSON.stringify({ scope: id == null ? "all" : "one", conversations: removed }) });
+    return removed;
   },
   reindex_failed: (): number => {
     const failed = mockHits.filter((h) => h.index_status === "failed");
@@ -3295,6 +3455,10 @@ function startup(): Startup {
 }
 
 const mutating = new Set([
+  "assistant_turn",
+  "assistant_clear",
+  "grant_assistant_consent",
+  "withdraw_assistant_consent",
   "save_business_profile",
   "accept_learned_profile",
   "dismiss_learned_profile",

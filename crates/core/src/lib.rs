@@ -2,6 +2,7 @@
 //! cola durable con recuperación y acciones idempotentes con historial.
 
 pub mod actions;
+pub mod assistant;
 pub mod business_profile;
 pub mod continuous;
 pub mod error;
@@ -20,6 +21,10 @@ pub mod templates;
 pub use actions::{
     ActionOutcome, ActionRecord, ActionRequest, AuditEntry, Authorization, Connector,
     ConnectorError,
+};
+pub use assistant::{
+    Aggregate, AggregateQuery, ConversationView, CurrencyTotal, NewCall, SavedExchange, SentCall,
+    StoredTurn, TaskCounts, TaskEvent, TaskRow,
 };
 pub use business_profile::{BusinessProfile, MAX_PROFILE_CHARS};
 pub use error::{CoreError, Result};

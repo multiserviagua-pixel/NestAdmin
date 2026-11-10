@@ -453,7 +453,7 @@ impl App {
     /// deja avanzar a las tareas que la necesitan (`ai_wait`: sin proveedor, sin clave, sin
     /// destino confirmado, clave rechazada, modelo no disponible o sin crédito). La pausa del
     /// usuario no cuenta: con IA utilizable lo que está en cola se procesa enseguida.
-    fn index_queued(&self) -> bool {
+    pub(crate) fn index_queued(&self) -> bool {
         self.ai_wait.is_some()
     }
 

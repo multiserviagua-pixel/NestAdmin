@@ -81,11 +81,14 @@ CREATE TABLE rules (
     include_str!("migrations/009_learned.sql"),
     // Índice local de búsqueda y su tabla FTS5 (D179); ver search.rs.
     include_str!("migrations/010_search.sql"),
+    // Conversaciones del asistente y lo enviado en cada llamada, solo locales (D188); ver
+    // assistant.rs.
+    include_str!("migrations/011_assistant.sql"),
     // Registros Verifactu encadenados, escritos con la emisión y la anulación (fase 11);
     // ver sales/verifactu.rs.
-    include_str!("migrations/011_verifactu.sql"),
+    include_str!("migrations/012_verifactu.sql"),
     // Número de instalación, de una sola fila y solo inserción (fase 11); ver installation.rs.
-    include_str!("migrations/012_installation.sql"),
+    include_str!("migrations/013_installation.sql"),
 ];
 
 /// Base de datos local. Cada operación pública se confirma en una transacción,

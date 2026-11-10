@@ -1,4 +1,4 @@
-//! Número de instalación (fase 11, migración 12). Prueba independiente de las demás. Solo datos
+//! Número de instalación (fase 11, migración 13). Prueba independiente de las demás. Solo datos
 //! sintéticos.
 
 use std::path::Path;

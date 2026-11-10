@@ -1,4 +1,4 @@
-//! Registros Verifactu encadenados con la emisión y la anulación (fase 11, migración 11).
+//! Registros Verifactu encadenados con la emisión y la anulación (fase 11, migración 12).
 //! Prueba independiente de `sales_store.rs`. Solo datos sintéticos: NIF de prueba y nombres
 //! inventados.
 

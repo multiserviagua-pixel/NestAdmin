@@ -1,4 +1,4 @@
-//! Número de instalación (fase 11, migración 12): identificador estable de esta copia de
+//! Número de instalación (fase 11, migración 13): identificador estable de esta copia de
 //! NestAdmin para el campo `NumeroInstalacion` del sistema informático Verifactu. Se genera la
 //! primera vez que hace falta y se guarda en una tabla de una sola fila y solo inserción.
 

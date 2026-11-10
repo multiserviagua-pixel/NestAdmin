@@ -13,6 +13,8 @@ pub enum Task {
     RefineSuggestions,
     /// Aprender a responder en la primera carga: estilo y tipo de respuesta por par (D170).
     LearnReplies,
+    /// Asistente de consulta del chat: un paso por llamada, con esquema cerrado (D182).
+    Assistant,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

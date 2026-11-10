@@ -172,7 +172,7 @@ fn valid_iso_date(s: &str) -> bool {
     (1..=days).contains(&d)
 }
 
-fn validate(filters: &SearchFilters) -> Result<()> {
+pub(crate) fn validate(filters: &SearchFilters) -> Result<()> {
     for (name, value) in [("from", &filters.from), ("to", &filters.to)] {
         if let Some(v) = value {
             if !valid_iso_date(v) {
@@ -210,7 +210,7 @@ fn clip_chars(s: &str, max: usize) -> String {
 }
 
 /// Filtros comunes; todos los parámetros se enlazan siempre (`NULL` = sin filtro).
-const FILTER_SQL: &str = "(:kind IS NULL OR i.kind = :kind)
+pub(crate) const FILTER_SQL: &str = "(:kind IS NULL OR i.kind = :kind)
     AND (:from IS NULL OR i.doc_date >= :from)
     AND (:to IS NULL OR i.doc_date <= :to)
     AND (:party IS NULL OR instr(lower(i.party), lower(:party)) > 0)
@@ -218,7 +218,7 @@ const FILTER_SQL: &str = "(:kind IS NULL OR i.kind = :kind)
     AND (:max IS NULL OR i.total_minor <= :max)
     AND (:status IS NULL OR t.state = :status)";
 
-const HIT_COLUMNS: &str = "i.task_id, i.kind, i.title, i.party, i.number, i.doc_date,
+pub(crate) const HIT_COLUMNS: &str = "i.task_id, i.kind, i.title, i.party, i.number, i.doc_date,
     i.total_minor, i.currency, t.state, i.status";
 
 fn parse_failure(index: usize, what: &str) -> rusqlite::Error {
@@ -230,7 +230,7 @@ fn parse_failure(index: usize, what: &str) -> rusqlite::Error {
 }
 
 /// Fila de resultado: las columnas de `HIT_COLUMNS` y, en la 11.ª, el fragmento.
-fn hit_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SearchHit> {
+pub(crate) fn hit_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SearchHit> {
     let kind: String = row.get(1)?;
     let state: String = row.get(8)?;
     let status: String = row.get(9)?;
@@ -287,7 +287,7 @@ fn index_in(tx: &Transaction<'_>, doc: &SearchDoc) -> Result<()> {
 /// pendientes.
 /// Con `include_queued` entran también las tareas en cola; las que están en curso (`running`)
 /// nunca.
-fn unindexed_sql(include_queued: bool) -> String {
+pub(crate) fn unindexed_sql(include_queued: bool) -> String {
     let excluded = if include_queued {
         "'running'"
     } else {
@@ -301,7 +301,7 @@ const UNINDEXED_SQL: &str = "kind IN ('invoice', 'email')
         THEN json_extract(tasks.input_ref, '$.redraft_of') END IS NOT NULL)
     AND NOT EXISTS (SELECT 1 FROM search_index s WHERE s.task_id = tasks.id)";
 
-fn count(conn: &Connection, sql: &str, p: impl rusqlite::Params) -> Result<usize> {
+pub(crate) fn count(conn: &Connection, sql: &str, p: impl rusqlite::Params) -> Result<usize> {
     let n: i64 = conn.query_row(sql, p, |r| r.get(0))?;
     Ok(usize::try_from(n).unwrap_or(0))
 }

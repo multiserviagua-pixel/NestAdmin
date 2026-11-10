@@ -1,4 +1,4 @@
-//! Registros Verifactu de la facturación de venta (fase 11, migración 11).
+//! Registros Verifactu de la facturación de venta (fase 11, migración 12).
 //!
 //! Conecta la emisión y la anulación de `documents.rs` con `nestadmin-verifactu`: dentro de la
 //! MISMA transacción que numera, emite o anula, traduce la entrada del registro (D83, D113) a

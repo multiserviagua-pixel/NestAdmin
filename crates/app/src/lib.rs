@@ -8,6 +8,7 @@
 //! aplica reglas y deja la tarea completada, en revisión o fallida.
 
 pub mod accounts;
+pub mod assistant;
 pub mod initial_read;
 pub mod learn;
 pub mod learn_consent;
@@ -351,6 +352,9 @@ pub struct App {
     /// Estado en memoria del aprendizaje continuo (D178): pasadas en curso, puerta de tiempo,
     /// orden de comprobación y recuentos. No se guarda nada de esto.
     continuous: learn_continuous::ContinuousRuntime,
+    /// Estado en memoria del asistente del chat (D182): consentimiento vigente, cancelación y
+    /// turno exclusivo. No se guarda nada de esto.
+    assistant: assistant::AssistantRuntime,
     /// Reloj de la facturación de venta (sustituible en las pruebas); ver `sales.rs`.
     sales_clock: Arc<dyn sales::SalesClock>,
     /// Productor del software para los registros Verifactu; lo fija quien arranca la app.
@@ -964,6 +968,7 @@ impl App {
             reads_active: HashSet::new(),
             learning: learn_state::LearningRuntime::default(),
             continuous: learn_continuous::ContinuousRuntime::default(),
+            assistant: assistant::AssistantRuntime::default(),
             read_gate: Arc::new(Mutex::new(HashSet::new())),
             sales_clock: Arc::new(sales::LocalClock),
             verifactu_producer: None,
@@ -1199,6 +1204,7 @@ impl App {
         self.drop_consent_if_destination_changed();
         self.drop_profile_consent_if_destination_changed();
         self.drop_learning_consent_if_destination_changed();
+        self.drop_assistant_consent_if_destination_changed();
         self.expire_fallback_period();
     }
 
