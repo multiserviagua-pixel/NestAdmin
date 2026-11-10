@@ -65,6 +65,8 @@ pub struct InvoiceRecordInput {
     pub issuer_tax_id: String,
     pub number: DocumentNumber,
     pub issue_date: IsoDate,
+    /// Fecha de la operación solo si difiere de la de expedición (`FechaOperacion`, D80, D87).
+    pub operation_date: Option<IsoDate>,
     pub invoice_type: InvoiceTypeCode,
     pub recipient_name: Option<String>,
     pub recipient_tax_id: Option<String>,
@@ -179,6 +181,7 @@ pub fn record_input(
         issuer_tax_id: normalize(content.issuer.tax_id.as_deref().unwrap_or_default()),
         number,
         issue_date,
+        operation_date: content.operation_date.filter(|d| *d != issue_date),
         invoice_type,
         recipient_name: recipient.and_then(|r| text(&r.name)),
         recipient_tax_id: recipient

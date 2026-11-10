@@ -1241,3 +1241,270 @@ export interface AssistantPreview {
   never_sent: string[];
   notice: string;
 }
+
+// ---- Facturación de venta (fase 11, E3b). Espejo de `crates/desktop/src/ventas.rs`. ----
+// Fechas `AAAA-MM-DD`; importes, cantidades y porcentajes como cadenas decimales con punto.
+
+export type SalesKind = "quote" | "delivery_note" | "invoice" | "simplified_invoice" | "corrective_invoice";
+export type SalesStatus = "draft" | "issued" | "sent" | "accepted" | "rejected" | "expired" | "converted" | "delivered" | "invoiced" | "voided";
+export type SalesQualification = "S1" | "S2" | "N1" | "N2" | "E1" | "E2" | "E3" | "E4" | "E5" | "E6";
+export type SalesRectificationKind = "R1" | "R2" | "R3" | "R4" | "R5";
+export type SalesRectificationMethod = "substitution" | "differences";
+export type SalesPaymentMethod = "transfer" | "cash" | "card" | "other";
+export type SalesFrequency = "monthly" | "quarterly" | "annual";
+export type SalesCollectionState =
+  | "pending"
+  | "partial"
+  | "paid"
+  | "overdue"
+  | "to_refund"
+  | "substituted"
+  | "applied_to_original"
+  | "voided"
+  | "voided_with_payments";
+
+export interface SalesParty {
+  name: string | null;
+  tax_id: string | null;
+  address: string | null;
+}
+
+export interface SalesExemption {
+  qualification: SalesQualification;
+  description: string | null;
+}
+
+export interface SalesLine {
+  description: string;
+  quantity: string;
+  unit_price: string;
+  /** Fracción entre 0 y 1. */
+  discount: string;
+  tax_percent: string;
+  exemption: SalesExemption | null;
+  /** Importe fijado al emitir; `null` en un borrador. */
+  amount: string | null;
+  product_id: number | null;
+}
+
+/** Lo que se envía al guardar una línea (sin el importe, que calcula el backend). */
+export interface SalesLineIn {
+  description: string;
+  quantity: string;
+  unit_price: string;
+  discount?: string | null;
+  tax_percent: string;
+  exemption?: SalesExemption | null;
+  product_id?: number | null;
+}
+
+export interface SalesBreakdown {
+  tax_percent: string;
+  qualification: SalesQualification | null;
+  descriptions: string[];
+  base: string;
+  tax: string;
+}
+
+export interface SalesTotals {
+  currency: string;
+  line_amounts: string[];
+  breakdown: SalesBreakdown[];
+  base_total: string;
+  tax_total: string;
+  total: string;
+  withholding: string;
+  amount_due: string;
+}
+
+export interface SalesIssuer {
+  party: SalesParty;
+  email: string | null;
+  iban: string | null;
+  logo_sha256: string | null;
+}
+
+export interface SalesRectification {
+  kind: SalesRectificationKind;
+  method: SalesRectificationMethod;
+  rectified_base: string | null;
+  rectified_tax: string | null;
+}
+
+export interface SalesDocument {
+  id: number;
+  kind: SalesKind;
+  status: SalesStatus;
+  series_year: number | null;
+  sequence: number | null;
+  revision: number;
+  number: string | null;
+  superseded_by: number | null;
+  customer_id: number | null;
+  issue_date: string | null;
+  operation_date: string | null;
+  due_date: string | null;
+  withholding_percent: string | null;
+  currency: string;
+  issuer: SalesIssuer | null;
+  recipient: SalesParty | null;
+  /** Fijados al emitir; en un borrador los calcula el backend (o `null` si aún no son válidos). */
+  totals: SalesTotals | null;
+  lines: SalesLine[];
+  rectifies_id: number | null;
+  rectification: SalesRectification | null;
+  recipient_requested_tax_id: boolean;
+  art_4_2_declared: boolean;
+  recurring_template_id: number | null;
+  recurring_period: number | null;
+  created_at: number;
+  updated_at: number;
+}
+
+export interface SalesDraftIn {
+  kind: SalesKind;
+  customer_id?: number | null;
+  lines: SalesLineIn[];
+  issue_date?: string | null;
+  operation_date?: string | null;
+  due_date?: string | null;
+  withholding_percent?: string | null;
+  recipient_requested_tax_id?: boolean;
+  art_4_2_declared?: boolean;
+  rectification?: { kind: SalesRectificationKind; method: SalesRectificationMethod; rectified_base?: string | null; rectified_tax?: string | null } | null;
+}
+
+export interface SalesFilterIn {
+  kind?: SalesKind | null;
+  status?: SalesStatus | null;
+  include_superseded?: boolean;
+}
+
+export interface SalesCompany {
+  name: string | null;
+  tax_id: string | null;
+  address: string | null;
+  email: string | null;
+  iban: string | null;
+  has_logo: boolean;
+  logo_mime: string | null;
+}
+
+export type SalesCompanyData = Pick<SalesCompany, "name" | "tax_id" | "address" | "email" | "iban">;
+
+export interface SalesCustomerData {
+  name: string;
+  tax_id: string | null;
+  address: string | null;
+  email: string | null;
+}
+
+export interface SalesCustomer {
+  id: number;
+  data: SalesCustomerData;
+  retired: boolean;
+}
+
+export interface SalesProductIn {
+  description: string;
+  unit_price: string;
+  tax_percent: string;
+  exemption?: SalesExemption | null;
+  retired?: boolean;
+}
+
+export interface SalesProduct {
+  id: number;
+  description: string;
+  unit_price: string;
+  tax_percent: string;
+  exemption: SalesExemption | null;
+  retired: boolean;
+}
+
+export interface SalesReceivedNote {
+  id: number;
+  supplier_name: string;
+  supplier_tax_id: string | null;
+  supplier_number: string;
+  date: string;
+  status: "received" | "reviewed";
+  document_ref: string | null;
+  invoice_ref: string | null;
+}
+
+export interface SalesLink {
+  from_id: number;
+  to_id: number;
+  relation: string;
+}
+
+export interface SalesCollection {
+  state: SalesCollectionState;
+  payable: string;
+  paid: string;
+  outstanding: string;
+}
+
+export interface SalesPayment {
+  id: number;
+  date: string;
+  amount: string;
+  method: SalesPaymentMethod;
+}
+
+export interface SalesRecurringIn {
+  customer_id: number;
+  lines: SalesLineIn[];
+  frequency: SalesFrequency;
+  first_day: string;
+  end?: string | null;
+}
+
+export interface SalesRecurring {
+  id: number;
+  customer_id: number;
+  lines: SalesLine[];
+  frequency: SalesFrequency;
+  first_day: string;
+  end: string | null;
+  active: boolean;
+}
+
+export interface SalesRecurringRun {
+  created: Array<{ document_id: number; template_id: number; period: number; key: string; mode: "requires_review" | "auto_issue_by_rule" }>;
+  failed: Array<{ template_id: number; reason: string }>;
+}
+
+export interface VerifactuRecord {
+  id: number;
+  kind: "alta" | "anulacion";
+  document_id: number;
+  issuer_tax_id: string;
+  invoice_number: string;
+  /** `DD-MM-AAAA`, como va en el registro. */
+  issue_date: string;
+  invoice_type: string | null;
+  total: string | null;
+  tax_total: string | null;
+  previous_id: number | null;
+  previous_hash: string | null;
+  generated_at: string;
+  hash: string;
+  record: unknown;
+  created_at: number;
+}
+
+export type SalesChain = { state: "empty" } | { state: "ok"; records: number } | { state: "broken"; at_id: number; reason: string };
+
+export interface SalesSetupStatus {
+  producer_configured: boolean;
+  producer_problem: string | null;
+  chain: SalesChain;
+  today: string;
+}
+
+export interface ProducerState {
+  configured: boolean;
+  problem: string | null;
+}

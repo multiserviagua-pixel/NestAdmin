@@ -2583,3 +2583,56 @@ tr.is-located > td {
   user-select: text;
   overflow-wrap: anywhere;
 }
+
+/* ---- Ventas (E3b) ---- */
+
+.sales-panel {
+  margin-top: var(--s4);
+}
+
+.sales-line {
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  margin: 0 0 var(--s3);
+  padding: var(--s3);
+}
+
+.sales-line legend {
+  font-size: var(--fs-small);
+  color: var(--muted);
+  padding: 0 var(--s1);
+}
+
+.sales-sum {
+  display: grid;
+  grid-template-columns: max-content max-content;
+  gap: var(--s1) var(--s5);
+  justify-content: end;
+  margin: var(--s3) 0;
+}
+
+.sales-sum dd {
+  margin: 0;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.sales-logo {
+  display: block;
+  max-width: 200px;
+  max-height: 80px;
+  margin-bottom: var(--s3);
+}
+
+.sales-json {
+  max-width: 560px;
+  overflow: auto;
+  background: var(--surface-2);
+  padding: var(--s2);
+  border-radius: var(--radius-sm);
+  font-size: var(--fs-label);
+}
+
+.sales-panel .row {
+  flex-wrap: wrap;
+}

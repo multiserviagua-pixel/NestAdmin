@@ -708,13 +708,16 @@ fn a_record_that_cannot_be_built_rolls_the_issue_back() {
 }
 
 #[test]
-fn plain_issue_without_registration_still_works_and_leaves_no_record() {
-    // La emisión sin Verifactu sigue disponible para quien no lo conecte (p. ej. otras pruebas).
+fn plain_issue_and_void_of_an_invoice_are_rejected_and_leave_no_record() {
+    // Una factura solo se emite y se anula por el camino con registro (D213).
     let mut store = Store::open_in_memory().unwrap();
     let customer = setup(&mut store);
     let id = invoice(&mut store, customer, "100.00");
-    store
+    let err = store
         .issue_sales_document(id, date("2026-03-01"), date("2026-03-01"))
-        .unwrap();
+        .unwrap_err();
+    assert_eq!(err.code(), "conflict");
+    assert_eq!(store.sales_document(id).unwrap().status, Status::Draft);
+    assert_eq!(store.sales_document(id).unwrap().number, None);
     assert!(store.verifactu_records().unwrap().is_empty());
 }

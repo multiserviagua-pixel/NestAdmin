@@ -260,6 +260,17 @@ impl Store {
             }
         }
         let tx = self.conn.transaction()?;
+        // Con registros Verifactu el NIF del emisor consta en la cadena (D193, D213): no cambia.
+        let has_records: i64 =
+            tx.query_row("SELECT count(*) FROM verifactu_records", [], |r| r.get(0))?;
+        if has_records > 0 {
+            let current = load_company(&tx)?.and_then(|c| c.tax_id);
+            if clean(&company.tax_id) != current {
+                return Err(SalesStoreError::Conflict(
+                    "el NIF de la empresa no se puede cambiar: ya hay registros Verifactu".into(),
+                ));
+            }
+        }
         // El logotipo se guarda una sola vez por contenido y nunca se modifica: los documentos
         // emitidos citan el suyo por su hash (D76, D90).
         let logo_sha256 = match (&company.logo, &company.logo_mime) {

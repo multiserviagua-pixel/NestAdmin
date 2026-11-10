@@ -257,7 +257,7 @@ fn the_default_issue_date_is_today_and_a_future_date_is_rejected() {
     let dir = tempfile::tempdir().unwrap();
     let (mut app, clock) = app(&dir, true);
     let (customer, product) = setup(&mut app);
-    assert_eq!(app.sales_today(), date("2026-03-01"));
+    assert_eq!(app.sales_today().unwrap(), date("2026-03-01"));
 
     let future = draft(&mut app, DocumentKind::Invoice, customer, product);
     let err = app
@@ -272,7 +272,7 @@ fn the_default_issue_date_is_today_and_a_future_date_is_rejected() {
 
     // Al día siguiente, «hoy» avanza con el reloj.
     clock.advance(86_400);
-    assert_eq!(app.sales_today(), date("2026-03-02"));
+    assert_eq!(app.sales_today().unwrap(), date("2026-03-02"));
     let next = draft(&mut app, DocumentKind::Invoice, customer, product);
     assert_eq!(
         app.issue_sales_document(next, None).unwrap().issue_date,

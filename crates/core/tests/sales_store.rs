@@ -14,6 +14,38 @@ use nestadmin_sales::{
 };
 use rust_decimal::Decimal;
 
+/// La emisión y la anulación de facturas sin registro Verifactu ya no son públicas para una
+/// factura (D213): estas pruebas de numeración y estados usan el camino con gancho vacío.
+trait Unregistered {
+    fn issue_unregistered(
+        &mut self,
+        id: i64,
+        issue_date: IsoDate,
+        today: IsoDate,
+    ) -> Result<nestadmin_core::sales::SalesDocument, SalesStoreError>;
+    fn void_unregistered(
+        &mut self,
+        id: i64,
+    ) -> Result<nestadmin_core::sales::SalesDocument, SalesStoreError>;
+}
+
+impl Unregistered for Store {
+    fn issue_unregistered(
+        &mut self,
+        id: i64,
+        issue_date: IsoDate,
+        today: IsoDate,
+    ) -> Result<nestadmin_core::sales::SalesDocument, SalesStoreError> {
+        self.issue_sales_document_with(id, issue_date, today, |_, _| Ok(()))
+    }
+    fn void_unregistered(
+        &mut self,
+        id: i64,
+    ) -> Result<nestadmin_core::sales::SalesDocument, SalesStoreError> {
+        self.void_sales_invoice_with(id, |_, _| Ok(()))
+    }
+}
+
 fn d(text: &str) -> Decimal {
     text.parse().unwrap()
 }
@@ -77,7 +109,7 @@ fn invoice(store: &mut Store, customer: i64, price: &str) -> i64 {
 
 fn issue(store: &mut Store, id: i64, on: &str) -> String {
     store
-        .issue_sales_document(id, date(on), date(on))
+        .issue_unregistered(id, date(on), date(on))
         .unwrap()
         .number
         .unwrap()
@@ -186,7 +218,7 @@ fn a_date_before_the_last_one_of_the_series_is_rejected_without_consuming_a_numb
     issue(&mut store, a, "2026-03-10");
 
     let error = store
-        .issue_sales_document(b, date("2026-03-09"), date("2026-03-09"))
+        .issue_unregistered(b, date("2026-03-09"), date("2026-03-09"))
         .unwrap_err();
     assert!(matches!(error, SalesStoreError::Series(_)), "{error}");
     assert_eq!(error.code(), "conflict");
@@ -206,7 +238,7 @@ fn a_revision_cannot_be_issued_in_another_year() {
     issue(&mut store, quote, "2026-12-30");
     let revision = store.revise_sales_document(quote).unwrap();
     let error = store
-        .issue_sales_document(revision, date("2027-01-02"), date("2027-01-02"))
+        .issue_unregistered(revision, date("2027-01-02"), date("2027-01-02"))
         .unwrap_err();
     assert!(matches!(error, SalesStoreError::Series(_)), "{error}");
     assert_eq!(
@@ -226,7 +258,7 @@ fn an_invoice_missing_mandatory_data_is_rejected_without_a_number() {
         .unwrap();
     let id = invoice(&mut store, customer, "10.00");
     let error = store
-        .issue_sales_document(id, date("2026-03-01"), date("2026-03-01"))
+        .issue_unregistered(id, date("2026-03-01"), date("2026-03-01"))
         .unwrap_err();
     assert_eq!(error.code(), "invalid_input");
     assert!(error.to_string().contains("issuer"), "{error}");
@@ -238,7 +270,7 @@ fn an_invoice_missing_mandatory_data_is_rejected_without_a_number() {
     let other = store.create_customer(&no_address).unwrap();
     let id2 = invoice(&mut store, other, "10.00");
     let error = store
-        .issue_sales_document(id2, date("2026-03-01"), date("2026-03-01"))
+        .issue_unregistered(id2, date("2026-03-01"), date("2026-03-01"))
         .unwrap_err();
     assert_eq!(error.code(), "invalid_input");
     assert!(error.to_string().contains("recipient.address"), "{error}");
@@ -248,7 +280,7 @@ fn an_invoice_missing_mandatory_data_is_rejected_without_a_number() {
         .unwrap();
     assert_eq!(
         store
-            .issue_sales_document(empty, date("2026-03-01"), date("2026-03-01"))
+            .issue_unregistered(empty, date("2026-03-01"), date("2026-03-01"))
             .unwrap_err()
             .code(),
         "invalid_input"
@@ -331,7 +363,7 @@ fn issued_documents_keep_their_own_copy_of_company_customer_and_product() {
         .unwrap();
     let before = {
         store
-            .issue_sales_document(id, date("2026-03-01"), date("2026-03-01"))
+            .issue_unregistered(id, date("2026-03-01"), date("2026-03-01"))
             .unwrap();
         store.sales_document(id).unwrap()
     };
@@ -389,7 +421,7 @@ fn drafts_are_editable_and_issued_documents_are_not() {
         ("36.30".to_owned(), "31.80".to_owned())
     );
     store
-        .issue_sales_document(id, date("2026-03-01"), date("2026-03-01"))
+        .issue_unregistered(id, date("2026-03-01"), date("2026-03-01"))
         .unwrap();
     let error = store.update_sales_draft(id, &edited).unwrap_err();
     assert_eq!(error.code(), "invalid_transition");
@@ -447,11 +479,11 @@ fn voiding_only_works_from_issued_and_never_reuses_the_number() {
 
     // Enviada: error explícito que remite a la rectificativa (D82).
     store.transition_sales_document(a, Status::Sent).unwrap();
-    let error = store.void_sales_invoice(a).unwrap_err();
+    let error = store.void_unregistered(a).unwrap_err();
     assert_eq!(error.code(), "invalid_transition");
     assert!(error.to_string().contains("rectificativa"), "{error}");
     // Un borrador tampoco se anula; el generico no anula ni emite.
-    assert!(store.void_sales_invoice(c).is_err());
+    assert!(store.void_unregistered(c).is_err());
     assert!(store.transition_sales_document(c, Status::Issued).is_err());
     // Voided no se reutiliza.
     assert_eq!(issue(&mut store, c, "2026-03-03"), "F-2026-0003");
@@ -508,7 +540,7 @@ fn payments_partial_full_excess_and_removal_leave_a_trail() {
     input.due_date = Some(date("2026-03-31"));
     store.update_sales_draft(id, &input).unwrap();
     store
-        .issue_sales_document(id, date("2026-03-01"), date("2026-03-01"))
+        .issue_unregistered(id, date("2026-03-01"), date("2026-03-01"))
         .unwrap();
     assert_eq!(
         store.sales_collection(id, today).unwrap().state,
@@ -805,7 +837,7 @@ fn revisions_keep_the_number_and_supersede_the_previous_one() {
         .update_sales_draft(revision, &draft(DocumentKind::Quote, customer, "120.00"))
         .unwrap();
     let issued = store
-        .issue_sales_document(revision, date("2026-03-05"), date("2026-03-05"))
+        .issue_unregistered(revision, date("2026-03-05"), date("2026-03-05"))
         .unwrap();
     assert_eq!(issued.number.as_deref(), Some("P-2026-0001"));
     assert_eq!(issued.totals.unwrap().base_total.to_string(), "120.00");
@@ -941,7 +973,7 @@ fn zero_rate_lines_keep_their_qualification() {
     })];
     let id = store.create_sales_draft(&input).unwrap();
     let issued = store
-        .issue_sales_document(id, date("2026-03-01"), date("2026-03-01"))
+        .issue_unregistered(id, date("2026-03-01"), date("2026-03-01"))
         .unwrap();
     let totals = issued.totals.unwrap();
     assert_eq!(totals.total.to_string(), "54.90");
@@ -1066,7 +1098,7 @@ fn a_revision_is_not_issued_when_the_previous_one_was_accepted_or_converted() {
         )
         .unwrap();
     let error = store
-        .issue_sales_document(revision, date("2026-03-05"), date("2026-03-05"))
+        .issue_unregistered(revision, date("2026-03-05"), date("2026-03-05"))
         .unwrap_err();
     assert_eq!(error.code(), "conflict", "{error}");
     let after = store.sales_document(revision).unwrap();
@@ -1082,7 +1114,7 @@ fn issuing_rejects_future_dates_bad_due_dates_and_revisions_dated_backwards() {
     let customer = setup(&mut store);
     let id = invoice(&mut store, customer, "10.00");
     let error = store
-        .issue_sales_document(id, date("2026-03-10"), date("2026-03-09"))
+        .issue_unregistered(id, date("2026-03-10"), date("2026-03-09"))
         .unwrap_err();
     assert_eq!(error.code(), "invalid_input", "{error}");
     assert_eq!(series_rows(&path), 0, "no se consumió número");
@@ -1092,7 +1124,7 @@ fn issuing_rejects_future_dates_bad_due_dates_and_revisions_dated_backwards() {
     input.due_date = Some(date("2026-03-01"));
     store.update_sales_draft(id, &input).unwrap();
     let error = store
-        .issue_sales_document(id, date("2026-03-05"), date("2026-03-05"))
+        .issue_unregistered(id, date("2026-03-05"), date("2026-03-05"))
         .unwrap_err();
     assert_eq!(error.code(), "invalid_input", "{error}");
     assert!(error.to_string().contains("due_date"), "{error}");
@@ -1100,7 +1132,7 @@ fn issuing_rejects_future_dates_bad_due_dates_and_revisions_dated_backwards() {
     input.due_date = Some(date("2026-03-05"));
     store.update_sales_draft(id, &input).unwrap();
     store
-        .issue_sales_document(id, date("2026-03-05"), date("2026-03-05"))
+        .issue_unregistered(id, date("2026-03-05"), date("2026-03-05"))
         .unwrap();
 
     let quote = store
@@ -1109,11 +1141,11 @@ fn issuing_rejects_future_dates_bad_due_dates_and_revisions_dated_backwards() {
     issue(&mut store, quote, "2026-03-10");
     let revision = store.revise_sales_document(quote).unwrap();
     let error = store
-        .issue_sales_document(revision, date("2026-03-09"), date("2026-03-12"))
+        .issue_unregistered(revision, date("2026-03-09"), date("2026-03-12"))
         .unwrap_err();
     assert_eq!(error.code(), "invalid_input", "{error}");
     store
-        .issue_sales_document(revision, date("2026-03-10"), date("2026-03-12"))
+        .issue_unregistered(revision, date("2026-03-10"), date("2026-03-12"))
         .unwrap();
 }
 
@@ -1179,7 +1211,7 @@ fn incompatible_correctives_are_rejected_when_created_and_when_issued() {
     }
     // El borrador creado antes tampoco se puede emitir ahora.
     let error = store
-        .issue_sales_document(second, date("2026-03-03"), date("2026-03-03"))
+        .issue_unregistered(second, date("2026-03-03"), date("2026-03-03"))
         .unwrap_err();
     assert_eq!(error.code(), "conflict", "{error}");
     assert_eq!(store.sales_document(second).unwrap().status, Status::Draft);
@@ -1202,7 +1234,7 @@ fn incompatible_correctives_are_rejected_when_created_and_when_issued() {
         "conflict"
     );
     let error = store
-        .issue_sales_document(sub, date("2026-03-06"), date("2026-03-06"))
+        .issue_unregistered(sub, date("2026-03-06"), date("2026-03-06"))
         .unwrap_err();
     assert_eq!(error.code(), "conflict", "{error}");
     let more = differences_corrective(&mut store, customer, b);
@@ -1217,16 +1249,16 @@ fn an_invoice_with_a_corrective_in_force_cannot_be_voided() {
     issue(&mut store, original, "2026-03-01");
     let corrective = differences_corrective(&mut store, customer, original);
     issue(&mut store, corrective, "2026-03-02");
-    let error = store.void_sales_invoice(original).unwrap_err();
+    let error = store.void_unregistered(original).unwrap_err();
     assert_eq!(error.code(), "conflict", "{error}");
     assert_eq!(
         store.sales_document(original).unwrap().status,
         Status::Issued
     );
     // Anulada la rectificativa, la original se puede anular.
-    store.void_sales_invoice(corrective).unwrap();
+    store.void_unregistered(corrective).unwrap();
     assert_eq!(
-        store.void_sales_invoice(original).unwrap().status,
+        store.void_unregistered(original).unwrap().status,
         Status::Voided
     );
 }
@@ -1274,7 +1306,7 @@ fn rectified_base_and_tax_always_come_from_the_original() {
         )
         .unwrap();
     let issued = store
-        .issue_sales_document(corrective, date("2026-03-05"), date("2026-03-05"))
+        .issue_unregistered(corrective, date("2026-03-05"), date("2026-03-05"))
         .unwrap();
     let rect = issued.rectification.unwrap();
     assert_eq!(rect.rectified_base.unwrap().to_string(), "100.00");
@@ -1294,7 +1326,7 @@ fn issued_documents_cite_their_own_logo_by_hash() {
 
     let first = invoice(&mut store, customer, "10.00");
     store
-        .issue_sales_document(first, date("2026-03-01"), date("2026-03-01"))
+        .issue_unregistered(first, date("2026-03-01"), date("2026-03-01"))
         .unwrap();
     let hash = store
         .sales_document(first)
@@ -1313,7 +1345,7 @@ fn issued_documents_cite_their_own_logo_by_hash() {
     store.set_sales_company(&with_logo).unwrap();
     let second = invoice(&mut store, customer, "10.00");
     store
-        .issue_sales_document(second, date("2026-03-02"), date("2026-03-02"))
+        .issue_unregistered(second, date("2026-03-02"), date("2026-03-02"))
         .unwrap();
     let other = store
         .sales_document(second)
@@ -1492,7 +1524,7 @@ fn triggers_guard_status_series_links_and_payments() {
         .unwrap();
     let voided = invoice(&mut store, customer, "10.00");
     issue(&mut store, voided, "2026-03-02");
-    store.void_sales_invoice(voided).unwrap();
+    store.void_unregistered(voided).unwrap();
     let pending = invoice(&mut store, customer, "10.00");
     let quote = store
         .create_sales_draft(&draft(DocumentKind::Quote, customer, "10.00"))
@@ -1500,7 +1532,7 @@ fn triggers_guard_status_series_links_and_payments() {
     issue(&mut store, quote, "2026-03-03");
     let revision = store.revise_sales_document(quote).unwrap();
     store
-        .issue_sales_document(revision, date("2026-03-04"), date("2026-03-04"))
+        .issue_unregistered(revision, date("2026-03-04"), date("2026-03-04"))
         .unwrap();
 
     let conn = raw(&path);

@@ -2,6 +2,7 @@
 // reales con datos sintéticos (dominio .test); no decide nada que la capa Rust no decida.
 
 import { isPublicDomain, senderParts } from "./preferences-text";
+import { salesHandlers } from "./mock-ventas";
 import type {
   SeenInvoice,
   AccountFetch,
@@ -3502,7 +3503,7 @@ export async function invoke<T>(
   args: Record<string, unknown> | Uint8Array = {},
   options?: { headers: Record<string, string> },
 ): Promise<T> {
-  const handler = handlers[command];
+  const handler = handlers[command] ?? salesHandlers[command];
   if (!handler) throw `comando desconocido: ${command}`;
   const value = (await handler(args, options)) as T;
   if (mutating.has(command)) changed();

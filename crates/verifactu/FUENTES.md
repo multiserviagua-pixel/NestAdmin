@@ -78,6 +78,11 @@ simulador: 4102, 4103, 4104, 4114, 4116, 4135 y 4136 (`Fault`), 3000 (duplicado)
 anulado), 3002 (no existe), 2000 (huella incorrecta, registro aceptado con errores) y 1100
 (error forzado de ejemplo).
 
+**Pendiente de verificar contra el documento (1.2.2).** NestAdmin registra las facturas F2 y R5
+sin `Destinatarios` (D213), según la regla de la AEAT de que una factura simplificada y su
+rectificativa no los llevan. No se ha contrastado aquí el código de error exacto ni el texto de
+esa validación con el PDF: queda por comprobar antes de la prueba en preproducción.
+
 **FAQ (1.3).** Comprobación antes de generar un registro (art. 7.i de la Orden): el último
 registro está bien encadenado y su fecha-hora no es posterior en más de un minuto a la del
 nuevo; la facturación no se interrumpe por ello.

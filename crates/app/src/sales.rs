@@ -18,8 +18,8 @@ use nestadmin_core::sales::{
 };
 use nestadmin_documents::IsoDate;
 use nestadmin_sales::{
-    CollectionSummary, DocumentKind, Frequency, LineInput, Payment, PaymentMethod, Product,
-    RectificationKind, RectificationMethod, Status,
+    validate_tax_id, CollectionSummary, DocumentKind, Frequency, LineInput, Payment, PaymentMethod,
+    Product, RectificationKind, RectificationMethod, Status,
 };
 use nestadmin_verifactu::tipos::validar_nif;
 use nestadmin_verifactu::{FechaHoraHuso, Persona, SistemaInformatico};
@@ -41,14 +41,20 @@ pub trait SalesClock: Send + Sync {
     /// Instante actual con el huso horario local.
     fn now(&self) -> FechaHoraHuso;
 
-    /// Fecha de hoy según `now()`.
-    fn today(&self) -> IsoDate {
-        let date = self.now().fecha();
-        IsoDate {
+    /// Como `now()`, pero con error explícito si la hora no se puede representar. La aplicación
+    /// usa siempre esta; por defecto delega en `now()` (los relojes de prueba no fallan).
+    fn try_now(&self) -> Result<FechaHoraHuso, String> {
+        Ok(self.now())
+    }
+
+    /// Fecha de hoy según `try_now()`.
+    fn try_today(&self) -> Result<IsoDate, String> {
+        let date = self.try_now()?.fecha();
+        Ok(IsoDate {
             year: date.anio(),
             month: date.mes(),
             day: date.dia(),
-        }
+        })
     }
 }
 
@@ -57,14 +63,28 @@ pub trait SalesClock: Send + Sync {
 pub struct LocalClock;
 
 impl SalesClock for LocalClock {
+    /// Solo para el trait: la aplicación llama a `try_now`. Falla si la hora no es representable.
     fn now(&self) -> FechaHoraHuso {
+        self.try_now()
+            .expect("la hora local no es representable; use try_now")
+    }
+
+    fn try_now(&self) -> Result<FechaHoraHuso, String> {
         let local = chrono::Local::now();
         let offset_minutes = (local.offset().local_minus_utc() / 60) as i16;
-        FechaHoraHuso::desde_unix(local.timestamp(), offset_minutes).unwrap_or_else(|_| {
-            // Inalcanzable con un reloj razonable; el reloj atrasado lo detecta Verifactu.
-            FechaHoraHuso::desde_unix(0, 0).expect("el instante cero es válido")
-        })
+        FechaHoraHuso::desde_unix(local.timestamp(), offset_minutes)
+            .map_err(|e| format!("la hora local no se puede representar: {e}"))
     }
+}
+
+/// Código del error cuando el reloj no da una hora representable (no se inventa una).
+pub const CODE_CLOCK_UNAVAILABLE: &str = "clock_unavailable";
+
+fn clock_error(why: String) -> AppError {
+    AppError::Sales(SalesStoreError::External {
+        code: CODE_CLOCK_UNAVAILABLE.to_owned(),
+        message: why,
+    })
 }
 
 fn not_configured() -> AppError {
@@ -83,8 +103,8 @@ impl App {
     }
 
     /// Fecha de hoy según el reloj de la venta.
-    pub fn sales_today(&self) -> IsoDate {
-        self.sales_clock.today()
+    pub fn sales_today(&self) -> AppResult<IsoDate> {
+        self.sales_clock.try_today().map_err(clock_error)
     }
 
     /// Fija el productor del software (nombre y NIF del editor) que consta en los registros
@@ -98,9 +118,18 @@ impl App {
             )
             .into());
         }
-        validar_nif(tax_id, "producer.tax_id")
+        // Mayúsculas y sin espacios ni guiones, y validado con el mismo control de NIF que usa la
+        // venta (D214): el productor no entra en la cadena con un NIF que la AEAT rechazaría.
+        let tax_id: String = tax_id
+            .chars()
+            .filter(|c| !c.is_whitespace() && *c != '-')
+            .collect::<String>()
+            .to_uppercase();
+        validate_tax_id(&tax_id)
             .map_err(|e| SalesStoreError::invalid("producer.tax_id", e.to_string()))?;
-        self.verifactu_producer = Some(Persona::con_nif(name, tax_id));
+        validar_nif(&tax_id, "producer.tax_id")
+            .map_err(|e| SalesStoreError::invalid("producer.tax_id", e.to_string()))?;
+        self.verifactu_producer = Some(Persona::con_nif(name, &tax_id));
         Ok(())
     }
 
@@ -132,7 +161,7 @@ impl App {
                 multi_ot: false,
                 indicador_multiples_ot: false,
             },
-            now: self.sales_clock.now(),
+            now: self.sales_clock.try_now().map_err(clock_error)?,
         })
     }
 
@@ -261,7 +290,7 @@ impl App {
         id: i64,
         issue_date: Option<IsoDate>,
     ) -> AppResult<SalesDocument> {
-        let today = self.sales_clock.today();
+        let today = self.sales_today()?;
         let issue_date = issue_date.unwrap_or(today);
         if self.store.sales_document(id)?.kind.is_invoice() {
             let ctx = self.verifactu_context()?;
@@ -312,13 +341,13 @@ impl App {
         amount: Decimal,
         method: PaymentMethod,
     ) -> AppResult<(i64, CollectionSummary)> {
-        let today = self.sales_clock.today();
+        let today = self.sales_today()?;
         Ok(self
             .store
             .add_sales_payment(document_id, date, amount, method, today)?)
     }
     pub fn remove_sales_payment(&mut self, payment_id: i64) -> AppResult<CollectionSummary> {
-        let today = self.sales_clock.today();
+        let today = self.sales_today()?;
         Ok(self.store.remove_sales_payment(payment_id, today)?)
     }
     pub fn sales_payments(&self, document_id: i64) -> AppResult<Vec<Payment>> {
@@ -328,7 +357,7 @@ impl App {
     pub fn sales_collection(&self, document_id: i64) -> AppResult<CollectionSummary> {
         Ok(self
             .store
-            .sales_collection(document_id, self.sales_clock.today())?)
+            .sales_collection(document_id, self.sales_today()?)?)
     }
 
     // --- Recurrentes ---
@@ -375,7 +404,7 @@ impl App {
     /// Genera los borradores vencidos hasta hoy. Solo borradores: sin reglas expresas de
     /// emisión automática en esta etapa, ninguno se emite.
     pub fn generate_recurring_drafts(&mut self) -> AppResult<RecurringRun> {
-        let today = self.sales_clock.today();
+        let today = self.sales_today()?;
         Ok(self.store.generate_recurring_drafts(today, |_| false)?)
     }
 

@@ -1068,6 +1068,13 @@ impl Store {
         issue_date: IsoDate,
         today: IsoDate,
     ) -> SalesResult<SalesDocument> {
+        // Una factura solo se emite por el camino con registro Verifactu (D193).
+        if load_document(&self.conn, id)?.kind.is_invoice() {
+            return Err(SalesStoreError::Conflict(
+                "una factura se emite con issue_sales_invoice_registered (registro Verifactu)"
+                    .into(),
+            ));
+        }
         self.issue_sales_document_with(id, issue_date, today, |_, _| Ok(()))
     }
 
@@ -1194,7 +1201,12 @@ impl Store {
     // --- Anulación (D82) ---
 
     pub fn void_sales_invoice(&mut self, id: i64) -> SalesResult<SalesDocument> {
-        self.void_sales_invoice_with(id, |_, _| Ok(()))
+        // Sin registro de anulación una factura no se anula (D193): solo por el camino registrado.
+        let doc = load_document(&self.conn, id)?;
+        can_void(doc.kind, doc.status)?;
+        Err(SalesStoreError::Conflict(format!(
+            "la factura {id} se anula con void_sales_invoice_registered (registro Verifactu)"
+        )))
     }
 
     /// Anula una factura `issued` (nunca una `sent`). `hook` recibe el documento dentro de la

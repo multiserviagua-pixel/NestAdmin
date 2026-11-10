@@ -27,6 +27,7 @@ const ICON_PATH = {
   mail: "M2 3.5h12v9H2zM2.3 4l5.7 4.5L13.7 4",
   settings:
     "M8 10.2a2.2 2.2 0 1 0 0-4.4 2.2 2.2 0 0 0 0 4.4zM8 1.8v2M8 12.2v2M1.8 8h2M12.2 8h2M3.6 3.6 5 5M11 11l1.4 1.4M12.4 3.6 11 5M5 11l-1.4 1.4",
+  sales: "M3 2h10v12H3zM5.5 5h5M5.5 8h5M5.5 11h3",
   setup: "M8 2v8M5 7l3 3 3-3M3 13.5h10",
 } as const;
 

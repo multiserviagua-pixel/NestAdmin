@@ -438,14 +438,20 @@ fn la_interfaz_solo_llama_a_comandos_registrados() {
             Some(&name[..name.find('"')?])
         })
         .collect();
-    let source = include_str!("main.rs");
-    let list = &source[source.find("generate_handler![").unwrap()..];
-    let registered: std::collections::BTreeSet<&str> = list
-        ["generate_handler![".len()..list.find(']').unwrap()]
-        .split(',')
-        .map(str::trim)
-        .filter(|n| !n.is_empty())
-        .collect();
+    // Los comandos de venta están en una lista aparte (`ventas::handler()`, D205): se aceptan los
+    // de cualquiera de las dos listas.
+    let registered: std::collections::BTreeSet<&str> =
+        [include_str!("main.rs"), include_str!("ventas.rs")]
+            .into_iter()
+            .flat_map(|source| {
+                let list = &source[source.find("generate_handler![").unwrap()..];
+                list["generate_handler![".len()..list.find(']').unwrap()]
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|n| !n.is_empty())
+                    .collect::<Vec<_>>()
+            })
+            .collect();
     assert!(called.len() >= 25, "no se leyeron las llamadas: {called:?}");
     assert!(
         called.is_subset(&registered),

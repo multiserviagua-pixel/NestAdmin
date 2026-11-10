@@ -228,6 +228,7 @@ import {
   type RuleDraft,
 } from "./rules-text";
 
+import { createSalesView } from "./ventas-view";
 import { actionBar, dataTable, emptyState, h, helpTip, icon, sectionHeader, statusChip, tabs, type Child, type IconName, type Tone } from "./components";
 import {
   BOARD_COLUMNS,
@@ -483,7 +484,7 @@ const ACTION_LABEL: Record<string, string> = {
   ...ASSISTANT_ACTION_LABEL,
 };
 
-type View = "review" | "tasks" | "rules" | "history" | "mail" | "settings" | "setup";
+type View = "review" | "tasks" | "rules" | "history" | "sales" | "mail" | "settings" | "setup";
 
 const PROVIDER_LABEL: Record<MailProviderKind, string> = {
   simulator: "Simulador",
@@ -684,6 +685,7 @@ const state = {
 
 const root = document.getElementById("app")!;
 
+
 /**
  * Pide confirmación y espera la respuesta. En Tauri 2 el complemento de diálogos sustituye
  * `window.confirm` por una función asíncrona que devuelve una promesa, y una promesa siempre
@@ -693,6 +695,9 @@ const root = document.getElementById("app")!;
 async function ask(message: string): Promise<boolean> {
   return await (window.confirm(message) as boolean | Promise<boolean>);
 }
+
+// Sección Ventas (E3b): lleva su propio estado y repinta con `render`.
+const sales = createSalesView({ render: () => render(), ask: async (message) => await ask(message) });
 
 function notify(kind: "ok" | "error", text: unknown) {
   state.notice = { kind, text: String(text) };
@@ -1063,6 +1068,7 @@ function nav() {
       ],
     ],
     ["Automatización", [["rules", "Reglas", "rules"]]],
+    ["Facturación", [["sales", "Ventas", "sales"]]],
     [
       "Sistema",
       [
@@ -1092,6 +1098,7 @@ function nav() {
               if (view === "settings") resetBlocks();
               render();
               if (view === "tasks") void loadPipeline().then(() => render(true));
+              if (view === "sales") sales.enter();
             },
           },
           icon(iconName),
@@ -7394,6 +7401,7 @@ function render(background = false) {
     tasks: tasksView,
     rules: rulesView,
     history: historyView,
+    sales: () => sales.view(),
     mail: mailView,
     settings: settingsView,
     setup: setupView,

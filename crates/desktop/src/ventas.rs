@@ -765,7 +765,7 @@ fn sales_setup_status(shared: State<'_, SharedState>) -> CmdResult<SetupStatus> 
         producer_configured: producer.configured,
         producer_problem: producer.problem,
         chain: sale(app.verifactu_chain_status())?.into(),
-        today: show_date(app.sales_today()),
+        today: show_date(sale(app.sales_today())?),
     })
 }
 

@@ -35,6 +35,11 @@ use crate::Store;
 /// Código del error cuando la cadena guardada no es íntegra (registro alterado o ilegible).
 pub const CODE_CHAIN_BROKEN: &str = "verifactu_chain_broken";
 /// Código del error cuando el reloj está más de un minuto por detrás del último registro.
+///
+/// Procedimiento (D213, sin umbral automático): si el último registro quedó con una hora futura
+/// (reloj adelantado al emitirlo), la emisión y la anulación se bloquean con este código hasta
+/// que la hora real supere la del último registro; el mensaje dice esa hora. No se corrige ni
+/// se salta: los registros son de solo inserción y la cadena exige orden temporal.
 pub const CODE_CLOCK_BEHIND: &str = "verifactu_clock_behind";
 /// Código del error cuando la factura no se puede traducir a un registro.
 pub const CODE_RECORD_INVALID: &str = "verifactu_record_invalid";
@@ -293,17 +298,29 @@ fn build_alta(
             }
         }
     };
-    let destinatarios = match (&input.recipient_name, &input.recipient_tax_id) {
-        (Some(name), Some(nif)) => vec![Persona {
-            nombre_razon: name.clone(),
-            identificacion: Identificacion::Nif(nif.clone()),
-        }],
-        (None, None) => Vec::new(),
-        _ => {
-            return Err(record_error(
-                "el destinatario necesita nombre y NIF, o ninguno de los dos",
-            ))
-        }
+    // Regla de la AEAT (documento "Validaciones y errores" de VERI*FACTU, v1.2.2, listado en
+    // FUENTES.md de `crates/verifactu`): una factura simplificada (F2) y una rectificativa de
+    // simplificada (R5) se registran SIN `Destinatarios`, aunque el cliente tenga NIF. F1 y
+    // R1-R4 llevan nombre y NIF del destinatario; si falta uno es un error de entrada y la
+    // emisión se deshace (no se consume número).
+    let destinatarios = match input.invoice_type {
+        InvoiceTypeCode::F2 | InvoiceTypeCode::R5 => Vec::new(),
+        _ => match (&input.recipient_name, &input.recipient_tax_id) {
+            (Some(name), Some(nif)) => vec![Persona {
+                nombre_razon: name.clone(),
+                identificacion: Identificacion::Nif(nif.clone()),
+            }],
+            (None, _) => return Err(SalesStoreError::invalid(
+                "recipient.name",
+                "la factura completa y las rectificativas R1-R4 exigen el nombre del destinatario",
+            )),
+            (_, None) => {
+                return Err(SalesStoreError::invalid(
+                    "recipient.tax_id",
+                    "la factura completa y las rectificativas R1-R4 exigen el NIF del destinatario",
+                ))
+            }
+        },
     };
     let desglose = input
         .breakdown
@@ -322,7 +339,7 @@ fn build_alta(
         facturas_rectificadas,
         facturas_sustituidas: Vec::new(),
         importe_rectificacion,
-        fecha_operacion: None,
+        fecha_operacion: input.operation_date.map(fecha).transpose()?,
         descripcion_operacion: operation_description(&input.breakdown),
         factura_simplificada_art7273: None,
         sin_identif_destinatario_art61d: None,
@@ -444,35 +461,53 @@ fn write_alta(
     )
 }
 
-/// Misma normalización que `record_input` aplica al NIF del emisor.
-fn normalize_tax_id(id: &str) -> String {
-    id.chars()
-        .filter(|c| !c.is_whitespace() && *c != '-')
-        .collect::<String>()
-        .to_uppercase()
+/// `IDFactura` (emisor, número, fecha) tal como quedó en el registro de ALTA guardado, para que
+/// la anulación apunte exactamente a lo registrado y no a lo recalculado. Rechaza si el
+/// documento no tiene alta o si ya tiene una anulación.
+fn registered_id(conn: &Connection, document_id: i64) -> SalesResult<IdFactura> {
+    let voided: i64 = conn.query_row(
+        "SELECT count(*) FROM verifactu_records WHERE document_id = ?1 AND kind = 'anulacion'",
+        [document_id],
+        |r| r.get(0),
+    )?;
+    if voided > 0 {
+        return Err(SalesStoreError::Conflict(format!(
+            "la factura {document_id} ya tiene un registro de anulación Verifactu"
+        )));
+    }
+    let json: Option<String> = conn
+        .query_row(
+            "SELECT record_json FROM verifactu_records WHERE document_id = ?1 AND kind = 'alta' \
+             ORDER BY id LIMIT 1",
+            [document_id],
+            |r| r.get(0),
+        )
+        .optional()?;
+    let Some(json) = json else {
+        return Err(SalesStoreError::Conflict(format!(
+            "la factura {document_id} no tiene registro de alta Verifactu: no se puede anular \
+             con registro"
+        )));
+    };
+    match parse_record(document_id, &json)? {
+        RegistroFacturacion::Alta(alta) => Ok(alta.id_factura),
+        RegistroFacturacion::Anulacion(_) => Err(chain_error(format!(
+            "el alta guardada de la factura {document_id} no es un alta"
+        ))),
+    }
 }
 
-/// Genera, sella e inserta la anulación de una factura recién anulada.
+/// Genera, sella e inserta la anulación de una factura recién anulada. Su `IDFactura` es el del
+/// alta guardada; no se recalcula.
 fn write_anulacion(
     conn: &Connection,
     doc: &SalesDocument,
     ctx: &VerifactuContext,
 ) -> SalesResult<()> {
-    let number = doc
-        .number
-        .as_deref()
-        .ok_or_else(|| record_error("la factura anulada no tiene número"))?;
-    let issue_date = doc
-        .issue_date
-        .ok_or_else(|| record_error("la factura anulada no tiene fecha de expedición"))?;
-    let tax_id = doc
-        .issuer
-        .as_ref()
-        .and_then(|i| i.party.tax_id.as_deref())
-        .ok_or_else(|| record_error("la factura anulada no tiene NIF de emisor"))?;
+    let id_factura = registered_id(conn, doc.id)?;
     let (chain, previous) = next_link(conn, ctx)?;
     let mut anulacion = RegistroAnulacion {
-        id_factura: IdFactura::new(&normalize_tax_id(tax_id), number, fecha(issue_date)?),
+        id_factura,
         ref_externa: None,
         sin_registro_previo: false,
         rechazo_previo: false,
@@ -615,6 +650,47 @@ impl Store {
     }
 }
 
+/// Primera columna de `verifactu_records` que no coincide con `record_json` (lo que se sella y
+/// se remite), o `None` si todas coinciden. Una columna manipulada con el JSON y la huella
+/// intactos no cambia la huella, pero deja la fila incoherente: es una cadena rota.
+fn column_mismatch(row: &RawRow, record: &RegistroFacturacion) -> Option<&'static str> {
+    let id = record.id_factura();
+    let (kind, invoice_type, total, tax_total) = match record {
+        RegistroFacturacion::Alta(a) => (
+            VerifactuKind::Alta,
+            Some(a.tipo_factura.as_str().to_owned()),
+            Some(a.importe_total.to_string()),
+            Some(a.cuota_total.to_string()),
+        ),
+        RegistroFacturacion::Anulacion(_) => (VerifactuKind::Anulacion, None, None, None),
+    };
+    let expected_previous = match record.encadenamiento() {
+        Encadenamiento::PrimerRegistro => None,
+        Encadenamiento::RegistroAnterior { huella, .. } => Some(huella.as_str()),
+    };
+    if row.kind != kind.as_str() {
+        Some("kind")
+    } else if row.issuer_tax_id != id.nif_emisor {
+        Some("issuer_tax_id")
+    } else if row.invoice_number != id.num_serie {
+        Some("invoice_number")
+    } else if row.issue_date != id.fecha_expedicion.to_string() {
+        Some("issue_date")
+    } else if row.invoice_type != invoice_type {
+        Some("invoice_type")
+    } else if row.total != total {
+        Some("total")
+    } else if row.tax_total != tax_total {
+        Some("tax_total")
+    } else if row.previous_hash.as_deref() != expected_previous {
+        Some("previous_hash")
+    } else if row.generated_at != record.fecha_hora_huso_gen_registro().to_string() {
+        Some("generated_at")
+    } else {
+        None
+    }
+}
+
 /// Estado de la cadena completa; lo usan la verificación pública y la comprobación previa a
 /// cada registro nuevo.
 fn chain_status(conn: &Connection) -> SalesResult<ChainStatus> {
@@ -624,6 +700,7 @@ fn chain_status(conn: &Connection) -> SalesResult<ChainStatus> {
     }
     let mut records = Vec::with_capacity(raw.len());
     let mut previous_id: Option<i64> = None;
+    let mut previous_hash: Option<String> = None;
     for row in &raw {
         let broken = |reason: &str| {
             Ok(ChainStatus::Broken {
@@ -640,7 +717,16 @@ fn chain_status(conn: &Connection) -> SalesResult<ChainStatus> {
         if row.previous_id != previous_id {
             return broken("el registro anterior enlazado no es el precedente");
         }
+        if row.previous_hash != previous_hash {
+            return broken("la huella anterior guardada no es la del registro precedente");
+        }
+        if let Some(column) = column_mismatch(row, &record) {
+            return broken(&format!(
+                "la columna {column} no coincide con el registro guardado"
+            ));
+        }
         previous_id = Some(row.id);
+        previous_hash = Some(row.hash.clone());
         records.push(record);
     }
     match verificar_cadena(&records, None) {
