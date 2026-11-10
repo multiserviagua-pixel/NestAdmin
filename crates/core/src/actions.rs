@@ -126,6 +126,9 @@ pub struct AuditEntry {
     pub status: String,
     pub authorization: Option<String>,
     pub detail: Option<String>,
+    /// De dónde vino la acción: `None` para lo hecho desde las pantallas; `chat` para lo que se
+    /// ejecutó al confirmar una propuesta del asistente (D185).
+    pub origin: Option<String>,
 }
 
 fn audit(
@@ -406,7 +409,7 @@ impl Store {
 
     pub fn audit_log(&self) -> Result<Vec<AuditEntry>> {
         let mut stmt = self.conn.prepare(
-            "SELECT task_id, action, status, authorization, detail FROM audit_log ORDER BY id",
+            "SELECT task_id, action, status, authorization, detail, origin FROM audit_log ORDER BY id",
         )?;
         let rows = stmt.query_map([], |r| {
             Ok(AuditEntry {
@@ -415,6 +418,7 @@ impl Store {
                 status: r.get(2)?,
                 authorization: r.get(3)?,
                 detail: r.get(4)?,
+                origin: r.get(5)?,
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)

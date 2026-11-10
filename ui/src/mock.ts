@@ -38,6 +38,8 @@ import type {
   SenderPreference,
   AssistantConsentView,
   AssistantConversation,
+  ProposalCard,
+  ProposalReceipt,
   AssistantPreview,
   AssistantProgress,
   AssistantSentCall,
@@ -2329,6 +2331,55 @@ let assistantGranted = false;
 let nextConversation = 1;
 let nextAssistantTurn = 1;
 const assistantConversations = new Map<number, AssistantConversation>();
+
+// ---- Propuestas del asistente (E3, D185): tarjetas inventadas que recuerdan su estado mientras dure la página ----
+
+let nextProposal = 1;
+const proposalCards = new Map<number, ProposalCard>();
+/** Propuestas de cada turno de respuesta, por su identificador. */
+const proposalsByTurn = new Map<number, number[]>();
+
+/** Tres propuestas de ejemplo: aprobar un correo, aprobar una factura con importe dudoso y editar un borrador. */
+function newMockProposals(): ProposalCard[] {
+  const created = now();
+  const expires = created + 24 * 3600 * 1000;
+  const block = (id: number, kind: string, title: string) => ({ id, kind, title, state: "awaiting_review", version: 1 });
+  const cards: ProposalCard[] = [
+    {
+      id: nextProposal++, kind: "approve", status: "pending", task_id: 901, seen_version: 1, created_at: created, expires_at: expires, effect: "send_mail", receipt: null,
+      summary: {
+        type: "email", version: 1, task: block(901, "email", "Consulta sobre el pedido 2231"), from: "cliente.beta@ejemplo.test", original_subject: "Consulta sobre el pedido 2231",
+        to: ["cliente.beta@ejemplo.test"], subject: "Re: Consulta sobre el pedido 2231",
+        body: "Buenos días:\n\nLe confirmamos que el pedido 2231 saldrá el jueves.\n\nUn saludo.", category: "consulta_pago", issues: [], draft_flags: [], recipient_signals: null, review_reason: "ninguna regla activa coincide",
+      },
+    },
+    {
+      id: nextProposal++, kind: "approve", status: "pending", task_id: 902, seen_version: 1, created_at: created, expires_at: expires, effect: "register_invoice", receipt: null,
+      summary: {
+        type: "invoice", version: 1, task: block(902, "invoice", "Alfa SL F-2"), document: "factura-alfa-f2.pdf", supplier: "Alfa SL", invoice_number: "F-2", date: "2026-10-02",
+        subtotal: "1.000", tax: "210,00", total: "1.210,00", currency: "EUR", issues: ["amount_to_review"], duplicates: [],
+        amount_review: "Hay importes que no se leen sin duda en «factura-alfa-f2.pdf»: el documento dice «1.000» y se propone 1000.00. Compruébelos con el original antes de aprobar.",
+        recovered: [{ field: "subtotal", literal: "1.000", value: "1000.00", reason: "thousands_or_decimal" }], unreadable: [], recovery: null, review_reason: "importe dudoso",
+      },
+    },
+    {
+      id: nextProposal++, kind: "edit_draft", status: "pending", task_id: 903, seen_version: 1, created_at: created, expires_at: expires, effect: "none", receipt: null,
+      summary: {
+        type: "edit_draft", version: 1, task: block(903, "email", "Cambio de horario"), to: ["logistica@transportes-delta.test"], subject: "Re: Cambio de horario",
+        current_body: "Recibido, gracias.", new_body: "Recibido, gracias. Tomamos nota del nuevo horario de recogida a partir del lunes.",
+      },
+    },
+  ];
+  for (const card of cards) proposalCards.set(card.id, card);
+  return cards;
+}
+
+/** Recalcula `expired` al leer, como el real. */
+function currentProposal(id: number): ProposalCard | undefined {
+  const card = proposalCards.get(id);
+  if (card && card.status === "pending" && now() >= card.expires_at) card.status = "expired";
+  return card;
+}
 const assistantSentCalls = new Map<number, AssistantSentCall[]>();
 /** Cancela el turno lento en curso (la pregunta con «lento»). */
 let assistantCancel: (() => void) | null = null;
@@ -2521,7 +2572,7 @@ const handlers: Record<string, (a: any, options?: any) => unknown> = {
     const found = words.page.results.slice(0, 3);
     const base: AssistantTurn = {
       conversation_id: conversationId, turn_id: null, outcome: "answered", error_code: null, answer: "", citations: [], dropped_citations: 0, withheld: 0,
-      navigate: null, ...external, steps: 0, tools: [], words: null,
+      navigate: null, ...external, steps: 0, tools: [], words: null, proposals: [],
     };
     // Guarda el turno (y, si se indica, lo enviado) y deja el evento del historial, sin el texto.
     const finish = (turn: AssistantTurn, calls: AssistantSentCall[], saved: boolean): AssistantTurn => {
@@ -2530,7 +2581,7 @@ const handlers: Record<string, (a: any, options?: any) => unknown> = {
         const id = conversationId ?? nextConversation++;
         const conversation = assistantConversations.get(id) ?? { id, created_at: now(), updated_at: now(), turns: [] };
         const stored = (role: "user" | "assistant", body: string, extra: Partial<AssistantStoredTurn> = {}): AssistantStoredTurn => ({
-          id: nextAssistantTurn++, role, text: body, created_at: now(), outcome: null, citation_refs: [], dropped_citations: 0, withheld: 0, navigate: null, provider: null, model: null, local: false, fallback: null, steps: 0, tools: [], citations: [], ...extra,
+          id: nextAssistantTurn++, role, text: body, created_at: now(), outcome: null, citation_refs: [], dropped_citations: 0, withheld: 0, navigate: null, provider: null, model: null, local: false, fallback: null, steps: 0, tools: [], citations: [], proposals: [], ...extra,
         });
         conversation.turns.push(stored("user", question));
         const reply = stored("assistant", turn.answer || "Sin respuesta.", {
@@ -2538,6 +2589,7 @@ const handlers: Record<string, (a: any, options?: any) => unknown> = {
           dropped_citations: turn.dropped_citations, withheld: turn.withheld, navigate: turn.navigate, citations: turn.citations, citation_refs: turn.citations.map((c) => `doc:${c.task_id}`),
         });
         conversation.turns.push(reply);
+        if (turn.proposals.length) proposalsByTurn.set(reply.id, turn.proposals.map((c) => c.id));
         conversation.updated_at = now();
         assistantConversations.set(id, conversation);
         if (calls.length) assistantSentCalls.set(reply.id, calls);
@@ -2583,6 +2635,13 @@ const handlers: Record<string, (a: any, options?: any) => unknown> = {
         [sentFor(1, false), sentFor(2, true)],
         true,
       );
+    // «propón…» o «prepara…»: tres tarjetas de ejemplo. No se ha ejecutado nada hasta pulsar el botón.
+    if (/propon|prepara/.test(flat))
+      return finish(
+        { ...base, answer: "He preparado tres propuestas. No se ha ejecutado nada: usted decide con el botón de cada tarjeta.", steps: 4, tools: ["list_tasks", "propose_approve", "propose_edit_draft"], proposals: newMockProposals() },
+        [sentFor(1, false), sentFor(2, false)],
+        true,
+      );
     const sensitive = flat.includes("sensible");
     return finish(
       {
@@ -2605,7 +2664,50 @@ const handlers: Record<string, (a: any, options?: any) => unknown> = {
   },
   assistant_conversation: ({ id }: { id: number | null }): AssistantConversation | null => {
     const found = id != null ? assistantConversations.get(id) : [...assistantConversations.values()].sort((a, b) => b.updated_at - a.updated_at)[0];
-    return found ? structuredClone(found) : null;
+    if (!found) return null;
+    const view = structuredClone(found);
+    // Las tarjetas de cada turno, con su estado actual.
+    for (const turn of view.turns) turn.proposals = (proposalsByTurn.get(turn.id) ?? []).flatMap((id) => { const c = currentProposal(id); return c ? [structuredClone(c)] : []; });
+    return view;
+  },
+  assistant_proposals: ({ conversationId }: { conversationId: number }): ProposalCard[] => {
+    const conversation = assistantConversations.get(conversationId);
+    const ids = conversation ? conversation.turns.flatMap((t) => proposalsByTurn.get(t.id) ?? []) : [];
+    return ids.flatMap((id) => { const c = currentProposal(id); return c ? [structuredClone(c)] : []; });
+  },
+  proposal_confirm: ({ id, amountsChecked }: { id: number; amountsChecked?: boolean }): ProposalReceipt => {
+    const card = currentProposal(id);
+    if (!card) throw "la propuesta no existe";
+    if (card.status === "confirmed" && card.receipt) return structuredClone(card.receipt);
+    if (card.status === "rejected") throw "la propuesta se descartó y ya no se puede confirmar";
+    if (card.status === "expired") throw "la propuesta caducó; pídala de nuevo";
+    if (card.status === "stale") throw "el contenido cambió; revíselo de nuevo";
+    // Como el fondo (D186): sin la casilla de importes, una factura dudosa no se registra y la propuesta sigue pendiente.
+    if (card.kind === "approve" && card.summary.amount_review && !amountsChecked)
+      throw "hay importes que no se leen sin duda: confirme antes los importes con el documento";
+    const receipt: ProposalReceipt = {
+      proposal_id: card.id, kind: card.kind, task_id: card.task_id, task_state: card.kind === "edit_draft" ? "awaiting_review" : "completed", effect: card.effect,
+      confirmed_at: now(), reconciled: false, result: card.kind === "edit_draft" ? { new_version: 2 } : { version: card.seen_version },
+    };
+    card.status = "confirmed";
+    card.receipt = receipt;
+    if (card.effect !== "none")
+      audit.push({
+        task_id: card.task_id, action: card.effect === "send_mail" ? "send_draft" : "register_invoice", status: "confirmed", authorization: "aprobación",
+        detail: `task-${card.task_id}/${card.effect === "send_mail" ? "send_draft" : "register_invoice"}/v${card.seen_version}`, origin: "chat",
+      });
+    audit.push({ task_id: card.task_id, action: "assistant_proposal", status: "confirmed", authorization: null, detail: JSON.stringify({ kind: card.kind, task_id: card.task_id, effect: card.effect }), origin: "chat" });
+    return structuredClone(receipt);
+  },
+  proposal_dismiss: ({ id }: { id: number }): ProposalCard => {
+    const card = currentProposal(id);
+    if (!card) throw "la propuesta no existe";
+    if (card.status === "confirmed") throw "la propuesta ya se confirmó y no se puede descartar";
+    if (card.status !== "rejected") {
+      card.status = "rejected";
+      audit.push({ task_id: card.task_id, action: "assistant_proposal", status: "rejected", authorization: null, detail: JSON.stringify({ kind: card.kind, task_id: card.task_id, effect: card.effect }), origin: "chat" });
+    }
+    return structuredClone(card);
   },
   assistant_sent: ({ turnId }: { turnId: number }): AssistantSentCall[] => structuredClone(assistantSentCalls.get(turnId) ?? []),
   assistant_clear: ({ id }: { id: number | null }): number => {
@@ -2614,7 +2716,13 @@ const handlers: Record<string, (a: any, options?: any) => unknown> = {
       removed = assistantConversations.size;
       assistantConversations.clear();
       assistantSentCalls.clear();
-    } else removed = assistantConversations.delete(id) ? 1 : 0;
+      proposalCards.clear();
+      proposalsByTurn.clear();
+    } else {
+      // Borrar la conversación borra sus propuestas.
+      for (const t of assistantConversations.get(id)?.turns ?? []) for (const pid of proposalsByTurn.get(t.id) ?? []) proposalCards.delete(pid);
+      removed = assistantConversations.delete(id) ? 1 : 0;
+    }
     audit.push({ task_id: null, action: "assistant_cleared", status: "cleared", authorization: null, detail: JSON.stringify({ scope: id == null ? "all" : "one", conversations: removed }) });
     return removed;
   },
@@ -2924,15 +3032,18 @@ const handlers: Record<string, (a: any, options?: any) => unknown> = {
     if (metaOf(id).archived_at) throw `la regla ${id} está archivada; desarchívela para volver a usarla`;
     if (acknowledge && (r.action_kind !== "send_draft" || hasSender(r.conditions)))
       throw "la opción avanzada solo existe en reglas de envío sin remitente";
+    // Dar la validación a una regla ACTIVA que no la tenía la deja inactiva en la misma operación (D186c).
+    const widened = acknowledge && r.active && metaOf(id).any_sender_ack_at === null;
     setMeta(id, { any_sender_ack_at: acknowledge ? now() : null });
+    const current = widened ? addRule({ ...r, version: r.version + 1, active: false, created_at: now() }) : r;
     audit.push({
       task_id: null,
       action: "rule_any_sender",
       status: acknowledge ? "acknowledged" : "revoked",
       authorization: null,
-      detail: `${id} v${r.version}: ${acknowledge ? "validada la opción avanzada" : "retirada la opción avanzada"}`,
+      detail: `${id} v${current.version}: ${acknowledge ? "validada la opción avanzada" : "retirada la opción avanzada"}`,
     });
-    return ruleView(r);
+    return { ...ruleView(current), deactivated_by_edit: widened };
   },
   archive_rule: ({ id }) => {
     let r = latest().find((r) => r.id === id);
@@ -3482,6 +3593,8 @@ function startup(): Startup {
 const mutating = new Set([
   "assistant_turn",
   "assistant_clear",
+  "proposal_confirm",
+  "proposal_dismiss",
   "grant_assistant_consent",
   "withdraw_assistant_consent",
   "save_business_profile",

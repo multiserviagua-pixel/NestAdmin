@@ -71,11 +71,11 @@ fn count(path: &std::path::Path, table: &str) -> i64 {
 
 #[test]
 fn migration_11_applies_on_a_new_database_and_on_a_v10_one() {
-    assert_eq!(SCHEMA_VERSION, 11);
+    // La migración 12 (propuestas) depende de las tablas de la 11: en una base v10 caen las dos.
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("n.db");
     let mut store = Store::open(&path).unwrap();
-    assert_eq!(store.schema_version().unwrap(), 11);
+    assert_eq!(store.schema_version().unwrap(), SCHEMA_VERSION);
     add(
         &mut store,
         SearchKind::Invoice,
@@ -96,13 +96,14 @@ fn migration_11_applies_on_a_new_database_and_on_a_v10_one() {
     // Una base v10: sin las tablas del asistente y con datos previos.
     let conn = rusqlite::Connection::open(&path).unwrap();
     conn.execute_batch(
-        "DROP TABLE assistant_calls; DROP TABLE assistant_turns; DROP TABLE assistant_conversations;
+        "DROP TABLE assistant_proposals; ALTER TABLE audit_log DROP COLUMN origin;
+         DROP TABLE assistant_calls; DROP TABLE assistant_turns; DROP TABLE assistant_conversations;
          PRAGMA user_version = 10;",
     )
     .unwrap();
     drop(conn);
     let store = Store::open(&path).unwrap();
-    assert_eq!(store.schema_version().unwrap(), 11);
+    assert_eq!(store.schema_version().unwrap(), SCHEMA_VERSION);
     assert_eq!(
         store.search_hits(&[1]).unwrap().len(),
         1,

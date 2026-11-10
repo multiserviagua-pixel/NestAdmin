@@ -18,6 +18,7 @@
 //! local si el resolvedor `assistant_local` (que no arranca procesos) la da ya en marcha.
 
 pub mod consent;
+pub mod proposals;
 pub mod tools;
 
 use std::collections::HashSet;
@@ -34,6 +35,7 @@ use nestadmin_core::{NewCall, SearchHit, SentCall};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
+use self::proposals::ProposalCard;
 use self::tools::{
     fragment_count, split_masked, strip_fragments, ToolCall, ToolOutput, WITHHELD_MARK,
 };
@@ -73,6 +75,9 @@ pub(crate) struct AssistantRuntime {
     cancel: Arc<AtomicBool>,
     /// Hay un turno en curso: solo uno a la vez.
     busy: Arc<AtomicBool>,
+    /// Contexto del turno en curso para crear propuestas (D185): conversación, referencias que
+    /// las herramientas devolvieron y propuestas ya creadas en el turno.
+    pub(crate) turn: Mutex<proposals::TurnCtx>,
 }
 
 /// El turno exclusivo: se libera al soltarlo, también si el trabajo entra en pánico.
@@ -226,6 +231,9 @@ pub struct AssistantTurn {
     pub tools: Vec<String>,
     /// Búsqueda por palabras, solo con `consent_required` y `not_configured` (D181).
     pub words: Option<QuestionAnswer>,
+    /// Tarjetas de las propuestas que el asistente preparó en este turno (D185). La aplicación las
+    /// compone con datos del equipo; nada de esto se ejecuta hasta que la persona pulsa el botón.
+    pub proposals: Vec<ProposalCard>,
 }
 
 /// Lo que se guarda de un turno junto a su texto (en `meta_json`).
@@ -247,6 +255,11 @@ pub struct TurnMeta {
     pub error_code: Option<String>,
     /// Código cerrado del último rechazo si el fallo fue `invalid_response`.
     pub error_detail: Option<String>,
+    /// Propuestas que preparó este turno (la tarjeta se compone al leer, con su estado actual).
+    pub proposal_ids: Vec<i64>,
+    /// Referencias (`doc:N`, `acct:N`) que las herramientas devolvieron en este turno: las únicas
+    /// sobre las que el asistente puede proponer una acción en esta conversación.
+    pub returned_refs: Vec<String>,
 }
 
 /// Un turno de una conversación guardada.
@@ -261,6 +274,8 @@ pub struct ConversationTurn {
     pub meta: TurnMeta,
     /// Tarjetas de los documentos citados, tal como están ahora en el índice.
     pub citations: Vec<SearchHit>,
+    /// Tarjetas de las propuestas de este turno con su estado actual (D185).
+    pub proposals: Vec<ProposalCard>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -726,6 +741,26 @@ impl App {
             }
             None => Vec::new(),
         };
+        // Propuestas de un turno que nunca se guardó (se cortó): sin turno no hay tarjeta, se borran.
+        self.store.proposals_discard_unattached(None)?;
+        let mut known: HashSet<String> = HashSet::new();
+        if let Some(id) = conversation_id {
+            if let Some(conversation) = self.store.assistant_conversation(id)? {
+                for turn in &conversation.turns {
+                    if let Some(refs) = turn.meta["returned_refs"].as_array() {
+                        known.extend(refs.iter().filter_map(|r| r.as_str().map(str::to_owned)));
+                    }
+                }
+            }
+        }
+        if let Ok(mut ctx) = self.assistant.turn.lock() {
+            *ctx = proposals::TurnCtx {
+                active: true,
+                conversation_id,
+                known,
+                created: Vec::new(),
+            };
+        }
         let external_provider = self.provider.kind() != ProviderKind::Ollama;
         let consent_granted = external_provider && self.assistant_consent()?.state == "granted";
         // La IA local del asistente no arranca nada y solo existe con el respaldo local activado:
@@ -826,6 +861,7 @@ impl App {
             steps,
             tools,
             words: None,
+            proposals: Vec::new(),
         };
         let audit_status = match status {
             RunStatus::Answered => {
@@ -890,6 +926,15 @@ impl App {
                 "error"
             }
         };
+        // Propuestas del turno: solo una respuesta las deja en pie. Un turno con error o cancelado no
+        // enseña tarjetas, así que sus propuestas se descartan antes de que nadie las vea.
+        let mut proposal_ids = self.take_turn_proposals();
+        if turn.outcome != Outcome::Answered && !proposal_ids.is_empty() {
+            self.discard_turn_proposals(&proposal_ids);
+            proposal_ids.clear();
+        }
+        let mut returned_refs: Vec<String> = known_refs.iter().cloned().collect();
+        returned_refs.sort();
         // Guarda lo que la persona puede seguir leyendo (una respuesta o su motivo) y, aunque no
         // sea una respuesta, todo turno del que salió alguna llamada.
         if matches!(
@@ -924,6 +969,8 @@ impl App {
                 tools: turn.tools.clone(),
                 error_code: turn.error_code.clone(),
                 error_detail: turn.error_detail.clone(),
+                proposal_ids: proposal_ids.clone(),
+                returned_refs,
             };
             let saved = self.store.assistant_save_exchange(
                 conversation_id,
@@ -934,6 +981,9 @@ impl App {
             )?;
             turn.conversation_id = Some(saved.conversation_id);
             turn.turn_id = Some(saved.turn_id);
+            self.store
+                .proposals_attach(&proposal_ids, saved.conversation_id, saved.turn_id)?;
+            turn.proposals = self.proposal_cards(&proposal_ids)?;
         }
         // Los hechos, sin el texto de la pregunta ni de la respuesta.
         self.store.record_note(
@@ -951,6 +1001,7 @@ impl App {
                 "withheld": turn.withheld,
                 "error_code": turn.error_code,
                 "error_detail": turn.error_detail,
+                "proposals": turn.proposals.len(),
             }),
         )?;
         Ok(turn)
@@ -977,6 +1028,7 @@ impl App {
                 .filter_map(|r| doc_id(r))
                 .collect();
             let citations = self.store.search_hits(&ids)?;
+            let proposals = self.proposal_cards(&meta.proposal_ids)?;
             turns.push(ConversationTurn {
                 id: turn.id,
                 role: turn.role,
@@ -984,6 +1036,7 @@ impl App {
                 created_at: turn.created_at,
                 meta,
                 citations,
+                proposals,
             });
         }
         Ok(Some(AssistantConversation {
@@ -992,6 +1045,41 @@ impl App {
             updated_at: stored.updated_at,
             turns,
         }))
+    }
+
+    /// Vacía el contexto del turno y devuelve las propuestas que preparó.
+    fn take_turn_proposals(&self) -> Vec<i64> {
+        self.assistant
+            .turn
+            .lock()
+            .map(|mut ctx| {
+                let created = std::mem::take(&mut ctx.created);
+                *ctx = proposals::TurnCtx::default();
+                created
+            })
+            .unwrap_or_default()
+    }
+
+    /// Borra las propuestas de un turno que no terminó en respuesta y lo deja en el historial, sin
+    /// contenido.
+    fn discard_turn_proposals(&self, ids: &[i64]) {
+        for id in ids {
+            if let Ok(Some(row)) = self.store.proposal(*id) {
+                if row.turn_id.is_none() {
+                    let _ = self.store.proposal_audit(
+                        row.task_id,
+                        "rejected",
+                        &json!({
+                            "kind": row.kind,
+                            "task_id": row.task_id,
+                            "effect": row.card["effect"],
+                            "code": "turn_not_answered",
+                        }),
+                    );
+                }
+            }
+        }
+        let _ = self.store.proposals_discard_unattached(Some(ids));
     }
 
     /// Lo que se envió en las llamadas de un turno, tal cual, guardado solo en el equipo.

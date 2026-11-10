@@ -197,6 +197,10 @@ pub(crate) fn is_archived(conn: &rusqlite::Connection, id: &str) -> Result<bool>
 pub(crate) const DEACTIVATED_BY_EDIT: &str =
     "desactivada al editarla: el cambio amplía lo que haría sin revisión";
 
+/// Nota de la versión que deja inactiva a una regla activa al darle la validación avanzada.
+pub(crate) const DEACTIVATED_BY_ANY_SENDER: &str =
+    "desactivada al validar «cualquier remitente»: amplía lo que haría sin revisión";
+
 /// Decide el estado de la versión nueva al editar: una regla inactiva sigue inactiva; una
 /// activa conserva el estado solo si `keep_active` lo permite. Devuelve `(activa, desactivada)`.
 pub(crate) fn decide_active(

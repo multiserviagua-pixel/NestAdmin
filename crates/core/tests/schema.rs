@@ -35,10 +35,13 @@ const DROP_PANEL: &str = "DROP TABLE rule_settings; DROP TABLE rule_suggestions;
 const DROP_PIPELINES: &str =
     "DROP TABLE pipeline_steps; DROP TABLE pipeline_runs; DROP TABLE task_templates;";
 
-/// Quita lo que añadió la migración 11 (conversaciones del asistente). Va antes de los `DROP`
-/// anteriores.
-const DROP_ASSISTANT: &str =
-    "DROP TABLE assistant_calls; DROP TABLE assistant_turns; DROP TABLE assistant_conversations;";
+/// Quita lo que añadió la migración 12 (propuestas del asistente y origen de los eventos).
+const DROP_PROPOSALS: &str =
+    "DROP TABLE assistant_proposals; ALTER TABLE audit_log DROP COLUMN origin;";
+
+/// Quita lo que añadió la migración 11 (conversaciones del asistente) y la 12, que depende de ella.
+/// Va antes de los `DROP` anteriores.
+const DROP_ASSISTANT: &str = "DROP TABLE assistant_proposals; ALTER TABLE audit_log DROP COLUMN origin; DROP TABLE assistant_calls; DROP TABLE assistant_turns; DROP TABLE assistant_conversations;";
 
 /// Quita lo que añadió la migración 10 (índice de búsqueda; los triggers caen con su tabla).
 /// Va antes de los `DROP` anteriores.
@@ -124,7 +127,7 @@ fn migrating_from_schema_2_adds_sales_tables_and_keeps_a_copy() {
 
     let store = Store::open(&path).unwrap();
     assert_eq!(store.schema_version().unwrap(), SCHEMA_VERSION);
-    assert_eq!(SCHEMA_VERSION, 11);
+    assert_eq!(SCHEMA_VERSION, 12);
     assert_eq!(
         store.audit_log().unwrap().len(),
         1,
@@ -624,4 +627,89 @@ fn migrating_from_schema_8_keeps_the_signals_and_allows_learned_ones_without_a_t
             [],
         )
         .is_err());
+}
+
+/// La migración 12 (D185) añade `assistant_proposals` y la columna `origin` del historial: sobre
+/// una base nueva y sobre una de la versión 11, que conserva sus filas con el origen nulo.
+#[test]
+fn a_new_database_has_proposals_and_a_null_origin_for_ordinary_events() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("nestadmin.db");
+    let mut store = Store::open(&path).unwrap();
+    assert_eq!(SCHEMA_VERSION, 12);
+    store
+        .record_note("evento", "ok", &serde_json::json!({}))
+        .unwrap();
+    let log = store.audit_log().unwrap();
+    assert_eq!(log.len(), 1);
+    assert_eq!(log[0].origin, None, "un evento corriente no lleva origen");
+    drop(store);
+    assert!(has_table(&path, "assistant_proposals"));
+}
+
+#[test]
+fn migrating_from_schema_11_adds_proposals_and_keeps_previous_events_with_no_origin() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("nestadmin.db");
+    drop(Store::open(&path).unwrap());
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    conn.execute_batch(&format!("{DROP_PROPOSALS} PRAGMA user_version = 11;"))
+        .unwrap();
+    conn.execute(
+        "INSERT INTO audit_log (at, action, status) VALUES (1, 'previa', 'ok')",
+        [],
+    )
+    .unwrap();
+    drop(conn);
+    assert!(!has_table(&path, "assistant_proposals"));
+
+    let store = Store::open(&path).unwrap();
+    assert_eq!(store.schema_version().unwrap(), SCHEMA_VERSION);
+    let log = store.audit_log().unwrap();
+    assert_eq!(log.len(), 1, "los datos previos se conservan");
+    assert_eq!(log[0].origin, None);
+    drop(store);
+    let backup = backup_path(&path, 11);
+    assert_eq!(user_version(&backup), 11);
+    assert!(!has_table(&backup, "assistant_proposals"));
+    assert!(has_table(&path, "assistant_proposals"));
+}
+
+/// Mientras hay un origen fijado, todo evento lo lleva en el mismo `INSERT`; al quitarlo, vuelve a
+/// ser nulo. El origen es de la conexión: no queda en el archivo.
+#[test]
+fn the_audit_origin_stamps_events_only_while_it_is_set_and_never_persists() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("nestadmin.db");
+    let mut store = Store::open(&path).unwrap();
+    let note = serde_json::json!({});
+    store.record_note("antes", "ok", &note).unwrap();
+    store.set_audit_origin(Some("chat")).unwrap();
+    store.record_note("durante", "ok", &note).unwrap();
+    store.record_event(1, "durante_tarea", "ok", &note).ok();
+    store.set_audit_origin(None).unwrap();
+    store.record_note("despues", "ok", &note).unwrap();
+    let origin = |action: &str| {
+        store
+            .audit_log()
+            .unwrap()
+            .into_iter()
+            .find(|e| e.action == action)
+            .map(|e| e.origin)
+    };
+    assert_eq!(origin("antes"), Some(None));
+    assert_eq!(origin("durante"), Some(Some("chat".to_owned())));
+    assert_eq!(origin("despues"), Some(None));
+    // Un corte con el origen puesto no lo deja en la base: otra conexión escribe sin origen.
+    store.set_audit_origin(Some("chat")).unwrap();
+    drop(store);
+    let mut again = Store::open(&path).unwrap();
+    again.record_note("tras_el_corte", "ok", &note).unwrap();
+    let last = again
+        .audit_log()
+        .unwrap()
+        .into_iter()
+        .find(|e| e.action == "tras_el_corte")
+        .unwrap();
+    assert_eq!(last.origin, None);
 }

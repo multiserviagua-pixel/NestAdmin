@@ -258,6 +258,8 @@ export interface AuditEntry {
   status: string;
   authorization: string | null;
   detail: string | null;
+  /** `chat` si lo ejecutó la confirmación de una propuesta del asistente (D185); ausente o `null` si vino de las pantallas. */
+  origin?: string | null;
 }
 
 export type ProviderChoice =
@@ -1183,6 +1185,56 @@ export interface AssistantTurn {
   tools: string[];
   /** Búsqueda por palabras, solo con `consent_required` y `not_configured` (D181). */
   words: QuestionAnswer | null;
+  /** Tarjetas de las acciones que el asistente preparó en este turno (D185). No se ha ejecutado nada: solo el botón de la tarjeta confirma. */
+  proposals: ProposalCard[];
+}
+
+// ---- Propuestas del asistente (E3, D185) ----
+
+export type ProposalKind =
+  | "approve"
+  | "reject"
+  | "retry"
+  | "archive"
+  | "confirm_not_sent"
+  | "edit_draft"
+  | "fetch_mail"
+  | "mail_limit"
+  | "rename_account"
+  | "sender_preference";
+
+export type ProposalStatus = "pending" | "executing" | "confirmed" | "rejected" | "expired" | "stale" | "failed";
+
+/** Si confirmar la propuesta envía un correo, registra una factura o no tiene efecto externo. */
+export type ProposalEffect = "send_mail" | "register_invoice" | "none";
+
+/** Tarjeta de una propuesta: la compone la aplicación con los datos reales del equipo. `summary` lleva `type` y, según él, lo mismo que la pantalla de revisión antes de aprobar. */
+export interface ProposalCard {
+  id: number;
+  kind: ProposalKind;
+  status: ProposalStatus;
+  task_id: number | null;
+  /** Versión de la tarea que se vio al crearla (la lee la aplicación). */
+  seen_version: number | null;
+  created_at: number;
+  expires_at: number;
+  effect: ProposalEffect;
+  summary: Record<string, any>;
+  /** Recibo original, si ya se confirmó. */
+  receipt: ProposalReceipt | null;
+}
+
+/** Lo que devuelve confirmar; confirmar otra vez devuelve el mismo. */
+export interface ProposalReceipt {
+  proposal_id: number;
+  kind: ProposalKind;
+  task_id: number | null;
+  task_state: string | null;
+  effect: ProposalEffect;
+  confirmed_at: number;
+  /** Tras un corte se comprobó que la acción ya estaba hecha y no se repitió. */
+  reconciled: boolean;
+  result: Record<string, any>;
 }
 
 /** Turno guardado de una conversación. Los de la persona solo llevan `role`, `text` y la fecha. */
@@ -1208,6 +1260,8 @@ export interface AssistantStoredTurn {
   error_detail?: string | null;
   /** Tarjetas de los documentos citados, tal como están ahora en el índice. */
   citations: SearchHit[];
+  /** Tarjetas de las propuestas de este turno con su estado actual (D185). */
+  proposals: ProposalCard[];
 }
 
 export interface AssistantConversation {

@@ -12,7 +12,7 @@ use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
-use nestadmin_ai::assistant::{DATA_CLOSE, DATA_OPEN, TOOLS};
+use nestadmin_ai::assistant::{Level, DATA_CLOSE, DATA_OPEN, TOOLS};
 use nestadmin_ai::{
     AiError, GenerateRequest, GenerateResult, ModelUnavailableCause, Provider, ProviderKind,
     Task as AiTask, Usage,
@@ -626,7 +626,8 @@ fn every_free_tool_reads_and_none_changes_the_tasks_rules_or_consent() {
         };
         serde_json::from_value(value).unwrap()
     };
-    for spec in TOOLS {
+    // Las de nivel «propone» tienen su propia suite (assistant_proposals.rs).
+    for spec in TOOLS.iter().filter(|t| t.level != Level::Propose) {
         for external in [false, true] {
             let out = w.app.assistant_tool(&ToolCall {
                 name: spec.name.to_owned(),

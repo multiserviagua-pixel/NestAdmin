@@ -1405,7 +1405,11 @@ fn the_advanced_option_is_per_rule_audited_and_erased_by_editing() {
         )],
     );
     let mut acked = open(&dir2, FakeProvider::new());
-    acked.set_rule_any_sender("vieja", true).unwrap();
+    // Validar «cualquier remitente» en una regla activa la deja inactiva (D186c): hay que
+    // activarla de nuevo, como acto aparte, para que automatice.
+    let validated = acked.set_rule_any_sender("vieja", true).unwrap();
+    assert!(validated.deactivated_by_edit && !validated.rule.active);
+    acked.set_rule_active("vieja", true).unwrap();
     let states = mail_states(&mut acked);
     let completed = states
         .iter()

@@ -84,6 +84,8 @@ CREATE TABLE rules (
     // Conversaciones del asistente y lo enviado en cada llamada, solo locales (D188); ver
     // assistant.rs.
     include_str!("migrations/011_assistant.sql"),
+    // Propuestas del asistente y origen de los eventos del historial (D185); ver proposals.rs.
+    include_str!("migrations/012_proposals.sql"),
 ];
 
 /// Base de datos local. Cada operación pública se confirma en una transacción,
@@ -108,7 +110,38 @@ impl Store {
         conn.execute_batch("PRAGMA foreign_keys = ON; PRAGMA synchronous = FULL;")?;
         let mut store = Self { conn };
         store.migrate(path)?;
+        store.install_audit_origin()?;
         Ok(store)
+    }
+
+    /// Origen en curso de los eventos del historial (D185). Un disparador TEMPORAL (solo de esta
+    /// conexión: no se guarda en el archivo ni sobrevive a un corte) rellena `audit_log.origin` en
+    /// el mismo `INSERT` mientras haya un origen fijado con `set_audit_origin`. Así lo escriben
+    /// todas las funciones de auditoría, sin retocar filas después y sin repartir el origen por cada
+    /// sitio que audita.
+    fn install_audit_origin(&self) -> Result<()> {
+        self.conn.execute_batch(
+            "CREATE TEMP TABLE IF NOT EXISTS audit_origin (origin TEXT);
+             DELETE FROM temp.audit_origin;
+             INSERT INTO temp.audit_origin (origin) VALUES (NULL);
+             DROP TRIGGER IF EXISTS temp.audit_origin_stamp;
+             CREATE TEMP TRIGGER audit_origin_stamp AFTER INSERT ON main.audit_log
+             WHEN NEW.origin IS NULL AND (SELECT origin FROM temp.audit_origin) IS NOT NULL
+             BEGIN
+                 UPDATE main.audit_log
+                    SET origin = (SELECT origin FROM temp.audit_origin)
+                  WHERE id = NEW.id;
+             END;",
+        )?;
+        Ok(())
+    }
+
+    /// Fija (o con `None` quita) el origen que llevarán los eventos del historial que se escriban
+    /// a partir de ahora. Quien lo fija debe restablecerlo siempre al terminar.
+    pub fn set_audit_origin(&self, origin: Option<&str>) -> Result<()> {
+        self.conn
+            .execute("UPDATE temp.audit_origin SET origin = ?1", [origin])?;
+        Ok(())
     }
 
     fn migrate(&mut self, path: Option<&Path>) -> Result<()> {

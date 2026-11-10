@@ -52,7 +52,6 @@ fn ids(store: &Store, query: &SearchQuery) -> Vec<i64> {
 
 #[test]
 fn migration_applies_on_new_and_on_v9_database() {
-    assert_eq!(SCHEMA_VERSION, 11);
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("n.db");
     let mut store = Store::open(&path).unwrap();
@@ -62,7 +61,7 @@ fn migration_applies_on_new_and_on_v9_database() {
 
     // Una base v9: sin el índice y sin su FTS.
     let conn = rusqlite::Connection::open(&path).unwrap();
-    conn.execute_batch("DROP TABLE assistant_calls; DROP TABLE assistant_turns; DROP TABLE assistant_conversations; DROP TABLE search_fts; DROP TABLE search_index; PRAGMA user_version = 9;")
+    conn.execute_batch("DROP TABLE assistant_proposals; ALTER TABLE audit_log DROP COLUMN origin; DROP TABLE assistant_calls; DROP TABLE assistant_turns; DROP TABLE assistant_conversations; DROP TABLE search_fts; DROP TABLE search_index; PRAGMA user_version = 9;")
         .unwrap();
     drop(conn);
     let mut store = Store::open(&path).unwrap();

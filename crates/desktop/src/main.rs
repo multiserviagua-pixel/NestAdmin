@@ -20,6 +20,7 @@ use nestadmin_app::accounts::{
     AccountView, FetchReport, MailAccountsView, MailEnv, MailProviderKind,
 };
 use nestadmin_app::assistant::consent::{AssistantConsentView, AssistantPreview};
+use nestadmin_app::assistant::proposals::{ProposalCard, ProposalReceipt};
 use nestadmin_app::assistant::tools::ToolOutput;
 use nestadmin_app::assistant::{AssistantConversation, AssistantTurn, Progress};
 use nestadmin_app::initial_read::{
@@ -230,6 +231,73 @@ fn assistant_conversation(
     id: Option<i64>,
 ) -> CmdResult<Option<AssistantConversation>> {
     shared.app()?.assistant_conversation(id).map_err(text)
+}
+
+/// Las tarjetas de propuestas de una conversación con su estado actual (D185). Recalcula
+/// `stale` y `expired`. No ejecuta nada.
+#[tauri::command]
+fn assistant_proposals(
+    shared: State<'_, SharedState>,
+    conversation_id: i64,
+) -> CmdResult<Vec<ProposalCard>> {
+    shared.app()?.proposals(conversation_id).map_err(text)
+}
+
+/// Confirma una propuesta del asistente (D185): SOLO lo invoca el botón de la tarjeta y no figura
+/// entre las herramientas del asistente. Ejecuta el mismo método de `App` que la pantalla
+/// correspondiente, con origen `chat` en el historial; confirmar otra vez devuelve el recibo
+/// original. Ausente, `amounts_checked` equivale a «no confirmado» (D186). Consultar el correo
+/// puede tardar, así que se hace fuera del hilo de la ventana.
+#[tauri::command]
+async fn proposal_confirm<R: Runtime>(
+    shared: State<'_, SharedState>,
+    handle: AppHandle<R>,
+    id: i64,
+    amounts_checked: Option<bool>,
+) -> CmdResult<ProposalReceipt> {
+    let shared = Arc::clone(shared.inner());
+    let worker = Arc::clone(&shared);
+    let receipt = tauri::async_runtime::spawn_blocking(move || {
+        worker
+            .app()?
+            .proposal_confirm(id, amounts_checked.unwrap_or(false))
+            .map_err(self::text)
+    })
+    .await
+    .map_err(text)?;
+    // Como la pantalla de cuentas: el límite también se guarda en la configuración.
+    if let Ok(receipt) = &receipt {
+        if receipt.kind == "mail_limit" {
+            if let Some(limit) = receipt.result["limit"]
+                .as_u64()
+                .and_then(|l| usize::try_from(l).ok())
+            {
+                let mut settings = shared.settings.lock().map_err(text)?;
+                let updated = Settings {
+                    mail_limit: limit,
+                    ..settings.clone()
+                };
+                updated.save(&shared.data_dir).map_err(text)?;
+                *settings = updated;
+            }
+        }
+    }
+    // Una tarea que esperaba a esta (pipeline) puede empezar ya, sin esperar al sondeo.
+    shared.wake();
+    changed(&handle);
+    receipt
+}
+
+/// La persona descarta la tarjeta de una propuesta: ya no se puede confirmar (D185).
+#[tauri::command]
+fn proposal_dismiss<R: Runtime>(
+    shared: State<'_, SharedState>,
+    handle: AppHandle<R>,
+    id: i64,
+) -> CmdResult<ProposalCard> {
+    let card = shared.app()?.proposal_dismiss(id).map_err(text)?;
+    changed(&handle);
+    Ok(card)
 }
 
 /// Lo que se envió en las llamadas de un turno («Ver lo enviado»).
@@ -2906,6 +2974,9 @@ fn configure<R: Runtime>(builder: Builder<R>, prepare_only: bool) -> Builder<R> 
             assistant_conversation,
             assistant_sent,
             assistant_clear,
+            assistant_proposals,
+            proposal_confirm,
+            proposal_dismiss,
             assistant_consent,
             assistant_preview,
             grant_assistant_consent,

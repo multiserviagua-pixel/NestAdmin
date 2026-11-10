@@ -129,12 +129,7 @@ impl App {
         key: &str,
         route: &str,
     ) -> AppResult<PreferenceChange> {
-        let (scope, key, route) = parse(scope, key, route)?;
-        if scope == PreferenceScope::Domain && is_public_mail_domain(&key) {
-            return Err(AppError::Invalid(format!(
-                "{key} es un servicio de correo público: una preferencia por dominio abarcaría a cualquiera que lo use. Fíjela para una dirección concreta"
-            )));
-        }
+        let (scope, key, route) = validated(scope, key, route)?;
         let previous = self.store.set_sender_preference(scope, &key, route)?;
         let warnings = if route == PreferenceRoute::Informative {
             self.preference_warnings(scope, &key)?
@@ -190,6 +185,23 @@ fn unknown_scope() -> AppError {
 
 fn invalid_key() -> AppError {
     AppError::Invalid("la dirección o el dominio no es válido".into())
+}
+
+/// Valida una preferencia como la fija `set_sender_preference`: ámbito y ruta conocidos, clave
+/// normalizada y, por dominio, que no sea de un servicio de correo público. Sin efectos. La usa
+/// también el asistente al preparar la propuesta (D185).
+pub(crate) fn validated(
+    scope: &str,
+    key: &str,
+    route: &str,
+) -> AppResult<(PreferenceScope, String, PreferenceRoute)> {
+    let (scope, key, route) = parse(scope, key, route)?;
+    if scope == PreferenceScope::Domain && is_public_mail_domain(&key) {
+        return Err(AppError::Invalid(format!(
+            "{key} es un servicio de correo público: una preferencia por dominio abarcaría a cualquiera que lo use. Fíjela para una dirección concreta"
+        )));
+    }
+    Ok((scope, key, route))
 }
 
 fn parse(

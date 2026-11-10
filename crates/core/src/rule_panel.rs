@@ -11,7 +11,7 @@ use serde_json::Value;
 use crate::error::{CoreError, Result};
 use crate::rules::{
     audit_any_sender, current_rule, decide_active, insert_rule_version, insert_rule_version_noting,
-    is_archived, live_rule, DEACTIVATED_BY_EDIT,
+    is_archived, live_rule, DEACTIVATED_BY_ANY_SENDER, DEACTIVATED_BY_EDIT,
 };
 use crate::store::{now_ms, Store};
 use crate::Rule;
@@ -331,6 +331,47 @@ impl Store {
         audit_any_sender(&tx, &rule, acknowledge, reason)?;
         tx.commit()?;
         Ok(rule)
+    }
+
+    /// Como `set_any_sender_ack`, pero dar la validación avanzada a una regla ACTIVA que no la
+    /// tenía la deja inactiva en la misma transacción (D186c): `keep_active(anterior,
+    /// tenía_validación)` decide, con fallo cerrado. Retirarla no cambia el estado. La versión nueva
+    /// y la validación constan en el historial. Devuelve la regla y si quedó desactivada.
+    pub fn set_any_sender_ack_guarded(
+        &mut self,
+        id: &str,
+        acknowledge: bool,
+        reason: &str,
+        keep_active: &dyn Fn(&Rule, bool) -> bool,
+    ) -> Result<(Rule, bool)> {
+        let tx = self.conn.transaction()?;
+        let current = live_rule(&tx, id)?;
+        let (_, deactivated) = if acknowledge {
+            decide_active(&tx, &current, keep_active)?
+        } else {
+            (current.active, false)
+        };
+        tx.execute(
+            "INSERT INTO rule_meta (rule_id, allow_any_sender_ack_at) VALUES (?1, ?2)
+             ON CONFLICT(rule_id) DO UPDATE SET allow_any_sender_ack_at = excluded.allow_any_sender_ack_at",
+            params![id, acknowledge.then(now_ms)],
+        )?;
+        let rule = if deactivated {
+            insert_rule_version_noting(
+                &tx,
+                id,
+                current.version + 1,
+                &current.action_kind,
+                &current.conditions,
+                false,
+                Some(DEACTIVATED_BY_ANY_SENDER),
+            )?
+        } else {
+            current
+        };
+        audit_any_sender(&tx, &rule, acknowledge, reason)?;
+        tx.commit()?;
+        Ok((rule, deactivated))
     }
 
     /// Guarda una evaluación; `UNIQUE` la hace idempotente al reprocesar. Con la misma clave,

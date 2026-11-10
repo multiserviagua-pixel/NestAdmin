@@ -407,7 +407,9 @@ impl App {
     }
 
     /// Valida o retira la opción avanzada de una regla de envío sin remitente (D126). Queda
-    /// en el historial con su motivo. Sin la marca, la regla no automatiza.
+    /// en el historial con su motivo. Sin la marca, la regla no automatiza. Validarla en una
+    /// regla activa la deja inactiva en la misma operación (D186c) y la vista lo indica en
+    /// `deactivated_by_edit`.
     pub fn set_rule_any_sender(&mut self, id: &str, acknowledge: bool) -> AppResult<RuleView> {
         let rule = self
             .store
@@ -434,8 +436,16 @@ impl App {
         } else {
             "retirada la opción avanzada: la regla vuelve a exigir remitente"
         };
-        self.store.set_any_sender_ack(id, acknowledge, reason)?;
-        self.rule_view(id)
+        // Dar la validación a una regla ACTIVA amplía lo que hace sin revisión: queda inactiva en
+        // la misma operación (D186c), con el mismo criterio que una edición.
+        let (_, deactivated) =
+            self.store
+                .set_any_sender_ack_guarded(id, acknowledge, reason, &|old, old_ack| {
+                    edit_keeps_active(old, old_ack, &old.conditions, acknowledge)
+                })?;
+        let mut view = self.rule_view(id)?;
+        view.deactivated_by_edit = deactivated;
+        Ok(view)
     }
 
     /// Archiva una regla: queda inactiva y fuera de la lista, y su historial se conserva

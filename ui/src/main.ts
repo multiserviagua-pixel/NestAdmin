@@ -3092,16 +3092,20 @@ function rulePanel(r: RuleView): HTMLElement | null {
         type: "button",
         "data-focus-key": `rule:${r.id}:panel-go`,
         onclick: () =>
-          void act(
-            async () => {
-              await api.setRuleAnySender(r.id, true);
+          void (async () => {
+            try {
+              const saved = await api.setRuleAnySender(r.id, true);
               state.rulePanel = null;
               state.ruleSim = null;
-            },
-            r.active
-              ? "Opción avanzada validada. La regla está activa: ya contesta a cualquier remitente sin revisión. Queda en el historial y puede retirarla cuando quiera"
-              : "Opción avanzada validada. Cuando active la regla, contestará a cualquier remitente sin revisión. Queda en el historial y puede retirarla cuando quiera",
-          ),
+              // Validarla en una regla activa la deja inactiva (D186c): el mismo aviso que al editarla.
+              state.notice = saved.deactivated_by_edit
+                ? ruleSavedNotice(r.name, true, true)
+                : { kind: "ok", text: "Opción avanzada validada. Cuando active la regla, contestará a cualquier remitente sin revisión. Queda en el historial y puede retirarla cuando quiera" };
+              await refresh();
+            } catch (error) {
+              notify("error", error);
+            }
+          })(),
       },
       "Validar la opción avanzada",
     ) as HTMLButtonElement;
@@ -3112,7 +3116,7 @@ function rulePanel(r: RuleView): HTMLElement | null {
       h("h4", {}, "Contestar a cualquier remitente"),
       h("p", { class: "rule-sentence" }, `Enviar sin revisión la respuesta redactada por la IA a cualquier remitente cuando se clasifique como ${categoryLabel(r.conditions.category ?? "")}`),
       r.active
-        ? h("p", { class: "rule-problem", role: "alert" }, "Esta regla está activa: empezará a contestar en cuanto la valide.")
+        ? h("p", { class: "rule-problem", role: "alert" }, "Esta regla está activa: al validarla quedará inactiva y tendrá que activarla de nuevo.")
         : null,
       ackControls(
         () => r.conditions.category ?? "",

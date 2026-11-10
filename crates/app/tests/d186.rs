@@ -1,6 +1,7 @@
 //! D186: comprobaciones que pasan al fondo antes de exponer acciones al asistente. (a) `approve`
 //! rechaza una factura con importe dudoso sin la confirmación de importes; (c) editar una regla
-//! activa solo la deja activa si no amplía lo que haría sin revisión. Datos sintéticos.
+//! activa solo la deja activa si no amplía lo que haría sin revisión, y dar la validación de «cualquier
+//! remitente» (D126) a una regla activa la deja inactiva. Datos sintéticos.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -449,4 +450,83 @@ fn after_the_deactivation_a_task_that_the_rule_would_have_run_goes_to_review() {
     let task = app.process_next().unwrap().unwrap();
     assert_eq!(task.state, TaskState::AwaitingReview);
     assert_eq!(app.simulators().1.record_count().unwrap(), before + 1);
+}
+
+// ---- (c) Dar la validación avanzada de «cualquier remitente» (D126) a una regla activa ----
+
+/// Crea una regla de envío SIN remitente, activa y sin la validación avanzada (como las guardadas
+/// antes de D126): `create_rule_full` la rechaza sin ella, así que se crea con la validación, se
+/// retira y se activa. La retirada de la validación no la desactiva.
+fn active_send_rule_without_sender(app: &mut App, id: &str) {
+    active_send_rule(app, id, &json!({ "category": "solicitud_factura" }), true);
+    let view = app.set_rule_any_sender(id, false).unwrap();
+    assert!(
+        view.rule.active && !view.deactivated_by_edit,
+        "retirarla no desactiva"
+    );
+}
+
+#[test]
+fn validating_any_sender_on_an_active_send_rule_leaves_it_inactive_in_the_same_operation() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = open(&dir);
+    active_send_rule_without_sender(&mut app, "envio");
+    assert!(rule_view(&app, "envio").rule.active);
+    let version_before = rule_view(&app, "envio").rule.version;
+    let audit_before = app.audit_log().unwrap().len();
+
+    let view = app.set_rule_any_sender("envio", true).unwrap();
+    // La respuesta lo indica, la regla quedó inactiva y la validación consta.
+    assert!(view.deactivated_by_edit);
+    assert!(!view.rule.active);
+    assert!(view.any_sender_ack_at.is_some());
+    assert_eq!(view.rule.version, version_before + 1);
+    assert!(!rule_view(&app, "envio").rule.active, "también al releerla");
+
+    // Auditado: la versión inactiva y la validación, en la misma operación.
+    let log = app.audit_log().unwrap();
+    assert!(log[audit_before..].iter().any(|e| e.action == "rule"
+        && e.status == "inactive"
+        && e.detail
+            .as_deref()
+            .unwrap_or("")
+            .contains("desactivada al validar")));
+    assert!(log[audit_before..]
+        .iter()
+        .any(|e| e.action == "rule_any_sender" && e.status == "acknowledged"));
+
+    // Activarla de nuevo es un acto aparte.
+    assert!(app.set_rule_active("envio", true).unwrap().active);
+}
+
+#[test]
+fn validating_any_sender_never_touches_inactive_rules_and_withdrawing_never_deactivates() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = open(&dir);
+    // Una regla inactiva sigue como está y sin aviso.
+    app.create_rule_full(nestadmin_app::panel::NewRule {
+        id: Some("inactiva"),
+        name: None,
+        action_kind: "send_draft",
+        conditions: &json!({ "category": "solicitud_factura" }),
+        allow_any_sender: true,
+    })
+    .unwrap();
+    let version = rule_view(&app, "inactiva").rule.version;
+    let again = app.set_rule_any_sender("inactiva", true).unwrap();
+    assert!(!again.rule.active && !again.deactivated_by_edit);
+    assert_eq!(
+        again.rule.version, version,
+        "sin versión nueva si no estaba activa"
+    );
+
+    // Una regla activa que YA tenía la validación (la validada al activarla) no cambia al
+    // repetirla: no amplía nada.
+    app.set_rule_active("inactiva", true).unwrap();
+    let repeated = app.set_rule_any_sender("inactiva", true).unwrap();
+    assert!(repeated.rule.active && !repeated.deactivated_by_edit);
+    // Y retirarla estrecha: sigue activa (aunque ya no automatiza sin remitente).
+    let retired = app.set_rule_any_sender("inactiva", false).unwrap();
+    assert!(retired.rule.active && !retired.deactivated_by_edit);
+    assert!(retired.any_sender_ack_at.is_none());
 }

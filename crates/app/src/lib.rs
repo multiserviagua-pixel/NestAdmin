@@ -83,6 +83,10 @@ pub enum AppError {
     /// importes con el documento (D186).
     #[error("hay importes que no se leen sin duda: confirme antes los importes con el documento")]
     AmountAckRequired,
+    /// Una propuesta del asistente que no se puede confirmar (D185): `code` es `not_found`,
+    /// `expired`, `rejected` o `failed`. La versión cambiada usa `StaleVersion`.
+    #[error("{message}")]
+    Proposal { code: &'static str, message: String },
 }
 
 /// La interfaz recibe el error como texto; nunca contiene credenciales.

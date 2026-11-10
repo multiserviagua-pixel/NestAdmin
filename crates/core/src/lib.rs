@@ -9,6 +9,7 @@ pub mod error;
 pub mod mail_signals;
 pub mod pipeline;
 pub mod preferences;
+pub mod proposals;
 pub mod queue;
 pub mod rule_panel;
 pub mod rules;
@@ -29,6 +30,7 @@ pub use business_profile::{BusinessProfile, MAX_PROFILE_CHARS};
 pub use error::{CoreError, Result};
 pub use pipeline::{BlockingStep, NewStep, PipelineRun, PipelineStep, ATTACHMENT_REJECTED};
 pub use preferences::{normalize_key, PreferenceScope, SenderPreference};
+pub use proposals::{NewProposal, ProposalRow, CHAT_ORIGIN, PROPOSAL_KINDS};
 pub use queue::{Task, TaskError, TaskState};
 pub use rule_panel::{
     is_learned_origin, BatchApplied, BatchRule, EvaluationRecord, EvaluationRow, LearnedEvidence,

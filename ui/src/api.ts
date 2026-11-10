@@ -46,6 +46,8 @@ import type {
   SenderPreference,
   AssistantConsentView,
   AssistantConversation,
+  ProposalCard,
+  ProposalReceipt,
   AssistantPreview,
   AssistantProgress,
   AssistantSentCall,
@@ -162,6 +164,12 @@ export const api = {
   assistantSent: (turnId: number) => invoke<AssistantSentCall[]>("assistant_sent", { turnId }),
   /** Borra una conversación o, sin indicar, todas; devuelve cuántas. */
   assistantClear: (id: number | null) => invoke<number>("assistant_clear", { id }),
+  /** Tarjetas de propuestas de una conversación con su estado actual (E3, D185); recalcula `stale` y `expired`. No ejecuta nada. */
+  assistantProposals: (conversationId: number) => invoke<ProposalCard[]>("assistant_proposals", { conversationId }),
+  /** Confirma una propuesta: SOLO lo llama el botón de la tarjeta. `amountsChecked` es la casilla de importes dudosos (D186); confirmar otra vez devuelve el mismo recibo. */
+  proposalConfirm: (id: number, amountsChecked?: boolean) => invoke<ProposalReceipt>("proposal_confirm", { id, amountsChecked }),
+  /** La persona descarta la tarjeta: ya no se puede confirmar. */
+  proposalDismiss: (id: number) => invoke<ProposalCard>("proposal_dismiss", { id }),
   /** Estado del permiso para enviar datos fuera del equipo (D183). */
   assistantConsent: () => invoke<AssistantConsentView>("assistant_consent"),
   /** Texto literal de un envío de ejemplo y su destino; no llama al proveedor. */

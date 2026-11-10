@@ -415,6 +415,21 @@ impl App {
     /// Ejecuta una herramienta de nivel libre. Solo lee (o anota una navegación). Un fallo no es un
     /// error del turno: vuelve al modelo como `{"error": <código>}`.
     pub fn assistant_tool(&self, call: &ToolCall) -> ToolOutput {
+        // Las herramientas de nivel «propone» solo guardan una propuesta (D185); no ejecutan nada.
+        if call.name.starts_with("propose_") {
+            return self.tool_propose(&call.name, &call.args);
+        }
+        let out = self.assistant_read_tool(call);
+        // Las referencias devueltas valen, en esta conversación, para proponer una acción.
+        if let Ok(mut ctx) = self.assistant.turn.lock() {
+            if ctx.active {
+                ctx.known.extend(out.refs.iter().cloned());
+            }
+        }
+        out
+    }
+
+    fn assistant_read_tool(&self, call: &ToolCall) -> ToolOutput {
         let text = Text::new(call.external);
         let result = match call.name.as_str() {
             "search" => self.tool_search(&call.args, &text),
@@ -680,7 +695,8 @@ impl App {
             .collect();
         ToolOutput {
             value: json!({ "accounts": accounts }),
-            refs: Vec::new(),
+            // Las únicas cuentas sobre las que el asistente puede proponer un cambio.
+            refs: (1..=accounts.len()).map(|n| format!("acct:{n}")).collect(),
             navigate: None,
             withheld: 0,
         }
