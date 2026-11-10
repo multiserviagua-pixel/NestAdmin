@@ -2534,3 +2534,52 @@ tr.is-located > td {
   flex: 1;
   min-width: 0;
 }
+
+/* Asistente con IA (E2): acciones de la cabecera, progreso, texto plano, quién contestó y «Ver lo enviado». */
+.chat-head-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+}
+
+.chat-busy {
+  display: flex;
+  align-items: center;
+  gap: var(--s3);
+}
+
+.chat-text {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s2);
+}
+
+.chat-text p {
+  white-space: pre-wrap;
+}
+
+.chat-source {
+  font-style: normal;
+}
+
+.chat-sent {
+  gap: var(--s3);
+}
+
+.chat-sent h3,
+.chat-sent h4 {
+  margin: 0;
+}
+
+.chat-sent-call {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s1);
+  margin-bottom: var(--s3);
+}
+
+.chat-sent-text {
+  max-height: 320px;
+  user-select: text;
+  overflow-wrap: anywhere;
+}

@@ -316,8 +316,64 @@ import {
   isInformative,
   triageNotices,
 } from "./triage-text";
-import type { QuestionAnswer, SearchHit } from "./types";
+import type { AssistantConsentView, AssistantPreview, AssistantSentCall, AssistantStoredTurn, AssistantTurn, QuestionAnswer, SearchHit } from "./types";
 import {
+  ASSISTANT_ACCEPT,
+  ASSISTANT_ACTION_LABEL,
+  ASSISTANT_BUSY,
+  ASSISTANT_CANCEL,
+  ASSISTANT_CLEAR_ALL,
+  ASSISTANT_CLEAR_ALL_CONFIRM,
+  ASSISTANT_GRANT_OPEN,
+  ASSISTANT_INTRO,
+  ASSISTANT_LOADING,
+  ASSISTANT_OPTION,
+  ASSISTANT_PREVIEW_TITLE,
+  ASSISTANT_SAMPLE_LABEL,
+  ASSISTANT_TITLE,
+  ASSISTANT_WITHDRAW,
+  ASSISTANT_WITHOUT,
+  CANCELLED_TEXT,
+  CHAT_CANCEL,
+  CHAT_CANCELLING,
+  CLEAR_CONVERSATION,
+  CLEAR_CONVERSATION_CONFIRM,
+  CONSENT_REQUIRED_TEXT,
+  LOADING_PREVIOUS,
+  ASSISTANT_MAY_HEADING,
+  ASSISTANT_NEVER_HEADING,
+  NOT_CONFIGURED_TEXT,
+  SENT_BACK,
+  SENT_BUTTON,
+  SENT_INTRO,
+  SENT_LOADING,
+  SENT_NONE,
+  SENT_TITLE,
+  SETTINGS_BUTTON,
+  WORDS_BUTTON,
+  WORDS_INTRO,
+  assistantAuditText,
+  assistantCallErrorText,
+  assistantErrorText,
+  assistantLoadError,
+  canGrantConsent,
+  canWithdrawConsent,
+  clearedText,
+  consentStateText,
+  assistantDestinationText,
+  droppedCitationsText,
+  grantErrorText,
+  limitLines,
+  loadErrorText,
+  localFallbackLine,
+  navigateTarget,
+  navigatedText,
+  sentCallTitle,
+  sentCallWhere,
+  sentError,
+  textParagraphs,
+  whoAnswered,
+  withheldText,
   ASSISTANT_LABEL,
   CHAT_BUSY,
   CHAT_BUTTON,
@@ -424,6 +480,7 @@ const ACTION_LABEL: Record<string, string> = {
   rule_merge: "Unificación de reglas",
   sender_preference: "Preferencia de remitente",
   mail: "Correo",
+  ...ASSISTANT_ACTION_LABEL,
 };
 
 type View = "review" | "tasks" | "rules" | "history" | "mail" | "settings" | "setup";
@@ -466,7 +523,29 @@ const state = {
   focusAfterRender: null as string | null,
   // Chat (E1, D181): solo en memoria; las conversaciones no se guardan. Vive en su propio contenedor,
   // fuera del repintado de la aplicación, para que este no le quite lo escrito, el foco ni el desplazamiento.
-  chat: { open: false, input: "", busy: false, reindexing: false, turns: [] as ChatTurn[], cardNote: null as null | { key: string; text: string } },
+  chat: {
+    open: false,
+    input: "",
+    busy: false,
+    /** `assistant`: el asistente piensa (se puede cancelar); `words`: búsqueda por palabras. */
+    busyKind: "assistant" as "assistant" | "words",
+    cancelling: false,
+    reindexing: false,
+    turns: [] as ChatTurn[],
+    cardNote: null as null | { key: string; text: string },
+    // E2 (D188): conversación guardada en el equipo; se recupera la última al abrir por primera vez.
+    conversationId: null as number | null,
+    loaded: false,
+    loading: false,
+    // «Ver lo enviado»: vista del propio panel con «Volver»; guarda el desplazamiento al que volver.
+    sent: null as null | { turnId: number; calls: AssistantSentCall[] | null; error: string | null; scroll: number },
+  },
+  // Opción del asistente en Configuración (D183).
+  assistantConsent: null as AssistantConsentView | null,
+  assistantPreview: null as AssistantPreview | null,
+  assistantConfirming: false,
+  assistantBusy: false,
+  assistantError: null as string | null,
   // Filtro de la lista de pendientes por origen: "" (todo), "file" o el ID de una cuenta.
   originFilter: "",
   tasks: [] as Task[],
@@ -762,7 +841,7 @@ async function refresh(background = false) {
     let continuousError: string | null = null;
     // Solo con la vista Tareas abierta: los demás refrescos no piden las ejecuciones (D151).
     const pipelineLoad = state.view === "tasks" ? loadPipeline() : null;
-    const [tasks, preferences, rules, findings, suggestions, refinement, refinePreview, audit, settings, mail, read, profile, profilePreview, learningOverview, learnedBatch, continuous] = await Promise.all([
+    const [tasks, preferences, rules, findings, suggestions, refinement, refinePreview, audit, settings, mail, read, profile, profilePreview, learningOverview, learnedBatch, continuous, assistantConsent] = await Promise.all([
       api.tasks(),
       api.senderPreferences(),
       api.ruleViews(),
@@ -809,9 +888,11 @@ async function refresh(background = false) {
         continuousError = String(error);
         return null;
       }),
+      // E2 (D183): un fallo no tumba el resto; se conserva el último estado conocido.
+      api.assistantConsent().catch(() => state.assistantConsent),
     ]);
     await pipelineLoad;
-    Object.assign(state, { tasks, preferences, rules, findings, findingsError, suggestions, suggestionsError, refinement, refinePreview, refineError, audit, settings, mail, read, readError, profile, profilePreview, profileError, learningError, learnedBatch, learnedBatchError, continuous, continuousError });
+    Object.assign(state, { assistantConsent, tasks, preferences, rules, findings, findingsError, suggestions, suggestionsError, refinement, refinePreview, refineError, audit, settings, mail, read, readError, profile, profilePreview, profileError, learningError, learnedBatch, learnedBatchError, continuous, continuousError });
     await syncLearning(learningOverview?.accounts ?? null);
     // La oferta de la IA local necesita saber si está preparada: se comprueba al aparecer la espera.
     if (isProviderWait(settings?.ai_wait)) {
@@ -4331,7 +4412,7 @@ function historyView() {
               ACTION_LABEL[e.action] ?? e.action,
               auditStatusLabel(e.action, e.status),
               e.authorization ?? missing(),
-              h("div", { class: "detail-cell" }, (e.action === "sender_preference" ? preferenceAuditText(e.detail) : e.detail) ?? missing()),
+              h("div", { class: "detail-cell" }, (e.action === "sender_preference" ? preferenceAuditText(e.detail) : e.action.startsWith("assistant_") ? assistantAuditText(e.action, e.detail, e.status) : e.detail) ?? missing()),
             ]),
           )
         : emptyState("Ninguna entrada coincide con el filtro", "Pruebe con otra regla o quite el filtro.")
@@ -5963,9 +6044,179 @@ function settingsView() {
         ),
       ),
     ),
+    assistantSection(),
     profileSection(),
     h("section", { class: "section" }, sectionHeader("Datos locales"), h("p", { class: "mono" }, s.data_dir || missing())),
   );
+}
+
+// ---- Asistente del chat en Configuración (E2, D183) ----
+// El backend decide si el permiso vale; aquí solo se ve qué saldría, se autoriza con lo que se mostró y se retira.
+
+async function loadAssistantConsent() {
+  try {
+    state.assistantConsent = await api.assistantConsent();
+    state.assistantError = null;
+  } catch (error) {
+    state.assistantError = assistantLoadError(error);
+  }
+  render(true);
+}
+
+/** Carga la vista previa literal y abre el bloque de confirmación; no autoriza nada. */
+async function openAssistantPreview() {
+  if (state.assistantBusy) return;
+  state.assistantBusy = true;
+  state.assistantError = null;
+  render();
+  try {
+    const preview = await api.assistantPreview();
+    state.assistantPreview = preview;
+    state.assistantConsent = preview.consent;
+    state.assistantConfirming = true;
+    state.focusAfterRender = "assistant:confirm";
+  } catch (error) {
+    state.assistantError = String(error);
+  } finally {
+    state.assistantBusy = false;
+    render();
+  }
+}
+
+/** Autoriza con el proveedor, el modelo y el servidor que se mostraron; si el fondo lo rechaza, recarga la vista previa. */
+async function grantAssistant() {
+  const preview = state.assistantPreview;
+  if (!preview || state.assistantBusy) return;
+  state.assistantBusy = true;
+  state.assistantError = null;
+  render();
+  let ok = false;
+  try {
+    state.assistantConsent = await api.grantAssistantConsent(preview.provider.provider, preview.provider.model, preview.host ?? "");
+    state.assistantConfirming = false;
+    state.assistantPreview = null;
+    state.notice = { kind: "ok", text: "Envío del asistente autorizado" };
+    state.focusAfterRender = "assistant:withdraw";
+    ok = true;
+  } catch (error) {
+    state.assistantError = grantErrorText(error);
+    try {
+      const fresh = await api.assistantPreview();
+      state.assistantPreview = fresh;
+      state.assistantConsent = fresh.consent;
+    } catch {
+      state.assistantConfirming = false;
+      state.assistantPreview = null;
+    }
+    state.focusAfterRender = "assistant:confirm";
+  } finally {
+    state.assistantBusy = false;
+    if (ok) await refresh();
+    else render();
+  }
+}
+
+async function withdrawAssistant() {
+  if (state.assistantBusy) return;
+  state.assistantBusy = true;
+  state.assistantError = null;
+  render();
+  try {
+    state.assistantConsent = await api.withdrawAssistantConsent();
+    state.assistantConfirming = false;
+    state.assistantPreview = null;
+    state.notice = { kind: "ok", text: "Autorización del asistente retirada" };
+    state.focusAfterRender = "assistant:grant";
+  } catch (error) {
+    state.assistantError = String(error);
+  } finally {
+    state.assistantBusy = false;
+    await refresh();
+  }
+}
+
+/** «Borrar todas las conversaciones», con la confirmación en pantalla de las acciones destructivas. */
+async function clearAllConversations() {
+  if (state.assistantBusy) return;
+  if (!(await ask(ASSISTANT_CLEAR_ALL_CONFIRM))) return;
+  state.assistantBusy = true;
+  state.assistantError = null;
+  try {
+    const n = await api.assistantClear(null);
+    state.chat.conversationId = null;
+    state.chat.turns = [];
+    state.chat.sent = null;
+    state.chat.cardNote = null;
+    state.notice = { kind: "ok", text: clearedText(n) };
+    renderChat();
+  } catch (error) {
+    state.assistantError = String(error);
+  } finally {
+    state.assistantBusy = false;
+    await refresh();
+  }
+}
+
+function bulletList(label: string, items: string[]): HTMLElement {
+  return h("div", {}, h("p", {}, h("strong", {}, label)), h("ul", { "aria-label": label }, ...items.map((item) => h("li", {}, item))));
+}
+
+function assistantSection(): HTMLElement {
+  const c = state.assistantConsent;
+  const preview = state.assistantPreview;
+  const body: Child[] = [h("p", { class: "intro" }, ASSISTANT_INTRO)];
+  if (!c) {
+    body.push(state.assistantError ? h("div", { class: "notice error", role: "alert" }, h("span", {}, state.assistantError)) : h("p", {}, ASSISTANT_LOADING));
+  } else {
+    body.push(h("p", {}, h("strong", {}, ASSISTANT_OPTION)), h("p", { role: "status" }, consentStateText(c)));
+    if (c.state !== "not_needed") body.push(h("p", { class: "meta" }, ASSISTANT_WITHOUT));
+    if (state.assistantError) body.push(h("div", { class: "notice error", role: "alert" }, h("span", {}, state.assistantError)));
+    const buttons: Child[] = [];
+    if (canGrantConsent(c) && !state.assistantConfirming)
+      buttons.push(h("button", { type: "button", class: "primary", "data-focus-key": "assistant:grant", disabled: state.assistantBusy, onclick: () => void openAssistantPreview() }, ASSISTANT_GRANT_OPEN));
+    if (canWithdrawConsent(c))
+      buttons.push(h("button", { type: "button", "data-focus-key": "assistant:withdraw", disabled: state.assistantBusy, onclick: () => void withdrawAssistant() }, ASSISTANT_WITHDRAW));
+    if (buttons.length) body.push(h("div", { class: "buttons" }, ...buttons));
+    if (state.assistantConfirming && preview && canGrantConsent(c)) {
+      body.push(
+        h(
+          "div",
+          { class: "confirm", role: "group", "aria-label": ASSISTANT_PREVIEW_TITLE },
+          h("h4", { tabindex: "-1", "data-focus-key": "assistant:confirm" }, ASSISTANT_PREVIEW_TITLE),
+          h("p", {}, assistantDestinationText(preview.provider.provider, preview.provider.model, preview.host)),
+          h("p", { class: "meta" }, localFallbackLine(preview.local_fallback)),
+          h("p", {}, h("strong", {}, ASSISTANT_SAMPLE_LABEL)),
+          h("pre", { class: "mono block", tabindex: "0", "aria-label": ASSISTANT_SAMPLE_LABEL }, preview.sample),
+          bulletList(ASSISTANT_MAY_HEADING, preview.may_travel),
+          bulletList(ASSISTANT_NEVER_HEADING, preview.never_sent),
+          h("ul", { class: "meta", "aria-label": "Límites de cada envío" }, ...limitLines(preview.limits).map((line) => h("li", {}, line))),
+          h("p", {}, preview.notice),
+          h(
+            "div",
+            { class: "buttons" },
+            h("button", { type: "button", class: "primary", "data-focus-key": "assistant:accept", disabled: state.assistantBusy, onclick: () => void grantAssistant() }, ASSISTANT_ACCEPT),
+            h(
+              "button",
+              {
+                type: "button",
+                "data-focus-key": "assistant:cancel",
+                onclick: () => {
+                  state.assistantConfirming = false;
+                  state.assistantPreview = null;
+                  state.focusAfterRender = "assistant:grant";
+                  render();
+                },
+              },
+              ASSISTANT_CANCEL,
+            ),
+          ),
+        ),
+      );
+    }
+  }
+  body.push(h("div", { class: "buttons" }, h("button", { type: "button", class: "danger", "data-focus-key": "assistant:clear-all", disabled: state.assistantBusy, onclick: () => void clearAllConversations() }, ASSISTANT_CLEAR_ALL)));
+  // El botón del chat lleva aquí el foco y el desplazamiento mediante esta clave estable.
+  return h("section", { class: "section", tabindex: "-1", "data-focus-key": "settings:assistant", "aria-label": ASSISTANT_TITLE }, sectionHeader(ASSISTANT_TITLE), ...body);
 }
 
 /// Perfil del negocio (E6, D163): editor, vista previa literal y consentimiento. El backend valida
@@ -6500,15 +6751,90 @@ function setupView() {
   );
 }
 
-// ---- Chat (E1, D181) ----
-// Sin asistente con IA todavía, cada pregunta se contesta con una búsqueda por palabras hecha en este
-// equipo. Nada se busca mientras se escribe: solo al enviar. El panel no es modal y vive en su propio
-// contenedor (`#chat-root`), así que el repintado de la aplicación no lo toca.
+// ---- Chat (E1, D181) y asistente con IA (E2, D182-D184, D188) ----
+// Cada pregunta va al asistente (`assistant_turn`). Sin asistente utilizable, o si el asistente falla, el
+// chat contesta con una búsqueda por palabras hecha en este equipo. Nada se busca ni se envía mientras se
+// escribe: solo al enviar. Todo texto del modelo se pinta como texto plano. El panel no es modal y vive en
+// su propio contenedor (`#chat-root`), así que el repintado de la aplicación no lo toca.
+
+/** Una respuesta del asistente lista para pintar, venga de un turno recién hecho o de uno guardado. */
+interface AiView {
+  text: string;
+  outcome: AssistantTurn["outcome"];
+  citations: SearchHit[];
+  dropped: number;
+  withheld: number;
+  /** Vista a la que se ha llevado a la persona; solo en el turno recién hecho. */
+  navigated: string | null;
+  provider: string | null;
+  model: string | null;
+  local: boolean;
+  fallback: { from: string; reason: string } | null;
+  turnId: number | null;
+  /** Búsqueda por palabras de `consent_required` y `not_configured`. */
+  words: QuestionAnswer | null;
+  /** La pregunta, para ofrecer «Buscar por palabras» tras un error. */
+  question: string;
+}
 
 type ChatTurn =
   | { role: "user"; text: string }
   | { role: "assistant"; text: string; answer: QuestionAnswer }
+  | { role: "ai"; view: AiView }
   | { role: "info"; text: string; error?: boolean };
+
+/** El texto de una respuesta: la del modelo si hubo, y si no el motivo en palabras llanas. */
+function aiText(outcome: AssistantTurn["outcome"], answer: string, errorCode: string | null): string {
+  switch (outcome) {
+    case "answered":
+      return answer;
+    case "consent_required":
+      return CONSENT_REQUIRED_TEXT;
+    case "not_configured":
+      return NOT_CONFIGURED_TEXT;
+    case "cancelled":
+      return CANCELLED_TEXT;
+    default:
+      return assistantErrorText(errorCode);
+  }
+}
+
+function aiFromTurn(t: AssistantTurn, question: string, navigated: string | null): AiView {
+  return {
+    text: aiText(t.outcome, t.answer, t.error_code),
+    outcome: t.outcome,
+    citations: t.citations,
+    dropped: t.dropped_citations,
+    withheld: t.withheld,
+    navigated,
+    provider: t.provider,
+    model: t.model,
+    local: t.local,
+    fallback: t.fallback,
+    turnId: t.turn_id,
+    words: t.words,
+    question,
+  };
+}
+
+function aiFromStored(t: AssistantStoredTurn, question: string): AiView {
+  const outcome = t.outcome ?? "answered";
+  return {
+    text: aiText(outcome, t.text, null),
+    outcome,
+    citations: t.citations,
+    dropped: t.dropped_citations,
+    withheld: t.withheld,
+    navigated: null,
+    provider: t.provider,
+    model: t.model,
+    local: t.local,
+    fallback: t.fallback,
+    turnId: t.id,
+    words: null,
+    question,
+  };
+}
 
 const chatHost = (() => {
   const el = document.createElement("div");
@@ -6549,13 +6875,45 @@ function focusChatInput() {
 
 function openChat() {
   if (!chatAllowed() || confirmationOpen()) return;
-  if (state.chat.open) return focusChatInput();
+  if (state.chat.open) {
+    if (state.chat.sent) closeSent();
+    return focusChatInput();
+  }
   const active = document.activeElement as HTMLElement | null;
   const usable = active !== null && active !== document.body && root.contains(active);
   chatOpener = { el: usable ? active : null, key: usable ? (active.dataset.focusKey ?? null) : "chat:button" };
   state.chat.open = true;
   setChatExpanded();
-  renderChat({ focus: "chat:input" });
+  renderChat({ focus: "chat:input", end: true });
+  void loadLastConversation();
+}
+
+/** Primera apertura de la sesión: recupera la última conversación guardada en el equipo (D188). */
+async function loadLastConversation() {
+  const chat = state.chat;
+  if (chat.loaded) return;
+  chat.loaded = true;
+  chat.loading = true;
+  renderChat();
+  try {
+    const conversation = await api.assistantConversation(null);
+    // Si la persona ya ha empezado otra conversación mientras tanto, no se pisa.
+    if (conversation && chat.turns.length === 0) {
+      chat.conversationId = conversation.id;
+      let question = "";
+      for (const turn of conversation.turns) {
+        if (turn.role === "user") {
+          question = turn.text;
+          chat.turns.push({ role: "user", text: turn.text });
+        } else chat.turns.push({ role: "ai", view: aiFromStored(turn, question) });
+      }
+    }
+  } catch (error) {
+    chat.turns.push({ role: "info", text: loadErrorText(error), error: true });
+  } finally {
+    chat.loading = false;
+    renderChat({ end: true });
+  }
 }
 
 /** `restoreFocus` es falso cuando el cierre viene de un cambio de vista que ya reparte el foco. */
@@ -6571,16 +6929,16 @@ function closeChat(restoreFocus = true) {
 }
 
 /** Repinta solo el panel y conserva lo escrito, el foco y el desplazamiento (D138); `end` baja al último turno. */
-function renderChat(options: { focus?: string; end?: boolean } = {}) {
+function renderChat(options: { focus?: string; end?: boolean; scroll?: number } = {}) {
   if (!state.chat.open) return;
-  const scroll = chatHost.querySelector<HTMLElement>('[data-scroll-key="chat:turns"]')?.scrollTop ?? 0;
+  const scroll = chatHost.querySelector<HTMLElement>(".chat-turns")?.scrollTop ?? 0;
   const active = document.activeElement as HTMLElement | null;
   const inside = active !== null && chatHost.contains(active);
   const focusKey = options.focus ?? (inside ? (active.dataset.focusKey ?? null) : null);
   const selection = inside && active instanceof HTMLInputElement ? ([active.selectionStart, active.selectionEnd] as const) : null;
   chatHost.replaceChildren(chatPanel());
-  const list = chatHost.querySelector<HTMLElement>('[data-scroll-key="chat:turns"]');
-  if (list) list.scrollTop = options.end ? list.scrollHeight : scroll;
+  const list = chatHost.querySelector<HTMLElement>(".chat-turns");
+  if (list) list.scrollTop = options.end ? list.scrollHeight : (options.scroll ?? scroll);
   if (!focusKey) return;
   const target = chatField(focusKey);
   if (!target) return;
@@ -6591,24 +6949,128 @@ function renderChat(options: { focus?: string; end?: boolean } = {}) {
   }
 }
 
+/** Lleva la ventana a una vista de la lista cerrada del asistente; el chat sigue abierto y el foco no cambia. */
+function navigateFromChat(view: string) {
+  state.view = view as View;
+  state.notice = null;
+  state.taskLocate = null;
+  if (view === "settings") resetBlocks();
+  render();
+  if (view === "tasks") void loadPipeline().then(() => render(true));
+}
+
 async function sendChat() {
   const chat = state.chat;
   const text = chat.input.trim();
-  if (!text || chat.busy) return;
+  if (!text || chat.busy || chat.loading) return;
   chat.turns.push({ role: "user", text });
   chat.input = "";
   chat.busy = true;
+  chat.busyKind = "assistant";
+  chat.cancelling = false;
+  chat.cardNote = null;
+  chat.sent = null;
+  renderChat({ focus: "chat:input", end: true });
+  try {
+    const turn = await api.assistantTurn(chat.conversationId, text, state.view);
+    if (turn.conversation_id !== null) chat.conversationId = turn.conversation_id;
+    // Solo las vistas de la lista cerrada, y solo con una respuesta: nunca por un error o una cancelación.
+    const target = turn.outcome === "answered" ? navigateTarget(turn.navigate) : null;
+    chat.turns.push({ role: "ai", view: aiFromTurn(turn, text, target) });
+    if (target) navigateFromChat(target);
+  } catch (error) {
+    chat.turns.push({ role: "info", text: assistantCallErrorText(error), error: true });
+  } finally {
+    chat.busy = false;
+    chat.cancelling = false;
+    renderChat({ focus: "chat:input", end: true });
+  }
+}
+
+/** Pide parar el turno en curso; el turno termina con `cancelled` y no deja efectos. */
+async function cancelChat() {
+  const chat = state.chat;
+  if (!chat.busy || chat.busyKind !== "assistant" || chat.cancelling) return;
+  chat.cancelling = true;
+  renderChat();
+  try {
+    await api.assistantCancel();
+  } catch (error) {
+    chat.cancelling = false;
+    chat.turns.push({ role: "info", text: String(error), error: true });
+    renderChat({ end: true });
+  }
+}
+
+/** Búsqueda por palabras de la pregunta (D181): la oferta tras un error del asistente. */
+async function searchByWords(question: string) {
+  const chat = state.chat;
+  if (!question.trim() || chat.busy) return;
+  chat.busy = true;
+  chat.busyKind = "words";
   chat.cardNote = null;
   renderChat({ focus: "chat:input", end: true });
   try {
-    const answer = await api.searchQuestion(text);
+    const answer = await api.searchQuestion(question);
     chat.turns.push({ role: "assistant", text: answerText(answer.matched, answer.page.total, answer.terms, answer.kind), answer });
   } catch (error) {
     chat.turns.push({ role: "info", text: searchErrorText(error), error: true });
   } finally {
     chat.busy = false;
+    renderChat({ focus: "chat:input", end: true });
+  }
+}
+
+/** Borra la conversación abierta, con confirmación en pantalla (D188), y deja el panel vacío. */
+async function clearConversation() {
+  const chat = state.chat;
+  if (chat.busy || chat.conversationId === null) return;
+  if (!(await ask(CLEAR_CONVERSATION_CONFIRM))) return;
+  try {
+    await api.assistantClear(chat.conversationId);
+    chat.conversationId = null;
+    chat.turns = [];
+    chat.sent = null;
+    chat.cardNote = null;
+    renderChat({ focus: "chat:input" });
+  } catch (error) {
+    chat.turns.push({ role: "info", text: String(error), error: true });
     renderChat({ end: true });
   }
+}
+
+/** Abre «Ver lo enviado» de un turno dentro del panel. */
+async function openSent(turnId: number) {
+  const chat = state.chat;
+  const scroll = chatHost.querySelector<HTMLElement>(".chat-turns")?.scrollTop ?? 0;
+  chat.sent = { turnId, calls: null, error: null, scroll };
+  renderChat({ focus: "chat:sent:title", scroll: 0 });
+  try {
+    const calls = await api.assistantSent(turnId);
+    if (chat.sent?.turnId === turnId) chat.sent.calls = calls;
+  } catch (error) {
+    if (chat.sent?.turnId === turnId) chat.sent.error = sentError(error);
+  }
+  renderChat();
+}
+
+function closeSent() {
+  const sent = state.chat.sent;
+  if (!sent) return;
+  state.chat.sent = null;
+  renderChat({ focus: `chat:sent-open:${sent.turnId}`, scroll: sent.scroll });
+}
+
+/** De la respuesta de un turno sin permiso o sin IA a Configuración, con el foco y el desplazamiento en el bloque del asistente. */
+function goToAssistantSettings() {
+  state.view = "settings";
+  state.notice = null;
+  state.taskLocate = null;
+  resetBlocks();
+  state.focusAfterRender = "settings:assistant";
+  render();
+  root.querySelector('[data-focus-key="settings:assistant"]')?.scrollIntoView({ block: "start" });
+  if (!state.assistantConsent) void loadAssistantConsent();
 }
 
 async function retryFailedIndex() {
@@ -6713,18 +7175,18 @@ function chatCard(hit: SearchHit, key: string): HTMLElement {
   );
 }
 
-function chatTurn(turn: ChatTurn, index: number, last: boolean): HTMLElement {
-  if (turn.role === "user") return h("div", { class: "chat-turn user" }, h("span", { class: "chat-who" }, YOU_LABEL), h("p", {}, turn.text));
-  if (turn.role === "info")
-    return h("div", { class: `chat-turn assistant${turn.error ? " error" : ""}` }, h("span", { class: "chat-who" }, ASSISTANT_LABEL), h("p", { role: turn.error ? "alert" : undefined }, turn.text));
-  const { page } = turn.answer;
+/** Texto plano en párrafos: respeta los saltos de línea y no interpreta nada (sin HTML, imágenes ni enlaces activos). */
+function plainText(text: string, role?: string): HTMLElement {
+  return h("div", { class: "chat-text", role }, ...textParagraphs(text).map((line) => h("p", {}, line)));
+}
+
+/** Lo que cuelga de una búsqueda por palabras: aviso, tarjetas, recuentos y el reintento de lo que falló. */
+function wordsBlock(text: string, answer: QuestionAnswer, index: number, last: boolean): Array<HTMLElement | null> {
+  const { page } = answer;
   const counts = countLines(page);
   const shown = shownLine(page.results.length, page.total);
-  return h(
-    "div",
-    { class: "chat-turn assistant" },
-    h("span", { class: "chat-who" }, ASSISTANT_LABEL),
-    h("p", {}, turn.text),
+  return [
+    h("p", {}, text),
     h("p", { class: "chat-notice" }, SEARCH_NOTICE),
     page.results.length ? h("ul", { class: "chat-cards" }, ...page.results.map((hit) => chatCard(hit, `chat:card:${index}:${hit.task_id}`))) : null,
     shown ? h("p", { class: "meta" }, shown) : null,
@@ -6732,6 +7194,74 @@ function chatTurn(turn: ChatTurn, index: number, last: boolean): HTMLElement {
     page.failed > 0 && last
       ? h("button", { type: "button", "data-focus-key": "chat:reindex", disabled: state.chat.reindexing, onclick: () => void retryFailedIndex() }, state.chat.reindexing ? REINDEX_BUSY : REINDEX_BUTTON)
       : null,
+  ];
+}
+
+/** Respuesta del asistente (E2): texto plano, tarjetas de lo citado, quién contestó y notas de lo descartado o retenido. */
+function aiTurn(v: AiView, index: number, last: boolean): HTMLElement {
+  const answered = v.outcome === "answered";
+  const who = answered ? whoAnswered(v) : "";
+  const notes = answered ? [droppedCitationsText(v.dropped), withheldText(v.withheld)].filter((n): n is string => n !== null) : [];
+  const sendHint = v.outcome === "consent_required" || v.outcome === "not_configured";
+  return h(
+    "div",
+    { class: `chat-turn assistant${v.outcome === "error" ? " error" : ""}` },
+    h("span", { class: "chat-who" }, ASSISTANT_LABEL),
+    plainText(v.text, v.outcome === "error" ? "alert" : undefined),
+    v.navigated ? h("p", { class: "chat-notice", role: "status" }, navigatedText(v.navigated)) : null,
+    v.citations.length ? h("ul", { class: "chat-cards" }, ...v.citations.map((hit) => chatCard(hit, `chat:card:${index}:${hit.task_id}`))) : null,
+    who ? h("p", { class: "chat-notice chat-source" }, who) : null,
+    ...notes.map((note) => h("p", { class: "chat-notice" }, note)),
+    sendHint
+      ? h("div", { class: "buttons" }, h("button", { type: "button", "data-focus-key": `chat:settings:${index}`, onclick: goToAssistantSettings }, SETTINGS_BUTTON))
+      : null,
+    sendHint && v.words ? h("p", { class: "chat-notice" }, WORDS_INTRO) : null,
+    ...(sendHint && v.words ? wordsBlock(answerText(v.words.matched, v.words.page.total, v.words.terms, v.words.kind), v.words, index, last) : []),
+    v.outcome === "error" && last && v.question
+      ? h("div", { class: "buttons" }, h("button", { type: "button", "data-focus-key": "chat:words", disabled: state.chat.busy, onclick: () => void searchByWords(v.question) }, WORDS_BUTTON))
+      : null,
+    v.turnId !== null
+      ? h("div", { class: "buttons" }, h("button", { type: "button", class: "link", "data-focus-key": `chat:sent-open:${v.turnId}`, onclick: () => void openSent(v.turnId!) }, SENT_BUTTON))
+      : null,
+  );
+}
+
+function chatTurn(turn: ChatTurn, index: number, last: boolean): HTMLElement {
+  if (turn.role === "user") return h("div", { class: "chat-turn user" }, h("span", { class: "chat-who" }, YOU_LABEL), h("p", {}, turn.text));
+  if (turn.role === "info")
+    return h("div", { class: `chat-turn assistant${turn.error ? " error" : ""}` }, h("span", { class: "chat-who" }, ASSISTANT_LABEL), h("p", { role: turn.error ? "alert" : undefined }, turn.text));
+  if (turn.role === "ai") return aiTurn(turn.view, index, last);
+  return h("div", { class: "chat-turn assistant" }, h("span", { class: "chat-who" }, ASSISTANT_LABEL), ...wordsBlock(turn.text, turn.answer, index, last));
+}
+
+/** Vista del panel «Ver lo enviado» (D183): el texto literal de cada llamada, en un bloque seleccionable. */
+function sentView(): HTMLElement {
+  const sent = state.chat.sent!;
+  return h(
+    "div",
+    { class: "chat-turns chat-sent" },
+    h("div", { class: "buttons" }, h("button", { type: "button", "data-focus-key": "chat:sent:back", onclick: closeSent }, SENT_BACK)),
+    h("h3", { tabindex: "-1", "data-focus-key": "chat:sent:title" }, SENT_TITLE),
+    h("p", { class: "meta" }, SENT_INTRO),
+    sent.error
+      ? h("p", { class: "error-text", role: "alert" }, sent.error)
+      : sent.calls === null
+        ? h("p", { class: "meta", role: "status" }, SENT_LOADING)
+        : sent.calls.length === 0
+          ? h("p", { role: "status" }, SENT_NONE)
+          : h(
+              "div",
+              { class: "chat-sent-calls" },
+              ...sent.calls.map((call) =>
+                h(
+                  "section",
+                  { class: "chat-sent-call", "aria-label": sentCallTitle(call) },
+                  h("h4", {}, sentCallTitle(call)),
+                  h("p", { class: "meta" }, sentCallWhere(call)),
+                  h("pre", { class: "mono block chat-sent-text", tabindex: "0", "aria-label": `Texto enviado en la llamada ${call.step}` }, call.sent_text),
+                ),
+              ),
+            ),
   );
 }
 
@@ -6749,7 +7279,7 @@ function chatPanel(): HTMLElement {
     },
   }) as HTMLInputElement;
   input.value = chat.input;
-  const lastAnswer = chat.turns.map((t) => t.role).lastIndexOf("assistant");
+  const lastAnswer = chat.turns.map((t) => (t.role === "assistant" || t.role === "ai" ? "a" : t.role)).lastIndexOf("a");
   const list = chat.turns.length
     ? chat.turns.map((turn, i) => chatTurn(turn, i, i === lastAnswer))
     : [
@@ -6786,10 +7316,41 @@ function chatPanel(): HTMLElement {
   return h(
     "section",
     { id: "chat-panel", class: "chat-panel", role: "dialog", "aria-label": CHAT_LABEL },
-    h("div", { class: "chat-head" }, h("h2", {}, CHAT_TITLE), h("button", { type: "button", class: "close", "data-focus-key": "chat:close", "aria-label": CHAT_CLOSE, title: CHAT_CLOSE, onclick: () => closeChat() }, "×")),
-    h("div", { class: "chat-turns", "data-scroll-key": "chat:turns", "aria-live": "polite", "aria-busy": String(chat.busy) }, ...list, chat.busy ? h("p", { class: "meta", role: "status" }, CHAT_BUSY) : null),
-    // Un formulario: Intro en el cuadro y el botón «Preguntar» envían igual (una sola vía).
     h(
+      "div",
+      { class: "chat-head" },
+      h("h2", {}, CHAT_TITLE),
+      h(
+        "div",
+        { class: "chat-head-actions" },
+        chat.conversationId !== null && !chat.sent
+          ? h("button", { type: "button", "data-focus-key": "chat:clear", disabled: chat.busy, onclick: () => void clearConversation() }, CLEAR_CONVERSATION)
+          : null,
+        h("button", { type: "button", class: "close", "data-focus-key": "chat:close", "aria-label": CHAT_CLOSE, title: CHAT_CLOSE, onclick: () => closeChat() }, "×"),
+      ),
+    ),
+    chat.sent
+      ? sentView()
+      : h(
+          "div",
+          { class: "chat-turns", "data-scroll-key": "chat:turns", "aria-live": "polite", "aria-busy": String(chat.busy || chat.loading) },
+          ...list,
+          chat.loading ? h("p", { class: "meta", role: "status" }, LOADING_PREVIOUS) : null,
+          chat.busy
+            ? h(
+                "div",
+                { class: "chat-busy" },
+                h("span", { class: "meta", role: "status" }, chat.busyKind === "assistant" ? ASSISTANT_BUSY : CHAT_BUSY),
+                chat.busyKind === "assistant"
+                  ? h("button", { type: "button", "data-focus-key": "chat:cancel", disabled: chat.cancelling, onclick: () => void cancelChat() }, chat.cancelling ? CHAT_CANCELLING : CHAT_CANCEL)
+                  : null,
+              )
+            : null,
+        ),
+    // Un formulario: Intro en el cuadro y el botón «Preguntar» envían igual (una sola vía).
+    chat.sent
+      ? null
+      : h(
       "form",
       {
         class: "chat-form",
@@ -6799,7 +7360,7 @@ function chatPanel(): HTMLElement {
         },
       },
       h("label", { for: "chat-input", class: "chat-label" }, CHAT_INPUT_LABEL),
-      h("div", { class: "chat-row" }, input, h("button", { type: "submit", class: "primary", "data-focus-key": "chat:send", disabled: chat.busy }, CHAT_SEND)),
+      h("div", { class: "chat-row" }, input, h("button", { type: "submit", class: "primary", "data-focus-key": "chat:send", disabled: chat.busy || chat.loading }, CHAT_SEND)),
     ),
   );
 }

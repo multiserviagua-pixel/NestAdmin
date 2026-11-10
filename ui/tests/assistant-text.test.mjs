@@ -3,6 +3,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import * as T from "../src/assistant-text.ts";
+import { auditStatusLabel } from "../src/rules-text.ts";
 
 const hit = (over = {}) => ({
   kind: "invoice",
@@ -66,11 +67,11 @@ test("solo el tipo, sin palabras: dice que son las más recientes", () => {
   assert.equal(T.answerText("all", 1, [], "email"), "Este es el correo más reciente.");
 });
 
-test("el aviso fijo dice que no es la IA y no promete fecha ni activación", () => {
+test("el aviso fijo dice que no es la IA y ya no promete un asistente futuro", () => {
   assert.ok(T.SEARCH_NOTICE.includes("búsqueda por palabras hecha en este equipo"));
   assert.ok(T.SEARCH_NOTICE.includes("no una respuesta de la IA"));
-  assert.ok(T.SEARCH_NOTICE.includes("llegará en una versión posterior"));
-  assert.ok(!/activ|Configuración|\d{4}/.test(T.SEARCH_NOTICE));
+  assert.ok(!/versión posterior|llegará|próxim/i.test(T.SEARCH_NOTICE));
+  for (const text of Object.values(T).filter((v) => typeof v === "string")) assert.ok(!/versión posterior/i.test(text), text);
 });
 
 test("recuentos con singular y plural, y vacío si no hay nada", () => {
@@ -185,4 +186,174 @@ test("solo la tarjeta de una factura ofrece abrir el documento, y el error del f
   assert.equal(T.originalErrorText(new Error("x")), "Error: x");
   assert.equal(T.originalErrorText(""), "No se pudo abrir el documento.");
   assert.equal(T.originalErrorText(null), "No se pudo abrir el documento.");
+});
+
+// ---- E2: asistente con IA (D182-D184, D188). Todo inventado. ----
+
+const external = { provider: "ollama_cloud", model: "modelo-x", local: false, fallback: null };
+
+test("quién contestó: externo, local y respaldo", () => {
+  assert.equal(T.whoAnswered(external), "Respondió Ollama cloud · modelo-x");
+  assert.equal(T.whoAnswered({ ...external, provider: "ollama", local: true }), "Respondió la IA local de este equipo");
+  const fb = T.whoAnswered({ provider: "ollama", model: "m", local: true, fallback: { from: "ollama_cloud", reason: "timeout" } });
+  assert.ok(fb.includes("El proveedor externo (Ollama cloud) no respondió a tiempo"));
+  assert.ok(fb.includes("contestó la IA local de este equipo"));
+  assert.ok(T.whoAnswered({ provider: "ollama", model: "m", local: true, fallback: { from: "anthropic", reason: "otro" } }).includes("no respondió y contestó"));
+  assert.equal(T.whoAnswered({ provider: null, model: null, local: false, fallback: null }), "");
+});
+
+test("citas descartadas y fragmentos retenidos, en singular y plural", () => {
+  assert.equal(T.droppedCitationsText(0), null);
+  assert.equal(T.droppedCitationsText(1), "Se descartó 1 referencia que no venía de sus documentos.");
+  assert.equal(T.droppedCitationsText(3), "Se descartaron 3 referencias que no venían de sus documentos.");
+  assert.equal(T.withheldText(0), null);
+  assert.equal(T.withheldText(1), "1 fragmento no se envió a la IA por contener datos sensibles.");
+  assert.equal(T.withheldText(2), "2 fragmentos no se enviaron a la IA por contener datos sensibles.");
+});
+
+test("cada código de error tiene su mensaje y todos dicen que no se cambió nada", () => {
+  const codes = ["unauthorized", "timeout", "rate_limited", "no_credit", "model_unavailable", "request_rejected", "unavailable", "invalid_response"];
+  const seen = new Set();
+  for (const code of codes) {
+    const text = T.assistantErrorText(code);
+    assert.ok(text.endsWith(T.NOTHING_CHANGED), code);
+    seen.add(text);
+  }
+  assert.equal(seen.size, codes.length);
+  assert.ok(T.assistantErrorText("unauthorized").includes("clave"));
+  assert.ok(T.assistantErrorText("algo_raro").startsWith("El asistente no pudo contestar."));
+  assert.ok(T.assistantErrorText(null).endsWith(T.NOTHING_CHANGED));
+  assert.ok(T.assistantCallErrorText("sin red").includes("sin red"));
+  assert.ok(T.assistantCallErrorText("sin red").endsWith(T.NOTHING_CHANGED));
+  assert.ok(T.assistantCallErrorText("").endsWith(T.NOTHING_CHANGED));
+});
+
+test("sin permiso o sin IA el motivo dice cómo resolverlo", () => {
+  assert.ok(T.CONSENT_REQUIRED_TEXT.includes("Configuración"));
+  assert.ok(T.CONSENT_REQUIRED_TEXT.includes("no sale nada"));
+  assert.ok(T.NOT_CONFIGURED_TEXT.includes("Configuración"));
+  assert.equal(T.CANCELLED_TEXT, "Pregunta cancelada.");
+  assert.ok(T.WORDS_INTRO.includes("búsqueda por palabras"));
+});
+
+test("las vistas a las que se navega son solo las de la lista cerrada", () => {
+  for (const view of ["review", "tasks", "rules", "history", "mail", "settings"]) assert.equal(T.navigateTarget(view), view);
+  for (const view of ["setup", "wizard", "", null, undefined, "constructor", "__proto__", "toString"]) assert.equal(T.navigateTarget(view), null, String(view));
+  assert.equal(T.navigatedText("rules"), "Le he llevado a «Reglas». El chat sigue abierto.");
+});
+
+test("la respuesta se divide en párrafos sin interpretar nada", () => {
+  assert.deepEqual(T.textParagraphs("Uno\n\nDos  \r\nTres"), ["Uno", "Dos", "Tres"]);
+  assert.deepEqual(T.textParagraphs(""), []);
+  // Una URL, HTML o Markdown quedan tal cual: el pintado usa solo texto.
+  assert.deepEqual(T.textParagraphs("Vea https://ejemplo.test/x y <b>negrita</b> **no**"), ["Vea https://ejemplo.test/x y <b>negrita</b> **no**"]);
+});
+
+test("borrado de conversaciones: singular y plural", () => {
+  assert.equal(T.clearedText(0), "No había conversaciones que borrar.");
+  assert.equal(T.clearedText(1), "Se borró 1 conversación.");
+  assert.equal(T.clearedText(4), "Se borraron 4 conversaciones.");
+});
+
+test("«Ver lo enviado» dice dónde se guarda y qué ocurre sin llamadas", () => {
+  assert.ok(T.SENT_INTRO.includes("solo en este equipo"));
+  assert.ok(T.SENT_NONE.includes("no se envió nada"));
+  const call = { step: 2, provider: "ollama_cloud", model: "modelo-x", host: "ollama.test", local: false };
+  assert.equal(T.sentCallTitle(call), "Llamada 2: Ollama cloud · modelo-x");
+  assert.equal(T.sentCallWhere(call), "Servidor: ollama.test");
+  assert.ok(T.sentCallWhere({ ...call, local: true, host: "127.0.0.1" }).includes("no salió nada"));
+  assert.equal(T.sentCallWhere({ ...call, host: "" }), "Servicio externo");
+  assert.ok(T.sentError("x").includes("x"));
+  assert.equal(T.sentError(""), "No se pudo cargar lo enviado.");
+});
+
+test("estados del permiso del asistente y qué botones corresponden", () => {
+  const view = (state, over = {}) => ({ state, provider: "ollama_cloud", model: "modelo-x", host: "ollama.test", at: 1_700_000_000, ...over });
+  assert.ok(T.consentStateText(view("not_needed")).includes("local"));
+  assert.ok(T.consentStateText(view("missing")).startsWith("Desactivada"));
+  const granted = T.consentStateText(view("granted"));
+  assert.ok(granted.startsWith("Activada para Ollama cloud · modelo-x (servidor ollama.test), desde el "));
+  assert.ok(T.consentStateText(view("granted", { at: null, host: null })).endsWith("modelo-x."));
+  assert.ok(T.consentStateText(view("stale")).includes("han cambiado"));
+  assert.equal(T.canGrantConsent(view("missing")), true);
+  assert.equal(T.canGrantConsent(view("stale")), true);
+  assert.equal(T.canGrantConsent(view("granted")), false);
+  assert.equal(T.canGrantConsent(view("not_needed")), false);
+  assert.equal(T.canWithdrawConsent(view("granted")), true);
+  assert.equal(T.canWithdrawConsent(view("stale")), true);
+  assert.equal(T.canWithdrawConsent(view("missing")), false);
+  assert.equal(T.canWithdrawConsent(view("not_needed")), false);
+  assert.ok(T.ASSISTANT_WITHOUT.includes("IA local") && T.ASSISTANT_WITHOUT.includes("búsqueda por palabras"));
+  assert.equal(T.ASSISTANT_OPTION, "Permitir que el asistente envíe datos fuera de este equipo");
+});
+
+test("destino y límites de la vista previa, en frases", () => {
+  assert.equal(T.assistantDestinationText("anthropic", "modelo-y", "api.ejemplo.test"), "Destino: Claude · Anthropic · modelo-y · servidor api.ejemplo.test.");
+  assert.equal(T.assistantDestinationText("ollama_cloud", "m", null), "Destino: Ollama cloud · m.");
+  const lines = T.limitLines({ steps: 6, history_turns: 6, turn_chars: 2000, fragments: 8, fragment_chars: 600, data_chars: 12000 });
+  assert.deepEqual(lines, [
+    "Hasta 6 pasos por pregunta.",
+    "Como mucho los 6 últimos turnos de la conversación, de 2.000 caracteres cada uno.",
+    "Hasta 8 fragmentos de documentos de 600 caracteres cada uno, y 12.000 caracteres de datos en total por llamada.",
+  ]);
+  assert.ok(T.localFallbackLine(true).includes("una sola vez"));
+  assert.ok(T.localFallbackLine(false).includes("desactivado"));
+  assert.ok(T.grantErrorText("El destino cambió.").includes("vista previa"));
+  assert.ok(T.grantErrorText("").includes("vista previa"));
+});
+
+test("historial: etiquetas legibles y detalle sin texto de preguntas ni respuestas", () => {
+  assert.equal(T.ASSISTANT_ACTION_LABEL.assistant_turn, "Pregunta al asistente");
+  assert.equal(T.ASSISTANT_ACTION_LABEL.assistant_cleared, "Conversaciones del asistente borradas");
+  const states = { answered: "Respondida", fallback: "Respondida por la IA local (respaldo)", error: "Con error", cancelled: "Cancelada", consent_required: "Sin permiso para enviar datos", not_configured: "Sin IA preparada" };
+  for (const [status, label] of Object.entries(states)) assert.equal(auditStatusLabel("assistant_turn", status), label);
+  assert.equal(auditStatusLabel("assistant_cleared", "cleared"), "Borradas");
+  assert.equal(auditStatusLabel("assistant_turn", "otro"), "otro");
+  const detail = JSON.stringify({ steps: 2, tools: ["search", "aggregate"], provider: "ollama_cloud", model: "modelo-x", local: false, fallback: null, citations: 1, dropped_citations: 2, withheld: 1, error_code: null });
+  const text = T.assistantAuditText("assistant_turn", detail);
+  assert.ok(text.includes("2 pasos") && text.includes("buscar documentos, sumas y recuentos") && text.includes("Respondió Ollama cloud · modelo-x"));
+  assert.ok(text.includes("1 documento citado") && text.includes("2 referencias descartadas") && text.includes("1 fragmento retenido"));
+  const fb = T.assistantAuditText("assistant_turn", JSON.stringify({ steps: 1, tools: [], provider: "ollama", model: "m", local: true, fallback: "timeout", citations: 0, dropped_citations: 0, withheld: 0, error_code: null }));
+  assert.ok(fb.startsWith("1 paso ·"));
+  assert.ok(fb.includes("Sin herramientas") && fb.includes("contestó la IA local"));
+  const failed = T.assistantAuditText("assistant_turn", JSON.stringify({ steps: 0, tools: [], provider: "ollama_cloud", model: "m", local: false, fallback: null, citations: 0, dropped_citations: 0, withheld: 0, error_code: "no_credit" }));
+  assert.ok(failed.includes("Sin pasos con la IA") && failed.includes("no tiene crédito") && !failed.includes(T.NOTHING_CHANGED));
+  assert.ok(!T.assistantAuditText("assistant_turn", detail, "cancelled").includes("Respondió"));
+  assert.ok(T.assistantAuditText("assistant_turn", detail, "answered").includes("Respondió"));
+  assert.equal(T.assistantAuditText("assistant_cleared", JSON.stringify({ scope: "all", conversations: 3 })), "Todas las conversaciones. Se borraron 3 conversaciones.");
+  assert.equal(T.assistantAuditText("assistant_cleared", JSON.stringify({ scope: "one", conversations: 1 })), "Una conversación. Se borró 1 conversación.");
+  // Un detalle que no es JSON se ve tal cual; uno de otra acción no es suyo.
+  assert.equal(T.assistantAuditText("assistant_turn", "texto raro"), "texto raro");
+  assert.equal(T.assistantAuditText("rule", "{}"), null);
+  assert.equal(T.assistantAuditText("assistant_turn", null), null);
+});
+
+test("ningún texto nuevo contiene HTML", () => {
+  const view = { state: "granted", provider: "ollama_cloud", model: "m", host: "h.test", at: 1_700_000_000 };
+  const texts = [
+    T.whoAnswered(external),
+    T.whoAnswered({ provider: "ollama", model: "m", local: true, fallback: { from: "ollama_cloud", reason: "rate_limited" } }),
+    T.droppedCitationsText(2),
+    T.withheldText(2),
+    ...["unauthorized", "timeout", "rate_limited", "no_credit", "model_unavailable", "request_rejected", "unavailable", "invalid_response", "x"].map(T.assistantErrorText),
+    T.assistantCallErrorText("x"),
+    T.loadErrorText("x"),
+    T.navigatedText("settings"),
+    T.clearedText(2),
+    T.sentCallTitle({ step: 1, provider: "anthropic", model: "m", host: "h", local: false }),
+    T.sentCallWhere({ step: 1, provider: "ollama", model: "m", host: "", local: true }),
+    T.sentError("x"),
+    T.consentStateText(view),
+    T.consentStateText({ ...view, state: "stale" }),
+    T.consentStateText({ ...view, state: "missing" }),
+    T.assistantDestinationText("ollama_cloud", "m", "h.test"),
+    ...T.limitLines({ steps: 6, history_turns: 6, turn_chars: 2000, fragments: 8, fragment_chars: 600, data_chars: 12000 }),
+    T.localFallbackLine(true),
+    T.assistantLoadError("x"),
+    T.grantErrorText("x"),
+    ...Object.values(T.NAVIGABLE),
+    ...Object.values(T.ASSISTANT_ACTION_LABEL),
+    T.assistantAuditText("assistant_turn", JSON.stringify({ steps: 1, tools: ["search"], provider: "ollama_cloud", model: "m", local: false, fallback: null, citations: 1, dropped_citations: 1, withheld: 1, error_code: "timeout" })),
+  ];
+  for (const text of texts) assert.ok(!/[<>]|&\w+;/.test(text), text);
 });

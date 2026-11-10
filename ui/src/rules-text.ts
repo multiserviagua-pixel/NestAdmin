@@ -1380,10 +1380,22 @@ const RULE_AUDIT_STATUS: Record<string, string> = {
   changed: "Ajuste cambiado",
 };
 
+/** Estados de los eventos del asistente (D188): `assistant_turn` y `assistant_cleared`. */
+const ASSISTANT_AUDIT_STATUS: Record<string, string> = {
+  answered: "Respondida",
+  fallback: "Respondida por la IA local (respaldo)",
+  error: "Con error",
+  cancelled: "Cancelada",
+  consent_required: "Sin permiso para enviar datos",
+  not_configured: "Sin IA preparada",
+  cleared: "Borradas",
+};
+
 /** Estado en palabras de una entrada del historial que viene de una regla; el resto se deja tal cual. */
 export function auditStatusLabel(action: string, status: string): string {
   if (action === "mail" && status === "replied_outside") return "Tarea cerrada: ya estaba respondido fuera de NestAdmin";
   if (action === "sender_preference") return status === "set" ? "Fijada" : status === "removed" ? "Quitada" : status;
+  if (action === "assistant_turn" || action === "assistant_cleared") return ASSISTANT_AUDIT_STATUS[status] ?? status;
   return action.startsWith("rule") ? (RULE_AUDIT_STATUS[status] ?? status) : status;
 }
 
