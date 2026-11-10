@@ -45,3 +45,18 @@ No se envió ningún correo: 0 enviados y 0 borradores en el simulador, y 0 acci
 - El caso de dos correos del mismo hilo con un envío de NestAdmin entre medias (solo en las pruebas automáticas).
 - El interruptor en la aplicación real (comprobado en la vista previa del navegador con datos sintéticos).
 - El rodaje con un correo nuevo tras activar la regla.
+
+## Cuentas reales (solo recuentos)
+
+2026-11-10, misma versión, con la carpeta de pruebas habitual y las dos cuentas reales conectadas (una de Gmail y una de Outlook), con autorización expresa. Copia previa de la base: `nestadmin.antes-continuo.db` en esa carpeta.
+
+| Comprobación | Gmail | Outlook |
+|---|---|---|
+| Tareas de correo en revisión | 28 | 4 |
+| De ellas, con el dato del hilo (consultables) | 1 | 1 |
+| Pasada al abrir | 1 comprobado, 0 respuestas, 0 cerradas, sin error | 1 comprobado, 0 respuestas, 0 cerradas, sin error |
+| «Consultar correo» | sin mensajes nuevos | sin mensajes nuevos |
+
+La consulta de metadatos de Enviados respondió sin error en las dos cuentas reales (Gmail `format=metadata`, Graph `$select` sin cuerpo). Ninguna de las dos tareas consultables tenía respuesta propia posterior, así que no se cerró nada ni hubo evidencia nueva. No se envió nada y no se creó ni activó ninguna regla.
+
+**Límite:** las demás tareas reales se descargaron antes de que NestAdmin guardara el hilo del mensaje y el aprendizaje continuo no puede consultarlas; y no había correo nuevo. Falta ver con cuentas reales un cierre por respuesta hecha fuera, que exige un correo nuevo respondido desde Gmail u Outlook.
