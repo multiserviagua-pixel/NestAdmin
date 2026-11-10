@@ -135,6 +135,51 @@ impl Store {
         Ok(inserted)
     }
 
+    /// Guarda el hilo recuperado de una tarea de correo creada antes de que el resultado lo
+    /// llevara (D178): `message.thread_key` y `message.thread_recovered = true`, sin tocar nada
+    /// más del resultado ni el estado, en una transacción. Solo escribe si la tarea sigue en
+    /// `expected_state` con el mismo `updated_at` que al leerla y su mensaje aún no tiene hilo;
+    /// si no, devuelve `None`. No cambia `updated_at` (el hilo no es un cambio de la tarea que
+    /// deba invalidar otras comprobaciones) ni deja entrada en el Historial.
+    pub fn record_recovered_thread(
+        &mut self,
+        id: i64,
+        expected_state: TaskState,
+        expected_updated_at: i64,
+        thread_key: &str,
+    ) -> Result<Option<Task>> {
+        let thread_key = thread_key.trim();
+        if thread_key.is_empty() {
+            return Ok(None);
+        }
+        let tx = self.conn.transaction()?;
+        let current = crate::queue::load(&tx, id)?;
+        if current.state != expected_state || current.updated_at != expected_updated_at {
+            return Ok(None);
+        }
+        let Some(mut result) = current.result.clone() else {
+            return Ok(None);
+        };
+        let has_thread = result["message"]["thread_key"]
+            .as_str()
+            .is_some_and(|k| !k.trim().is_empty());
+        let Some(message) = result.get_mut("message").and_then(Value::as_object_mut) else {
+            return Ok(None);
+        };
+        if has_thread {
+            return Ok(None);
+        }
+        message.insert("thread_key".into(), json!(thread_key));
+        message.insert("thread_recovered".into(), json!(true));
+        tx.execute(
+            "UPDATE tasks SET result = ?2 WHERE id = ?1",
+            params![id, serde_json::to_string(&result)?],
+        )?;
+        let task = crate::queue::load(&tx, id)?;
+        tx.commit()?;
+        Ok(Some(task))
+    }
+
     /// Cierra sin enviar una tarea en revisión cuya respuesta se hizo fuera (D178): la pasa a
     /// `completed` con ese resultado, deja la entrada `mail` / `replied_outside` y, si se pide,
     /// inserta la fila `learned`, todo en una transacción. Solo si la tarea sigue en

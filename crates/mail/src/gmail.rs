@@ -505,6 +505,21 @@ impl MailProvider for Gmail {
         }
     }
 
+    /// `messages.get` con `format=minimal` y `fields=id,threadId` (D178): solo el hilo, sin
+    /// cabeceras, cuerpo ni `snippet`. Un 404 es `not_found`.
+    fn thread_of(&self, message_id: &str) -> MailResult<Option<String>> {
+        let message = self.get_message(
+            message_id,
+            &[("format", "minimal"), ("fields", "id,threadId")],
+        )?;
+        Ok(message
+            .get("threadId")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|t| !t.is_empty())
+            .map(str::to_owned))
+    }
+
     /// `threads.get` con `format=full` (D168): el único caso en que se lee el cuerpo de un
     /// mensaje propio del hilo. `gmail.modify` ya cubre la lectura; no hay scope nuevo. Un 404 es
     /// «no hay respuesta».

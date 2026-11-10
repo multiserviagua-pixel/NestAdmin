@@ -79,6 +79,11 @@ pub trait MailProvider {
     ) -> MailResult<Vec<OwnReplyMeta>> {
         Ok(Vec::new())
     }
+    /// Hilo de un mensaje recibido, solo con metadatos (D178). Un mensaje que ya no existe es
+    /// `not_found`. Por defecto, `Ok(None)` sin llamar a nadie.
+    fn thread_of(&self, _message_id: &str) -> MailResult<Option<String>> {
+        Ok(None)
+    }
     /// Cuerpo sin cita y nombre visible del remitente de un mensaje recibido (solo para
     /// aprender, D169). Por defecto, nada.
     fn received_extra(&self, _message_id: &str) -> MailResult<ReceivedExtra> {
@@ -266,6 +271,14 @@ impl<P: MailProvider> MailConnector for Mailbox<P> {
             return Ok(Vec::new());
         }
         self.provider.own_replies_meta(thread_key, after_id)
+    }
+
+    /// Solo lectura y solo metadatos. Un identificador vacío no llama al servicio.
+    fn thread_of(&self, message_id: &str) -> Result<Option<String>, ConnectorError> {
+        if message_id.trim().is_empty() {
+            return Ok(None);
+        }
+        self.provider.thread_of(message_id)
     }
 
     /// Solo lectura. Un identificador vacío no llama al servicio.

@@ -190,6 +190,16 @@ fn env(messages: Vec<Message>) -> Env {
     let mut e = open_env(ProviderKind::OllamaCloud, messages);
     e.app.fetch_mail().unwrap();
     process_all(&mut e.app);
+    // El simulador trae además su correo de muestra sin fecha ni hilo (M-0003): con la fecha de
+    // hoy y sin hilo sería candidato de la recuperación (D178) y ensuciaría los recuentos. Se
+    // lo fecha fuera de la ventana, como los demás de muestra.
+    e.sql()
+        .execute(
+            "UPDATE tasks SET result = json_set(result, '$.message.date', '2026-10-03T09:00:00Z')
+             WHERE json_extract(result, '$.message.id') = 'simulador:M-0003'",
+            [],
+        )
+        .unwrap();
     e
 }
 
@@ -1255,4 +1265,333 @@ fn the_first_load_and_the_continuous_learning_write_the_same_source_in_the_signa
     }
     assert_eq!(all[0].1, format!("{prefix}simulador:m1"));
     assert_eq!(all[1].1, format!("{prefix}simulador:m2"));
+}
+
+// ---- T34c: tareas sin hilo (D178) ----
+
+impl Env {
+    /// Deja la tarea del correo `i` como las creadas antes de que se guardara el hilo: sin
+    /// `message.thread_key` (misma fila, mismo estado y mismo `updated_at`).
+    fn strip_thread(&self, i: usize) {
+        let changed = self
+            .sql()
+            .execute(
+                "UPDATE tasks SET result = json_remove(result, '$.message.thread_key') WHERE id = ?1",
+                [self.task(i).id],
+            )
+            .unwrap();
+        assert_eq!(changed, 1);
+        assert!(self.task(i).result.unwrap()["message"]
+            .get("thread_key")
+            .is_none());
+    }
+
+    fn thread_calls(&self) -> Vec<String> {
+        self.sim().thread_of_lookups()
+    }
+}
+
+fn thread_of_task(task: &Task) -> (Option<String>, Option<bool>) {
+    let message = &task.result.as_ref().unwrap()["message"];
+    (
+        message["thread_key"].as_str().map(str::to_owned),
+        message["thread_recovered"].as_bool(),
+    )
+}
+
+#[test]
+fn a_task_without_thread_recovers_it_and_is_then_closed_like_any_other_with_evidence() {
+    let mut e = env(vec![
+        incoming(1, &sender_of(1), "Necesito la factura."),
+        incoming(2, &sender_of(2), "Necesito otra factura."),
+        incoming(3, &sender_of(3), "Necesito la tercera."),
+    ]);
+    // 1 en revisión y 2 archivada, ambas sin hilo; 3 con hilo.
+    e.app.archive(e.task(2).id).unwrap();
+    e.strip_thread(1);
+    e.strip_thread(2);
+    for i in 1..=3 {
+        e.reply(i);
+    }
+    let sends = e.sends();
+    let calls = e.spy.calls.load(Ordering::SeqCst);
+
+    assert_eq!(e.pass(), ContinuousStep::Changed);
+
+    // Una sola consulta de hilo por tarea sin hilo; la que ya lo tenía no pregunta.
+    let mut asked = e.thread_calls();
+    asked.sort();
+    assert_eq!(asked, ["m1", "m2"]);
+    let task1 = e.task(1);
+    assert!(is_closed_outside(&task1), "{task1:?}");
+    assert_eq!(thread_of_task(&task1), (Some("t1".into()), Some(true)));
+    assert_eq!(
+        task1.result.as_ref().unwrap()["closed"],
+        json!({ "reason": "replied_outside", "replied_at": at(2, 12) })
+    );
+    // La archivada recupera su hilo y da evidencia, como cualquier otra.
+    let task2 = e.task(2);
+    assert_eq!(thread_of_task(&task2), (Some("t2".into()), Some(true)));
+    assert!(!is_closed_outside(&task2));
+    assert!(is_closed_outside(&e.task(3)));
+    assert_eq!(thread_of_task(&e.task(3)), (Some("t3".into()), None));
+    let source = e.app.account_read_source(ACCOUNT).unwrap();
+    let mut keys: Vec<String> = e.learned().into_iter().map(|(_, k)| k).collect();
+    keys.sort();
+    assert_eq!(
+        keys,
+        (1..=3)
+            .map(|i| format!("learned|{source}|simulador:m{i}"))
+            .collect::<Vec<_>>()
+    );
+    // Solo metadatos, sin IA y sin envíos.
+    assert_eq!(e.sim().sent_body_lookups(), 0);
+    assert_eq!(e.spy.calls.load(Ordering::SeqCst), calls);
+    assert_eq!(e.sends(), sends);
+
+    // La segunda pasada no vuelve a pedir ningún hilo ni duplica nada.
+    let learned = e.learned();
+    e.pass();
+    assert_eq!(e.thread_calls().len(), 2);
+    assert_eq!(e.learned(), learned);
+}
+
+#[test]
+fn without_a_reply_the_recovered_thread_is_kept_and_the_task_stays_in_review() {
+    let mut e = env(vec![
+        incoming(1, &sender_of(1), "Necesito la factura."),
+        incoming(2, &sender_of(2), "Necesito otra factura."),
+    ]);
+    e.strip_thread(1);
+    e.strip_thread(2);
+    // Respuesta a un tercero en el hilo 1: tampoco cuenta.
+    e.reply_to(1, &["otra-persona@empresa.test"], "Reenvío interno.");
+    let updated: Vec<i64> = (1..=2).map(|i| e.task(i).updated_at).collect();
+
+    assert_ne!(e.pass(), ContinuousStep::Changed);
+
+    for i in 1..=2 {
+        let task = e.task(i);
+        assert_eq!(task.state, TaskState::AwaitingReview);
+        assert!(closed_reason(&task).is_none());
+        assert_eq!(
+            thread_of_task(&task),
+            (Some(format!("t{i}")), Some(true)),
+            "tarea {i}"
+        );
+        // El resto del resultado no cambia y la tarea no parece tocada.
+        assert_eq!(task.updated_at, updated[i - 1]);
+        assert_eq!(task.result.as_ref().unwrap()["needs_reply"], json!(true));
+    }
+    assert!(e.learned().is_empty());
+    assert_eq!(e.thread_calls().len(), 2);
+    // Ya con hilo: la pasada siguiente solo consulta Enviados.
+    let sent_before = e.lookups().len();
+    e.pass();
+    assert_eq!(e.thread_calls().len(), 2);
+    assert_eq!(e.lookups().len(), sent_before + 2);
+}
+
+#[test]
+fn a_message_that_is_gone_is_noted_and_not_asked_again_while_other_errors_follow_the_pass_rules() {
+    let mut e = env(vec![
+        incoming(1, &sender_of(1), "Necesito la factura."),
+        incoming(2, &sender_of(2), "Necesito otra factura."),
+        incoming(3, &sender_of(3), "Necesito la tercera."),
+    ]);
+    for i in 1..=3 {
+        e.strip_thread(i);
+        e.reply(i);
+    }
+    e.sim().set_thread_of_error("m1", Some("not_found"));
+    e.sim().set_thread_of_error("m2", Some("invalid_input"));
+
+    // `not_found` e `invalid_input` saltan su tarea; la tercera sigue.
+    assert_eq!(e.pass(), ContinuousStep::Changed);
+    assert!(is_closed_outside(&e.task(3)));
+    for i in 1..=2 {
+        assert_eq!(e.task(i).state, TaskState::AwaitingReview);
+        assert!(e.task(i).result.unwrap()["message"]
+            .get("thread_key")
+            .is_none());
+    }
+    let mut asked = e.thread_calls();
+    asked.sort();
+    assert_eq!(asked, ["m1", "m2", "m3"]);
+    assert!(e.app.continuous_learning_overview().unwrap().mailboxes[0]
+        .last_error
+        .is_none());
+
+    // Siguiente pasada: el mensaje que no existe no se pide más; el de `invalid_input` sí.
+    e.pass();
+    let mut again = e.thread_calls();
+    again.sort();
+    assert_eq!(again, ["m1", "m2", "m2", "m3"]);
+    // Aunque el mensaje vuelva a existir, en esta sesión no se insiste.
+    e.sim().set_thread_of_error("m1", None);
+    e.sim().set_thread_of_error("m2", None);
+    e.pass();
+    assert!(!e.thread_calls().iter().skip(4).any(|m| m == "m1"));
+    assert_eq!(thread_of_task(&e.task(2)).0.as_deref(), Some("t2"));
+    assert!(is_closed_outside(&e.task(2)));
+    assert_eq!(e.task(1).state, TaskState::AwaitingReview);
+
+    // Un fallo de red, de límite o de credenciales detiene la pasada sin escribir nada.
+    let mut e = env(vec![
+        incoming(1, &sender_of(1), "Necesito la factura."),
+        incoming(2, &sender_of(2), "Necesito otra factura."),
+    ]);
+    for i in 1..=2 {
+        e.strip_thread(i);
+        e.reply(i);
+    }
+    for (mode, code) in [
+        (FailureMode::Unavailable, "unavailable"),
+        (FailureMode::Unauthorized, "unauthorized"),
+    ] {
+        e.sim().set_sent_failure(Some(mode));
+        let before = e.thread_calls().len();
+        e.pass();
+        assert_eq!(e.thread_calls().len(), before + 1, "{code}: se detiene");
+        assert!(e.task(1).result.unwrap()["message"]
+            .get("thread_key")
+            .is_none());
+        assert_eq!(e.task(2).state, TaskState::AwaitingReview);
+        let overview = e.app.continuous_learning_overview().unwrap();
+        assert_eq!(overview.mailboxes[0].last_error.as_deref(), Some(code));
+    }
+    e.sim().set_sent_failure(None);
+    assert_eq!(e.pass(), ContinuousStep::Changed);
+    assert!(is_closed_outside(&e.task(1)) && is_closed_outside(&e.task(2)));
+}
+
+#[test]
+fn a_task_that_changes_after_planning_is_neither_asked_for_its_thread_nor_written() {
+    let mut e = env(vec![
+        incoming(1, &sender_of(1), "Necesito la factura."),
+        incoming(2, &sender_of(2), "Necesito otra factura."),
+    ]);
+    for i in 1..=2 {
+        e.strip_thread(i);
+        e.reply(i);
+    }
+    assert_eq!(e.app.begin_continuous_pass(ACCOUNT).unwrap(), 2);
+    // La persona archiva la 1 antes de que llegue su paso.
+    e.app.archive(e.task(1).id).unwrap();
+    while e.app.step_continuous_pass(ACCOUNT).unwrap() != ContinuousStep::Idle {}
+
+    assert_eq!(e.thread_calls(), ["m2"], "la cambiada no se consulta");
+    let archived = e.task(1);
+    assert!(archived.result.as_ref().unwrap()["message"]
+        .get("thread_key")
+        .is_none());
+    assert!(closed_reason(&archived).is_none());
+    assert!(is_closed_outside(&e.task(2)));
+}
+
+#[test]
+fn a_nestadmin_send_in_the_recovered_thread_still_blocks_the_task() {
+    // Dos correos del mismo hilo: NestAdmin responde al 1 y el 2 (sin hilo guardado) no se cierra
+    // con la respuesta que se vería en Enviados.
+    let mut first = incoming(1, &sender_of(1), "Necesito la factura.");
+    first.thread_key = Some("tx".into());
+    let mut second = incoming(2, &sender_of(2), "Otra consulta más.");
+    second.thread_key = Some("tx".into());
+    let mut e = env(vec![first, second]);
+    e.app.approve(e.task(1).id, 1).unwrap();
+    e.strip_thread(2);
+    e.sim()
+        .add_sent_message(SentMessage {
+            id: "s2".into(),
+            thread_key: "tx".into(),
+            date: Some(at(2, 12)),
+            body: None,
+            to: vec![sender_of(2)],
+        })
+        .unwrap();
+
+    assert_ne!(e.pass(), ContinuousStep::Changed);
+
+    let task = e.task(2);
+    assert_eq!(task.state, TaskState::AwaitingReview);
+    assert_eq!(thread_of_task(&task), (Some("tx".into()), Some(true)));
+    assert!(closed_reason(&task).is_none());
+    assert!(e.lookups().is_empty(), "no se consultó Enviados");
+    assert!(e.learned().is_empty());
+}
+
+#[test]
+fn the_cap_of_25_counts_the_recoveries_and_the_with_thread_ones_go_first() {
+    // 20 con hilo y 10 sin él, todas respondidas.
+    let total = 30;
+    let mut e = env((1..=total)
+        .map(|i| incoming(i, &sender_of(i), "Necesito la factura."))
+        .collect());
+    for i in 21..=total {
+        e.strip_thread(i);
+    }
+    for i in 1..=total {
+        e.reply(i);
+    }
+    e.pass();
+    let threads = e.thread_calls().len();
+    let sent = e.lookups().len();
+    // Las 20 con hilo, después las sin hilo hasta agotar las 25 consultas del buzón.
+    assert_eq!(threads + sent, CONTINUOUS_MAX_PER_PASS);
+    assert_eq!((threads, sent), (3, 22));
+    for i in 1..=20 {
+        assert!(is_closed_outside(&e.task(i)), "{i}");
+    }
+    // Las recuperadas sin presupuesto para comprobarse guardan su hilo y siguen en revisión.
+    assert!(is_closed_outside(&e.task(21)) && is_closed_outside(&e.task(22)));
+    assert_eq!(
+        thread_of_task(&e.task(23)),
+        (Some("t23".into()), Some(true))
+    );
+    assert_eq!(e.task(23).state, TaskState::AwaitingReview);
+    assert!(e.task(24).result.unwrap()["message"]
+        .get("thread_key")
+        .is_none());
+
+    // Todo sin hilo: cada tarea cuesta dos consultas (el hilo y Enviados), así que una pasada
+    // da para 12 completas y la recuperación de la 13.ª; esa guarda su hilo y espera.
+    let mut e = env((1..=total)
+        .map(|i| incoming(i, &sender_of(i), "Necesito la factura."))
+        .collect());
+    for i in 1..=total {
+        e.strip_thread(i);
+        e.reply(i);
+    }
+    e.pass();
+    assert_eq!((e.thread_calls().len(), e.lookups().len()), (13, 12));
+    assert_eq!(
+        thread_of_task(&e.task(13)),
+        (Some("t13".into()), Some(true))
+    );
+    assert_eq!(e.task(13).state, TaskState::AwaitingReview);
+    assert!((1..=12).all(|i| is_closed_outside(&e.task(i))));
+    // La siguiente empieza por la 13.ª, que ya tiene hilo y no lo pide otra vez.
+    e.pass();
+    assert_eq!(e.lookups()[12], ("t13".to_owned(), "m13".to_owned()));
+    assert_eq!(e.thread_calls().len() + e.lookups().len(), 2 * 25);
+}
+
+#[test]
+fn tasks_with_thread_go_first_then_review_without_it_then_archived() {
+    let mut e = env(vec![
+        incoming(1, &sender_of(1), "Necesito la factura."),
+        incoming(2, &sender_of(2), "Necesito otra factura."),
+        incoming(3, &sender_of(3), "Necesito la tercera."),
+    ]);
+    e.app.archive(e.task(1).id).unwrap();
+    e.strip_thread(1);
+    e.strip_thread(2);
+    for i in 1..=3 {
+        e.reply(i);
+    }
+    e.pass();
+    // Revisión con hilo (3), revisión sin hilo (2), archivada (1).
+    assert_eq!(e.thread_calls(), ["m2", "m1"]);
+    let order: Vec<String> = e.lookups().into_iter().map(|(t, _)| t).collect();
+    assert_eq!(order, ["t3", "t2", "t1"]);
 }

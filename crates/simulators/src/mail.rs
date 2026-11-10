@@ -223,6 +223,10 @@ struct ThreadStates {
     body_lookups: usize,
     /// Error propio de un hilo (por ejemplo `invalid_input`) en las consultas de metadatos.
     sent_thread_errors: HashMap<String, String>,
+    /// Consultas del hilo de un mensaje (`thread_of`, D178): id del mensaje, nunca contenido.
+    thread_of_lookups: Vec<String>,
+    /// Error propio de un mensaje (por ejemplo `not_found`) en `thread_of`.
+    thread_of_errors: HashMap<String, String>,
 }
 
 const DEFAULT_PAGE_SIZE: usize = 20;
@@ -308,6 +312,26 @@ impl MailSimulator {
                 .insert(thread_key.to_owned(), code.to_owned()),
             None => threads.sent_thread_errors.remove(thread_key),
         };
+    }
+
+    /// Para pruebas: la consulta del hilo (`thread_of`) de ese mensaje falla con ese código.
+    pub fn set_thread_of_error(&self, message_id: &str, code: Option<&str>) {
+        let mut threads = self.threads.lock().expect("mutex");
+        match code {
+            Some(code) => threads
+                .thread_of_errors
+                .insert(message_id.to_owned(), code.to_owned()),
+            None => threads.thread_of_errors.remove(message_id),
+        };
+    }
+
+    /// Consultas del hilo de un mensaje hasta ahora (espía: solo ids, nunca contenido).
+    pub fn thread_of_lookups(&self) -> Vec<String> {
+        self.threads
+            .lock()
+            .expect("mutex")
+            .thread_of_lookups
+            .clone()
     }
 
     /// Consultas a Enviados que entregaron el cuerpo de una respuesta propia (la de la primera
@@ -513,6 +537,34 @@ impl MailConnector for MailSimulator {
                     body: r.body.clone(),
                     to: r.to.clone(),
                 }))
+        })
+    }
+
+    /// El `thread_key` del mensaje, si lo tiene (D178). Sin cuerpo. Admite el fallo forzado de
+    /// Enviados y un error propio por mensaje; un mensaje desconocido es `not_found`.
+    fn thread_of(&self, message_id: &str) -> SimResult<Option<String>> {
+        {
+            let mut threads = self.threads.lock().expect("mutex");
+            threads.thread_of_lookups.push(message_id.to_owned());
+            if let Some(mode) = threads.sent_failure {
+                return Err(error(mode.code(), "fallo simulado al consultar el hilo"));
+            }
+            if let Some(code) = threads.thread_of_errors.get(message_id) {
+                return Err(error(code, "fallo simulado propio de este mensaje"));
+            }
+        }
+        self.state.read(|s| {
+            s.messages
+                .iter()
+                .find(|m| m.id == message_id)
+                .map(|m| {
+                    m.thread_key
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|k| !k.is_empty())
+                        .map(str::to_owned)
+                })
+                .ok_or_else(|| error(codes::NOT_FOUND, "el mensaje ya no existe"))
         })
     }
 

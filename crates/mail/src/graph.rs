@@ -309,6 +309,17 @@ impl MailProvider for Graph {
         Ok(found.into_iter().map(|(_, meta)| meta).collect())
     }
 
+    /// D178. El mensaje con `$select=id,conversationId`: ni cuerpo ni cabeceras. Un 404 es
+    /// `not_found`.
+    fn thread_of(&self, message_id: &str) -> MailResult<Option<String>> {
+        let url = self.api.url(
+            &["me", "messages", message_id],
+            &[("$select", "id,conversationId")],
+        );
+        let value = self.api.call(Method::Get, &url, None)?;
+        Ok(non_empty(value.get("conversationId")))
+    }
+
     /// `uniqueBody` (sin el texto citado del hilo) y nombre visible del remitente del recibido.
     fn received_extra(&self, message_id: &str) -> MailResult<ReceivedExtra> {
         let url = self.api.url(

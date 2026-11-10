@@ -149,3 +149,69 @@ fn a_learned_row_is_unique_by_its_message_even_if_the_account_source_changed() {
             .unwrap());
     }
 }
+
+#[test]
+fn a_recovered_thread_is_written_only_if_the_task_did_not_change() {
+    let mut store = Store::open_in_memory().unwrap();
+    let result = json!({
+        "version": 1,
+        "needs_reply": true,
+        "message": { "id": "a1:m1", "subject": "Consulta" },
+    });
+    let task = store
+        .enqueue_review("email", "{}", &result, "borrador")
+        .unwrap();
+
+    // Otra `updated_at` (la persona tocó la tarea) o otro estado: no se escribe nada.
+    assert!(store
+        .record_recovered_thread(
+            task.id,
+            TaskState::AwaitingReview,
+            task.updated_at - 1,
+            "t-1"
+        )
+        .unwrap()
+        .is_none());
+    assert!(store
+        .record_recovered_thread(task.id, TaskState::Completed, task.updated_at, "t-1")
+        .unwrap()
+        .is_none());
+    // Un hilo vacío tampoco.
+    assert!(store
+        .record_recovered_thread(task.id, TaskState::AwaitingReview, task.updated_at, "  ")
+        .unwrap()
+        .is_none());
+    assert_eq!(store.task(task.id).unwrap().result.unwrap(), result);
+
+    // Con el estado y la marca vigentes guarda el hilo y nada más; ni estado ni marca cambian.
+    let saved = store
+        .record_recovered_thread(task.id, TaskState::AwaitingReview, task.updated_at, " t-1 ")
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        (saved.state, saved.updated_at),
+        (TaskState::AwaitingReview, task.updated_at)
+    );
+    let mut expected = result.clone();
+    expected["message"]["thread_key"] = json!("t-1");
+    expected["message"]["thread_recovered"] = json!(true);
+    assert_eq!(saved.result.unwrap(), expected);
+    assert!(store
+        .audit_log()
+        .unwrap()
+        .iter()
+        .all(|e| e.task_id != Some(task.id) || e.action != "mail"));
+
+    // Si ya tiene hilo, no se pisa; sin mensaje, tampoco se escribe.
+    assert!(store
+        .record_recovered_thread(task.id, TaskState::AwaitingReview, task.updated_at, "t-2")
+        .unwrap()
+        .is_none());
+    let bare = store
+        .enqueue_review("email", "{}", &json!({ "version": 1 }), "borrador")
+        .unwrap();
+    assert!(store
+        .record_recovered_thread(bare.id, TaskState::AwaitingReview, bare.updated_at, "t-1")
+        .unwrap()
+        .is_none());
+}

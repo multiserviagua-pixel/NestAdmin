@@ -1230,3 +1230,35 @@ fn gmail_own_replies_meta_lists_every_later_sent_message_without_asking_for_a_bo
         "unavailable"
     );
 }
+
+/// D178: el hilo de un mensaje recibido se pide con `messages.get` en `format=minimal` y `fields`
+/// restringido a `id,threadId`: ni cabeceras, ni cuerpo, ni `snippet`.
+#[test]
+fn gmail_thread_of_asks_only_for_the_thread_id_without_a_body() {
+    let (mailbox, world) = mailbox();
+    world.lock().unwrap().messages = vec![full_message(
+        "in-1",
+        json!(["INBOX"]),
+        "1000000",
+        "pregunta",
+    )];
+    assert_eq!(mailbox.thread_of("in-1").unwrap().as_deref(), Some("t-9"));
+    {
+        let w = world.lock().unwrap();
+        assert_eq!(w.requests.len(), 1);
+        assert_eq!(w.requests[0].method, "GET");
+        assert!(w.requests[0].url.path().ends_with("/messages/in-1"));
+        assert_eq!(w.requests[0].query("format").as_deref(), Some("minimal"));
+        let fields = w.requests[0].query("fields").unwrap();
+        assert_eq!(fields, "id,threadId");
+        assert!(!fields.contains("body") && !fields.contains("snippet"));
+    }
+    // Un mensaje que ya no existe es `not_found`; un identificador vacío no llama al servicio.
+    assert_eq!(mailbox.thread_of("no-esta").unwrap_err().code, "not_found");
+    let before = world.lock().unwrap().requests.len();
+    assert_eq!(mailbox.thread_of(" ").unwrap(), None);
+    assert_eq!(world.lock().unwrap().requests.len(), before);
+    // Un fallo del servicio es un error.
+    world.lock().unwrap().force = Some(("/messages/".into(), 500));
+    assert_eq!(mailbox.thread_of("in-1").unwrap_err().code, "unavailable");
+}

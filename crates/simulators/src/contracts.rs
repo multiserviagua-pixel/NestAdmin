@@ -73,6 +73,14 @@ pub trait MailConnector: Connector {
         Ok(Vec::new())
     }
 
+    /// Hilo (`thread_key`) de un mensaje recibido con su id del conector (sin prefijo de cuenta),
+    /// para las tareas creadas antes de que se guardara ese dato (D178). **Solo metadatos**: la
+    /// petición no pide ningún cuerpo. `Ok(None)` si el conector no da hilo; un mensaje que ya no
+    /// existe es `not_found`. Solo lectura. Por defecto, `Ok(None)` sin llamar a nadie.
+    fn thread_of(&self, _message_id: &str) -> Result<Option<String>, ConnectorError> {
+        Ok(None)
+    }
+
     /// Datos extra de un mensaje recibido que solo hacen falta para aprender (D168, D169): la
     /// parte del cuerpo que no es cita del hilo (`uniqueBody` de Graph) y el nombre visible del
     /// remitente. Solo lectura. Por defecto, nada: quien llama usa el cuerpo del mensaje.

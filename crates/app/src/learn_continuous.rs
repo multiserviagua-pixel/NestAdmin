@@ -20,6 +20,14 @@
 //! en Enviados puede ser esa respuesta, a otro correo del hilo. Se decide en local, al planificar
 //! y otra vez justo antes de consultar.
 //!
+//! # Tareas sin hilo
+//!
+//! Las tareas creadas antes de que el resultado guardara `message.thread_key` entran como candidatas
+//! con el hilo pendiente, detrás de las que ya lo tienen. Su paso pide el hilo con `thread_of`
+//! (solo metadatos), lo guarda con una escritura que solo ocurre si la tarea no cambió
+//! ([`nestadmin_core::Store::record_recovered_thread`]) y sigue como cualquier otra. Cada
+//! consulta, de hilo o de Enviados, descuenta del tope de la pasada.
+//!
 //! # Por pasos
 //!
 //! Como la recogida de D175, una pasada avanza **una consulta por paso** y quien la lleva suelta el
@@ -148,7 +156,13 @@ struct Candidate {
     kind: Kind,
     /// Id del mensaje sin el prefijo de la cuenta, para el conector.
     inner_id: String,
+    /// Id completo del mensaje (con la cuenta): la clave de lo ya consultado en esta sesión.
+    message_id: String,
+    /// Hilo del resultado; vacío mientras `thread_pending` (se recupera en su paso).
     thread_key: String,
+    /// El resultado no lleva `message.thread_key` (tarea anterior a ese dato): el primer paso
+    /// pide el hilo al conector con `thread_of` (D178).
+    thread_pending: bool,
     address: String,
     /// Instante del recibido (ms) con el que se compara un envío de NestAdmin en el hilo.
     received_ms: i64,
@@ -161,6 +175,9 @@ struct Pass {
     /// Fuente de la cuenta al planificar: si cambia, la pasada se descarta.
     source: String,
     queue: VecDeque<Candidate>,
+    /// Consultas al conector que quedan en esta pasada (`thread_of` y `own_replies_meta` cuentan
+    /// una cada una).
+    budget: usize,
 }
 
 #[derive(Default)]
@@ -173,6 +190,9 @@ pub(crate) struct ContinuousRuntime {
     advanced: HashSet<String>,
     /// Orden de la última comprobación de cada tarea: la que lleva más sin comprobarse va antes.
     checked_order: HashMap<i64, u64>,
+    /// Mensajes (id completo) cuyo hilo no se pudo recuperar (`not_found` o sin hilo): no se
+    /// vuelven a pedir en esta sesión (D178).
+    no_thread: HashSet<String>,
     counter: u64,
     /// Recuentos por identificador de cuenta.
     stats: HashMap<String, Stats>,
@@ -506,9 +526,14 @@ impl App {
             return Ok(0);
         }
         let count = queue.len();
-        self.continuous
-            .passes
-            .insert(account.to_owned(), Pass { source, queue });
+        self.continuous.passes.insert(
+            account.to_owned(),
+            Pass {
+                source,
+                queue,
+                budget: CONTINUOUS_MAX_PER_PASS,
+            },
+        );
         Ok(count)
     }
 
@@ -522,8 +547,11 @@ impl App {
     fn plan_continuous(&self, account: &str, source: &str) -> AppResult<VecDeque<Candidate>> {
         let today = today_day();
         let mut seen: HashSet<String> = HashSet::new();
+        // Con hilo primero y, dentro de cada tipo, las que aún piden su hilo después (D178).
         let mut review: Vec<Candidate> = Vec::new();
+        let mut review_pending: Vec<Candidate> = Vec::new();
         let mut archived: Vec<Candidate> = Vec::new();
+        let mut archived_pending: Vec<Candidate> = Vec::new();
         // `all_tasks` va de la más reciente a la más antigua; un mensaje con dos tareas (una
         // redacción pedida) se comprueba una sola vez, con la que espera revisión si la hay.
         let mut tasks = self.store.all_tasks()?;
@@ -541,9 +569,11 @@ impl App {
             if !seen.insert(message_id) {
                 continue;
             }
-            match candidate.kind {
-                Kind::Review => review.push(candidate),
-                Kind::Archived => archived.push(candidate),
+            match (candidate.kind, candidate.thread_pending) {
+                (Kind::Review, false) => review.push(candidate),
+                (Kind::Review, true) => review_pending.push(candidate),
+                (Kind::Archived, false) => archived.push(candidate),
+                (Kind::Archived, true) => archived_pending.push(candidate),
             }
         }
         let order = |list: &mut Vec<Candidate>, runtime: &ContinuousRuntime| {
@@ -555,10 +585,14 @@ impl App {
             });
         };
         order(&mut review, &self.continuous);
+        order(&mut review_pending, &self.continuous);
         order(&mut archived, &self.continuous);
+        order(&mut archived_pending, &self.continuous);
         Ok(review
             .into_iter()
+            .chain(review_pending)
             .chain(archived)
+            .chain(archived_pending)
             .take(CONTINUOUS_MAX_PER_PASS)
             .collect())
     }
@@ -604,17 +638,21 @@ impl App {
             return Ok(None);
         };
         let (message_account, inner) = split_id(&message.id);
-        let Some(thread_key) = message
-            .thread_key
-            .as_deref()
-            .map(str::trim)
-            .filter(|k| !k.is_empty())
-        else {
-            return Ok(None);
-        };
         if message_account != account || inner.is_empty() {
             return Ok(None);
         }
+        // Sin `thread_key` (tarea anterior a ese dato) el hilo se pide en su paso (D178), salvo
+        // que ya se haya visto que no se puede recuperar.
+        let thread_key = message
+            .thread_key
+            .as_deref()
+            .map(str::trim)
+            .filter(|k| !k.is_empty());
+        let thread_pending = thread_key.is_none();
+        if thread_pending && self.continuous.no_thread.contains(&message.id) {
+            return Ok(None);
+        }
+        let thread_key = thread_key.unwrap_or("");
         // Ventana: la fecha del mensaje y, si falta o no se lee, la de creación de la tarea.
         let received_ms = message
             .date
@@ -630,7 +668,8 @@ impl App {
             return Ok(None);
         }
         // Un envío de NestAdmin posterior en el hilo: ni se consulta, ni se cierra, ni da evidencia.
-        if self.nestadmin_sent_after(account, thread_key, received_ms)? {
+        // Sin hilo todavía no se puede saber: se vuelve a comprobar al recuperarlo.
+        if !thread_pending && self.nestadmin_sent_after(account, thread_key, received_ms)? {
             return Ok(None);
         }
         let evidence = evidence_of(result, &message, source);
@@ -668,7 +707,9 @@ impl App {
                 updated_at: task.updated_at,
                 kind,
                 inner_id: inner.to_owned(),
+                message_id: message.id.clone(),
                 thread_key: thread_key.to_owned(),
+                thread_pending,
                 address,
                 received_ms,
                 evidence,
@@ -690,11 +731,17 @@ impl App {
             return Ok(ContinuousStep::Idle);
         }
         let source = pass.source.clone();
-        let Some(candidate) = pass.queue.pop_front() else {
+        // Sin consultas que gastar la pasada termina; el resto se comprueba en la siguiente.
+        let candidate = if pass.budget == 0 {
+            None
+        } else {
+            pass.queue.pop_front()
+        };
+        let Some(candidate) = candidate else {
             self.finish_pass(account, &source, None);
             return Ok(ContinuousStep::Idle);
         };
-        match self.check_candidate(account, &source, &candidate) {
+        match self.check_candidate(account, &source, &candidate, &mut pass.budget) {
             Ok(changed) => {
                 self.continuous.passes.insert(account.to_owned(), pass);
                 Ok(if changed {
@@ -722,10 +769,11 @@ impl App {
         account: &str,
         source: &str,
         candidate: &Candidate,
+        budget: &mut usize,
     ) -> Result<bool, CheckFailure> {
         // La tarea debe seguir como estaba al planificar: la persona pudo aprobarla, archivarla,
         // editarla o rechazarla entre un paso y el siguiente.
-        let Some(task) = self
+        let Some(mut task) = self
             .store
             .task_by_id(candidate.task_id)
             .map_err(store_failure)?
@@ -748,10 +796,14 @@ impl App {
         {
             return Ok(false);
         }
+        if candidate.thread_pending && self.continuous.no_thread.contains(&candidate.message_id) {
+            return Ok(false);
+        }
         // Y NestAdmin pudo enviar otra respuesta del hilo desde que se planificó la pasada.
-        if self
-            .nestadmin_sent_after(account, &candidate.thread_key, candidate.received_ms)
-            .map_err(CheckFailure::Store)?
+        if !candidate.thread_pending
+            && self
+                .nestadmin_sent_after(account, &candidate.thread_key, candidate.received_ms)
+                .map_err(CheckFailure::Store)?
         {
             return Ok(false);
         }
@@ -762,16 +814,61 @@ impl App {
         self.continuous
             .checked_order
             .insert(candidate.task_id, order);
-        let replies =
-            match self
-                .mail
-                .own_replies_meta(account, &candidate.thread_key, &candidate.inner_id)
-            {
-                Ok(replies) => replies,
-                // Un error propio de la tarea (el hilo o el mensaje ya no existen) la salta.
-                Err(e) if e.code == "not_found" || e.code == "invalid_input" => return Ok(false),
+        let mut thread_key = candidate.thread_key.clone();
+        if candidate.thread_pending {
+            // Recuperar el hilo (D178): solo metadatos y una consulta del tope.
+            *budget = budget.saturating_sub(1);
+            match self.mail.thread_of(account, &candidate.inner_id) {
+                Ok(Some(found)) if !found.trim().is_empty() => {
+                    thread_key = found.trim().to_owned();
+                }
+                // Un mensaje que ya no existe o que no da hilo: no se vuelve a pedir en la sesión.
+                Ok(_) => {
+                    self.continuous
+                        .no_thread
+                        .insert(candidate.message_id.clone());
+                    return Ok(false);
+                }
+                Err(e) if e.code == "not_found" => {
+                    self.continuous
+                        .no_thread
+                        .insert(candidate.message_id.clone());
+                    return Ok(false);
+                }
+                Err(e) if e.code == "invalid_input" => return Ok(false),
                 Err(e) => return Err(CheckFailure::Connector(e.code)),
-            };
+            }
+            // Solo se escribe si la tarea no cambió desde que se leyó.
+            match self
+                .store
+                .record_recovered_thread(task.id, task.state, task.updated_at, &thread_key)
+                .map_err(store_failure)?
+            {
+                Some(updated) => task = updated,
+                None => return Ok(false),
+            }
+            // Con el hilo ya conocido, NestAdmin pudo haber respondido a otro correo de él.
+            if self
+                .nestadmin_sent_after(account, &thread_key, candidate.received_ms)
+                .map_err(CheckFailure::Store)?
+            {
+                return Ok(false);
+            }
+            // Sin consultas que gastar, la comprobación sigue en la siguiente pasada.
+            if *budget == 0 {
+                return Ok(false);
+            }
+        }
+        *budget = budget.saturating_sub(1);
+        let replies = match self
+            .mail
+            .own_replies_meta(account, &thread_key, &candidate.inner_id)
+        {
+            Ok(replies) => replies,
+            // Un error propio de la tarea (el hilo o el mensaje ya no existen) la salta.
+            Err(e) if e.code == "not_found" || e.code == "invalid_input" => return Ok(false),
+            Err(e) => return Err(CheckFailure::Connector(e.code)),
+        };
         self.continuous.stats_mut(account, source).checked += 1;
         // La primera respuesta dirigida al remitente, aunque antes haya otra a un tercero (un
         // reenvío interno). Solo metadatos: no hay cuerpo que descartar.

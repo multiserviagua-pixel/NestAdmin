@@ -337,6 +337,9 @@ impl MailConnector for SharedSimulator {
     ) -> Result<Vec<OwnReplyMeta>, ConnectorError> {
         self.0.own_replies_meta(thread_key, after_id)
     }
+    fn thread_of(&self, message_id: &str) -> Result<Option<String>, ConnectorError> {
+        self.0.thread_of(message_id)
+    }
     fn received_extra(&self, message_id: &str) -> Result<ReceivedExtra, ConnectorError> {
         self.0.received_extra(message_id)
     }
@@ -826,6 +829,16 @@ impl Accounts {
     ) -> Result<Vec<OwnReplyMeta>, ConnectorError> {
         self.connector(account)?
             .own_replies_meta(thread_key, after_id)
+    }
+
+    /// Hilo de un mensaje recibido con ID del conector (sin prefijo de cuenta), solo con
+    /// metadatos (D178).
+    pub(crate) fn thread_of(
+        &self,
+        account: &str,
+        message_id: &str,
+    ) -> Result<Option<String>, ConnectorError> {
+        self.connector(account)?.thread_of(message_id)
     }
 
     /// Cuerpo sin cita y nombre visible del remitente de un mensaje recibido con ID del conector

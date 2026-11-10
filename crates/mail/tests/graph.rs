@@ -102,7 +102,7 @@ fn handler(req: &Req, w: &mut World) -> Resp {
             // Como Graph con `$select`: solo lo pedido.
             let wanted = req.query("$select").unwrap_or_default();
             let mut out = json!({ "id": id, "receivedDateTime": m["receivedDateTime"] });
-            for field in ["from", "uniqueBody"] {
+            for field in ["from", "uniqueBody", "conversationId"] {
                 if wanted.split(',').any(|w| w == field) {
                     out[field] = m[field].clone();
                 }
@@ -770,5 +770,30 @@ fn graph_own_replies_meta_lists_every_later_reply_without_asking_for_a_body() {
         .is_empty());
     let before = world.lock().unwrap().requests.len();
     assert!(mailbox.own_replies_meta(" ", "m-1").unwrap().is_empty());
+    assert_eq!(world.lock().unwrap().requests.len(), before);
+}
+
+/// D178: el hilo de un mensaje recibido se pide con `$select=id,conversationId`: sin cuerpo ni
+/// cabeceras.
+#[test]
+fn graph_thread_of_asks_only_for_the_conversation_without_a_body() {
+    let (mailbox, world) = mailbox();
+    assert_eq!(mailbox.thread_of("m-1").unwrap().as_deref(), Some("c-1"));
+    {
+        let w = world.lock().unwrap();
+        assert_eq!(w.requests.len(), 1);
+        assert_eq!(w.requests[0].method, "GET");
+        assert!(w.requests[0].url.path().ends_with("/me/messages/m-1"));
+        let select = w.requests[0].query("$select").unwrap();
+        assert_eq!(select, "id,conversationId");
+        assert!(!select.to_lowercase().contains("body"));
+    }
+    // Un mensaje que ya no existe es `not_found`; un identificador vacío no llama al servicio.
+    assert_eq!(
+        mailbox.thread_of("no-existe").unwrap_err().code,
+        "not_found"
+    );
+    let before = world.lock().unwrap().requests.len();
+    assert_eq!(mailbox.thread_of(" ").unwrap(), None);
     assert_eq!(world.lock().unwrap().requests.len(), before);
 }
