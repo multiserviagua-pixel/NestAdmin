@@ -64,9 +64,23 @@ Con `npm run dev` de `ui/` y los datos sintéticos de `ui/src/mock.ts`, commit `
 
 **Corregido durante el recorrido** (commit siguiente a `9ae735c`): la tarjeta de una tarea ya terminada solo decía que no se podía abrir; ahora lleva a Tareas con la fila localizada y, en facturas, ofrece «Abrir el documento». Se amplió la lista de palabras vacías. Tras la corrección: `cargo fmt`, clippy, `cargo test` de `nestadmin-app` y `nestadmin-desktop`, `npm run build` y `npm test` (276) en verde, y el recorrido de la tabla repetido.
 
+## Lo que espera a la IA también se encuentra (D179 ampliada)
+
+El primer recorrido mostró que, sin IA utilizable, lo importado se quedaba en `queued` y no llegaba al índice. El usuario decidió indexarlo. Tras el cambio: `cargo fmt`, clippy, `cargo test --workspace --locked` (1239 pasan, 0 fallan), `npm run build` y `npm test` (276) en verde. Pruebas nuevas en `crates/core/tests/search.rs` y `crates/app/tests/search_index.rs`: sin IA se indexan la factura y el correo en cola sin cambiar su estado, su resultado, sus transiciones ni el orden; con IA utilizable no se indexan ni cuentan en `pending_index`; una tarea en curso nunca se toma; al terminar, la fila pasa a la completa sin duplicarse, y una fila completa no se degrada.
+
+Segundo recorrido en `tauri dev`, misma carpeta sintética, sin IA configurada:
+
+| Paso | Resultado |
+|---|---|
+| Al abrir, 2 correos seguían en cola sin fila | la pasada de fondo los indexó; `pending_index` 0 |
+| Importar una factura inventada (`factura-agua-sintetica.txt`) | la tarea nace `queued`; la pasada la indexa con su texto en menos de 2 s, sin proveedor ni importe |
+| Estado y orden de la cola tras indexar | sin cambios: las 3 tareas siguen `queued`, en el mismo orden |
+| «¿Tengo alguna factura del agua?» en el chat | 1 factura, con la etiqueta «En espera de la IA: aún no se ha leído» |
+| Tarjeta de esa factura | abre Tareas con su fila localizada («En cola · Esperando al proveedor de IA») |
+
 ## Pendiente
 
-- **Sin IA utilizable, lo importado no llega al índice.** Las tareas esperan a la IA en `queued` y solo se indexan al terminar, así que el chat no encuentra un documento recién importado hasta que se procesa. D179 lo define así; cambiarlo (indexar con la extracción local mientras la tarea espera) es una decisión abierta.
+- No se vio en la aplicación el paso de una fila provisional a la completa cuando la IA procesa la tarea (no había IA); está cubierto por las pruebas automáticas.
 - No se probó en la aplicación con tareas en revisión ni Informativos (sin IA no se llega a esos estados); ese camino de la tarjeta está visto en la vista previa.
 - No se pulsó «Abrir el documento» ni se probó «Volver a intentar los que fallaron» en la aplicación.
 - La suite completa del espacio de trabajo no se repitió tras las dos últimas correcciones.
