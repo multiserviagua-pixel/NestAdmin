@@ -856,11 +856,16 @@ impl Store {
         if let Some(evidence) = evidence {
             let now = now_ms();
             for s in &evidence.signals {
+                // Única también por el mensaje: la fuente de la cuenta puede haber cambiado
+                // desde que el aprendizaje continuo contó ese correo (D178).
                 tx.execute(
-                    "INSERT OR IGNORE INTO rule_signals
-                     (kind, action_kind, subject_key, edit_state, task_id, content_version, source_key, at, state)
-                     VALUES ('learned', 'send_draft', ?1, 'unknown', NULL, 0, ?2, ?3, 'valid')",
-                    params![s.subject_key, s.source_key, now],
+                    &crate::continuous::insert_learned_sql(),
+                    params![
+                        s.subject_key,
+                        s.source_key,
+                        now,
+                        crate::continuous::learned_message_id(&s.source_key)
+                    ],
                 )?;
             }
             if first_result {

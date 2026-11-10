@@ -115,3 +115,37 @@ fn a_learned_row_is_unique_by_its_source_key() {
         .count();
     assert_eq!(notes, 1);
 }
+
+#[test]
+fn a_learned_row_is_unique_by_its_message_even_if_the_account_source_changed() {
+    let mut store = Store::open_in_memory().unwrap();
+    let task = store
+        .enqueue_review("email", "{}", &json!({}), "borrador")
+        .unwrap();
+    // La cuenta aún no tenía dirección: la fuente va por su identificador.
+    let by_id = "learned|account:gmail:id:a1|a1:m1";
+    // El proveedor dio la dirección después: otra fuente, el mismo mensaje.
+    let by_address = "learned|account:gmail:ana@cliente.test|a1:m1";
+    assert!(store
+        .insert_learned_outside(task.id, &signal(by_id))
+        .unwrap());
+    assert!(store.learned_source_exists(by_id).unwrap());
+    assert!(store.learned_source_exists(by_address).unwrap());
+    assert!(!store
+        .insert_learned_outside(task.id, &signal(by_address))
+        .unwrap());
+    // Otro mensaje, aunque su id acabe igual o empiece igual, sí cuenta.
+    for other in [
+        "learned|account:gmail:ana@cliente.test|a1:m11",
+        "learned|account:gmail:ana@cliente.test|1:m1",
+        "learned|account:gmail:ana@cliente.test|a2:m1",
+    ] {
+        assert!(!store.learned_source_exists(other).unwrap(), "{other}");
+        assert!(store
+            .insert_learned_outside(task.id, &signal(other))
+            .unwrap());
+        assert!(!store
+            .insert_learned_outside(task.id, &signal(other))
+            .unwrap());
+    }
+}

@@ -17,18 +17,53 @@ pub const REPLIED_OUTSIDE: &str = "replied_outside";
 /// Estado de la entrada cuando una tarea ya archivada aporta evidencia.
 pub const LEARNED_OUTSIDE: &str = "learned_outside";
 
-const INSERT_LEARNED: &str = "INSERT OR IGNORE INTO rule_signals
+/// Condición «ya hay una fila `learned` de ese mensaje» sobre el id del mensaje en `?4`.
+const SAME_MESSAGE: &str = "kind = 'learned' AND source_key IS NOT NULL
+           AND length(source_key) > length(?4)
+           AND substr(source_key, length(source_key) - length(?4)) = '|' || ?4";
+
+/// Inserta una fila `learned` si no hay ya una de ese mensaje. La clave es
+/// `learned|<fuente>|<id del mensaje>` y la fuente de una cuenta cambia cuando el proveedor da la
+/// dirección más tarde (de `…:id:<id>` a `…:<dirección>`); el id del mensaje, que lleva el prefijo
+/// de la cuenta, no cambia. Por eso la unicidad se comprueba también por el mensaje (`?4`,
+/// [`learned_message_id`]), además del índice único de `source_key`: un mismo correo no cuenta
+/// dos veces entre la primera carga y el aprendizaje continuo (D172, D178).
+pub(crate) fn insert_learned_sql() -> String {
+    format!(
+        "INSERT OR IGNORE INTO rule_signals
      (kind, action_kind, subject_key, edit_state, task_id, content_version, source_key, at, state)
-     VALUES ('learned', 'send_draft', ?1, 'unknown', NULL, 0, ?2, ?3, 'valid')";
+     SELECT 'learned', 'send_draft', ?1, 'unknown', NULL, 0, ?2, ?3, 'valid'
+     WHERE NOT EXISTS (SELECT 1 FROM rule_signals WHERE {SAME_MESSAGE})"
+    )
+}
+
+/// Id del mensaje de una clave `learned|<fuente>|<id del mensaje>`; si la clave no tiene esa
+/// forma, la clave entera (entonces solo la deduplica el índice único).
+pub(crate) fn learned_message_id(source_key: &str) -> &str {
+    let mut parts = source_key.splitn(3, '|');
+    match (parts.next(), parts.next(), parts.next()) {
+        (Some("learned"), Some(_), Some(id)) if !id.is_empty() => id,
+        _ => source_key,
+    }
+}
 
 impl Store {
-    /// Si ya hay una fila `learned` con esa clave (la primera carga o una pasada anterior).
+    /// Si ya hay una fila `learned` con esa clave o de ese mismo mensaje con otra fuente de la
+    /// cuenta (la primera carga o una pasada anterior).
     pub fn learned_source_exists(&self, source_key: &str) -> Result<bool> {
         Ok(self
             .conn
             .query_row(
-                "SELECT 1 FROM rule_signals WHERE kind = 'learned' AND source_key = ?1",
-                [source_key],
+                &format!(
+                    "SELECT 1 FROM rule_signals
+                     WHERE (kind = 'learned' AND source_key = ?1) OR ({SAME_MESSAGE}) LIMIT 1"
+                ),
+                params![
+                    source_key,
+                    rusqlite::types::Null,
+                    rusqlite::types::Null,
+                    learned_message_id(source_key)
+                ],
                 |_| Ok(()),
             )
             .optional()?
@@ -85,8 +120,13 @@ impl Store {
     pub fn insert_learned_outside(&mut self, task_id: i64, signal: &LearnedSignal) -> Result<bool> {
         let tx = self.conn.transaction()?;
         let inserted = tx.execute(
-            INSERT_LEARNED,
-            params![signal.subject_key, signal.source_key, now_ms()],
+            &insert_learned_sql(),
+            params![
+                signal.subject_key,
+                signal.source_key,
+                now_ms(),
+                learned_message_id(&signal.source_key)
+            ],
         )? > 0;
         if inserted {
             insert_event(&tx, task_id, (MAIL_ACTION, LEARNED_OUTSIDE, &json!({})))?;
@@ -125,8 +165,13 @@ impl Store {
         let inserted = match signal {
             Some(s) => {
                 tx.execute(
-                    INSERT_LEARNED,
-                    params![s.subject_key, s.source_key, now_ms()],
+                    &insert_learned_sql(),
+                    params![
+                        s.subject_key,
+                        s.source_key,
+                        now_ms(),
+                        learned_message_id(&s.source_key)
+                    ],
                 )? > 0
             }
             None => false,
