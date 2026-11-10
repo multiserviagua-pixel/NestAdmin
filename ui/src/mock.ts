@@ -561,6 +561,13 @@ task(
     return result;
   })(),
 );
+// Correo cerrado porque la persona ya lo respondió desde su programa de correo (D178): no se envió nada.
+task(
+  "email",
+  { message_id: "google-1:18c3-sintetico", account: "google-1", message: { id: "google-1:18c3-sintetico", from: "clientes@cliente-gamma.test", subject: "Consulta sobre el plazo de entrega" } },
+  "completed",
+  { archived: true, closed: { reason: "replied_outside", replied_at: "2026-11-09T10:30:00Z" } },
+);
 // `?muchos`: lista grande, para comprobar el desplazamiento de la lista y del detalle.
 if (new URLSearchParams(location.search).has("muchos")) {
   for (let i = 1; i <= 24; i++) {

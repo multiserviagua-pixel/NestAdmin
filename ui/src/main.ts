@@ -46,6 +46,7 @@ import type {
   LearnedBatch,
   LearnedProfileProposal,
   LearningPreview,
+  ContinuousOverview,
   LearningStatus,
 } from "./types";
 import {
@@ -101,6 +102,12 @@ import {
   proposalBlockedLine,
   rodajeNotice,
   sendButtonLabel,
+  CONTINUOUS_INTRO,
+  CONTINUOUS_OFF,
+  CONTINUOUS_TITLE,
+  CONTINUOUS_TOGGLE,
+  continuousLimitNote,
+  continuousMailboxLines,
 } from "./learn-text";
 import {
   READ_HELP,
@@ -268,6 +275,8 @@ import {
   type SenderScope,
   type TaskReason,
   type TasksView,
+  REPLIED_OUTSIDE_LABEL,
+  isRepliedOutside,
 } from "./tasks-text";
 import {
   PROFILE_FIELDS,
@@ -377,6 +386,7 @@ const ACTION_LABEL: Record<string, string> = {
   rule_rename: "Nombre de una regla",
   rule_merge: "Unificación de reglas",
   sender_preference: "Preferencia de remitente",
+  mail: "Correo",
 };
 
 type View = "review" | "tasks" | "rules" | "history" | "mail" | "settings" | "setup";
@@ -458,6 +468,10 @@ const state = {
   // y la tanda de reglas aprendidas con sus casillas (por defecto marcadas: solo se guardan las desmarcadas).
   learning: [] as LearningStatus[],
   learningError: null as string | null,
+  // Aprendizaje continuo (D178): resumen por buzón y error de lectura; `continuousBusy` evita un doble clic.
+  continuous: null as ContinuousOverview | null,
+  continuousError: null as string | null,
+  continuousBusy: false,
   learnPreview: {} as Record<string, LearningPreview>,
   learnShow: {} as Record<string, boolean>,
   learnBusy: {} as Record<string, "collect" | "run" | "retry">,
@@ -693,9 +707,10 @@ async function refresh(background = false) {
     let profileError: string | null = null;
     let learningError: string | null = null;
     let learnedBatchError: string | null = null;
+    let continuousError: string | null = null;
     // Solo con la vista Tareas abierta: los demás refrescos no piden las ejecuciones (D151).
     const pipelineLoad = state.view === "tasks" ? loadPipeline() : null;
-    const [tasks, preferences, rules, findings, suggestions, refinement, refinePreview, audit, settings, mail, read, profile, profilePreview, learningOverview, learnedBatch] = await Promise.all([
+    const [tasks, preferences, rules, findings, suggestions, refinement, refinePreview, audit, settings, mail, read, profile, profilePreview, learningOverview, learnedBatch, continuous] = await Promise.all([
       api.tasks(),
       api.senderPreferences(),
       api.ruleViews(),
@@ -738,9 +753,13 @@ async function refresh(background = false) {
         learnedBatchError = String(error);
         return null;
       }),
+      api.continuousLearningOverview().catch((error) => {
+        continuousError = String(error);
+        return null;
+      }),
     ]);
     await pipelineLoad;
-    Object.assign(state, { tasks, preferences, rules, findings, findingsError, suggestions, suggestionsError, refinement, refinePreview, refineError, audit, settings, mail, read, readError, profile, profilePreview, profileError, learningError, learnedBatch, learnedBatchError });
+    Object.assign(state, { tasks, preferences, rules, findings, findingsError, suggestions, suggestionsError, refinement, refinePreview, refineError, audit, settings, mail, read, readError, profile, profilePreview, profileError, learningError, learnedBatch, learnedBatchError, continuous, continuousError });
     await syncLearning(learningOverview?.accounts ?? null);
     // La oferta de la IA local necesita saber si está preparada: se comprueba al aparecer la espera.
     if (isProviderWait(settings?.ai_wait)) {
@@ -1843,11 +1862,12 @@ function taskActions(t: Task): HTMLElement {
 }
 
 /** Chip de estado; una tarea retenida por su pipeline dice «Bloqueada» o «Esperando» aunque siga en cola en los datos. */
-function stateChip(state: string, held: { text: string; tone: "warn" | "neutral" } | null) {
-  return held ? statusChip(held.text, held.tone) : statusChip(STATE_LABEL[state] ?? state, TASK_TONE[state] ?? "neutral");
+function stateChip(state: string, held: { text: string; tone: "warn" | "neutral" } | null, label?: string) {
+  return held ? statusChip(held.text, held.tone) : statusChip(label ?? STATE_LABEL[state] ?? state, TASK_TONE[state] ?? "neutral");
 }
 
-const taskChip = (t: Task) => stateChip(t.state, pipelineChip(entryOf(t)));
+// Una tarea cerrada porque ya estaba respondida fuera no es «Completada» ni un rechazo (D178).
+const taskChip = (t: Task) => stateChip(t.state, pipelineChip(entryOf(t)), isRepliedOutside(t) ? REPLIED_OUTSIDE_LABEL : undefined);
 
 // Más de esto no cabe en las dos líneas de la tarjeta: se ofrece desplegarlo.
 const CARD_REASON_CHARS = 60;
@@ -4906,12 +4926,71 @@ function learnCard(a: LearningStatus): HTMLElement {
   );
 }
 
+/** Bloque «Aprendizaje continuo» (D178): interruptor global y, por buzón, solo recuentos y el motivo de un fallo. */
+function continuousBlock(): HTMLElement | null {
+  const c = state.continuous;
+  if (!c) return state.continuousError ? h("p", { class: "meta warn", role: "alert" }, `No se pudo leer el aprendizaje continuo: ${state.continuousError}`) : null;
+  const now = Date.now();
+  const toggle = h("input", {
+    type: "checkbox",
+    id: "continuous-toggle",
+    "data-focus-key": "learn:continuous:toggle",
+    checked: c.enabled,
+    disabled: state.continuousBusy,
+    onchange: (event: Event) => {
+      const input = event.target as HTMLInputElement;
+      if (state.continuousBusy) return;
+      state.continuousBusy = true;
+      const wanted = input.checked;
+      void api
+        .setContinuousLearning(wanted)
+        .then(
+          (next) => {
+            state.continuous = next;
+          },
+          (error) => {
+            // Falla: la casilla vuelve a como estaba.
+            input.checked = !wanted;
+            state.notice = { kind: "error", text: String(error) };
+          },
+        )
+        .finally(() => {
+          state.continuousBusy = false;
+          render();
+        });
+    },
+  }) as HTMLInputElement;
+  return h(
+    "div",
+    { class: "sub-block continuous-block", "aria-label": CONTINUOUS_TITLE },
+    h("h3", {}, CONTINUOUS_TITLE),
+    h("p", { class: "intro" }, CONTINUOUS_INTRO),
+    h("p", {}, h("label", { for: "continuous-toggle" }, toggle, " ", CONTINUOUS_TOGGLE)),
+    c.enabled
+      ? h(
+          "ul",
+          { class: "accounts" },
+          ...c.mailboxes.map((m) =>
+            h(
+              "li",
+              { class: "account", "aria-label": `${CONTINUOUS_TITLE}: ${m.label}` },
+              h("div", { class: "account-main" }, h("strong", {}, m.label), m.address ? h("div", { class: "meta" }, m.address) : null, ...continuousMailboxLines(m, c.every_minutes, now).map((line) => h("p", { class: "meta", role: "status" }, line))),
+            ),
+          ),
+        )
+      : h("p", { class: "meta", role: "status" }, CONTINUOUS_OFF),
+    h("p", { class: "meta" }, continuousLimitNote(c.window_days)),
+  );
+}
+
 /** Bloque de aprender de la sección de lectura; sin cuentas con datos, no se pinta. */
 function learnSection(): HTMLElement | null {
   if (state.learningError)
     return h("div", {}, sectionHeader(LEARN_TITLE), h("p", { class: "meta warn", role: "alert" }, `No se pudo leer el estado de aprender a responder: ${state.learningError}`));
-  if (!state.learning.length) return null;
-  return h("div", { "aria-label": LEARN_TITLE }, sectionHeader(LEARN_TITLE), h("p", { class: "intro" }, LEARN_INTRO), h("ul", { class: "accounts" }, ...state.learning.map(learnCard)));
+  const anyMailbox = state.learning.length > 0 || (state.continuous?.mailboxes.length ?? 0) > 0;
+  if (!anyMailbox) return null;
+  const continuous = continuousBlock();
+  return h("div", { "aria-label": LEARN_TITLE }, sectionHeader(LEARN_TITLE), h("p", { class: "intro" }, LEARN_INTRO), h("ul", { class: "accounts" }, ...state.learning.map(learnCard)), continuous);
 }
 
 // -- Propuesta de perfil (D171) --

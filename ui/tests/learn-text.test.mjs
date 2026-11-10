@@ -28,6 +28,13 @@ import {
   proposalBlockedLine,
   rodajeNotice,
   sendButtonLabel,
+  CONTINUOUS_INTRO,
+  CONTINUOUS_NO_SENT,
+  CONTINUOUS_OFF,
+  agoText,
+  continuousErrorLine,
+  continuousLimitNote,
+  continuousMailboxLines,
 } from "../src/learn-text.ts";
 
 const counts = (over = {}) => ({ scanned: 24, automatic: 18, no_own_reply: 3, no_sent_folder: 0, pairs: 3, ...over });
@@ -169,9 +176,9 @@ test("terminado: con qué IA y cuántos pares, sin prometer reglas", () => {
 test("evidencia de una regla: veces, dirección, categoría y origen", () => {
   assert.equal(
     evidenceText({ learned: 4, count: 4, subject: "ana@ejemplo.test", category: "solicitud_factura", addresses: 1 }, catName),
-    "Usted respondió 4 veces a ana@ejemplo.test sobre solicitud de factura (primera carga).",
+    "Usted respondió 4 veces a ana@ejemplo.test sobre solicitud de factura (observado en su correo).",
   );
-  assert.match(evidenceText({ learned: 1, count: 1, subject: "ana@ejemplo.test", category: null, addresses: 1 }, catName), /^Usted respondió 1 vez a ana@ejemplo.test \(primera carga\)\.$/);
+  assert.match(evidenceText({ learned: 1, count: 1, subject: "ana@ejemplo.test", category: null, addresses: 1 }, catName), /^Usted respondió 1 vez a ana@ejemplo.test \(observado en su correo\)\.$/);
   assert.match(evidenceText({ learned: 5, count: 5, subject: "ejemplo.test", category: "documentacion", addresses: 2 }, catName), /5 veces a 2 direcciones de ejemplo.test sobre documentacion/);
 });
 
@@ -220,4 +227,75 @@ test("etiquetas de las tarjetas de regla solo con datos del backend", () => {
   assert.deepEqual(learnedChips({ evidence_origin: "learned", rodaje: { left: 3, of: 3 } }), { learned: true, rodaje: "En rodaje: 0 de 3" });
   assert.deepEqual(learnedChips({ evidence_origin: "learned", rodaje: { left: 1, of: 3 } }), { learned: true, rodaje: "En rodaje: 2 de 3" });
   assert.deepEqual(learnedChips({ evidence_origin: "learned", rodaje: { left: 0, of: 3 } }), { learned: true, rodaje: null });
+});
+
+// ---- Aprendizaje continuo (D178) ----
+
+const NOW = 1_800_000_000_000;
+const mb = (over = {}) => ({ last_pass_at: NOW - 5 * 60000, checked: 12, observed: 4, closed: 2, last_error: null, ...over });
+
+test("continuo: textos fijos", () => {
+  assert.match(CONTINUOUS_INTRO, /^NestAdmin comprueba en Enviados .* No usa la IA y no guarda el texto de sus respuestas\.$/);
+  assert.equal(CONTINUOUS_OFF, "El aprendizaje continuo está desactivado. NestAdmin no consulta Enviados.");
+  assert.equal(continuousLimitNote(14), "Solo se comprueban los correos de los últimos 14 días que ya están en NestAdmin.");
+  assert.equal(continuousLimitNote(1), "Solo se comprueban los correos de los últimos 1 día que ya están en NestAdmin.");
+});
+
+test("continuo: sin pasada todavía", () => {
+  assert.deepEqual(continuousMailboxLines(mb({ last_pass_at: null }), 15, NOW), ["Todavía no se ha comprobado. Se hace sola cada 15 minutos con NestAdmin en reposo."]);
+  assert.match(continuousMailboxLines(mb({ last_pass_at: null }), 1, NOW)[0], /cada 1 minuto con/);
+});
+
+test("continuo: con pasada, singulares y plurales", () => {
+  assert.deepEqual(continuousMailboxLines(mb(), 15, NOW), ["Última comprobación: hace 5 minutos. Desde que abrió NestAdmin: 12 correos comprobados, 4 respuestas suyas, 2 tareas cerradas."]);
+  assert.deepEqual(continuousMailboxLines(mb({ checked: 1, observed: 1, closed: 1, last_pass_at: NOW - 60000 }), 15, NOW), [
+    "Última comprobación: hace 1 minuto. Desde que abrió NestAdmin: 1 correo comprobado, 1 respuesta suya, 1 tarea cerrada.",
+  ]);
+  assert.match(continuousMailboxLines(mb({ checked: 0, observed: 0, closed: 0 }), 15, NOW)[0], /0 correos comprobados, 0 respuestas suyas, 0 tareas cerradas\./);
+});
+
+test("continuo: hace cuánto", () => {
+  assert.equal(agoText(NOW - 10_000, NOW), "hace un momento");
+  assert.equal(agoText(NOW - 3600_000, NOW), "hace 1 hora");
+  assert.equal(agoText(NOW - 3 * 3600_000, NOW), "hace 3 horas");
+  assert.equal(agoText(NOW - 86_400_000, NOW), "hace 1 día");
+  assert.equal(agoText(NOW - 3 * 86_400_000, NOW), "hace 3 días");
+  assert.equal(agoText(NOW + 5000, NOW), "hace un momento");
+});
+
+test("continuo: cada motivo de error es legible y nunca enseña el código", () => {
+  const cases = {
+    unavailable: "sin conexión con el proveedor de correo",
+    timeout: "sin conexión con el proveedor de correo",
+    unauthorized: "hay que volver a conectar la cuenta",
+    signed_out: "hay que volver a conectar la cuenta",
+    rate_limited: "demasiadas consultas seguidas",
+    rare_code_xyz: "un error del proveedor de correo",
+  };
+  for (const [code, words] of Object.entries(cases)) {
+    const line = continuousErrorLine(code);
+    assert.equal(line, `La última comprobación no se pudo completar: ${words}. Se volverá a intentar sola.`);
+    assert.ok(!line.includes(code), `${code} no debe verse`);
+  }
+  const lines = continuousMailboxLines(mb({ last_error: "unavailable" }), 15, NOW);
+  assert.equal(lines.length, 2);
+  assert.match(lines[0], /^Última comprobación/);
+});
+
+test("continuo: Enviados no disponible", () => {
+  assert.deepEqual(continuousMailboxLines(mb({ last_error: "no_sent_folder" }), 15, NOW), [CONTINUOUS_NO_SENT]);
+  assert.deepEqual(continuousMailboxLines(mb({ last_pass_at: null, last_error: "no_sent_folder" }), 15, NOW), [CONTINUOUS_NO_SENT]);
+  assert.ok(!CONTINUOUS_NO_SENT.includes("no_sent_folder"));
+});
+
+test("continuo: ningún texto lleva un código técnico", () => {
+  const all = [
+    CONTINUOUS_INTRO,
+    CONTINUOUS_OFF,
+    CONTINUOUS_NO_SENT,
+    ...["unavailable", "timeout", "unauthorized", "signed_out", "rate_limited", "otro_codigo"].map(continuousErrorLine),
+    ...continuousMailboxLines(mb(), 15, NOW),
+  ].join(" ");
+  assert.doesNotMatch(all, /[a-z]+_[a-z]+/);
+  assert.doesNotMatch(all, /unavailable|unauthorized|rate_limited|signed_out|no_sent_folder/);
 });

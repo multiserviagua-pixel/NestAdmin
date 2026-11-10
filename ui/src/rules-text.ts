@@ -636,7 +636,7 @@ export function reasonText(code: string, facts?: Record<string, unknown> | null)
       return REVIEW_ONLY_TEXT.charAt(0).toLowerCase() + REVIEW_ONLY_TEXT.slice(1).replace(/\.$/, "");
     case "rodaje":
     {
-      // Regla aprendida aceptada en lote (D174). El mismo texto que el backend (`rodaje_reason`).
+      // Regla aprendida aceptada en lote o con su tarjeta (D174, D178). El mismo texto que el backend (`rodaje_reason`).
       const left = typeof f.left === "number" ? f.left : 3;
       let text = left === 1 ? "en rodaje: queda 1 aprobación antes de enviar sola" : `en rodaje: quedan ${left} aprobaciones antes de enviar sola`;
       const min = typeof f.min_addresses === "number" ? f.min_addresses : 0;
@@ -1382,6 +1382,7 @@ const RULE_AUDIT_STATUS: Record<string, string> = {
 
 /** Estado en palabras de una entrada del historial que viene de una regla; el resto se deja tal cual. */
 export function auditStatusLabel(action: string, status: string): string {
+  if (action === "mail" && status === "replied_outside") return "Tarea cerrada: ya estaba respondido fuera de NestAdmin";
   if (action === "sender_preference") return status === "set" ? "Fijada" : status === "removed" ? "Quitada" : status;
   return action.startsWith("rule") ? (RULE_AUDIT_STATUS[status] ?? status) : status;
 }
@@ -1403,7 +1404,7 @@ export interface SuggestionEvidenceLike {
   /** De `count`: aprobaciones de la persona y facturas solo vistas en la primera lectura (E5). */
   approved?: number;
   seen?: number;
-  /** `learned`: respuestas propias observadas en la primera carga (D172); no son aprobaciones. */
+  /** `learned`: respuestas propias observadas en su correo, en la primera carga o después (D172, D178); no son aprobaciones. */
   origin?: string;
   learned?: number;
   addresses?: number;
@@ -1480,7 +1481,7 @@ export const SUGGESTION_HELP = {
 } as const;
 
 export const SUGGESTION_INTRO =
-  "Estas sugerencias salen de lo que usted aprueba en Pendientes, de cómo respondió usted en la primera carga («Aprender a responder») y, para facturas, de la repetición observada en la primera lectura (ni una ni otra son aprobaciones). Se calculan en este equipo, sin IA, y ninguna se crea ni se activa sin su aceptación. Una IA puede afinarlas (ordenarlas, proponer ocultar las poco útiles, preguntar por proveedores parecidos o proponer otro límite), pero nunca crea ni activa reglas ni pone las cifras.";
+  "Estas sugerencias salen de lo que usted aprueba en Pendientes, de cómo responde usted desde su programa de correo («Aprender a responder»: la primera carga y el aprendizaje continuo) y, para facturas, de la repetición observada en la primera lectura (ni una ni otra son aprobaciones). Se calculan en este equipo, sin IA, y ninguna se crea ni se activa sin su aceptación. Una IA puede afinarlas (ordenarlas, proponer ocultar las poco útiles, preguntar por proveedores parecidos o proponer otro límite), pero nunca crea ni activa reglas ni pone las cifras.";
 
 export const SUGGESTION_INACTIVE_NOTICE = "Si la crea, nacerá inactiva: no actuará hasta que usted la pruebe y la active.";
 
@@ -1529,7 +1530,7 @@ export function suggestionWhy(c: SuggestionLike): string {
   if (e.origin === "learned") {
     const times = e.learned || n;
     const where = (e.addresses ?? 1) > 1 ? `a ${e.addresses} direcciones de ${c.subject}` : `a ${c.subject}`;
-    return `Usted respondió ${times} ${plural(times, "vez", "veces")} ${where} sobre ${cat} (observado en la primera carga; no son aprobaciones en NestAdmin).${before("con cambios, rechazo o sin clasificar")}`;
+    return `Usted respondió ${times} ${plural(times, "vez", "veces")} ${where} sobre ${cat} (observado en su correo; no son aprobaciones en NestAdmin).${before("con cambios, rechazo o sin clasificar")}`;
   }
   return `Constan ${n} ${plural(n, "respuesta aprobada", "respuestas aprobadas")} sin cambios a ${c.subject} clasificadas como ${cat}; la última, el ${last}.${before("con cambios, rechazo o sin clasificar")}`;
 }

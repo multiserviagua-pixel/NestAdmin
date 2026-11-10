@@ -196,6 +196,8 @@ export function taskReason(
     const text = humanizeTaskError(task.error.message);
     return text ? { tone: "error", text } : { tone: "missing", text: "Motivo no consta" };
   }
+  const outside = repliedOutsideDetail(task);
+  if (outside) return { tone: "plain", text: outside };
   if (task.state === "failed") return { tone: "missing", text: "Motivo no consta" };
   const issues: unknown = task.result?.issues;
   if (Array.isArray(issues) && issues.length) return { tone: "plain", text: issues.map((i) => issueLabel(String(i))).join(", ") };
@@ -487,3 +489,34 @@ export function archiveConfirm(name: string): string {
 export const TEMPLATES_EMPTY_TEXT = "Aún no hay plantillas. Una plantilla hace que la respuesta a un correo espere hasta terminar sus facturas adjuntas.";
 export const TEMPLATE_AUTHORITY_NOTE = "La plantilla solo decide cuándo puede empezar cada tarea. Registrar y enviar siguen necesitando su revisión o una regla activa.";
 export const TEMPLATE_SCOPE_NOTE = "Se aplica a correos con fecha desde el día en que la activa. No cambia los correos anteriores.";
+
+// ---- Tarea cerrada porque ya estaba respondida fuera de NestAdmin (D178) ----
+
+export const REPLIED_OUTSIDE_LABEL = "Respondido fuera de NestAdmin";
+
+/** Texto del Historial para la entrada `mail` / `replied_outside`. */
+export const REPLIED_OUTSIDE_EVENT = "Tarea cerrada: ya estaba respondido fuera de NestAdmin";
+
+/** `true` si la tarea se cerró sin enviar porque la persona ya había respondido desde su programa de correo. */
+export function isRepliedOutside(task: { result: Record<string, any> | null }): boolean {
+  return task.result?.closed?.reason === "replied_outside";
+}
+
+/** Fecha corta «dd/mm/aaaa» de la respuesta, o `null` si falta o no se entiende. */
+export function repliedDate(value: unknown): string | null {
+  if (typeof value !== "string" || !value.trim()) return null;
+  const iso = /^(\d{4})-(\d{2})-(\d{2})/.exec(value.trim());
+  if (iso) return `${iso[3]}/${iso[2]}/${iso[1]}`;
+  const d = new Date(value);
+  if (Number.isNaN(d.getTime())) return null;
+  return `${String(d.getUTCDate()).padStart(2, "0")}/${String(d.getUTCMonth() + 1).padStart(2, "0")}/${d.getUTCFullYear()}`;
+}
+
+/** Detalle de una tarea cerrada como respondida fuera; `null` si no lo es. */
+export function repliedOutsideDetail(task: { result: Record<string, any> | null }): string | null {
+  if (!isRepliedOutside(task)) return null;
+  const date = repliedDate(task.result?.closed?.replied_at);
+  return date
+    ? `Usted ya respondió a este correo desde su programa de correo el ${date}. NestAdmin no envió nada.`
+    : "Usted ya respondió a este correo desde su programa de correo. NestAdmin no envió nada.";
+}

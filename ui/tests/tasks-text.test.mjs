@@ -1,6 +1,11 @@
 import assert from "node:assert/strict";
 import { beforeEach, test } from "node:test";
 import {
+  REPLIED_OUTSIDE_EVENT,
+  REPLIED_OUTSIDE_LABEL,
+  isRepliedOutside,
+  repliedDate,
+  repliedOutsideDetail,
   BOARD_COLUMNS,
   BOARD_PAGE,
   WAITING_FOR_PROVIDER,
@@ -481,4 +486,33 @@ test("la frase del adjunto que llega después solo aparece si el motivo es un ad
     assert.equal(continueConfirm("factura-0910.pdf", code), sin, code);
     assert.ok(!continueConfirm("factura-0910.pdf", code).includes(frase), code);
   }
+});
+
+// ---- Respondido fuera de NestAdmin (D178) ----
+
+const closedTask = (closed) => ({ state: "completed", error: null, attempts: 0, result: { closed } });
+
+test("respondido fuera: etiqueta y detalle con fecha", () => {
+  const t = closedTask({ reason: "replied_outside", replied_at: "2026-11-09T10:30:00Z" });
+  assert.ok(isRepliedOutside(t));
+  assert.equal(REPLIED_OUTSIDE_LABEL, "Respondido fuera de NestAdmin");
+  assert.equal(repliedOutsideDetail(t), "Usted ya respondió a este correo desde su programa de correo el 09/11/2026. NestAdmin no envió nada.");
+  assert.deepEqual(taskReason(t, false), { tone: "plain", text: repliedOutsideDetail(t) });
+});
+
+test("respondido fuera: sin fecha o con fecha ilegible", () => {
+  const text = "Usted ya respondió a este correo desde su programa de correo. NestAdmin no envió nada.";
+  assert.equal(repliedOutsideDetail(closedTask({ reason: "replied_outside", replied_at: null })), text);
+  assert.equal(repliedOutsideDetail(closedTask({ reason: "replied_outside", replied_at: "no es una fecha" })), text);
+  assert.equal(repliedDate("Mon, 09 Nov 2026 10:30:00 +0000"), "09/11/2026");
+  assert.equal(repliedDate(undefined), null);
+});
+
+test("respondido fuera: otras tareas no cambian", () => {
+  assert.equal(isRepliedOutside({ result: null }), false);
+  assert.equal(isRepliedOutside(closedTask({ reason: "otra" })), false);
+  assert.equal(repliedOutsideDetail(closedTask({ reason: "otra" })), null);
+  assert.equal(taskReason(closedTask({ reason: "otra" }), false), null);
+  assert.equal(REPLIED_OUTSIDE_EVENT, "Tarea cerrada: ya estaba respondido fuera de NestAdmin");
+  assert.doesNotMatch(REPLIED_OUTSIDE_LABEL + repliedOutsideDetail(closedTask({ reason: "replied_outside" })), /Archivada|rechaz|replied_outside/i);
 });

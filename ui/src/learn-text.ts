@@ -318,7 +318,7 @@ export function evidenceText(item: { learned: number; count: number; subject: st
   const n = item.learned || item.count;
   const about = item.category ? ` sobre ${categoryName(item.category)}` : "";
   const where = item.addresses > 1 ? `${item.addresses} direcciones de ${item.subject}` : item.subject;
-  return `Usted respondió ${n} ${plural(n, "vez", "veces")} a ${where}${about} (primera carga).`;
+  return `Usted respondió ${n} ${plural(n, "vez", "veces")} a ${where}${about} (observado en su correo).`;
 }
 
 export function acceptButton(marked: number): string {
@@ -379,4 +379,75 @@ export function learnedChips(origin: OriginLike | null | undefined): { learned: 
   const r = origin?.rodaje;
   const rodaje = learned && r && r.left > 0 ? `En rodaje: ${Math.max(0, r.of - r.left)} de ${r.of}` : null;
   return { learned, rodaje };
+}
+
+// ---- Aprendizaje continuo (D178, R31) ----
+
+export const CONTINUOUS_TITLE = "Aprendizaje continuo";
+
+export const CONTINUOUS_INTRO =
+  "NestAdmin comprueba en Enviados si usted ya respondió desde su programa de correo a los correos que tiene aquí. Lo cuenta para sugerirle reglas y cierra la tarea para que no se responda dos veces. No usa la IA y no guarda el texto de sus respuestas.";
+
+export const CONTINUOUS_TOGGLE = "Seguir aprendiendo de mis respuestas";
+
+export const CONTINUOUS_OFF = "El aprendizaje continuo está desactivado. NestAdmin no consulta Enviados.";
+
+export const CONTINUOUS_NO_SENT = "Esta cuenta no permite leer Enviados, así que no se puede aprender de sus respuestas.";
+
+/** Nota de límite: solo cuenta lo que ya está en NestAdmin. */
+export function continuousLimitNote(windowDays: number): string {
+  return `Solo se comprueban los correos de los últimos ${windowDays} ${plural(windowDays, "día", "días")} que ya están en NestAdmin.`;
+}
+
+export function continuousNever(everyMinutes: number): string {
+  return `Todavía no se ha comprobado. Se hace sola cada ${everyMinutes} ${plural(everyMinutes, "minuto", "minutos")} con NestAdmin en reposo.`;
+}
+
+const CONTINUOUS_ERROR_WORDS: Record<string, string> = {
+  unavailable: "sin conexión con el proveedor de correo",
+  timeout: "sin conexión con el proveedor de correo",
+  unauthorized: "hay que volver a conectar la cuenta",
+  signed_out: "hay que volver a conectar la cuenta",
+  rate_limited: "demasiadas consultas seguidas",
+};
+
+/** Motivo legible de un fallo; un código desconocido no se enseña. */
+export function continuousErrorWords(code: string): string {
+  return CONTINUOUS_ERROR_WORDS[code] ?? "un error del proveedor de correo";
+}
+
+export function continuousErrorLine(code: string): string {
+  return `La última comprobación no se pudo completar: ${continuousErrorWords(code)}. Se volverá a intentar sola.`;
+}
+
+/** «hace 5 minutos», «hace 2 horas», «hace 3 días»; `now` y `at` en milisegundos. */
+export function agoText(at: number, now: number): string {
+  const mins = Math.max(0, Math.floor((now - at) / 60000));
+  if (mins < 1) return "hace un momento";
+  if (mins < 60) return `hace ${mins} ${plural(mins, "minuto", "minutos")}`;
+  const hours = Math.floor(mins / 60);
+  if (hours < 24) return `hace ${hours} ${plural(hours, "hora", "horas")}`;
+  const days = Math.floor(hours / 24);
+  return `hace ${days} ${plural(days, "día", "días")}`;
+}
+
+export interface ContinuousMailboxLike {
+  last_pass_at: number | null;
+  checked: number;
+  observed: number;
+  closed: number;
+  last_error: string | null;
+}
+
+/** Líneas de un buzón con el interruptor activado, en orden. Solo recuentos; nunca un código técnico. */
+export function continuousMailboxLines(m: ContinuousMailboxLike, everyMinutes: number, now: number): string[] {
+  if (m.last_error === "no_sent_folder") return [CONTINUOUS_NO_SENT];
+  const lines: string[] = [];
+  if (m.last_pass_at === null) lines.push(continuousNever(everyMinutes));
+  else
+    lines.push(
+      `Última comprobación: ${agoText(m.last_pass_at, now)}. Desde que abrió NestAdmin: ${m.checked} ${plural(m.checked, "correo comprobado", "correos comprobados")}, ${m.observed} ${plural(m.observed, "respuesta suya", "respuestas suyas")}, ${m.closed} ${plural(m.closed, "tarea cerrada", "tareas cerradas")}.`,
+    );
+  if (m.last_error) lines.push(continuousErrorLine(m.last_error));
+  return lines;
 }

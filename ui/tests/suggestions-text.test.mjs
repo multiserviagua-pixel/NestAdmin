@@ -370,14 +370,14 @@ test("la evidencia aprendida dice que son respuestas suyas observadas, no aproba
   );
   assert.equal(
     one,
-    "Usted respondió 3 veces a cliente@ejemplo.test sobre Consulta de pago (observado en la primera carga; no son aprobaciones en NestAdmin).",
+    "Usted respondió 3 veces a cliente@ejemplo.test sobre Consulta de pago (observado en su correo; no son aprobaciones en NestAdmin).",
   );
   const dom = suggestionWhy(
     reply({ category: "consulta_pago", subject: "ejemplo.test" }, { origin: "learned", learned: 4, count: 4, addresses: 2 }),
   );
   assert.equal(
     dom,
-    "Usted respondió 4 veces a 2 direcciones de ejemplo.test sobre Consulta de pago (observado en la primera carga; no son aprobaciones en NestAdmin).",
+    "Usted respondió 4 veces a 2 direcciones de ejemplo.test sobre Consulta de pago (observado en su correo; no son aprobaciones en NestAdmin).",
   );
   assert.doesNotMatch(one + dom, /aprobadas|Constan/);
 });

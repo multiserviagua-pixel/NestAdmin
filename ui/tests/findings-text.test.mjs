@@ -423,6 +423,7 @@ test("al restaurar una regla archivada se avisa con el mismo texto de hallazgo",
 
 test("el historial dice en palabras qué pasó con una regla", () => {
   assert.equal(auditStatusLabel("rule_merge", "merged"), "Unificada");
+  assert.equal(auditStatusLabel("mail", "replied_outside"), "Tarea cerrada: ya estaba respondido fuera de NestAdmin");
   assert.equal(auditStatusLabel("rule_archive", "unarchived"), "Restaurada");
   assert.equal(auditStatusLabel("rule_any_sender", "revoked"), "Opción avanzada retirada");
   // Es el estado de la versión guardada, también al crear o editar: no se dice «activada».
