@@ -483,6 +483,34 @@ test("el recibo dice qué se hizo, cuándo y si ya constaba hecho", () => {
   assert.deepEqual(T.proposalReceiptLines(card("approve")), []);
 });
 
+test("una aprobación que no envía ni registra dice el resultado real y no es un recibo de éxito", () => {
+  const notDone = (effect, reason) => card("approve", { status: "failed", effect, receipt: { confirmed_at: Date.UTC(2026, 10, 10, 9, 30), reconciled: false, result: {}, outcome: "not_done", reason } });
+  assert.equal(T.proposalFinalText(notDone("send_mail", "returned_to_review")), "No se pudo enviar; la tarea sigue pendiente de revisión.");
+  assert.equal(T.proposalFinalText(notDone("send_mail", "action_failed")), "No se pudo enviar; la tarea quedó fallida y se puede reintentar.");
+  assert.equal(T.proposalFinalText(notDone("register_invoice", "action_failed")), "No se pudo registrar la factura; la tarea quedó fallida y se puede reintentar.");
+  assert.equal(T.proposalFinalText(notDone("register_invoice", "returned_to_review")), "No se pudo registrar la factura; la tarea sigue pendiente de revisión.");
+  assert.ok(T.proposalFinalText(notDone("send_mail", "not_completed")).startsWith("No se pudo enviar"));
+  // Una fallida sin recibo conserva el texto de siempre, y ninguna de las dos pinta «Enviado».
+  assert.ok(T.proposalFinalText(card("approve", { status: "failed" })).startsWith("No se hizo nada"));
+  assert.deepEqual(T.proposalReceiptLines(notDone("send_mail", "action_failed")), []);
+  const done = card("approve", { status: "confirmed", effect: "send_mail", receipt: { confirmed_at: Date.UTC(2026, 10, 10, 9, 30), reconciled: false, result: {}, outcome: "done", reason: null } });
+  assert.ok(T.proposalReceiptLines(done)[0].startsWith("Enviado el "));
+});
+
+test("consultar el correo y reintentar avisan de las reglas activas, en singular y plural", () => {
+  const one = T.proposalRulesText("fetch_mail", "may_trigger_rules", { active_send_rules: 1, active_register_rules: 0 });
+  assert.equal(one, "Tiene 1 regla activa que puede enviar respuestas o registrar facturas sin revisión con el correo nuevo.");
+  const many = T.proposalRulesText("fetch_mail", "may_trigger_rules", { active_send_rules: 2, active_register_rules: 1 });
+  assert.equal(many, "Tiene 3 reglas activas que pueden enviar respuestas o registrar facturas sin revisión con el correo nuevo.");
+  assert.ok(T.proposalRulesText("retry", "may_trigger_rules", { active_send_rules: 0, active_register_rules: 2 }).endsWith("con la tarea reintentada."));
+  assert.equal(T.proposalRulesText("fetch_mail", "none", { active_send_rules: 0, active_register_rules: 0 }), null);
+  assert.equal(T.proposalRulesText("approve", "send_mail", {}), null);
+  const audit = T.assistantAuditText("assistant_proposal", JSON.stringify({ kind: "fetch_mail", task_id: null, effect: "may_trigger_rules", code: null }), "created");
+  assert.ok(audit.includes("puede activar reglas"));
+  const failed = T.assistantAuditText("assistant_proposal", JSON.stringify({ kind: "approve", task_id: 4, effect: "send_mail", code: "returned_to_review" }), "failed");
+  assert.ok(failed.includes("no se hizo: la tarea volvió a revisión"));
+});
+
 test("el mensaje de error dice qué pasó con la propuesta", () => {
   assert.equal(
     T.proposalErrorText("hay importes que no se leen sin duda.", "pending"),
@@ -552,6 +580,8 @@ test("los textos de las propuestas no contienen HTML", () => {
     ...["rejected", "expired", "stale", "failed"].map((status) => T.proposalFinalText(card("approve", { status }))),
     ...["pending", "executing", "confirmed", "rejected", "expired", "stale", "failed"].map(T.proposalStatusLabel),
     T.proposalErrorText("x", "pending"),
+    T.proposalRulesText("fetch_mail", "may_trigger_rules", { active_send_rules: 2, active_register_rules: 0 }),
+    ...["action_failed", "returned_to_review", "not_completed"].map((reason) => T.proposalFinalText(card("approve", { status: "failed", effect: "send_mail", receipt: { confirmed_at: 0, reconciled: false, result: {}, outcome: "not_done", reason } }))),
     T.recipientSignalsText(["noreply_address"]),
     T.emailIssueText("unconfirmed_attempt", 1),
   ];

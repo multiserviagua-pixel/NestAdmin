@@ -16,6 +16,10 @@ CREATE TABLE assistant_proposals (
     )),
     task_id         INTEGER,
     seen_version    INTEGER,
+    -- Huella de lo que la tarjeta mostró y de lo que determina la acción (estado, versión y hora
+    -- de la tarea, y el resumen recompuesto). Si al leer o confirmar ya no coincide, la propuesta
+    -- pasa a `stale` y no se ejecuta.
+    seen_fp         TEXT,
     args_json       TEXT NOT NULL,
     card_json       TEXT NOT NULL,
     idem_key        TEXT NOT NULL UNIQUE,

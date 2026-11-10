@@ -1205,8 +1205,14 @@ export type ProposalKind =
 
 export type ProposalStatus = "pending" | "executing" | "confirmed" | "rejected" | "expired" | "stale" | "failed";
 
-/** Si confirmar la propuesta envía un correo, registra una factura o no tiene efecto externo. */
-export type ProposalEffect = "send_mail" | "register_invoice" | "none";
+/** Si confirmar la propuesta envía un correo, registra una factura o no tiene efecto externo. `may_trigger_rules`: no actúa por sí misma, pero el correo nuevo o la tarea reintentada pasan por las reglas activas, que pueden enviar o registrar sin revisión. */
+export type ProposalEffect = "send_mail" | "register_invoice" | "may_trigger_rules" | "none";
+
+/** Resultado real de la acción: `done` solo si la acción con efecto consta realizada. */
+export type ProposalOutcome = "done" | "not_done";
+
+/** Motivo cerrado cuando la acción no se hizo: la tarea quedó fallida, volvió a revisión o no se completó. */
+export type ProposalReason = "action_failed" | "returned_to_review" | "not_completed";
 
 /** Tarjeta de una propuesta: la compone la aplicación con los datos reales del equipo. `summary` lleva `type` y, según él, lo mismo que la pantalla de revisión antes de aprobar. */
 export interface ProposalCard {
@@ -1232,6 +1238,10 @@ export interface ProposalReceipt {
   task_state: string | null;
   effect: ProposalEffect;
   confirmed_at: number;
+  /** Lo que pasó de verdad: con `not_done` la propuesta queda `failed`. */
+  outcome: ProposalOutcome;
+  /** Motivo cerrado cuando `outcome` es `not_done`. */
+  reason: ProposalReason | null;
   /** Tras un corte se comprobó que la acción ya estaba hecha y no se repitió. */
   reconciled: boolean;
   result: Record<string, any>;

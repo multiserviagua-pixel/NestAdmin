@@ -36,6 +36,8 @@ pub struct ProposalRow {
     pub kind: String,
     pub task_id: Option<i64>,
     pub seen_version: Option<i64>,
+    /// Huella de lo que mostró la tarjeta (véase la migración 12).
+    pub seen_fp: Option<String>,
     pub args: Value,
     pub card: Value,
     pub idem_key: String,
@@ -53,6 +55,7 @@ pub struct NewProposal<'a> {
     pub kind: &'a str,
     pub task_id: Option<i64>,
     pub seen_version: Option<i64>,
+    pub seen_fp: &'a str,
     pub args: &'a Value,
     pub card: &'a Value,
     pub idem_key: &'a str,
@@ -60,7 +63,7 @@ pub struct NewProposal<'a> {
 }
 
 const COLUMNS: &str = "id, conversation_id, turn_id, kind, task_id, seen_version, args_json, \
-card_json, idem_key, status, receipt_json, created_at, expires_at, resolved_at";
+card_json, idem_key, status, receipt_json, created_at, expires_at, resolved_at, seen_fp";
 
 fn json_of(text: &str) -> Value {
     serde_json::from_str(text).unwrap_or(Value::Null)
@@ -83,6 +86,7 @@ fn from_row(r: &Row<'_>) -> rusqlite::Result<ProposalRow> {
         created_at: r.get(11)?,
         expires_at: r.get(12)?,
         resolved_at: r.get(13)?,
+        seen_fp: r.get(14)?,
     })
 }
 
@@ -92,8 +96,8 @@ impl Store {
         self.conn.execute(
             "INSERT INTO assistant_proposals
              (conversation_id, kind, task_id, seen_version, args_json, card_json, idem_key,
-              status, created_at, expires_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'pending', ?8, ?9)",
+              status, created_at, expires_at, seen_fp)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'pending', ?8, ?9, ?10)",
             params![
                 new.conversation_id,
                 new.kind,
@@ -103,7 +107,8 @@ impl Store {
                 new.card.to_string(),
                 new.idem_key,
                 now_ms(),
-                new.expires_at
+                new.expires_at,
+                new.seen_fp
             ],
         )?;
         Ok(self.conn.last_insert_rowid())
@@ -142,14 +147,15 @@ impl Store {
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
-    /// Una propuesta pendiente y sin caducar idéntica (mismo tipo, tarea, versión y argumentos)
-    /// de esta conversación: se reutiliza en vez de crear otra.
+    /// Una propuesta pendiente y sin caducar idéntica (mismo tipo, tarea, versión, huella y
+    /// argumentos) de esta conversación: se reutiliza en vez de crear otra.
     pub fn proposal_identical_pending(
         &self,
         conversation_id: Option<i64>,
         kind: &str,
         task_id: Option<i64>,
         seen_version: Option<i64>,
+        seen_fp: &str,
         args: &Value,
     ) -> Result<Option<i64>> {
         Ok(self
@@ -157,7 +163,7 @@ impl Store {
             .query_row(
                 "SELECT id FROM assistant_proposals
                  WHERE conversation_id IS ?1 AND kind = ?2 AND task_id IS ?3
-                   AND seen_version IS ?4 AND args_json = ?5
+                   AND seen_version IS ?4 AND args_json = ?5 AND seen_fp IS ?7
                    AND status = 'pending' AND expires_at > ?6
                  ORDER BY id LIMIT 1",
                 params![
@@ -166,7 +172,8 @@ impl Store {
                     task_id,
                     seen_version,
                     args.to_string(),
-                    now_ms()
+                    now_ms(),
+                    seen_fp
                 ],
                 |r| r.get(0),
             )

@@ -2428,10 +2428,12 @@ function mockFinalStateCards(): ProposalCard[] {
     id: nextProposal++, kind: "approve", status, task_id: t.id, seen_version: 1, created_at: created, expires_at: created + 24 * 3600 * 1000, effect: "send_mail", summary, receipt: null, ...extra,
   });
   const confirmed = make("confirmed");
-  confirmed.receipt = { proposal_id: confirmed.id, kind: "approve", task_id: t.id, task_state: "completed", effect: "send_mail", confirmed_at: created + 60_000, reconciled: false, result: { version: 1 } };
+  confirmed.receipt = { proposal_id: confirmed.id, kind: "approve", task_id: t.id, task_state: "completed", effect: "send_mail", confirmed_at: created + 60_000, outcome: "done", reason: null, reconciled: false, result: { version: 1 } };
   const reconciled = make("confirmed", { kind: "archive", effect: "none", summary: { type: "archive", task: block } });
-  reconciled.receipt = { proposal_id: reconciled.id, kind: "archive", task_id: t.id, task_state: "completed", effect: "none", confirmed_at: created + 120_000, reconciled: true, result: {} };
-  const cards = [confirmed, reconciled, make("rejected"), make("expired"), make("stale"), make("failed")];
+  reconciled.receipt = { proposal_id: reconciled.id, kind: "archive", task_id: t.id, task_state: "completed", effect: "none", confirmed_at: created + 120_000, outcome: "done", reason: null, reconciled: true, result: {} };
+  const notDone = make("failed");
+  notDone.receipt = { proposal_id: notDone.id, kind: "approve", task_id: t.id, task_state: "failed", effect: "send_mail", confirmed_at: created + 180_000, outcome: "not_done", reason: "action_failed", reconciled: false, result: { version: 1 } };
+  const cards = [confirmed, reconciled, make("rejected"), make("expired"), make("stale"), make("failed"), notDone];
   for (const card of cards) proposalCards.set(card.id, card);
   return cards;
 }
@@ -2761,13 +2763,15 @@ const handlers: Record<string, (a: any, options?: any) => unknown> = {
     if (card.status === "confirmed" && card.receipt) return structuredClone(card.receipt);
     if (card.status === "rejected") throw "la propuesta se descartó y ya no se puede confirmar";
     if (card.status === "expired") throw "la propuesta caducó; pídala de nuevo";
-    if (card.status === "stale") throw "el contenido cambió; revíselo de nuevo";
+    if (card.status === "stale") throw "lo que mostraba la tarjeta ya no es lo que hay; pídala de nuevo";
+    if (card.status === "failed") throw "la propuesta falló y no se puede confirmar; pídala de nuevo";
     // Como el fondo (D186): sin la casilla de importes, una factura dudosa no se registra y la propuesta sigue pendiente.
     if (card.kind === "approve" && card.summary.amount_review && !amountsChecked)
       throw "hay importes que no se leen sin duda: confirme antes los importes con el documento";
     // Si la tarea cambió de versión desde que se preparó la propuesta, queda obsoleta y no se ejecuta.
     const target = card.task_id === null ? undefined : tasks.find((t) => t.id === card.task_id);
-    if (target && (target.result?.version ?? 1) !== card.seen_version) {
+    // Como la huella del fondo: no solo la versión, también el estado que mostraba la tarjeta.
+    if (target && ((target.result?.version ?? 1) !== card.seen_version || (card.summary?.task?.state && card.summary.task.state !== target.state))) {
       card.status = "stale";
       throw "la tarea cambió después de preparar esta propuesta";
     }
@@ -2778,7 +2782,7 @@ const handlers: Record<string, (a: any, options?: any) => unknown> = {
     }
     const receipt: ProposalReceipt = {
       proposal_id: card.id, kind: card.kind, task_id: card.task_id, task_state: target?.state ?? null, effect: card.effect,
-      confirmed_at: now(), reconciled: false, result: card.kind === "edit_draft" ? { new_version: 2 } : { version: card.seen_version },
+      confirmed_at: now(), outcome: "done", reason: null, reconciled: false, result: card.kind === "edit_draft" ? { new_version: 2 } : { version: card.seen_version },
     };
     card.status = "confirmed";
     card.receipt = receipt;

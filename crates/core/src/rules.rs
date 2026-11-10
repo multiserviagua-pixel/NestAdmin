@@ -54,15 +54,9 @@ impl Store {
         Ok(rule)
     }
 
-    /// Nueva versión con otras condiciones; conserva el estado activo de la anterior. Una
-    /// regla archivada no se edita (D128). Cambiar las condiciones borra la validación
-    /// avanzada sin remitente, que se dio a las condiciones anteriores (D126). Para editar
-    /// con la comprobación de D186, véase `update_rule_guarded`.
-    pub fn update_rule(&mut self, id: &str, conditions: &Value) -> Result<Rule> {
-        Ok(self.update_rule_guarded(id, conditions, &|_, _| true)?.0)
-    }
-
-    /// Como `update_rule`, pero una regla activa solo sigue activa si `keep_active(anterior,
+    /// Nueva versión con otras condiciones; es la única vía para editarlas (D186c). Una regla
+    /// archivada no se edita (D128). Cambiar las condiciones borra la validación avanzada sin
+    /// remitente, que se dio a las condiciones anteriores (D126). Una regla activa solo sigue activa si `keep_active(anterior,
     /// tenía_validación_avanzada)` lo permite (D186c). Si no, la versión nueva nace inactiva en
     /// la misma transacción y la entrada del historial lo dice. Devuelve la regla guardada y si
     /// quedó desactivada por la edición. La condición se evalúa dentro de la transacción, sobre

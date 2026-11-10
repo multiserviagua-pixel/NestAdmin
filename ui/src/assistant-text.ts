@@ -570,7 +570,7 @@ export interface ProposalLike {
   status: string;
   effect: string;
   summary: Record<string, any>;
-  receipt?: { confirmed_at: number; reconciled: boolean; result: Record<string, any> } | null;
+  receipt?: { confirmed_at: number; reconciled: boolean; result: Record<string, any>; outcome?: string; reason?: string | null } | null;
 }
 
 export const PROPOSAL_KINDS = [
@@ -756,10 +756,32 @@ export function proposalFinalText(card: ProposalLike): string | null {
     case "stale":
       return "La tarea cambió después de preparar esta propuesta. Pídala de nuevo para ver los datos actuales.";
     case "failed":
-      return "No se hizo nada: la acción ya no era posible con el estado actual de la tarea. Pídala de nuevo si la necesita.";
+      return notDoneText(card) ?? "No se hizo nada: la acción ya no era posible con el estado actual de la tarea. Pídala de nuevo si la necesita.";
     default:
       return null;
   }
+}
+
+/** Lo que pasó cuando se pulsó el botón y la acción no llegó a hacerse (recibo `not_done`); `null` si no hay ese recibo. */
+function notDoneText(card: ProposalLike): string | null {
+  if (card.receipt?.outcome !== "not_done") return null;
+  const what = card.effect === "register_invoice" ? "registrar la factura" : "enviar";
+  switch (card.receipt.reason) {
+    case "action_failed":
+      return `No se pudo ${what}; la tarea quedó fallida y se puede reintentar.`;
+    case "returned_to_review":
+      return `No se pudo ${what}; la tarea sigue pendiente de revisión.`;
+    default:
+      return `No se pudo ${what}: la tarea no llegó a completarse.`;
+  }
+}
+
+/** Aviso de que confirmar puede activar reglas que envían o registran sin revisión; `null` si no es el caso. */
+export function proposalRulesText(kind: string, effect: string, summary: Record<string, any> = {}): string | null {
+  if (effect !== "may_trigger_rules") return null;
+  const n = (Number(summary.active_send_rules) || 0) + (Number(summary.active_register_rules) || 0);
+  const what = `${n} ${plural(n, "regla activa que puede", "reglas activas que pueden")} enviar respuestas o registrar facturas sin revisión`;
+  return `Tiene ${what} con ${kind === "retry" ? "la tarea reintentada" : "el correo nuevo"}.`;
 }
 
 /** Etiqueta corta del estado, para el chip de la tarjeta. */
@@ -814,7 +836,7 @@ function receiptHeadline(card: ProposalLike): string {
 
 /** Qué se hizo y cuándo, tomado del recibo; vacío si la propuesta no está confirmada. */
 export function proposalReceiptLines(card: ProposalLike): string[] {
-  if (card.status !== "confirmed" || !card.receipt) return [];
+  if (card.status !== "confirmed" || !card.receipt || card.receipt.outcome === "not_done") return [];
   const when = formatStamp(card.receipt.confirmed_at);
   const lines = [`${receiptHeadline(card)}${when ? ` el ${when}` : ""}.`];
   if (card.kind === "approve" && card.effect === "send_mail") lines.push("La entrega al destinatario no se comprueba.");
@@ -866,11 +888,17 @@ export function emailIssueText(code: string, version?: unknown): string | null {
   return null;
 }
 
+const AUDIT_REASONS: Record<string, string> = {
+  action_failed: "la tarea quedó fallida",
+  returned_to_review: "la tarea volvió a revisión",
+  not_completed: "la tarea no se completó",
+};
+
 /** Detalle del Historial de un evento `assistant_proposal`, en palabras; sin texto de correos ni de documentos. */
 export function proposalAuditText(d: Record<string, unknown>): string {
   const what = typeof d.kind === "string" ? proposalHeading(d.kind, typeof d.effect === "string" ? d.effect : undefined).replace(/^Propuesta: /, "") : "propuesta";
-  const effect = d.effect === "send_mail" ? "envía un correo" : d.effect === "register_invoice" ? "registra una factura" : "sin envío ni registro";
-  const code = typeof d.code === "string" && d.code ? (d.code === "reconciled" ? " · ya constaba hecha y no se repitió" : ` · motivo: ${d.code}`) : "";
+  const effect = d.effect === "send_mail" ? "envía un correo" : d.effect === "register_invoice" ? "registra una factura" : d.effect === "may_trigger_rules" ? "puede activar reglas" : "sin envío ni registro";
+  const code = typeof d.code === "string" && d.code ? (d.code === "reconciled" ? " · ya constaba hecha y no se repitió" : d.code in AUDIT_REASONS ? ` · no se hizo: ${AUDIT_REASONS[String(d.code)]}` : ` · motivo: ${d.code}`) : "";
   return `${what.charAt(0).toUpperCase()}${what.slice(1)} · ${effect}${code}`;
 }
 

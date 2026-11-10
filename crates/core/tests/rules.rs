@@ -1,8 +1,14 @@
 //! Reglas versionadas (R07): creación inactiva, versiones nuevas en cada cambio,
 //! historial conservado y persistencia tras reabrir.
 
-use nestadmin_core::{CoreError, Store};
-use serde_json::json;
+use nestadmin_core::{CoreError, Rule, Store};
+use serde_json::{json, Value};
+
+/// Edita las condiciones por la única vía que hay (D186c) sin desactivar la regla: lo que
+/// comprueban estas pruebas es el versionado, no la comparación de condiciones.
+fn update(store: &mut Store, id: &str, conditions: &Value) -> Result<Rule, CoreError> {
+    Ok(store.update_rule_guarded(id, conditions, &|_, _| true)?.0)
+}
 
 #[test]
 fn rules_are_created_inactive_and_every_change_is_a_new_version() {
@@ -31,12 +37,12 @@ fn rules_are_created_inactive_and_every_change_is_a_new_version() {
             .version,
         2
     );
-    let updated = store
-        .update_rule(
-            "proveedor-alfa",
-            &json!({ "supplier": "Alfa SL", "max_total": "500.00" }),
-        )
-        .unwrap();
+    let updated = update(
+        &mut store,
+        "proveedor-alfa",
+        &json!({ "supplier": "Alfa SL", "max_total": "500.00" }),
+    )
+    .unwrap();
     assert_eq!(
         (updated.version, updated.active),
         (3, true),
@@ -107,7 +113,6 @@ fn rules_survive_restart() {
 
 use nestadmin_core::actions::ConnectorError;
 use nestadmin_core::{ActionRequest, Authorization, Connector, EvaluationRecord, SignalRecord};
-use serde_json::Value;
 
 struct Accepts;
 
@@ -142,9 +147,7 @@ fn names_archive_and_the_advanced_mark_live_in_rule_meta() {
 
     // Editar las condiciones borra la marca y lo deja en el historial; el nombre se queda.
     store.set_rule_active("envio", true).unwrap();
-    let edited = store
-        .update_rule("envio", &json!({ "category": "documentacion" }))
-        .unwrap();
+    let edited = update(&mut store, "envio", &json!({ "category": "documentacion" })).unwrap();
     assert!(edited.version > rule.version);
     let meta = store.rule_meta("envio").unwrap().unwrap();
     assert!(meta.allow_any_sender_ack_at.is_none());
@@ -171,7 +174,7 @@ fn names_archive_and_the_advanced_mark_live_in_rule_meta() {
         Err(CoreError::RuleArchived(_))
     ));
     assert!(matches!(
-        store.update_rule("envio", &json!({ "category": "otros" })),
+        update(&mut store, "envio", &json!({ "category": "otros" })),
         Err(CoreError::RuleArchived(_))
     ));
     // Desactivar una archivada sigue siendo posible (ya lo está), y archivar es idempotente.

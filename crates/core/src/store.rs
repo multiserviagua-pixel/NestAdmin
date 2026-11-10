@@ -144,6 +144,16 @@ impl Store {
         Ok(())
     }
 
+    /// Quita el origen fijado con `set_audit_origin`, sin dejarlo nunca fijado: si la
+    /// actualización falla dos veces, reinstala la tabla temporal y el disparador (que parten sin
+    /// origen). Si tampoco se puede, devuelve el error: quien lo fijó no debe continuar.
+    pub fn clear_audit_origin(&self) -> Result<()> {
+        if self.set_audit_origin(None).is_ok() || self.set_audit_origin(None).is_ok() {
+            return Ok(());
+        }
+        self.install_audit_origin()
+    }
+
     fn migrate(&mut self, path: Option<&Path>) -> Result<()> {
         let current: i64 = self
             .conn

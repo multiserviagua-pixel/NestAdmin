@@ -14,7 +14,7 @@ use nestadmin_ai::assistant::{Level, DATA_CLOSE, DATA_OPEN, TOOLS};
 use nestadmin_ai::{
     AiError, GenerateRequest, GenerateResult, Provider, ProviderKind, Task as AiTask, Usage,
 };
-use nestadmin_app::assistant::proposals::{Effect, ProposalCard};
+use nestadmin_app::assistant::proposals::{Effect, Outcome as ReceiptOutcome, ProposalCard};
 use nestadmin_app::assistant::{AssistantTurn, Outcome};
 use nestadmin_app::{App, AppError, AppPaths, EMAIL};
 use nestadmin_core::{AuditEntry, Task, TaskState};
@@ -823,7 +823,7 @@ fn a_doubtful_invoice_needs_the_amount_confirmation_and_stays_pending_without_it
 }
 
 #[test]
-fn a_precondition_that_no_longer_holds_leaves_the_proposal_failed_without_effects() {
+fn a_precondition_that_no_longer_holds_never_leaves_the_proposal_executing() {
     let mut w = world();
     let mail = first_mail(&mut w);
     let turn = propose(
@@ -834,17 +834,20 @@ fn a_precondition_that_no_longer_holds_leaves_the_proposal_failed_without_effect
         "review",
     );
     let id = turn.proposals[0].id;
-    // La persona aprueba por la pantalla (la versión no cambia): la tarea ya no está en revisión.
+    // La persona aprueba por la pantalla (la versión no cambia): la tarea ya no está en revisión y
+    // lo que mostraba la tarjeta ya no es lo que hay: no se ejecuta nada.
     w.app.approve(mail, 1).unwrap();
     let sent = w.sent();
     let error = w.app.proposal_confirm(id, false).unwrap_err();
-    assert!(matches!(error, AppError::Invalid(_)), "{error}");
-    assert_eq!(w.statuses()[0].1, "failed");
+    assert_eq!(code(&error), "stale", "{error}");
+    assert_eq!(w.statuses()[0].1, "stale");
     assert_eq!(w.sent(), sent);
+    assert_eq!(w.task(mail).state, TaskState::Completed);
     assert_eq!(
         code(&w.app.proposal_confirm(id, false).unwrap_err()),
-        "failed"
+        "stale"
     );
+    assert_eq!(w.app.proposal_dismiss(id).unwrap().status, "rejected");
 }
 
 // ======================================================================================
@@ -1354,10 +1357,11 @@ fn reject_cancels_the_task() {
         "review",
     );
     assert_eq!(turn.proposals[0].summary["type"], "reject");
-    let records = w.records();
+    let (records, sent) = (w.records(), w.sent());
     w.app.proposal_confirm(turn.proposals[0].id, false).unwrap();
     assert_eq!(w.task(inv).state, TaskState::Cancelled);
     assert_eq!(w.records(), records);
+    assert_eq!(w.sent(), sent, "rechazar no envía ningún correo");
     // Es una decisión de la persona: consta la señal de rechazo como cuando se descarta por pantalla.
     assert_eq!(
         w.count("SELECT count(*) FROM rule_signals WHERE kind = 'rejected'"),
@@ -1571,6 +1575,656 @@ fn fetch_mail_limit_rename_and_sender_preference_reach_their_app_methods() {
         "mail",
     );
     assert!(none.proposals.is_empty());
+}
+
+// ======================================================================================
+// Revisión de E3: huella, resultado real, recuperación, origen y texto del modelo
+// ======================================================================================
+
+/// Dirección de una regla de envío activa con remitente (la que `consultar el correo` y
+/// `reintentar` pueden disparar sin revisión).
+fn active_send_rule(app: &mut App, id: &str) {
+    app.create_rule_full(nestadmin_app::panel::NewRule {
+        id: Some(id),
+        name: None,
+        action_kind: "send_draft",
+        conditions: &json!({ "category": "solicitud_factura", "sender": "ana@alfa.test" }),
+        allow_any_sender: false,
+    })
+    .unwrap();
+    app.set_rule_active(id, true).unwrap();
+}
+
+fn status_of(w: &World, id: i64) -> String {
+    w.statuses().into_iter().find(|(i, _)| *i == id).unwrap().1
+}
+
+fn set_draft(w: &World, task: i64, body: &str, flags: &str) {
+    w.sql(&format!(
+        "UPDATE tasks SET result = json_set(result, '$.draft.body', '{body}', '$.draft_flags', json('{flags}')) WHERE id = {task}"
+    ));
+}
+
+#[test]
+fn scenario_a_an_action_done_on_screen_makes_the_other_cards_stale_not_stuck() {
+    // Aprobar y rechazar la misma tarea: la persona aprueba desde la revisión (la versión no cambia).
+    let mut w = world();
+    let mail = first_mail(&mut w);
+    let turn = propose(
+        &mut w,
+        None,
+        &[mail],
+        vec![
+            approve(mail),
+            tool("propose_reject", json!({ "ref": doc(mail) })),
+        ],
+        "review",
+    );
+    let conversation = turn.conversation_id.unwrap();
+    let (approve_id, reject_id) = (turn.proposals[0].id, turn.proposals[1].id);
+    w.app.approve(mail, 1).unwrap();
+    let (sent, signals) = (
+        w.sent(),
+        w.count("SELECT count(*) FROM rule_signals WHERE kind = 'rejected'"),
+    );
+    assert_eq!(w.version(mail), 1, "la versión no cambió");
+
+    // Al leer, las dos tarjetas ya constan obsoletas.
+    let cards = w.app.proposals(conversation).unwrap();
+    assert!(cards.iter().all(|c| c.status == "stale"), "{cards:?}");
+    // Confirmar la de rechazo no ejecuta nada y no deja `executing`.
+    for id in [reject_id, approve_id, reject_id] {
+        let error = w.app.proposal_confirm(id, false).unwrap_err();
+        assert!(matches!(code(&error), "stale" | "stale_version"), "{error}");
+    }
+    assert_eq!(w.sent(), sent, "ningún envío más");
+    assert_eq!(w.task(mail).state, TaskState::Completed);
+    assert_eq!(
+        w.count("SELECT count(*) FROM rule_signals WHERE kind = 'rejected'"),
+        signals
+    );
+    assert!(w.statuses().iter().all(|(_, s)| s == "stale"));
+    // Se pueden descartar.
+    for id in [approve_id, reject_id] {
+        assert_eq!(w.app.proposal_dismiss(id).unwrap().status, "rejected");
+    }
+}
+
+#[test]
+fn scenario_a_with_retry_the_same_task_retried_on_screen_is_not_cancelled_by_the_card() {
+    let mut w = world();
+    let failed = w.app.import_file("Factura.PDF", b"%PDF-1.4").unwrap();
+    assert_eq!(
+        w.app.process_next().unwrap().unwrap().state,
+        TaskState::Failed
+    );
+    let turn = propose(
+        &mut w,
+        None,
+        &[failed.id],
+        vec![
+            tool("propose_retry", json!({ "ref": doc(failed.id) })),
+            tool("propose_reject", json!({ "ref": doc(failed.id) })),
+        ],
+        "review",
+    );
+    let (retry_id, reject_id) = (turn.proposals[0].id, turn.proposals[1].id);
+    // La persona reintenta por la pantalla; la tarjeta de rechazo ya no describe la tarea.
+    w.app.retry(failed.id).unwrap();
+    for id in [reject_id, retry_id] {
+        let error = w.app.proposal_confirm(id, false).unwrap_err();
+        assert_eq!(code(&error), "stale", "{error}");
+        assert_ne!(status_of(&w, id), "executing");
+    }
+    assert_eq!(w.task(failed.id).state, TaskState::Queued, "no se canceló");
+    for id in [retry_id, reject_id] {
+        assert_eq!(w.app.proposal_dismiss(id).unwrap().status, "rejected");
+    }
+}
+
+#[test]
+fn scenario_b_a_failed_task_back_in_review_with_the_same_version_does_not_get_rejected() {
+    let mut w = world();
+    let mail = first_mail(&mut w);
+    // Aprobar con el conector caído: la tarea falla (versión 1).
+    w.app
+        .simulators()
+        .0
+        .set_failure(Some(nestadmin_simulators::FailureMode::Unavailable));
+    assert_eq!(w.app.approve(mail, 1).unwrap().state, TaskState::Failed);
+    w.app.simulators().0.set_failure(None);
+    let turn = propose(
+        &mut w,
+        None,
+        &[mail],
+        vec![tool("propose_reject", json!({ "ref": doc(mail) }))],
+        "review",
+    );
+    let id = turn.proposals[0].id;
+    assert_eq!(turn.proposals[0].summary["task"]["state"], "failed");
+    // La persona la reintenta y vuelve a revisión con el mismo número de versión.
+    w.app.retry(mail).unwrap();
+    let back = w.app.process_next().unwrap().unwrap();
+    assert_eq!(back.state, TaskState::AwaitingReview);
+    assert_eq!(w.version(mail), 1);
+    let signals = w.count("SELECT count(*) FROM rule_signals WHERE kind = 'rejected'");
+
+    let cards = w.app.proposals(turn.conversation_id.unwrap()).unwrap();
+    assert_eq!(cards[0].status, "stale", "{cards:?}");
+    let error = w.app.proposal_confirm(id, false).unwrap_err();
+    assert_eq!(code(&error), "stale", "{error}");
+    assert_eq!(
+        w.task(mail).state,
+        TaskState::AwaitingReview,
+        "no se canceló"
+    );
+    assert_eq!(
+        w.count("SELECT count(*) FROM rule_signals WHERE kind = 'rejected'"),
+        signals,
+        "sin señal `rejected`"
+    );
+    assert_eq!(w.app.proposal_dismiss(id).unwrap().status, "rejected");
+}
+
+#[test]
+fn a_pending_card_carries_the_current_data_or_is_stale() {
+    let mut w = world();
+    let mail = first_mail(&mut w);
+    let turn = propose(&mut w, None, &[mail], vec![approve(mail)], "review");
+    let conversation = turn.conversation_id.unwrap();
+    // Sin cambios, la tarjeta pendiente lleva el resumen actual (igual al mostrado).
+    let cards = w.app.proposals(conversation).unwrap();
+    assert_eq!(cards[0].status, "pending");
+    assert_eq!(cards[0].summary, turn.proposals[0].summary);
+    // La persona edita el borrador por la pantalla: la tarjeta ya no es la que se mostró.
+    w.app.edit_draft(mail, "Otro texto del borrador.").unwrap();
+    let cards = w.app.proposals(conversation).unwrap();
+    assert_eq!(cards[0].status, "stale");
+    // Una propuesta nueva lleva el texto actual.
+    let again = propose(
+        &mut w,
+        Some(conversation),
+        &[mail],
+        vec![approve(mail)],
+        "review",
+    );
+    assert_eq!(
+        again.proposals.last().unwrap().summary["body"],
+        json!("Otro texto del borrador.")
+    );
+    // Un valor que cambia por la pantalla también invalida la tarjeta de un ajuste.
+    let limit_turn = propose(&mut w, Some(conversation), &[], vec![limit(37)], "mail");
+    let limit_id = limit_turn.proposals.last().unwrap().id;
+    w.app.set_mail_limit(41).unwrap();
+    assert_eq!(status_of(&w, limit_id), "pending");
+    let cards = w.app.proposals(conversation).unwrap();
+    assert_eq!(
+        cards.iter().find(|c| c.id == limit_id).unwrap().status,
+        "stale"
+    );
+}
+
+#[test]
+fn the_draft_flags_of_the_cards_follow_the_current_body() {
+    let mut w = world();
+    let mail = first_mail(&mut w);
+    set_draft(
+        &w,
+        mail,
+        "Escriba a soporte@taller-ficticio.test, gracias.",
+        "[\"email\"]",
+    );
+    let turn = propose(
+        &mut w,
+        None,
+        &[mail],
+        vec![
+            approve(mail),
+            tool(
+                "propose_edit_draft",
+                json!({ "ref": doc(mail), "body": "Gracias por su mensaje." }),
+            ),
+        ],
+        "review",
+    );
+    assert_eq!(
+        card_of(&turn, "edit_draft").summary["draft_flags"],
+        json!([]),
+        "las marcas son las del texto nuevo"
+    );
+    // Confirmada la edición, el borrador guardado ya no lleva las marcas del anterior y la tarjeta
+    // de aprobación que se prepare después tampoco.
+    let edit_id = card_of(&turn, "edit_draft").id;
+    w.app.proposal_confirm(edit_id, false).unwrap();
+    assert_eq!(w.task(mail).result.unwrap()["draft_flags"], json!([]));
+    let next = propose(
+        &mut w,
+        turn.conversation_id,
+        &[mail],
+        vec![approve(mail)],
+        "review",
+    );
+    let card = next.proposals.last().unwrap();
+    assert_eq!(card.summary["body"], "Gracias por su mensaje.");
+    assert_eq!(card.summary["draft_flags"], json!([]));
+}
+
+#[test]
+fn an_approval_that_does_not_send_is_not_done_and_leaves_the_task_available() {
+    let mut w = world();
+    let mail = first_mail(&mut w);
+    let turn = propose(&mut w, None, &[mail], vec![approve(mail)], "review");
+    let id = turn.proposals[0].id;
+    let sent = w.sent();
+    w.app
+        .simulators()
+        .0
+        .set_failure(Some(nestadmin_simulators::FailureMode::Unavailable));
+    let receipt = w.app.proposal_confirm(id, false).unwrap();
+    w.app.simulators().0.set_failure(None);
+    assert_eq!(receipt.outcome, ReceiptOutcome::NotDone);
+    assert_eq!(receipt.reason.as_deref(), Some("action_failed"));
+    assert_eq!(receipt.task_state.as_deref(), Some("failed"));
+    assert_eq!(status_of(&w, id), "failed");
+    assert_eq!(w.sent(), sent, "ningún envío");
+    assert_eq!(
+        w.count("SELECT count(*) FROM actions WHERE kind = 'send_draft' AND status = 'confirmed'"),
+        0
+    );
+    // La tarjeta devuelta lleva el recibo real y no se puede confirmar otra vez.
+    let cards = w.app.proposals(turn.conversation_id.unwrap()).unwrap();
+    assert_eq!(cards[0].status, "failed");
+    assert_eq!(cards[0].receipt.as_ref(), Some(&receipt));
+    assert_eq!(
+        code(&w.app.proposal_confirm(id, false).unwrap_err()),
+        "failed"
+    );
+    // La tarea sigue disponible: se reintenta y se envía por la vía normal, una sola vez.
+    w.app.retry(mail).unwrap();
+    w.app.process_next().unwrap();
+    assert_eq!(w.app.approve(mail, 1).unwrap().state, TaskState::Completed);
+    assert_eq!(w.sent(), sent + 1);
+}
+
+#[test]
+fn a_cut_after_the_action_ends_confirmed_without_duplicates_for_every_task_kind() {
+    // Edición del borrador: la acción consta (versión 2 con el texto) y la propuesta quedó `executing`.
+    let mut w = world();
+    let mail = first_mail(&mut w);
+    let body = "Texto nuevo del borrador.";
+    let turn = propose(
+        &mut w,
+        None,
+        &[mail],
+        vec![tool(
+            "propose_edit_draft",
+            json!({ "ref": doc(mail), "body": body }),
+        )],
+        "review",
+    );
+    let id = turn.proposals[0].id;
+    w.app.edit_draft(mail, body).unwrap();
+    w.sql(&format!(
+        "UPDATE assistant_proposals SET status = 'executing' WHERE id = {id}"
+    ));
+    let receipt = w.app.proposal_confirm(id, false).unwrap();
+    assert!(receipt.reconciled);
+    assert_eq!(receipt.outcome, ReceiptOutcome::Done);
+    assert_eq!(w.version(mail), 2, "sin una tercera versión");
+    assert_eq!(
+        w.count("SELECT count(*) FROM rule_signals WHERE kind = 'edited'"),
+        1
+    );
+    assert_eq!(w.app.proposal_confirm(id, false).unwrap(), receipt);
+
+    // Confirmar que no se envió.
+    let mut w = world();
+    let mail = first_mail(&mut w);
+    w.sql(&format!(
+        "UPDATE tasks SET result = json_set(result, '$.attempt', json('{{\"version\":1,\"draft\":null}}')) WHERE id = {mail}"
+    ));
+    let turn = propose(
+        &mut w,
+        None,
+        &[mail],
+        vec![tool(
+            "propose_confirm_not_sent",
+            json!({ "ref": doc(mail) }),
+        )],
+        "review",
+    );
+    let id = turn.proposals[0].id;
+    w.app.confirm_not_sent(mail).unwrap();
+    w.sql(&format!(
+        "UPDATE assistant_proposals SET status = 'executing' WHERE id = {id}"
+    ));
+    let receipt = w.app.proposal_confirm(id, false).unwrap();
+    assert!(receipt.reconciled);
+    assert_eq!(w.version(mail), 2, "sin una tercera versión");
+    assert_eq!(w.sent(), 0);
+
+    // Rechazar: la tarea consta cancelada y la señal una sola vez.
+    let mut w = world();
+    let mail = first_mail(&mut w);
+    let turn = propose(
+        &mut w,
+        None,
+        &[mail],
+        vec![tool("propose_reject", json!({ "ref": doc(mail) }))],
+        "review",
+    );
+    let id = turn.proposals[0].id;
+    w.app.reject(mail).unwrap();
+    w.sql(&format!(
+        "UPDATE assistant_proposals SET status = 'executing' WHERE id = {id}"
+    ));
+    let receipt = w.app.proposal_confirm(id, false).unwrap();
+    assert!(receipt.reconciled);
+    assert_eq!(
+        w.count("SELECT count(*) FROM rule_signals WHERE kind = 'rejected'"),
+        1
+    );
+
+    // Reintentar: la tarea consta en cola.
+    let mut w = world();
+    let failed = w.app.import_file("Factura.PDF", b"%PDF-1.4").unwrap();
+    w.app.process_next().unwrap();
+    let turn = propose(
+        &mut w,
+        None,
+        &[failed.id],
+        vec![tool("propose_retry", json!({ "ref": doc(failed.id) }))],
+        "review",
+    );
+    let id = turn.proposals[0].id;
+    w.app.retry(failed.id).unwrap();
+    w.sql(&format!(
+        "UPDATE assistant_proposals SET status = 'executing' WHERE id = {id}"
+    ));
+    let receipt = w.app.proposal_confirm(id, false).unwrap();
+    assert!(receipt.reconciled);
+    assert_eq!(w.task(failed.id).state, TaskState::Queued);
+}
+
+#[test]
+fn a_cut_with_the_action_still_pending_in_the_connector_sends_once_and_gives_a_correct_receipt() {
+    for what in ["mail", "invoice"] {
+        let mut w = world();
+        let task = if what == "mail" {
+            first_mail(&mut w)
+        } else {
+            seed_invoice(
+                &mut w.app,
+                "a.txt",
+                &invoice_json("Alfa SL", "F-1", "121.00"),
+            )
+        };
+        let effects = |w: &World| {
+            if what == "mail" {
+                w.sent()
+            } else {
+                w.records()
+            }
+        };
+        let turn = propose(&mut w, None, &[task], vec![approve(task)], "review");
+        let id = turn.proposals[0].id;
+        let before = effects(&w);
+        // El conector hizo la acción, pero no se anotó: la acción consta `pending` y la tarea,
+        // en revisión, con el intento guardado.
+        w.app.approve(task, 1).unwrap();
+        assert_eq!(effects(&w), before + 1);
+        w.sql(&format!(
+            "UPDATE actions SET status = 'pending', receipt = NULL WHERE task_id = {task};
+             UPDATE tasks SET state = 'awaiting_review' WHERE id = {task};
+             UPDATE assistant_proposals SET status = 'executing' WHERE id = {id};"
+        ));
+        let receipt = w.app.proposal_confirm(id, false).unwrap();
+        assert_eq!(receipt.outcome, ReceiptOutcome::Done, "{what}");
+        assert_eq!(receipt.task_state.as_deref(), Some("completed"), "{what}");
+        assert_eq!(effects(&w), before + 1, "{what}: sin duplicado");
+        assert_eq!(status_of(&w, id), "confirmed");
+    }
+}
+
+#[test]
+fn an_executing_proposal_always_resolves_failed_dismissed_or_expired() {
+    // Reintentar una tarea que luego se canceló: no consta hecha y la precondición ya no vale.
+    let mut w = world();
+    let failed = w.app.import_file("Factura.PDF", b"%PDF-1.4").unwrap();
+    w.app.process_next().unwrap();
+    let turn = propose(
+        &mut w,
+        None,
+        &[failed.id],
+        vec![tool("propose_retry", json!({ "ref": doc(failed.id) }))],
+        "review",
+    );
+    let id = turn.proposals[0].id;
+    w.app.reject(failed.id).unwrap();
+    w.sql(&format!(
+        "UPDATE assistant_proposals SET status = 'executing' WHERE id = {id}"
+    ));
+    // Una tarea cancelada no es «reintentada»: no se da por reconciliada ni queda `executing`.
+    let error = w.app.proposal_confirm(id, false).unwrap_err();
+    assert!(
+        !matches!(error, AppError::Proposal { code: "busy", .. }),
+        "{error}"
+    );
+    assert_eq!(status_of(&w, id), "failed");
+    assert_eq!(w.task(failed.id).state, TaskState::Cancelled);
+
+    // Descartar una `executing` cuya acción no consta hecha la deja `rejected`.
+    let mut w = world();
+    let mail = first_mail(&mut w);
+    let turn = propose(&mut w, None, &[mail], vec![approve(mail)], "review");
+    let id = turn.proposals[0].id;
+    w.sql(&format!(
+        "UPDATE assistant_proposals SET status = 'executing' WHERE id = {id}"
+    ));
+    let sent = w.sent();
+    assert_eq!(w.app.proposal_dismiss(id).unwrap().status, "rejected");
+    assert_eq!(w.sent(), sent);
+
+    // Descartar una `executing` cuya acción SÍ consta hecha la reconcilia como confirmada.
+    let mut w = world();
+    let mail = first_mail(&mut w);
+    let turn = propose(&mut w, None, &[mail], vec![approve(mail)], "review");
+    let id = turn.proposals[0].id;
+    w.app.approve(mail, 1).unwrap();
+    w.sql(&format!(
+        "UPDATE assistant_proposals SET status = 'executing' WHERE id = {id}"
+    ));
+    let card = w.app.proposal_dismiss(id).unwrap();
+    assert_eq!(card.status, "confirmed");
+    assert!(card.receipt.is_some_and(|r| r.reconciled));
+
+    // Una `executing` caduca como las demás si no consta hecha.
+    let mut w = world();
+    let mail = first_mail(&mut w);
+    let turn = propose(&mut w, None, &[mail], vec![approve(mail)], "review");
+    let id = turn.proposals[0].id;
+    w.sql(&format!(
+        "UPDATE assistant_proposals SET status = 'executing', expires_at = 1 WHERE id = {id}"
+    ));
+    let cards = w.app.proposals(turn.conversation_id.unwrap()).unwrap();
+    assert_eq!(cards[0].status, "expired");
+}
+
+#[test]
+fn the_chat_origin_is_restored_after_an_error_and_after_a_panic() {
+    let mut w = world();
+    let last = |w: &World| w.app.audit_log().unwrap().pop().unwrap();
+    // Dentro del ámbito, lo que se escribe lleva `chat`.
+    w.app
+        .with_chat_origin(|app| app.record_setting("dentro", "ok", &json!({})))
+        .unwrap();
+    assert_eq!(last(&w).origin.as_deref(), Some("chat"));
+    // Después de un error del ámbito, el siguiente evento del flujo normal queda sin origen.
+    let error = w
+        .app
+        .with_chat_origin::<()>(|_| Err(AppError::Invalid("fallo de prueba".into())))
+        .unwrap_err();
+    assert!(matches!(error, AppError::Invalid(_)));
+    w.app
+        .record_setting("tras_error", "ok", &json!({}))
+        .unwrap();
+    assert_eq!(
+        (last(&w).action.as_str(), last(&w).origin),
+        ("tras_error", None)
+    );
+    // Y tras un pánico capturado.
+    let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _ = w.app.with_chat_origin::<()>(|app| {
+            app.record_setting("antes_del_panico", "ok", &json!({}))?;
+            panic!("pánico de prueba");
+        });
+    }));
+    assert!(caught.is_err());
+    assert_eq!(last(&w).origin.as_deref(), Some("chat"));
+    w.app
+        .record_setting("tras_panico", "ok", &json!({}))
+        .unwrap();
+    assert_eq!(
+        (last(&w).action.as_str(), last(&w).origin),
+        ("tras_panico", None)
+    );
+}
+
+#[test]
+fn invisible_and_bidirectional_characters_in_model_text_are_rejected() {
+    let mut w = world();
+    let mail = first_mail(&mut w);
+    for bad in ["\u{202E}", "\u{200B}", "\u{2066}"] {
+        // Cuerpo del borrador (en la vista de revisión).
+        w.ext.turn(vec![
+            tool("get_document", json!({ "ref": doc(mail) })),
+            tool(
+                "propose_edit_draft",
+                json!({ "ref": doc(mail), "body": format!("Gracias{bad} por escribir.") }),
+            ),
+            answer("Listo."),
+        ]);
+        let turn = ask(&mut w, None, "cambie el borrador", "review");
+        assert!(turn.proposals.is_empty(), "{bad:?}");
+        let content = w.ext.requests().last().unwrap().content.clone();
+        assert!(content.contains("\"error\":\"invisible_chars\""), "{bad:?}");
+        // Nombre de cuenta y clave de preferencia (en la vista de correo).
+        w.ext.turn(vec![
+            tool("mail_accounts", json!({})),
+            tool(
+                "propose_rename_account",
+                json!({ "account": "acct:1", "label": format!("Oficina{bad}") }),
+            ),
+            tool(
+                "propose_sender_preference",
+                json!({ "scope": "address", "key": format!("ana{bad}@cliente.test"), "route": "informative" }),
+            ),
+            answer("Listo."),
+        ]);
+        let turn = ask(&mut w, None, "cambie cosas", "mail");
+        assert!(turn.proposals.is_empty(), "{bad:?}");
+        let content = w.ext.requests().last().unwrap().content.clone();
+        assert_eq!(
+            content.matches("\"error\":\"invisible_chars\"").count(),
+            2,
+            "{bad:?}: {content}"
+        );
+    }
+    assert!(w.statuses().is_empty());
+}
+
+#[test]
+fn a_draft_that_already_carries_a_contact_signature_can_be_edited_but_not_given_new_contacts() {
+    let mut w = world();
+    let mail = first_mail(&mut w);
+    let current = "Gracias por su mensaje.\n\nContacto: soporte@taller-ficticio.test, +34 600 111 222. IBAN ES91 2100 0418 4502 0005 1332.";
+    set_draft(&w, mail, current, "[\"email\",\"iban\",\"phone\"]");
+    let edit = |body: &str| {
+        tool(
+            "propose_edit_draft",
+            json!({ "ref": doc(mail), "body": body }),
+        )
+    };
+    // Conservar la firma (con otro saludo): se puede proponer; las marcas se muestran.
+    let kept = "Muchas gracias por escribirnos.\n\nContacto: soporte@taller-ficticio.test, +34 600 111 222. IBAN ES91 2100 0418 4502 0005 1332.";
+    let turn = propose(&mut w, None, &[mail], vec![edit(kept)], "review");
+    assert_eq!(turn.proposals.len(), 1, "{turn:?}");
+    assert_eq!(turn.proposals[0].summary["new_body"], json!(kept));
+    // Introducir un IBAN, un correo, un teléfono o una URL NUEVOS se rechaza.
+    for (body, why) in [
+        (
+            "Gracias.\n\nContacto: soporte@taller-ficticio.test. IBAN ES12 2100 0418 4502 0005 9999.",
+            "iban nuevo",
+        ),
+        (
+            "Gracias.\n\nContacto: otro@externo.test, +34 600 111 222.",
+            "correo nuevo",
+        ),
+        (
+            "Gracias.\n\nContacto: soporte@taller-ficticio.test, +34 611 222 333.",
+            "teléfono nuevo",
+        ),
+        (
+            "Gracias.\n\nContacto: soporte@taller-ficticio.test, https://enlace.example.test/pago",
+            "url nueva",
+        ),
+    ] {
+        w.ext.turn(vec![
+            tool("get_document", json!({ "ref": doc(mail) })),
+            edit(body),
+            answer("Listo."),
+        ]);
+        let turn = ask(&mut w, turn.conversation_id, "cambie el borrador", "review");
+        assert!(turn.proposals.is_empty(), "{why}");
+        let content = w.ext.requests().last().unwrap().content.clone();
+        assert!(content.contains("\"error\":\"draft_flagged\""), "{why}: {content}");
+    }
+}
+
+#[test]
+fn fetch_mail_and_retry_say_when_active_rules_may_act_without_review() {
+    let mut w = world();
+    let turn = propose(
+        &mut w,
+        None,
+        &[],
+        vec![tool("propose_fetch_mail", json!({}))],
+        "mail",
+    );
+    let conversation = turn.conversation_id.unwrap();
+    let card = &turn.proposals[0];
+    assert_eq!(card.effect, Effect::NoEffect);
+    assert_eq!(card.summary["active_send_rules"], 0);
+    assert_eq!(card.summary["active_register_rules"], 0);
+    // Una regla activa creada después cambia lo que hace confirmar: la tarjeta pasa a obsoleta y la
+    // nueva lo dice.
+    active_send_rule(&mut w.app, "envio-ana");
+    let cards = w.app.proposals(conversation).unwrap();
+    assert_eq!(cards[0].status, "stale");
+    let next = propose(
+        &mut w,
+        Some(conversation),
+        &[],
+        vec![tool("propose_fetch_mail", json!({}))],
+        "mail",
+    );
+    let card = next.proposals.last().unwrap();
+    assert_eq!(card.effect, Effect::MayTriggerRules);
+    assert_eq!(card.summary["active_send_rules"], 1);
+    assert_eq!(card.summary["active_register_rules"], 0);
+    // Reintentar también.
+    let failed = w.app.import_file("Factura.PDF", b"%PDF-1.4").unwrap();
+    w.app.process_next().unwrap();
+    let turn = propose(
+        &mut w,
+        Some(conversation),
+        &[failed.id],
+        vec![tool("propose_retry", json!({ "ref": doc(failed.id) }))],
+        "review",
+    );
+    let card = turn.proposals.last().unwrap();
+    assert_eq!(card.effect, Effect::MayTriggerRules);
+    assert_eq!(card.summary["active_send_rules"], 1);
 }
 
 #[test]

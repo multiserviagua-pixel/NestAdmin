@@ -2655,6 +2655,8 @@ impl App {
             ));
         }
         result["draft"]["body"] = json!(body);
+        // Las marcas (D160) son las del texto nuevo, no las del borrador anterior.
+        result["draft_flags"] = json!(self.outgoing_flags(&result, body));
         // Marca que una persona cambió el texto: la aprobación posterior ya no es «sin
         // cambios» y no sirve de evidencia para sugerir una regla (D129).
         result["edited"] = json!(true);

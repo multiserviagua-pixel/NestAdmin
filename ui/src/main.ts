@@ -347,6 +347,7 @@ import {
   proposalHeading,
   proposalIsOpen,
   proposalReceiptLines,
+  proposalRulesText,
   proposalStatusLabel,
   proposalTone,
   proposalVerb,
@@ -7293,7 +7294,8 @@ async function confirmProposal(card: ProposalCard) {
   let confirmed = false;
   try {
     const receipt = await api.proposalConfirm(card.id, ack ? ui.checked : undefined);
-    card.status = "confirmed";
+    // Con el resultado real: si la acción no se hizo, la tarjeta queda `failed` con su motivo.
+    card.status = receipt.outcome === "not_done" ? "failed" : "confirmed";
     card.receipt = receipt;
     confirmed = true;
   } catch (error) {
@@ -7467,7 +7469,7 @@ function proposalDetail(card: ProposalCard, ui: { checked: boolean; busy: boolea
         s.recovery ? h("p", { class: "notice warn proposal-notice" }, emailIssueText(String(s.recovery), s.task?.version) ?? "Hay un intento anterior sin confirmar.") : null,
       ];
     case "fetch_mail":
-      return [h("dl", { class: "origin" }, ...proposalRow("Cuentas", String(s.accounts ?? "?")), ...proposalRow("Límite de lectura", String(s.limit ?? "?")))];
+      return [h("dl", { class: "origin" }, ...proposalRow("Cuentas", String(s.accounts ?? "?")), ...proposalRow("Límite de lectura", String(s.limit ?? "?")), ...proposalRow("Reglas activas que envían o registran", String((Number(s.active_send_rules) || 0) + (Number(s.active_register_rules) || 0))))];
     case "mail_limit":
       return [h("dl", { class: "origin" }, ...proposalRow("Límite actual", String(s.current ?? "?")), ...proposalRow("Límite nuevo", String(s.new ?? "?")))];
     case "rename_account":
@@ -7507,6 +7509,7 @@ function proposalCard(card: ProposalCard): HTMLElement {
   const blockedByAck = needsAck && !ui.checked;
   const final = proposalFinalText(card);
   const receipt = proposalReceiptLines(card);
+  const rulesNotice = proposalRulesText(card.kind, card.effect, card.summary ?? {});
   const tone = proposalTone(card.kind);
   const hintId = `chat-prop-hint-${card.id}`;
   const live = h(
@@ -7526,6 +7529,7 @@ function proposalCard(card: ProposalCard): HTMLElement {
     open ? h("p", { class: "proposal-fixed" }, PROPOSAL_NOTHING_DONE) : null,
     ...proposalDetail(card, ui),
     open ? h("p", { class: "proposal-effect" }, proposalEffectText(card.kind, card.effect, card.summary ?? {})) : null,
+    open && rulesNotice ? h("p", { class: "notice warn proposal-notice" }, rulesNotice) : null,
     open && blockedByAck ? h("p", { class: "meta", id: hintId }, AMOUNTS_REQUIRED_HINT) : null,
     open
       ? h(

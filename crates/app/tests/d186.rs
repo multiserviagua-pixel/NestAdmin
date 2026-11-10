@@ -530,3 +530,79 @@ fn validating_any_sender_never_touches_inactive_rules_and_withdrawing_never_deac
     assert!(retired.rule.active && !retired.deactivated_by_edit);
     assert!(retired.any_sender_ack_at.is_none());
 }
+
+/// T37b: unificar reglas (D131) y aceptar en lote (D173) nunca reactivan ni amplían una regla que
+/// ya estaba activa: la unificada nace inactiva, las originales quedan archivadas y una regla
+/// activa ajena no cambia de versión; aceptar en lote algo ya aceptado y activo no toca nada.
+#[test]
+fn merging_rules_and_accepting_in_batch_never_reactivate_or_widen_an_active_rule() {
+    use nestadmin_core::{BatchRule, Store};
+
+    let mut store = Store::open_in_memory().unwrap();
+    let a = json!({ "supplier": "Alfa SL", "max_total": "100.00" });
+    let b = json!({ "supplier": "Alfa SL", "max_total": "200.00" });
+    let other = json!({ "supplier": "Beta SL", "max_total": "50.00" });
+    for (id, conditions) in [("a", &a), ("b", &b), ("ajena", &other)] {
+        store
+            .create_rule(id, "register_invoice", conditions)
+            .unwrap();
+        store.set_rule_active(id, true).unwrap();
+    }
+    let version_of = |store: &Store, id: &str| store.rule(id).unwrap().unwrap();
+    let ajena = version_of(&store, "ajena");
+    let (va, vb) = (
+        version_of(&store, "a").version,
+        version_of(&store, "b").version,
+    );
+
+    // Unificar: la nueva nace inactiva aunque todas las originales estuvieran activas.
+    let merged = store
+        .merge_rules(
+            &[("a".into(), va), ("b".into(), vb)],
+            "alfa-unida",
+            "register_invoice",
+            &json!({ "supplier": "Alfa SL", "max_total": "200.00" }),
+            Some("Alfa"),
+            &json!({ "kind": "merge" }),
+        )
+        .unwrap();
+    assert!(!merged.active, "la unificada nace inactiva");
+    for id in ["a", "b"] {
+        assert!(
+            !version_of(&store, id).active,
+            "{id} queda inactiva y archivada"
+        );
+    }
+    assert_eq!(version_of(&store, "ajena"), ajena, "la ajena no cambió");
+
+    // Aceptar en lote dos veces la misma sugerencia: la segunda no crea ni activa nada y una regla
+    // activa no cambia de versión ni de condiciones.
+    let conditions = json!({ "supplier": "Gamma SL" });
+    let origin = json!({ "kind": "learned" });
+    let rule = BatchRule {
+        fingerprint: "huella-gamma",
+        new_id: "gamma",
+        action_kind: "register_invoice",
+        conditions: &conditions,
+        name: None,
+        origin: &origin,
+        evidence: &json!({}),
+    };
+    let first = store.accept_and_activate_batch(&[rule], "lote 1").unwrap();
+    assert!(first[0].created && first[0].activated && first[0].rule.active);
+    let before = version_of(&store, "gamma");
+    let wider = json!({ "supplier": "Gamma SL" });
+    let again = BatchRule {
+        fingerprint: "huella-gamma",
+        new_id: "gamma",
+        action_kind: "register_invoice",
+        conditions: &wider,
+        name: None,
+        origin: &origin,
+        evidence: &json!({}),
+    };
+    let second = store.accept_and_activate_batch(&[again], "lote 2").unwrap();
+    assert!(!second[0].created && !second[0].activated);
+    assert_eq!(version_of(&store, "gamma"), before, "sin versión nueva");
+    assert_eq!(version_of(&store, "ajena"), ajena);
+}
