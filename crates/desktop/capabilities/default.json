@@ -1,7 +1,12 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Solo la ventana principal puede usar los comandos de NestAdmin y escuchar sus eventos.",
+  "description": "Solo la ventana principal puede usar los comandos de NestAdmin y escuchar sus eventos, y mostrar los avisos y confirmaciones de la interfaz (window.alert y window.confirm pasan por el complemento de diálogos).",
   "windows": ["main"],
-  "permissions": ["core:event:default"]
+  "permissions": [
+    "core:event:default",
+    "dialog:allow-message",
+    "dialog:allow-ask",
+    "dialog:allow-confirm"
+  ]
 }
