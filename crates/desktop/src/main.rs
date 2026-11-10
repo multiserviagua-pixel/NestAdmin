@@ -52,7 +52,7 @@ use nestadmin_extract::{Extractor, Tesseract};
 use nestadmin_mail::PendingAuthorization;
 use nestadmin_setup::{Cancel, Report, Setup, SetupError, Startup, Status, WindowsSystem};
 use serde::Serialize;
-use serde_json::Value;
+use serde_json::{json, Value};
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{AppHandle, Builder, Emitter, Manager, Runtime, State, Window, WindowEvent};
@@ -675,8 +675,13 @@ fn approve<R: Runtime>(
     handle: AppHandle<R>,
     id: i64,
     version: i64,
+    amounts_checked: Option<bool>,
 ) -> CmdResult<Task> {
-    let task = shared.app()?.approve(id, version).map_err(text);
+    // Ausente equivale a «no confirmado» (D186): el fondo rechaza una factura con importe dudoso.
+    let task = shared
+        .app()?
+        .approve_reviewed(id, version, amounts_checked.unwrap_or(false))
+        .map_err(text);
     // Una tarea que esperaba a esta (pipeline) puede empezar ya, sin esperar al sondeo.
     shared.wake();
     changed(&handle);
@@ -1766,7 +1771,7 @@ fn update_rule<R: Runtime>(
     handle: AppHandle<R>,
     id: String,
     conditions: Value,
-) -> CmdResult<Rule> {
+) -> CmdResult<RuleView> {
     let rule = shared.app()?.update_rule(&id, &conditions).map_err(text)?;
     changed(&handle);
     Ok(rule)
@@ -1937,16 +1942,53 @@ fn local_choice() -> ProviderChoice {
 /// Activa o desactiva el respaldo automático del proveedor externo a la IA local (D101).
 #[tauri::command]
 fn set_local_fallback(shared: State<'_, SharedState>, enabled: bool) -> CmdResult<()> {
-    {
+    let changed = {
         let mut current = shared.settings.lock().map_err(text)?;
+        let changed = current.local_fallback != enabled;
         let updated = Settings {
             local_fallback: enabled,
             ..current.clone()
         };
         updated.save(&shared.data_dir).map_err(text)?;
         *current = updated;
+        changed
+    };
+    // Solo un cambio real deja evento (D186b); repetir el mismo valor no.
+    let audited = if changed {
+        audit_ai_setting(
+            &shared,
+            if enabled {
+                "local_fallback_on"
+            } else {
+                "local_fallback_off"
+            },
+            json!({}),
+        )
+    } else {
+        Ok(())
+    };
+    refresh_provider(&shared)?;
+    audited
+}
+
+/// Anota un cambio de la configuración de la IA en el historial (D186b). `detail` nunca lleva
+/// claves, su longitud ni un fragmento, ni URL con credenciales. Si no se puede anotar, el error
+/// es explícito: el cambio ya está guardado y no debe quedar sin rastro en silencio.
+fn audit_ai_setting(shared: &Shared, status: &str, detail: Value) -> CmdResult<()> {
+    shared
+        .app()?
+        .record_setting("ai_setting", status, &detail)
+        .map_err(|e| format!("El cambio se guardó, pero no se pudo anotar en el historial: {e}"))
+}
+
+/// Modelo de la elección.
+fn choice_model(choice: &ProviderChoice) -> &str {
+    match choice {
+        ProviderChoice::Ollama { model, .. }
+        | ProviderChoice::OllamaCloud { model }
+        | ProviderChoice::OpenAiCompatible { model, .. }
+        | ProviderChoice::Anthropic { model } => model,
     }
-    refresh_provider(&shared)
 }
 
 /// Cambio explícito de proveedor. Con uno externo hace falta la confirmación del destino
@@ -1960,26 +2002,50 @@ fn select_provider(
     consent: Option<bool>,
 ) -> CmdResult<ProviderInfo> {
     let consent = consent.unwrap_or(false);
-    {
+    let event = {
         let mut current = shared.settings.lock().map_err(text)?;
         let mut updated = current.clone();
+        // La confirmación solo cuenta como cambio si es nueva para ese destino.
+        let mut consent_new = false;
         if !choice.is_local() {
             if choice.destination().is_none() {
                 // URL no válida: el error explícito del adaptador, sin leer ninguna clave.
                 settings::build(&choice, shared.credentials.as_ref()).map_err(text)?;
             }
             if consent {
+                consent_new = !updated.has_consent(&choice);
                 updated.record_consent(&choice);
             } else if !updated.has_consent(&choice) {
                 return Err("Confirme antes el destino de los datos".into());
             }
         }
         settings::build(&choice, shared.credentials.as_ref()).map_err(text)?;
+        // Mismo proveedor, modelo y servidor que ya estaban y sin confirmación nueva: no hay
+        // cambio y no deja evento (D186b). El servidor es solo el destino, sin credenciales.
+        let same = current.provider.as_ref().is_some_and(|before| {
+            before.id() == choice.id()
+                && choice_model(before) == choice_model(&choice)
+                && before.destination() == choice.destination()
+        });
+        let event = (!same || consent_new).then(|| {
+            json!({
+                "provider": choice.id(),
+                "model": choice_model(&choice),
+                "host": choice.destination(),
+                "consent": consent,
+            })
+        });
         updated.provider = Some(choice);
         updated.save(&shared.data_dir).map_err(text)?;
         *current = updated;
-    }
+        event
+    };
+    let audited = match event {
+        Some(detail) => audit_ai_setting(&shared, "provider_selected", detail),
+        None => Ok(()),
+    };
     refresh_provider(&shared)?;
+    audited?;
     Ok(shared.app()?.provider())
 }
 
@@ -1987,11 +2053,21 @@ fn select_provider(
 /// a calcular el proveedor activo. Las claves nuevas solo se guardan al listar los modelos.
 #[tauri::command]
 fn delete_provider_key(shared: State<'_, SharedState>, choice: ProviderChoice) -> CmdResult<()> {
+    let mut existed = false;
     if let Some(name) = choice.credential_name() {
+        // Si ya no había clave, borrar no cambia nada y no deja evento (D186b). Si no se puede
+        // leer el almacén, se supone que existía: mejor un evento de más que ninguno.
+        existed = !matches!(shared.credentials.get(&name), Ok(None));
         shared.credentials.delete(&name).map_err(text)?;
     }
+    let audited = if existed {
+        audit_ai_setting(&shared, "key_deleted", json!({ "provider": choice.id() }))
+    } else {
+        Ok(())
+    };
     lift_wait_if_same_credential(&shared, &choice);
-    refresh_provider(&shared)
+    refresh_provider(&shared)?;
+    audited
 }
 
 /// Si hay clave guardada para `choice`; una URL compatible no válida no tiene ninguna.
@@ -2067,12 +2143,33 @@ fn list_models_for(
     };
     let models =
         nestadmin_ai::models::list_models(choice, used, PROVIDER_CALL_TIMEOUT).map_err(text)?;
-    if let (Some(key), Some(name)) = (&provided, &name) {
-        shared.credentials.set(name, key).map_err(text)?;
-        lift_wait_if_same_credential(shared, choice);
-        refresh_provider(shared)?;
+    if let Some(key) = &provided {
+        save_provider_key(shared, choice, key)?;
     }
     Ok(models)
+}
+
+/// Guarda la clave de `choice` (sin efecto si el proveedor no usa clave) y recalcula el proveedor
+/// activo. Un cambio real deja el evento `key_saved` (D186b); guardar la misma clave que ya
+/// estaba no es un cambio. La comparación es en memoria: la clave no se escribe en ningún
+/// registro, y el evento solo lleva el proveedor, nunca la clave, su longitud ni un fragmento.
+fn save_provider_key(shared: &SharedState, choice: &ProviderChoice, key: &Secret) -> CmdResult<()> {
+    let Some(name) = choice.credential_name() else {
+        return Ok(());
+    };
+    let unchanged = matches!(
+        shared.credentials.get(&name),
+        Ok(Some(old)) if old.expose() == key.expose()
+    );
+    shared.credentials.set(&name, key).map_err(text)?;
+    let audited = if unchanged {
+        Ok(())
+    } else {
+        audit_ai_setting(shared, "key_saved", json!({ "provider": choice.id() }))
+    };
+    lift_wait_if_same_credential(shared, choice);
+    refresh_provider(shared)?;
+    audited
 }
 
 /// Prueba sintética del proveedor `choice` con su clave guardada (D122): genera con un texto

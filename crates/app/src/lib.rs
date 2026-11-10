@@ -79,6 +79,10 @@ pub enum AppError {
     Invalid(String),
     #[error("el contenido cambió (versión {current}, se aprobó la {approved}); revíselo de nuevo")]
     StaleVersion { approved: i64, current: i64 },
+    /// Una factura con importe dudoso (D120) no se aprueba sin que la persona confirme antes los
+    /// importes con el documento (D186).
+    #[error("hay importes que no se leen sin duda: confirme antes los importes con el documento")]
+    AmountAckRequired,
 }
 
 /// La interfaz recibe el error como texto; nunca contiene credenciales.
@@ -2563,7 +2567,22 @@ impl App {
     }
 
     /// Aprueba la versión que el usuario ha visto. Si el contenido cambió, exige revisarlo.
+    /// Envoltorio de `approve_reviewed` sin la confirmación de importes (D186): una factura con
+    /// importe dudoso solo se aprueba por `approve_reviewed(…, true)`.
     pub fn approve(&mut self, task_id: i64, version: i64) -> AppResult<Task> {
+        self.approve_reviewed(task_id, version, false)
+    }
+
+    /// Aprueba la versión que el usuario ha visto. `amounts_checked` es la confirmación de que la
+    /// persona comprobó los importes con el documento; sin ella, una factura con importe dudoso
+    /// (D120) se rechaza con `AmountAckRequired` sin ejecutar nada (D186). Orden de comprobaciones:
+    /// estado, versión, borrador e importes.
+    pub fn approve_reviewed(
+        &mut self,
+        task_id: i64,
+        version: i64,
+        amounts_checked: bool,
+    ) -> AppResult<Task> {
         let (task, result) = self.reviewable(task_id)?;
         let current = result["version"].as_i64().unwrap_or(1);
         if current != version {
@@ -2581,6 +2600,9 @@ impl App {
             return Err(AppError::Invalid(
                 "el correo no tiene un borrador que aprobar; archívelo o pida una respuesta".into(),
             ));
+        }
+        if !amounts_checked && task.kind == INVOICE && result["amount_review"].as_str().is_some() {
+            return Err(AppError::AmountAckRequired);
         }
         // La aprobación es la decisión de la persona: se anota antes de ejecutar para que un
         // fallo al anotarla conste en el resultado sin impedir ni repetir la acción.
@@ -2834,6 +2856,12 @@ impl App {
             .collect())
     }
 
+    /// Deja en el historial un cambio de configuración, sin tarea (D186). El llamador decide si
+    /// hubo un cambio real y garantiza que `detail` no lleva secretos ni contenido.
+    pub fn record_setting(&mut self, action: &str, status: &str, detail: &Value) -> AppResult<()> {
+        Ok(self.store.record_note(action, status, detail)?)
+    }
+
     pub fn audit_log(&self) -> AppResult<Vec<AuditEntry>> {
         Ok(self.store.audit_log()?)
     }
@@ -2863,7 +2891,9 @@ impl App {
     /// Cambia las condiciones de una regla. Una regla archivada no se edita (D128). Cambiar
     /// las condiciones borra la validación avanzada sin remitente (D126): si la regla no
     /// indicaba remitente, deja de automatizar hasta validarla otra vez.
-    pub fn update_rule(&mut self, id: &str, conditions: &Value) -> AppResult<Rule> {
+    /// Una regla activa solo sigue activa si lo nuevo no amplía lo anterior; si no, queda
+    /// inactiva y la vista lo indica en `deactivated_by_edit` (D186c).
+    pub fn update_rule(&mut self, id: &str, conditions: &Value) -> AppResult<panel::RuleView> {
         let current = self
             .store
             .rule(id)?
@@ -2874,7 +2904,15 @@ impl App {
         }
         let validated = meta.is_some_and(|m| m.allow_any_sender_ack_at.is_some());
         check_rule(&current.action_kind, conditions, validated)?;
-        Ok(self.store.update_rule(id, conditions)?)
+        // Editar borra la validación avanzada: la versión nueva no la tiene.
+        let (_, deactivated) =
+            self.store
+                .update_rule_guarded(id, conditions, &|old, old_ack| {
+                    panel::edit_keeps_active(old, old_ack, conditions, false)
+                })?;
+        let mut view = self.rule_view(id)?;
+        view.deactivated_by_edit = deactivated;
+        Ok(view)
     }
 
     /// Activar revalida las condiciones guardadas y no admite una regla archivada;

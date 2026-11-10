@@ -161,6 +161,8 @@ import {
   anySenderConsequences,
   activationGroups,
   anySenderEditNotice,
+  ruleSavedNotice,
+  ACTIVE_EDIT_NOTICE,
   auditMatches,
   auditStatusLabel,
   categoryLabel,
@@ -316,6 +318,7 @@ import {
   isInformative,
   triageNotices,
 } from "./triage-text";
+import { AI_SETTING_ACTION, AI_SETTING_ACTION_LABEL, aiSettingAuditText, aiSettingStatusLabel } from "./ai-settings-text";
 import type { AssistantConsentView, AssistantPreview, AssistantProgress, AssistantSentCall, AssistantStoredTurn, AssistantTurn, QuestionAnswer, SearchHit } from "./types";
 import {
   ASSISTANT_ACCEPT,
@@ -481,6 +484,7 @@ const ACTION_LABEL: Record<string, string> = {
   sender_preference: "Preferencia de remitente",
   mail: "Correo",
   ...ASSISTANT_ACTION_LABEL,
+  ...AI_SETTING_ACTION_LABEL,
 };
 
 type View = "review" | "tasks" | "rules" | "history" | "mail" | "settings" | "setup";
@@ -1526,7 +1530,7 @@ function invoiceDetail(task: Task) {
         {
           class: "primary",
           disabled: !checked || needsConfirmation,
-          onclick: () => resolveTask(task, async () => afterApproval(await api.approve(task.id, r.version ?? 1), "Factura registrada en el simulador")),
+          onclick: () => resolveTask(task, async () => afterApproval(await api.approve(task.id, r.version ?? 1, Boolean(state.amountsChecked[task.id])), "Factura registrada en el simulador")),
         },
         "Aprobar y registrar",
       ),
@@ -1806,7 +1810,7 @@ function emailDetail(task: Task) {
                   let version = r.version ?? 1;
                   // Si se ha editado, se guarda primero como versión nueva y se aprueba esa.
                   if (body.value !== (draft.body ?? "")) version = (await api.editDraft(task.id, body.value)).result?.version;
-                  afterApproval(await api.approve(task.id, version), `Enviada desde ${accountName(message.id, r.origin)}; la entrega al destinatario no se comprueba`);
+                  afterApproval(await api.approve(task.id, version, false), `Enviada desde ${accountName(message.id, r.origin)}; la entrega al destinatario no se comprueba`);
                 }),
             },
             "Aprobar y enviar",
@@ -2844,7 +2848,7 @@ function ruleForm(): HTMLElement {
     const problem = ruleProblem(rule);
     previewProblem.textContent = problem ?? "";
     previewProblem.hidden = !problem;
-    const notice = anySenderEditNotice(editing, d);
+    const notice = [editing?.active ? ACTIVE_EDIT_NOTICE : null, anySenderEditNotice(editing, d)].filter(Boolean).join(" ") || null;
     editNotice.textContent = notice ?? "";
     editNotice.hidden = !notice;
     const issues = draftProblems(d, !editing);
@@ -2896,9 +2900,11 @@ function ruleForm(): HTMLElement {
           void act(async () => {
             // Una sola llamada atómica: nombre, condiciones y validación avanzada, o nada. Guardar
             // borra la validación anterior; si se mantiene «cualquier remitente», va confirmada.
-            await api.updateRuleWithAck(editing.id, d.name.trim(), conditions, editing.action_kind === "send_draft" && d.scope === "any");
+            const saved = await api.updateRuleWithAck(editing.id, d.name.trim(), conditions, editing.action_kind === "send_draft" && d.scope === "any");
             closeRuleEditor();
-          }, wasActive ? "Regla guardada; sigue activa y se aplicará a las tareas que se procesen desde ahora" : "Regla guardada; sigue inactiva");
+            // Si la edición amplió una regla activa, el fondo la dejó inactiva (D186c): se avisa.
+            state.notice = ruleSavedNotice(saved.name, wasActive, saved.deactivated_by_edit === true);
+          });
         } else {
           void act(async () => {
             await api.createRule(null, d.kind, conditions, { name: d.name.trim(), acknowledgeAnySender: d.kind === "send_draft" && d.scope === "any" });
@@ -4412,9 +4418,9 @@ function historyView() {
             entries.map((e) => [
               e.task_id ?? missing("Sin tarea"),
               ACTION_LABEL[e.action] ?? e.action,
-              auditStatusLabel(e.action, e.status),
+              e.action === AI_SETTING_ACTION ? aiSettingStatusLabel(e.status) : auditStatusLabel(e.action, e.status),
               e.authorization ?? missing(),
-              h("div", { class: "detail-cell" }, (e.action === "sender_preference" ? preferenceAuditText(e.detail) : e.action.startsWith("assistant_") ? assistantAuditText(e.action, e.detail, e.status) : e.detail) ?? missing()),
+              h("div", { class: "detail-cell" }, (e.action === "sender_preference" ? preferenceAuditText(e.detail) : e.action.startsWith("assistant_") ? assistantAuditText(e.action, e.detail, e.status) : e.action === AI_SETTING_ACTION ? aiSettingAuditText(e.action, e.status, e.detail) : e.detail) ?? missing()),
             ]),
           )
         : emptyState("Ninguna entrada coincide con el filtro", "Pruebe con otra regla o quite el filtro.")

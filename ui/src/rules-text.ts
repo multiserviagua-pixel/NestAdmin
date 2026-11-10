@@ -509,6 +509,24 @@ export function anySenderEditNotice(rule: RuleLike | null, d: RuleDraft): string
   return parts.length ? parts.join(" ") : null;
 }
 
+/** Aviso tras guardar la edición de una regla (D186c). Si estaba activa y el cambio amplía lo que haría
+ * sin revisión (o el backend no pudo comprobar que no lo amplíe), quedó inactiva y hay que decirlo. */
+export function ruleSavedNotice(name: string, wasActive: boolean, deactivatedByEdit: boolean): { kind: "ok" | "warn"; text: string } {
+  if (deactivatedByEdit)
+    return {
+      kind: "warn",
+      text: `La regla «${name}» se ha desactivado: el cambio amplía lo que haría sin revisión (o no se pudo comprobar que no lo amplíe). Revísela y actívela de nuevo si es lo que quiere.`,
+    };
+  return {
+    kind: "ok",
+    text: wasActive ? "Regla guardada; sigue activa y se aplicará a las tareas que se procesen desde ahora" : "Regla guardada; sigue inactiva",
+  };
+}
+
+/** Aviso previo, al editar una regla activa: guardar puede desactivarla (D186c). */
+export const ACTIVE_EDIT_NOTICE =
+  "Esta regla está activa. Si el cambio la amplía (más importe, sin límite, otro proveedor, otro remitente o más remitentes), se guardará inactiva y tendrá que activarla de nuevo.";
+
 // ---- Contadores (D129) ----
 
 export interface StatsLike {

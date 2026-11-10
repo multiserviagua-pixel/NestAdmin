@@ -56,17 +56,34 @@ impl Store {
 
     /// Nueva versión con otras condiciones; conserva el estado activo de la anterior. Una
     /// regla archivada no se edita (D128). Cambiar las condiciones borra la validación
-    /// avanzada sin remitente, que se dio a las condiciones anteriores (D126).
+    /// avanzada sin remitente, que se dio a las condiciones anteriores (D126). Para editar
+    /// con la comprobación de D186, véase `update_rule_guarded`.
     pub fn update_rule(&mut self, id: &str, conditions: &Value) -> Result<Rule> {
+        Ok(self.update_rule_guarded(id, conditions, &|_, _| true)?.0)
+    }
+
+    /// Como `update_rule`, pero una regla activa solo sigue activa si `keep_active(anterior,
+    /// tenía_validación_avanzada)` lo permite (D186c). Si no, la versión nueva nace inactiva en
+    /// la misma transacción y la entrada del historial lo dice. Devuelve la regla guardada y si
+    /// quedó desactivada por la edición. La condición se evalúa dentro de la transacción, sobre
+    /// la versión vigente leída en ella.
+    pub fn update_rule_guarded(
+        &mut self,
+        id: &str,
+        conditions: &Value,
+        keep_active: &dyn Fn(&Rule, bool) -> bool,
+    ) -> Result<(Rule, bool)> {
         let tx = self.conn.transaction()?;
         let current = live_rule(&tx, id)?;
-        let rule = insert_rule_version(
+        let (active, deactivated) = decide_active(&tx, &current, keep_active)?;
+        let rule = insert_rule_version_noting(
             &tx,
             id,
             current.version + 1,
             &current.action_kind,
             conditions,
-            current.active,
+            active,
+            deactivated.then_some(DEACTIVATED_BY_EDIT),
         )?;
         let had_ack = tx.execute(
             "UPDATE rule_meta SET allow_any_sender_ack_at = NULL
@@ -77,7 +94,7 @@ impl Store {
             audit_any_sender(&tx, &rule, false, "retirada: las condiciones cambiaron")?;
         }
         tx.commit()?;
-        Ok(rule)
+        Ok((rule, deactivated))
     }
 
     /// Nueva versión con el estado indicado; si ya lo tiene, no crea versión. Una regla
@@ -176,6 +193,32 @@ pub(crate) fn is_archived(conn: &rusqlite::Connection, id: &str) -> Result<bool>
         .unwrap_or(false))
 }
 
+/// Nota del historial cuando editar una regla activa la deja inactiva (D186c).
+pub(crate) const DEACTIVATED_BY_EDIT: &str =
+    "desactivada al editarla: el cambio amplía lo que haría sin revisión";
+
+/// Decide el estado de la versión nueva al editar: una regla inactiva sigue inactiva; una
+/// activa conserva el estado solo si `keep_active` lo permite. Devuelve `(activa, desactivada)`.
+pub(crate) fn decide_active(
+    tx: &rusqlite::Transaction<'_>,
+    current: &Rule,
+    keep_active: &dyn Fn(&Rule, bool) -> bool,
+) -> Result<(bool, bool)> {
+    if !current.active {
+        return Ok((false, false));
+    }
+    let had_ack = tx
+        .query_row(
+            "SELECT allow_any_sender_ack_at IS NOT NULL FROM rule_meta WHERE rule_id = ?1",
+            [&current.id],
+            |r| r.get::<_, bool>(0),
+        )
+        .optional()?
+        .unwrap_or(false);
+    let keep = keep_active(current, had_ack);
+    Ok((keep, !keep))
+}
+
 /// Inserta una versión y la deja en el historial visible.
 pub(crate) fn insert_rule_version(
     tx: &rusqlite::Transaction<'_>,
@@ -185,14 +228,31 @@ pub(crate) fn insert_rule_version(
     conditions: &Value,
     active: bool,
 ) -> Result<Rule> {
+    insert_rule_version_noting(tx, id, version, action_kind, conditions, active, None)
+}
+
+/// Como `insert_rule_version`, con una nota opcional al final del detalle del historial.
+pub(crate) fn insert_rule_version_noting(
+    tx: &rusqlite::Transaction<'_>,
+    id: &str,
+    version: i64,
+    action_kind: &str,
+    conditions: &Value,
+    active: bool,
+    note: Option<&str>,
+) -> Result<Rule> {
     let now = now_ms();
     tx.execute(
         "INSERT INTO rules (id, version, action_kind, conditions, active, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
         params![id, version, action_kind, serde_json::to_string(conditions)?, active, now],
     )?;
+    let detail = match note {
+        Some(note) => format!("{id} v{version} ({action_kind}): {note}"),
+        None => format!("{id} v{version} ({action_kind})"),
+    };
     tx.execute(
         "INSERT INTO audit_log (at, task_id, action, status, authorization, detail) VALUES (?1, NULL, 'rule', ?2, NULL, ?3)",
-        params![now, if active { "active" } else { "inactive" }, format!("{id} v{version} ({action_kind})")],
+        params![now, if active { "active" } else { "inactive" }, detail],
     )?;
     Ok(Rule {
         id: id.to_owned(),

@@ -38,6 +38,8 @@ import {
   searchText,
   simulationSummary,
   statsText,
+  ruleSavedNotice,
+  ACTIVE_EDIT_NOTICE,
 } from "../src/rules-text.ts";
 
 const invoice = (conditions) => ({
@@ -526,4 +528,19 @@ test("una tarea en revisión cuya evaluación dice «automatizada» explica el i
 test("la moneda no mostrada tiene su propio motivo", () => {
   assert.equal(reasonText("currency_not_shown"), "el documento no muestra la moneda; no se puede comprobar que sea en euros");
   assert.match(reasonText("codigo_antiguo_scanned_currency"), /motivo no reconocido/);
+});
+
+test("tras editar una regla, el aviso dice si quedó desactivada por ampliarla (D186c)", () => {
+  const off = ruleSavedNotice("Alfa hasta 500", true, true);
+  assert.equal(off.kind, "warn");
+  assert.match(off.text, /«Alfa hasta 500» se ha desactivado/);
+  assert.match(off.text, /amplía lo que haría sin revisión/);
+  assert.match(off.text, /actívela de nuevo/);
+  // Si sigue activa o ya estaba inactiva, no se alarma ni se afirma lo que no ocurrió.
+  const kept = ruleSavedNotice("Alfa", true, false);
+  assert.equal(kept.kind, "ok");
+  assert.match(kept.text, /sigue activa/);
+  assert.doesNotMatch(kept.text, /desactivado/);
+  assert.match(ruleSavedNotice("Alfa", false, false).text, /sigue inactiva/);
+  assert.match(ACTIVE_EDIT_NOTICE, /se guardará inactiva/);
 });

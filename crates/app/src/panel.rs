@@ -11,9 +11,9 @@ use serde::Serialize;
 use serde_json::{json, Value};
 
 use crate::rules::{
-    analyze, evaluate_result_in_run, evaluate_with, merge_before, merge_options, merge_plan,
-    merge_plan_in_runs, rules_fingerprint, Evaluation, FindingKind, Marks, MergeError, MergeOption,
-    MergePlan, PlanRule, ReasonCode, RuleDecision, RuleFinding,
+    analyze, compare, evaluate_result_in_run, evaluate_with, merge_before, merge_options,
+    merge_plan, merge_plan_in_runs, rules_fingerprint, Evaluation, FindingKind, Marks, MergeError,
+    MergeOption, MergePlan, PlanRule, ReasonCode, Relation, RuleDecision, RuleFinding, Side,
 };
 use crate::{
     action_kind, check_rule, check_rule_id, check_rule_inner, App, AppError, AppResult, EMAIL,
@@ -54,6 +54,42 @@ pub struct RuleView {
     /// De dónde sale la regla: al unificar, las reglas de origen y la opción elegida (D131).
     pub origin: Option<Value>,
     pub stats: RuleStats,
+    /// Solo en la respuesta de una edición: la regla estaba activa y el cambio la dejó inactiva
+    /// porque amplía lo que haría sin revisión, o no se pudo comprobar que no lo amplíe (D186c).
+    /// En el resto de vistas es falso.
+    pub deactivated_by_edit: bool,
+}
+
+/// Una regla activa solo sigue activa tras editarla si lo nuevo es igual o más estrecho que lo
+/// anterior (D186c). `old_ack` y `new_ack` dicen si la versión anterior y la nueva tienen la
+/// validación avanzada de «cualquier remitente» (D126). Con cualquier duda (`Similar`,
+/// `Disjoint`, `NotComparable`, la nueva más amplia) devuelve falso: falla cerrado.
+pub(crate) fn edit_keeps_active(
+    old: &Rule,
+    old_ack: bool,
+    new_conditions: &Value,
+    new_ack: bool,
+) -> bool {
+    // Dar «cualquier remitente» a una regla que no lo tenía amplía lo que hace sola.
+    if new_ack && !old_ack {
+        return false;
+    }
+    // Las marcas van por identificador y las dos versiones comparten el suyo: la nueva se
+    // compara con un identificador propio para que cada una lleve su validación.
+    let mut new = old.clone();
+    new.id = format!("{}#nueva", old.id);
+    new.conditions = new_conditions.clone();
+    let mut marks = Marks::default();
+    if old_ack {
+        marks.any_sender.insert(old.id.clone());
+    }
+    if new_ack {
+        marks.any_sender.insert(new.id.clone());
+    }
+    matches!(
+        compare(old, &new, &marks),
+        Relation::Equal | Relation::Contains { wider: Side::First }
+    )
 }
 
 /// Qué haría la regla hipotética con una tarea.
@@ -356,13 +392,18 @@ impl App {
                 (cleaned != stored).then_some(cleaned)
             }
         };
-        self.store.update_rule_full(
+        // Una regla activa solo sigue activa si lo nuevo no amplía lo anterior (D186c): se decide
+        // dentro de la transacción de guardado, sobre la versión vigente.
+        let (_, deactivated) = self.store.update_rule_full(
             id,
             conditions,
             name_change.as_ref().map(|n| n.as_deref()),
             acknowledge_any_sender,
+            &|old, old_ack| edit_keeps_active(old, old_ack, conditions, acknowledge_any_sender),
         )?;
-        self.rule_view(id)
+        let mut view = self.rule_view(id)?;
+        view.deactivated_by_edit = deactivated;
+        Ok(view)
     }
 
     /// Valida o retira la opción avanzada de una regla de envío sin remitente (D126). Queda
@@ -445,6 +486,7 @@ impl App {
                         reviewed: 0,
                         unclassified: 0,
                     }),
+                    deactivated_by_edit: false,
                     rule,
                 }
             })

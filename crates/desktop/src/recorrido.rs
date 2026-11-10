@@ -1671,3 +1671,210 @@ fn continuar_sin_ese_paso_por_la_ventana_libera_la_respuesta_a_revision() {
     assert_eq!(s.sent(), 0);
     s.close();
 }
+
+/// D186a por la ventana: una factura con importe dudoso (D120) no se aprueba sin la confirmación
+/// de importes, tanto si el argumento falta como si es falso; el rechazo no ejecuta nada y con la
+/// confirmación se registra una sola vez.
+#[test]
+fn importe_dudoso_se_rechaza_desde_la_ventana_sin_la_confirmacion() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = data_dir_for(&dir);
+    let ai = FakeOllama::start(Mode::Answer);
+    select_local(&data, &ai.url);
+    let s = Session::open(test_deps(&data, &ai.url));
+
+    // «1.000» sin decimales: el importe se propone y la factura queda pendiente de revisión.
+    let doubtful = format!(
+        "FACTURA D-1\n{}",
+        json!({
+            "supplier": "Alfa SL", "invoice_number": "D-1", "date": "2026-10-01",
+            "subtotal": "1.000", "tax": "210,00", "total": "1.210,00", "moneda": "EUR",
+        })
+    );
+    let imported = s.import("dudosa.txt", doubtful.as_bytes());
+    let task = s.wait_state(id(&imported), "awaiting_review");
+    assert!(task["result"]["amount_review"].is_string(), "{task}");
+    let audit_before = s.audit().len();
+
+    // Sin el argumento (ausente = no confirmado) y con `false`: el mismo rechazo, en claro.
+    for args in [
+        json!({ "id": id(&task), "version": version(&task) }),
+        json!({ "id": id(&task), "version": version(&task), "amountsChecked": false }),
+    ] {
+        let error = s.call("approve", args).unwrap_err();
+        let message = error.as_str().unwrap_or_default();
+        assert!(
+            message.contains("confirme antes los importes con el documento"),
+            "{error}"
+        );
+    }
+    assert_eq!(s.registered(), 0, "el rechazo no registra nada");
+    assert_eq!(s.task(id(&task))["state"], "awaiting_review");
+    assert_eq!(s.audit().len(), audit_before, "ni siquiera deja evento");
+
+    // Con la confirmación de la persona se registra una sola vez.
+    let done = s.ok(
+        "approve",
+        json!({ "id": id(&task), "version": version(&task), "amountsChecked": true }),
+    );
+    assert_eq!(done["state"], "completed");
+    assert_eq!(s.registered(), 1);
+    s.close();
+}
+
+/// Eventos `ai_setting` del Historial, en orden.
+fn ai_events(s: &Session) -> Vec<Value> {
+    s.audit()
+        .into_iter()
+        .filter(|e| e["action"] == "ai_setting")
+        .collect()
+}
+
+fn ai_detail(event: &Value) -> Value {
+    serde_json::from_str(event["detail"].as_str().unwrap()).unwrap()
+}
+
+/// D186b: elegir proveedor, el respaldo local y guardar o borrar una clave dejan exactamente un
+/// evento con los campos indicados; repetir el mismo valor no deja otro; ningún evento lleva la
+/// clave, y arrancar tampoco genera eventos.
+#[test]
+fn los_cambios_de_configuracion_de_la_ia_dejan_un_evento_sin_secretos() {
+    // Clave sintética con forma de clave: no debe aparecer en ningún sitio.
+    const SENTINEL: &str = "sk-ant-api03-SINTETICA-no-es-real-0123456789";
+    let dir = tempfile::tempdir().unwrap();
+    let data = data_dir_for(&dir);
+    let ai = FakeOllama::start(Mode::Answer);
+    select_local(&data, &ai.url);
+    let credentials = Arc::new(MemoryCredentialStore::default());
+    credentials
+        .set(
+            nestadmin_ai::credentials::ANTHROPIC_API_KEY,
+            &nestadmin_ai::Secret::new("clave-previa-sintetica"),
+        )
+        .unwrap();
+    let mut deps = test_deps(&data, &ai.url);
+    deps.credentials = credentials;
+    let s = Session::open(deps);
+    // Arrancar (y recalcular el proveedor) no genera eventos.
+    s.ok("settings", json!({}));
+    assert!(ai_events(&s).is_empty());
+
+    // Elegir lo que ya estaba (la IA local, mismo modelo y servidor): sin cambio, sin evento.
+    let local = json!({ "provider": "ollama", "base_url": ai.url, "model": "qwen3:8b" });
+    s.ok(
+        "select_provider",
+        json!({ "choice": local, "consent": false }),
+    );
+    assert!(ai_events(&s).is_empty());
+
+    // Cambiar a un proveedor externo con la confirmación del destino: un evento.
+    let claude = json!({ "provider": "anthropic", "model": "claude-sintetico" });
+    s.ok(
+        "select_provider",
+        json!({ "choice": claude, "consent": true }),
+    );
+    let events = ai_events(&s);
+    assert_eq!(events.len(), 1, "{events:?}");
+    assert_eq!(events[0]["status"], "provider_selected");
+    assert_eq!(events[0]["task_id"], Value::Null);
+    assert_eq!(
+        ai_detail(&events[0]),
+        json!({
+            "provider": "anthropic", "model": "claude-sintetico",
+            "host": "api.anthropic.com", "consent": true,
+        })
+    );
+    // Repetir la misma elección, con o sin confirmación ya dada, no deja otro.
+    for consent in [true, false] {
+        s.ok(
+            "select_provider",
+            json!({ "choice": claude, "consent": consent }),
+        );
+    }
+    assert_eq!(ai_events(&s).len(), 1);
+    // Otro modelo del mismo proveedor sí es un cambio.
+    let other = json!({ "provider": "anthropic", "model": "claude-sintetico-2" });
+    s.ok(
+        "select_provider",
+        json!({ "choice": other, "consent": false }),
+    );
+    let events = ai_events(&s);
+    assert_eq!(events.len(), 2);
+    assert_eq!(ai_detail(&events[1])["model"], "claude-sintetico-2");
+    assert_eq!(ai_detail(&events[1])["consent"], false);
+    // Volver a la IA local: sin servidor externo.
+    s.ok(
+        "select_provider",
+        json!({ "choice": local, "consent": false }),
+    );
+    let events = ai_events(&s);
+    assert_eq!(events.len(), 3);
+    assert_eq!(
+        ai_detail(&events[2]),
+        json!({ "provider": "ollama", "model": "qwen3:8b", "host": null, "consent": false })
+    );
+    // Una elección rechazada (sin confirmación) no deja nada.
+    let cloud = json!({ "provider": "ollama_cloud", "model": "gemma4:31b" });
+    assert!(s
+        .call(
+            "select_provider",
+            json!({ "choice": cloud, "consent": false })
+        )
+        .is_err());
+    assert_eq!(ai_events(&s).len(), 3);
+
+    // Respaldo local: un evento por cambio real.
+    s.ok("set_local_fallback", json!({ "enabled": true }));
+    assert_eq!(ai_events(&s).len(), 3, "ya estaba activado");
+    s.ok("set_local_fallback", json!({ "enabled": false }));
+    s.ok("set_local_fallback", json!({ "enabled": false }));
+    let events = ai_events(&s);
+    assert_eq!(events.len(), 4);
+    assert_eq!(events[3]["status"], "local_fallback_off");
+    assert_eq!(ai_detail(&events[3]), json!({}));
+    s.ok("set_local_fallback", json!({ "enabled": true }));
+    let events = ai_events(&s);
+    assert_eq!(events.len(), 5);
+    assert_eq!(events[4]["status"], "local_fallback_on");
+
+    // Claves: guardar una nueva, repetirla, cambiarla y borrarla (dos veces).
+    let shared = s.app.state::<SharedState>();
+    let key = Secret::new(SENTINEL);
+    let claude_choice: ProviderChoice = serde_json::from_value(claude.clone()).unwrap();
+    save_provider_key(&shared, &claude_choice, &key).unwrap();
+    let events = ai_events(&s);
+    assert_eq!(events.len(), 6, "{events:?}");
+    assert_eq!(events[5]["status"], "key_saved");
+    assert_eq!(ai_detail(&events[5]), json!({ "provider": "anthropic" }));
+    save_provider_key(&shared, &claude_choice, &key).unwrap();
+    assert_eq!(ai_events(&s).len(), 6, "la misma clave no es un cambio");
+    save_provider_key(
+        &shared,
+        &claude_choice,
+        &Secret::new("otra-clave-sintetica"),
+    )
+    .unwrap();
+    assert_eq!(ai_events(&s).len(), 7);
+    s.ok("delete_provider_key", json!({ "choice": claude }));
+    let events = ai_events(&s);
+    assert_eq!(events.len(), 8);
+    assert_eq!(events[7]["status"], "key_deleted");
+    assert_eq!(ai_detail(&events[7]), json!({ "provider": "anthropic" }));
+    s.ok("delete_provider_key", json!({ "choice": claude }));
+    assert_eq!(ai_events(&s).len(), 8, "ya no había clave");
+
+    // Ningún registro lleva la clave, ni un fragmento.
+    let everything = serde_json::to_string(&s.audit()).unwrap();
+    for secret in [
+        SENTINEL,
+        "sk-ant",
+        "SINTETICA",
+        "clave-previa",
+        "otra-clave",
+    ] {
+        assert!(!everything.contains(secret), "{secret} en el historial");
+    }
+    let saved = std::fs::read_to_string(data.join("configuracion.json")).unwrap();
+    assert!(!saved.contains("SINTETICA"), "la clave no va al archivo");
+    s.close();
+}

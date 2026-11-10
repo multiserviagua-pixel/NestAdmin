@@ -115,6 +115,8 @@ export interface RuleView extends Rule {
   archived_at: number | null;
   /** Marca de la opción avanzada: la regla de envío contesta a cualquier remitente. */
   any_sender_ack_at: number | null;
+  /** Solo en la respuesta de una edición: la regla estaba activa y el cambio la dejó inactiva porque amplía lo que haría sin revisión (D186c). */
+  deactivated_by_edit?: boolean;
   /** De dónde sale la regla: al unificar, las reglas de origen y la opción elegida (D131). */
   origin: {
     kind: string;

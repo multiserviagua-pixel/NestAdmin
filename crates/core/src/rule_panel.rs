@@ -9,7 +9,10 @@ use serde::Serialize;
 use serde_json::Value;
 
 use crate::error::{CoreError, Result};
-use crate::rules::{audit_any_sender, current_rule, insert_rule_version, is_archived, live_rule};
+use crate::rules::{
+    audit_any_sender, current_rule, decide_active, insert_rule_version, insert_rule_version_noting,
+    is_archived, live_rule, DEACTIVATED_BY_EDIT,
+};
 use crate::store::{now_ms, Store};
 use crate::Rule;
 
@@ -186,23 +189,29 @@ impl Store {
     /// `Some`; `Some(None)` lo borra) y la validación avanzada sin remitente (D126). Cambiar
     /// las condiciones borra la validación anterior; con `any_sender_ack` se da de nuevo a las
     /// condiciones nuevas. Todo consta en el historial y, si algo falla, no se guarda nada.
-    /// Quien llama comprueba las condiciones con `check_rule`.
+    /// Una regla activa solo sigue activa si `keep_active(anterior, tenía_validación)` lo
+    /// permite (D186c); si no, la versión nueva nace inactiva en la misma transacción. Devuelve
+    /// la regla y si quedó desactivada por la edición. Quien llama comprueba las condiciones con
+    /// `check_rule`.
     pub fn update_rule_full(
         &mut self,
         id: &str,
         conditions: &Value,
         name: Option<Option<&str>>,
         any_sender_ack: bool,
-    ) -> Result<Rule> {
+        keep_active: &dyn Fn(&Rule, bool) -> bool,
+    ) -> Result<(Rule, bool)> {
         let tx = self.conn.transaction()?;
         let current = live_rule(&tx, id)?;
-        let rule = insert_rule_version(
+        let (active, deactivated) = decide_active(&tx, &current, keep_active)?;
+        let rule = insert_rule_version_noting(
             &tx,
             id,
             current.version + 1,
             &current.action_kind,
             conditions,
-            current.active,
+            active,
+            deactivated.then_some(DEACTIVATED_BY_EDIT),
         )?;
         let had_ack = tx.execute(
             "UPDATE rule_meta SET allow_any_sender_ack_at = NULL
@@ -224,7 +233,7 @@ impl Store {
             audit_any_sender(&tx, &rule, true, "validada al guardar la regla")?;
         }
         tx.commit()?;
-        Ok(rule)
+        Ok((rule, deactivated))
     }
 
     /// Archiva una regla: la deja inactiva (versión nueva si estaba activa) y la marca. No

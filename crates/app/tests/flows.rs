@@ -678,7 +678,12 @@ fn doubtful_amounts_ask_for_human_review_with_file_and_amount() {
     assert!(reason.contains("base 100.00 + IVA 21.00 no coincide con el total 130.00"));
 
     // La persona revisa y aprueba: se registra una sola vez con el valor confirmado.
-    let approved = app.approve(task.id, 1).unwrap();
+    // Sin la confirmación de importes (D186) no se aprueba; con ella, sí.
+    assert!(matches!(
+        app.approve(task.id, 1),
+        Err(AppError::AmountAckRequired)
+    ));
+    let approved = app.approve_reviewed(task.id, 1, true).unwrap();
     assert_eq!(approved.state, TaskState::Completed);
     assert_eq!(app.simulators().1.record_count().unwrap(), before + 2);
 }
@@ -2813,12 +2818,16 @@ fn findings_count_only_evaluations_made_with_the_current_conditions() {
     app.set_rule_active("alfa-500", true).unwrap();
     assert_eq!(app.rule_findings().unwrap()[0].affected_tasks, Some(1));
 
-    // Editar las condiciones: lo evaluado con las anteriores ya no cuenta.
-    app.update_rule(
-        "alfa-500",
-        &json!({ "supplier": "Alfa SL", "max_total": "800.00" }),
-    )
-    .unwrap();
+    // Editar las condiciones: lo evaluado con las anteriores ya no cuenta. Subir el límite
+    // amplía la regla, así que queda inactiva (D186c) y la persona la activa de nuevo.
+    let edited = app
+        .update_rule(
+            "alfa-500",
+            &json!({ "supplier": "Alfa SL", "max_total": "800.00" }),
+        )
+        .unwrap();
+    assert!(edited.deactivated_by_edit && !edited.rule.active);
+    app.set_rule_active("alfa-500", true).unwrap();
     assert_eq!(app.rule_findings().unwrap()[0].affected_tasks, Some(0));
     app.import_document("2.txt", &invoice("Alfa SL", "F-2", "121.00"))
         .unwrap();

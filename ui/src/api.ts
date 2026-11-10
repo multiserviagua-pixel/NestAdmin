@@ -135,7 +135,8 @@ export const api = {
   renameMailAccount: (id: string, label: string) => invoke<MailAccount>("rename_mail_account", { id, label }),
   removeMailAccount: (id: string) => invoke<void>("remove_mail_account", { id }),
   addSimulatedMailAccount: () => invoke<MailAccount>("add_simulated_mail_account"),
-  approve: (id: number, version: number) => invoke<Task>("approve", { id, version }),
+  /** `amountsChecked`: la persona confirmó los importes con el documento; sin ello el fondo rechaza una factura con importe dudoso (D186). */
+  approve: (id: number, version: number, amountsChecked = false) => invoke<Task>("approve", { id, version, amountsChecked }),
   confirmNotSent: (id: number) => invoke<Task>("confirm_not_sent", { id }),
   editDraft: (id: number, body: string) => invoke<Task>("edit_draft", { id, body }),
   reject: (id: number) => invoke<Task>("reject", { id }),

@@ -1260,3 +1260,39 @@ fn the_simulation_reports_the_rodaje_left_of_the_tested_rule() {
         .unwrap();
     assert_eq!(sim.rodaje_left, None);
 }
+
+/// D186c y D174: una regla aprendida en rodaje que se amplía al editarla queda inactiva y conserva
+/// su origen y su contador de rodaje; estrecharla o repetirla no la desactiva.
+#[test]
+fn widening_a_rule_in_rodaje_deactivates_it_and_keeps_the_rodaje() {
+    let (dir, mut app) = learned();
+    let rule = accept_ana(&mut app);
+    assert_eq!(rodaje_left(dir.path(), &rule), Some(3));
+    let view = app
+        .rule_views()
+        .unwrap()
+        .into_iter()
+        .find(|v| v.rule.id == rule)
+        .unwrap();
+    assert!(view.rule.active);
+    let category = view.rule.conditions["category"].clone();
+
+    // Repetir las mismas condiciones no cambia nada.
+    let same = app
+        .update_rule_with_ack(&rule, None, &view.rule.conditions, false)
+        .unwrap();
+    assert!(same.rule.active && !same.deactivated_by_edit);
+
+    // De la dirección a todo su dominio amplía: queda inactiva, con el rodaje intacto.
+    let widened = app
+        .update_rule_with_ack(
+            &rule,
+            None,
+            &json!({ "category": category, "sender_domain": "alfa.test" }),
+            false,
+        )
+        .unwrap();
+    assert!(widened.deactivated_by_edit && !widened.rule.active);
+    assert_eq!(rodaje_left(dir.path(), &rule), Some(3));
+    assert!(widened.origin.is_some_and(|o| o["rodaje"]["left"] == 3));
+}

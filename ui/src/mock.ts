@@ -1406,7 +1406,7 @@ const canonLimit = (raw: string) => {
   return Number.isFinite(n) ? n.toFixed(2) : null;
 };
 
-function mockCond(r: Rule): MCond | MDefect {
+function mockCond(r: Rule, ack: boolean = metaOf(r.id).any_sender_ack_at !== null): MCond | MDefect {
   const c = r.conditions as Record<string, unknown>;
   if (r.action_kind === "register_invoice") {
     const supplier = String(c.supplier ?? "").trim();
@@ -1423,7 +1423,7 @@ function mockCond(r: Rule): MCond | MDefect {
     if (!category) return { code: "invalid_conditions", reason: "no indica categoría" };
     if (c.sender) return { kind: "send", category, scope: "sender", value: String(c.sender).trim().toLowerCase() };
     if (c.sender_domain) return { kind: "send", category, scope: "domain", value: String(c.sender_domain).trim().toLowerCase() };
-    if (metaOf(r.id).any_sender_ack_at !== null) return { kind: "send", category, scope: "any", value: null };
+    if (ack) return { kind: "send", category, scope: "any", value: null };
     return { code: "sender_missing", reason: "no indica remitente ni tiene validada la opción avanzada: no actúa" };
   }
   return { code: "not_comparable", reason: `la aplicación no reconoce el tipo de regla «${r.action_kind}», así que no puede compararla ni aplicarla` };
@@ -1455,13 +1455,25 @@ function mockRelation(a: MCond, b: MCond): MRel {
   return "disjoint";
 }
 
+/** Como el backend (D186c): una regla activa solo sigue activa tras editarla si lo nuevo es igual o
+ * más estrecho; con cualquier duda (parecida, disjunta, no comparable, más amplia) queda inactiva. */
+function mockKeepsActive(old: Rule, conditions: Record<string, string>, newAck: boolean): boolean {
+  const oldAck = metaOf(old.id).any_sender_ack_at !== null;
+  if (newAck && !oldAck) return false;
+  const a = mockCond(old, oldAck);
+  const b = mockCond({ ...old, conditions }, newAck);
+  if ("code" in a || "code" in b) return false;
+  const rel = mockRelation(a, b);
+  return rel === "equal" || rel === "first";
+}
+
 function mockSide(r: Rule, c: MCond) {
   return c.kind === "invoice" ? { id: r.id, limit: c.limit } : { id: r.id, scope: c.scope, value: c.value };
 }
 
 function mockFindings(list: Rule[]): RuleFinding[] {
   const live = list.filter((r) => !metaOf(r.id).archived_at).sort((a, b) => (a.id < b.id ? -1 : 1));
-  const conds = live.map(mockCond);
+  const conds = live.map((r) => mockCond(r));
   const out: RuleFinding[] = [];
   const fr = (r: Rule) => ({ id: r.id, version: r.version, active: r.active });
   live.forEach((r, i) => {
@@ -1546,7 +1558,7 @@ function mockMembers(ids: string[]): Rule[] {
   if (archived) throw `la regla ${archived.id} está archivada; restáurela antes de unificarla`;
   if (members.some((r) => r.action_kind !== members[0]!.action_kind))
     throw "solo se pueden unificar reglas del mismo tipo: no mezcle reglas de registrar facturas con reglas de enviar respuestas";
-  const conds = members.map(mockCond);
+  const conds = members.map((r) => mockCond(r));
   const bad = conds.findIndex((c) => "code" in c);
   if (bad >= 0) throw `la regla ${members[bad]!.id} no actúa (${(conds[bad] as MDefect).reason}); corríjala antes de unificarla`;
   for (let i = 0; i < members.length; i++)
@@ -2667,10 +2679,13 @@ const handlers: Record<string, (a: any, options?: any) => unknown> = {
     }
     return account;
   },
-  approve: ({ id, version }) => {
+  approve: ({ id, version, amountsChecked }) => {
     const t = reviewable(id);
     const current = t.result?.version ?? 1;
     if (current !== version) throw `el contenido cambió (versión ${current}, se aprobó la ${version}); revíselo de nuevo`;
+    // Como la aplicación (D186): una factura con importe dudoso exige la confirmación de importes.
+    if (t.kind === "invoice" && typeof t.result?.amount_review === "string" && !amountsChecked)
+      throw "hay importes que no se leen sin duda: confirme antes los importes con el documento";
     const action = t.kind === "invoice" ? "register_invoice" : "send_draft";
     // Como la aplicación: sin confirmar que el intento anterior no salió, no se envía otro.
     if (t.result?.recovery?.needs_confirmation) return t;
@@ -2858,8 +2873,10 @@ const handlers: Record<string, (a: any, options?: any) => unknown> = {
     if (!r) throw `regla ${id} inexistente`;
     if (metaOf(id).archived_at) throw `la regla ${id} está archivada; desarchívela para volver a usarla`;
     checkConditions(r.action_kind, conditions, metaOf(id).any_sender_ack_at !== null);
+    const keep = !r.active || mockKeepsActive(r, conditions, false);
     setMeta(id, { any_sender_ack_at: null }); // editar borra la validación avanzada
-    return addRule({ ...r, version: r.version + 1, conditions, created_at: now() });
+    const saved = addRule({ ...r, version: r.version + 1, conditions, active: keep && r.active, created_at: now() });
+    return { ...ruleView(saved), deactivated_by_edit: r.active && !keep };
   },
   // Atómico: se valida todo antes de tocar nada (nombre, condiciones y validación avanzada).
   update_rule_with_ack: ({ id, name, conditions, acknowledgeAnySender }) => {
@@ -2872,7 +2889,10 @@ const handlers: Record<string, (a: any, options?: any) => unknown> = {
     const clean = name === null || name === undefined ? undefined : String(name).trim() || null;
     if (clean !== undefined && clean !== null && clean.length > 80) throw "el nombre de la regla admite como mucho 80 caracteres";
     const hadAck = metaOf(id).any_sender_ack_at !== null;
-    const saved = addRule({ ...r, version: r.version + 1, conditions, created_at: now() });
+    // Una regla activa solo sigue activa si lo nuevo no amplía lo anterior (D186c).
+    const keep = !r.active || mockKeepsActive(r, conditions, Boolean(acknowledgeAnySender));
+    const saved = addRule({ ...r, version: r.version + 1, conditions, active: keep && r.active, created_at: now() });
+    if (r.active && !keep) audit[audit.length - 1]!.detail += ": desactivada al editarla: el cambio amplía lo que haría sin revisión";
     if (hadAck) audit.push({ task_id: null, action: "rule_any_sender", status: "revoked", authorization: null, detail: `${id} v${saved.version}: retirada: las condiciones cambiaron` });
     setMeta(id, { any_sender_ack_at: null });
     if (clean !== undefined && clean !== metaOf(id).name) {
@@ -2883,7 +2903,7 @@ const handlers: Record<string, (a: any, options?: any) => unknown> = {
       setMeta(id, { any_sender_ack_at: now() });
       audit.push({ task_id: null, action: "rule_any_sender", status: "acknowledged", authorization: null, detail: `${id} v${saved.version}: validada al guardar la regla` });
     }
-    return ruleView(saved);
+    return { ...ruleView(saved), deactivated_by_edit: r.active && !keep };
   },
   set_rule_active: ({ id, active }) => {
     const r = latest().find((r) => r.id === id);
