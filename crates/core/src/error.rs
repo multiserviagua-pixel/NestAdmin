@@ -47,6 +47,8 @@ pub enum CoreError {
     RuleArchived(String),
     #[error("la regla {0} ha cambiado; revise de nuevo")]
     RuleChanged(String),
+    #[error("filtro de búsqueda no válido: {0}")]
+    InvalidFilter(String),
     #[error("conector: {0}")]
     Connector(#[from] crate::actions::ConnectorError),
 }

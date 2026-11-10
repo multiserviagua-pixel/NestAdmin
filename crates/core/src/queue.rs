@@ -110,10 +110,10 @@ pub(crate) const READY_SQL: &str = "NOT EXISTS (
       AND (prev_task.id IS NULL OR prev_task.state <> 'completed')
 )";
 
-const TASK_COLUMNS: &str =
+pub(crate) const TASK_COLUMNS: &str =
     "id, kind, input_ref, state, attempts, result, error, created_at, updated_at";
 
-fn task_from_row(row: &Row<'_>) -> rusqlite::Result<Task> {
+pub(crate) fn task_from_row(row: &Row<'_>) -> rusqlite::Result<Task> {
     let parse_json = |index: usize, text: Option<String>| -> rusqlite::Result<Option<Value>> {
         text.map(|t| serde_json::from_str(&t))
             .transpose()
@@ -209,7 +209,7 @@ pub(crate) fn enqueue_in(tx: &Transaction<'_>, kind: &str, input_ref: &str) -> R
 
 /// Inserta una tarea que nace ya en `state` con su resultado, y su transición desde `NULL`, en
 /// la transacción dada. No cambia `can_move_to`: es una creación, no una transición.
-fn insert_born(
+pub(crate) fn insert_born(
     tx: &Transaction<'_>,
     kind: &str,
     input_ref: &str,

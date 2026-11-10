@@ -79,6 +79,8 @@ CREATE TABLE rules (
     include_str!("migrations/008_pipelines.sql"),
     // Evidencia `learned` y `reply_style` de «Aprender a responder» (D171, D172).
     include_str!("migrations/009_learned.sql"),
+    // Índice local de búsqueda y su tabla FTS5 (D179); ver search.rs.
+    include_str!("migrations/010_search.sql"),
 ];
 
 /// Base de datos local. Cada operación pública se confirma en una transacción,

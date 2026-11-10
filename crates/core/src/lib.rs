@@ -12,6 +12,7 @@ pub mod queue;
 pub mod rule_panel;
 pub mod rules;
 pub mod sales;
+pub mod search;
 pub mod store;
 pub mod templates;
 
@@ -30,5 +31,9 @@ pub use rule_panel::{
     LEARN_MARK_PREFIX, LEARN_RESULT_PREFIX, READ_MARK_PREFIX, REFINEMENT_KEY, RODAJE_SENDS,
 };
 pub use rules::Rule;
+pub use search::{
+    SearchDoc, SearchFilters, SearchHit, SearchKind, SearchPage, SearchQuery, SearchStatus,
+    SEARCH_PAGE_SIZE, SNIPPET_CHARS,
+};
 pub use store::Store;
 pub use templates::{active_since, TaskTemplate};
