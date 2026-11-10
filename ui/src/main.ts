@@ -563,6 +563,16 @@ const state = {
 
 const root = document.getElementById("app")!;
 
+/**
+ * Pide confirmación y espera la respuesta. En Tauri 2 el complemento de diálogos sustituye
+ * `window.confirm` por una función asíncrona que devuelve una promesa, y una promesa siempre
+ * cuenta como verdadera en un `if`: sin `await` la acción se ejecutaba antes de que la persona
+ * contestara. En el navegador `confirm` sigue siendo síncrono; `await` sirve en los dos casos.
+ */
+async function ask(message: string): Promise<boolean> {
+  return await (window.confirm(message) as boolean | Promise<boolean>);
+}
+
 function notify(kind: "ok" | "error", text: unknown) {
   state.notice = { kind, text: String(text) };
   render();
@@ -593,7 +603,7 @@ function discardTask(task: Task) {
           // Sin poder leer las ejecuciones no se bloquea el descarte: es la acción de siempre.
         }
       }
-      if (holds && !confirm(DISCARD_HELD_CONFIRM)) return;
+      if (holds && !await ask(DISCARD_HELD_CONFIRM)) return;
       resolveTask(task, () => api.reject(task.id), "Tarea descartada");
     } finally {
       discarding.delete(task.id);
@@ -1760,16 +1770,16 @@ function contextLine(t: Task, className: string): HTMLElement | null {
   );
 }
 
-function continueWithout(t: Task, step: { id: number; label: string }, code: string) {
-  if (!confirm(continueConfirm(step.label, code))) return;
+async function continueWithout(t: Task, step: { id: number; label: string }, code: string) {
+  if (!await ask(continueConfirm(step.label, code))) return;
   // El botón desaparece al omitir: el foco pasa a «Ver pasos» de la misma tarea.
   state.focusAfterRender = `task:steps:${t.id}`;
   // Si el paso ya estaba omitido, la respuesta es la misma y solo se refresca (D150).
   void act(() => api.waivePipelineStep(step.id, ""), `Se continúa sin “${step.label}”. La respuesta irá siempre a revisión.`);
 }
 
-function cancelAlso(t: Task) {
-  if (!confirm(CANCEL_ALSO_CONFIRM)) return;
+async function cancelAlso(t: Task) {
+  if (!await ask(CANCEL_ALSO_CONFIRM)) return;
   state.focusAfterRender = `task:steps:${t.id}`;
   resolveTask(t, () => api.reject(t.id), CANCEL_ALSO_DONE);
 }
@@ -1849,11 +1859,11 @@ function taskActions(t: Task): HTMLElement {
     waive
       ? h(
           "button",
-          { type: "button", "aria-label": actionLabel(CONTINUE_LABEL, title(t)), "data-focus-key": `task:waive:${t.id}`, onclick: () => continueWithout(t, waive.step, waive.code) },
+          { type: "button", "aria-label": actionLabel(CONTINUE_LABEL, title(t)), "data-focus-key": `task:waive:${t.id}`, onclick: () => void continueWithout(t, waive.step, waive.code) },
           CONTINUE_LABEL,
         )
       : null,
-    blocked ? h("button", { type: "button", "aria-label": actionLabel(CANCEL_ALSO_LABEL, title(t)), "data-focus-key": `task:cancel-also:${t.id}`, onclick: () => cancelAlso(t) }, CANCEL_ALSO_LABEL) : null,
+    blocked ? h("button", { type: "button", "aria-label": actionLabel(CANCEL_ALSO_LABEL, title(t)), "data-focus-key": `task:cancel-also:${t.id}`, onclick: () => void cancelAlso(t) }, CANCEL_ALSO_LABEL) : null,
     t.state === "failed"
       ? h("button", { "data-focus-key": `task:retry:${t.id}`, onclick: () => void act(() => api.retry(t.id), "Tarea reencolada") }, "Reintentar")
       : null,
@@ -2067,7 +2077,7 @@ async function saveTemplate() {
     return;
   }
   // Activar sin condición, o ampliar a «cualquier remitente» una ya activa, abarca todos los correos con adjunto.
-  if (ed.active && ed.scope === "any" && (!ed.wasActive || !ed.wasAny) && !confirm(ACTIVATE_WITHOUT_CONDITION_CONFIRM)) return;
+  if (ed.active && ed.scope === "any" && (!ed.wasActive || !ed.wasAny) && !await ask(ACTIVATE_WITHOUT_CONDITION_CONFIRM)) return;
   ed.busy = true;
   render();
   let saved = false;
@@ -2089,16 +2099,16 @@ async function saveTemplate() {
   }
 }
 
-function toggleTemplate(t: TaskTemplate) {
-  if (!t.active && scopeOf(t.conditions) === "any" && !confirm(ACTIVATE_WITHOUT_CONDITION_CONFIRM)) return;
+async function toggleTemplate(t: TaskTemplate) {
+  if (!t.active && scopeOf(t.conditions) === "any" && !await ask(ACTIVATE_WITHOUT_CONDITION_CONFIRM)) return;
   void act(
     () => api.setTaskTemplateActive(t.id, !t.active),
     t.active ? `Plantilla “${t.name}” desactivada.` : `Plantilla “${t.name}” activa. ${TEMPLATE_SCOPE_NOTE}`,
   );
 }
 
-function archiveTemplate(t: TaskTemplate) {
-  if (!confirm(archiveConfirm(t.name))) return;
+async function archiveTemplate(t: TaskTemplate) {
+  if (!await ask(archiveConfirm(t.name))) return;
   void act(() => api.archiveTaskTemplate(t.id, true), `Plantilla “${t.name}” archivada.`);
 }
 
@@ -2126,8 +2136,8 @@ function templateRow(t: TaskTemplate): HTMLElement {
           ]
         : [
             h("button", { type: "button", "aria-label": label("Editar"), "data-focus-key": `tpl:${t.id}:edit`, onclick: () => openTemplateEditor(t) }, "Editar"),
-            h("button", { type: "button", "aria-label": label(t.active ? "Desactivar" : "Activar"), "data-focus-key": `tpl:${t.id}:toggle`, onclick: () => toggleTemplate(t) }, t.active ? "Desactivar" : "Activar"),
-            h("button", { type: "button", "aria-label": label("Archivar"), "data-focus-key": `tpl:${t.id}:archive`, onclick: () => archiveTemplate(t) }, "Archivar"),
+            h("button", { type: "button", "aria-label": label(t.active ? "Desactivar" : "Activar"), "data-focus-key": `tpl:${t.id}:toggle`, onclick: () => void toggleTemplate(t) }, t.active ? "Desactivar" : "Activar"),
+            h("button", { type: "button", "aria-label": label("Archivar"), "data-focus-key": `tpl:${t.id}:archive`, onclick: () => void archiveTemplate(t) }, "Archivar"),
           ]),
     ),
   );
@@ -4483,11 +4493,11 @@ function accountRow(a: MailAccount, m: MailView, busy: boolean) {
         {
           class: "danger",
           "data-focus-key": `mail:remove:${a.id}`,
-          onclick: () => {
+          onclick: async () => {
             const what = real
               ? `Se borrarán los tokens de «${a.label}» de este equipo y NestAdmin dejará de leer esa cuenta. Las tareas ya creadas seguirán visibles, pero no podrán enviar respuestas.`
               : "NestAdmin dejará de leer el correo simulado. Puede volver a añadirlo.";
-            if (confirm(`${what} ¿Desconectar?`)) void act(() => api.removeMailAccount(a.id), `Cuenta «${a.label}» desconectada`);
+            if (await ask(`${what} ¿Desconectar?`)) void act(() => api.removeMailAccount(a.id), `Cuenta «${a.label}» desconectada`);
           },
         },
         "Desconectar",
@@ -5516,7 +5526,7 @@ async function useLocalAi() {
     return;
   }
   // D134: el consentimiento del afinado automático es de un destino concreto y se retira al cambiarlo.
-  if (state.refinement?.consent.state === "granted" && !confirm("Cambiar a la IA local retira el consentimiento del afinado automático de sugerencias (cambia el destino de los datos); podrá volver a activarlo después. ¿Continuar?")) return;
+  if (state.refinement?.consent.state === "granted" && !await ask("Cambiar a la IA local retira el consentimiento del afinado automático de sugerencias (cambia el destino de los datos); podrá volver a activarlo después. ¿Continuar?")) return;
   const b = block("ollama");
   b.model = s.default_local_model;
   b.url = s.default_local_url || LOCAL_URL;
