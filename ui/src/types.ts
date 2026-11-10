@@ -1322,6 +1322,9 @@ export interface SalesIssuer {
   email: string | null;
   iban: string | null;
   logo_sha256: string | null;
+  /** Membrete PDF vigente al emitir (D222); `null` en los emitidos antes del membrete o sin él. */
+  letterhead_sha256?: string | null;
+  letterhead_margins?: LetterheadMargins | null;
 }
 
 export interface SalesRectification {
@@ -1380,6 +1383,14 @@ export interface SalesFilterIn {
   include_superseded?: boolean;
 }
 
+/** Márgenes del área útil de una hoja A4 con membrete, en milímetros enteros (D222, D223). */
+export interface LetterheadMargins {
+  top_mm: number;
+  right_mm: number;
+  bottom_mm: number;
+  left_mm: number;
+}
+
 export interface SalesCompany {
   name: string | null;
   tax_id: string | null;
@@ -1388,6 +1399,9 @@ export interface SalesCompany {
   iban: string | null;
   has_logo: boolean;
   logo_mime: string | null;
+  /** Hay un membrete PDF vigente (D222); su contenido no viaja a la ventana. */
+  has_letterhead: boolean;
+  letterhead_margins: LetterheadMargins;
 }
 
 export type SalesCompanyData = Pick<SalesCompany, "name" | "tax_id" | "address" | "email" | "iban">;

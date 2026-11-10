@@ -14,6 +14,10 @@ use serde::{Deserialize, Serialize};
 pub use ocr::{mean_confidence, Ocr, OcrText, Tesseract};
 pub use picture::{prepare_image, IMAGE_EXTENSIONS};
 
+/// PDFium tal como lo enlaza el extractor; la generación de PDF (D76) comparte la biblioteca.
+pub use image;
+pub use pdfium_render;
+
 /// Una página con menos caracteres visibles que este umbral se considera escaneada (D10,
 /// calibrado en D92).
 pub const DEFAULT_MIN_CHARS: usize = 60;
@@ -171,6 +175,12 @@ impl Extractor {
     pub fn with_min_confidence(mut self, min_confidence: f32) -> Self {
         self.min_confidence = min_confidence;
         self
+    }
+
+    /// PDFium enlazado desde la carpeta configurada (uno por proceso, compartido con la
+    /// extracción). Lo usa la generación de los PDF de venta (D76, D223).
+    pub fn pdfium(&self) -> Result<&'static pdfium_render::prelude::Pdfium, ExtractError> {
+        pdf::pdfium(&self.pdfium_dir)
     }
 
     /// Motor de OCR configurado.

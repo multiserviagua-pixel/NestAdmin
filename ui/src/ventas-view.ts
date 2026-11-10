@@ -75,6 +75,20 @@ import {
   type LineDraftText,
   type SalesAction,
 } from "./ventas-text";
+import {
+  LETTERHEAD_HELP,
+  LETTERHEAD_MARGINS_HELP,
+  LETTERHEAD_REMOVE_CONFIRM,
+  LETTERHEAD_SCOPE,
+  LETTERHEAD_WARNING,
+  MARGIN_FIELDS,
+  VIEW_PDF_LABEL,
+  canViewPdf,
+  letterheadFileProblem,
+  marginsToText,
+  parseMargins,
+  type MarginsText,
+} from "./ventas-text";
 
 type Tab = "documents" | "customers" | "products" | "company" | "recurring" | "received" | "records";
 
@@ -127,6 +141,8 @@ export function createSalesView(ctx: Context) {
     company: null as SalesCompany | null,
     companyLogoUrl: null as string | null,
     companyForm: { name: "", tax_id: "", address: "", email: "", iban: "" },
+    marginsForm: { top_mm: "35", right_mm: "20", bottom_mm: "25", left_mm: "20" } as MarginsText,
+    marginProblems: [] as string[],
     customers: [] as SalesCustomer[],
     showRetiredCustomers: false,
     customerForm: null as null | { id: number | null; name: string; tax_id: string; address: string; email: string },
@@ -198,6 +214,8 @@ export function createSalesView(ctx: Context) {
     s.products = products;
     s.docs = docs;
     s.companyForm = { name: company?.name ?? "", tax_id: company?.tax_id ?? "", address: company?.address ?? "", email: company?.email ?? "", iban: company?.iban ?? "" };
+    s.marginsForm = marginsToText(company?.letterhead_margins ?? { top_mm: 35, right_mm: 20, bottom_mm: 25, left_mm: 20 });
+    s.marginProblems = [];
   }
 
   async function loadTab() {
@@ -793,6 +811,10 @@ export function createSalesView(ctx: Context) {
             a === "edit" || a === "revise" ? ACTION_LABEL[a] : `${ACTION_LABEL[a]}…`,
           ),
         ),
+        // El PDF refleja lo emitido (D76); se genera si falta y se abre con el visor del sistema.
+        canViewPdf(doc)
+          ? h("button", { "data-focus-key": "ventas:action:pdf", onclick: () => void run(() => api.salesOpenDocumentPdf(doc.id), "El PDF se abre con el visor del sistema.") }, VIEW_PDF_LABEL)
+          : null,
       ),
     );
   }
@@ -1150,6 +1172,88 @@ export function createSalesView(ctx: Context) {
             : null,
         ),
       ),
+      membreteSection(),
+    );
+  }
+
+  // ---- Membrete PDF de fondo (D222, D223) ----
+
+  function membreteSection(): HTMLElement {
+    const m = s.marginsForm;
+    const letterheadInput = h("input", { type: "file", id: "ventas-letterhead-file", accept: "application/pdf,.pdf", "data-focus-key": "ventas:letterhead:file" }) as HTMLInputElement;
+    return h(
+      "div",
+      {},
+      sectionHeader("Membrete"),
+      h("p", { class: "meta" }, LETTERHEAD_HELP),
+      h("p", { class: "meta" }, LETTERHEAD_WARNING),
+      h("p", { class: "meta" }, s.company?.has_letterhead ? "Hay un membrete guardado: se usa como fondo en los documentos que emita." : "No hay membrete: los documentos se dibujan con el diseño normal y el logotipo."),
+      h(
+        "div",
+        { class: "row" },
+        h("div", { class: "field" }, h("div", { class: "field-head" }, h("label", { for: "ventas-letterhead-file" }, "Elegir PDF de membrete")), letterheadInput),
+        h(
+          "div",
+          { class: "field" },
+          h(
+            "button",
+            {
+              "data-focus-key": "ventas:letterhead:save",
+              onclick: () =>
+                void (async () => {
+                  const file = letterheadInput.files?.[0];
+                  const problem = letterheadFileProblem(file);
+                  if (problem) return say("error", problem);
+                  await run(async () => api.salesSetLetterhead(new Uint8Array(await file!.arrayBuffer())), "Membrete guardado.");
+                  await reload();
+                })(),
+            },
+            "Guardar membrete",
+          ),
+          s.company?.has_letterhead
+            ? h(
+                "button",
+                {
+                  "data-focus-key": "ventas:letterhead:remove",
+                  onclick: () =>
+                    void (async () => {
+                      if (!(await ctx.ask(LETTERHEAD_REMOVE_CONFIRM))) return;
+                      await run(() => api.salesRemoveLetterhead(), "Membrete quitado.");
+                      await reload();
+                    })(),
+                },
+                "Quitar membrete",
+              )
+            : null,
+        ),
+      ),
+      h("p", { class: "meta" }, LETTERHEAD_MARGINS_HELP),
+      h(
+        "div",
+        { class: "row" },
+        ...MARGIN_FIELDS.map(([key, label]) => textField(label, () => m[key], (v) => (m[key] = v), { key: `margin:${key}`, inputmode: "numeric" })),
+      ),
+      problemList(s.marginProblems),
+      h(
+        "div",
+        { class: "row-actions" },
+        h(
+          "button",
+          {
+            "data-focus-key": "ventas:letterhead:margins",
+            onclick: () =>
+              void (async () => {
+                const parsed = parseMargins(s.marginsForm);
+                s.marginProblems = parsed.ok ? [] : parsed.problems;
+                if (!parsed.ok) return ctx.render();
+                await run(() => api.salesSetLetterheadMargins(parsed.margins), "Márgenes guardados.");
+                await reload();
+              })(),
+          },
+          "Guardar márgenes",
+        ),
+      ),
+      h("p", { class: "meta" }, LETTERHEAD_SCOPE),
     );
   }
 

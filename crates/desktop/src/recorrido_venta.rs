@@ -75,37 +75,42 @@ impl SalesClock for FixedClock {
     }
 }
 
-fn deps(data_dir: &Path) -> Deps {
+fn deps(data_dir: &Path, pdfium: &Path) -> Deps {
     let config = nestadmin_setup::Config::windows(
         data_dir.join("sin-tesseract.exe"),
         data_dir.join("sin-tessdata"),
-        data_dir.join("sin-pdfium"),
+        pdfium.to_owned(),
         data_dir.join("descargas"),
     );
     Deps {
         data_dir: data_dir.to_owned(),
         credentials: Arc::new(MemoryCredentialStore::default()),
         setup: Setup::new(config, Box::new(NoSystem)),
-        extractor: Extractor::new(data_dir.join("sin-pdfium"), Box::new(NoOcr)),
+        extractor: Extractor::new(pdfium.to_owned(), Box::new(NoOcr)),
         tray: false,
     }
 }
 
-struct Session {
-    app: tauri::App<MockRuntime>,
+pub(super) struct Session {
+    pub(super) app: tauri::App<MockRuntime>,
     window: WebviewWindow<MockRuntime>,
     worker: Option<thread::JoinHandle<()>>,
     clock: Arc<FixedClock>,
-    data_dir: PathBuf,
+    pub(super) data_dir: PathBuf,
 }
 
 impl Session {
     /// Abre la aplicación sobre `data_dir` con el reloj fijo, como al ejecutar `nestadmin.exe`.
-    fn open(data_dir: &Path) -> Self {
+    pub(super) fn open(data_dir: &Path) -> Self {
+        Self::open_with_pdfium(data_dir, &data_dir.join("sin-pdfium"))
+    }
+
+    /// Como `open`, con la carpeta de PDFium indicada (los PDF de venta necesitan la real).
+    pub(super) fn open_with_pdfium(data_dir: &Path, pdfium: &Path) -> Self {
         let app = configure(mock_builder(), false)
             .build(tauri::generate_context!())
             .expect("la aplicación se construye");
-        let worker = start(app.handle(), deps(data_dir)).expect("la aplicación arranca");
+        let worker = start(app.handle(), deps(data_dir, pdfium)).expect("la aplicación arranca");
         let window = WebviewWindowBuilder::new(&app, "main", WebviewUrl::default())
             .build()
             .expect("ventana principal");
@@ -123,7 +128,7 @@ impl Session {
         }
     }
 
-    fn request(
+    pub(super) fn request(
         &self,
         cmd: &str,
         body: InvokeBody,
@@ -149,7 +154,7 @@ impl Session {
     }
 
     /// Un comando con argumentos JSON, como `invoke(cmd, args)`.
-    fn call(&self, cmd: &str, args: Value) -> Result<Value, String> {
+    pub(super) fn call(&self, cmd: &str, args: Value) -> Result<Value, String> {
         self.request(cmd, InvokeBody::Json(args), Default::default())
             .map(|body| body.deserialize::<Value>().unwrap())
             .map_err(|e| {
@@ -159,13 +164,13 @@ impl Session {
             })
     }
 
-    fn ok(&self, cmd: &str, args: Value) -> Value {
+    pub(super) fn ok(&self, cmd: &str, args: Value) -> Value {
         self.call(cmd, args)
             .unwrap_or_else(|e| panic!("{cmd} falló: {e}"))
     }
 
     /// El comando falla y su texto empieza por `[code]`.
-    fn fails(&self, cmd: &str, args: Value, code: &str) -> String {
+    pub(super) fn fails(&self, cmd: &str, args: Value, code: &str) -> String {
         let error = self
             .call(cmd, args)
             .expect_err(&format!("{cmd} debía fallar"));
@@ -176,7 +181,7 @@ impl Session {
         error
     }
 
-    fn id(&self, cmd: &str, args: Value) -> i64 {
+    pub(super) fn id(&self, cmd: &str, args: Value) -> i64 {
         self.ok(cmd, args).as_i64().unwrap()
     }
 
@@ -184,11 +189,11 @@ impl Session {
         self.ok("sales_setup_status", json!({}))
     }
 
-    fn write_producer(&self, text: &str) {
+    pub(super) fn write_producer(&self, text: &str) {
         std::fs::write(self.data_dir.join(productor::FILE), text).unwrap();
     }
 
-    fn close(mut self) {
+    pub(super) fn close(mut self) {
         stop_worker(self.app.handle());
         if let Some(worker) = self.worker.take() {
             worker.join().unwrap();
@@ -197,10 +202,10 @@ impl Session {
     }
 }
 
-const PRODUCER: &str = r#"{ "name": "Productor Demo SL", "tax_id": "B00000034" }"#;
+pub(super) const PRODUCER: &str = r#"{ "name": "Productor Demo SL", "tax_id": "B00000034" }"#;
 
 /// Cliente y producto (80 EUR al 21 %) con la empresa; devuelve (cliente, producto).
-fn master_data(s: &Session) -> (i64, i64) {
+pub(super) fn master_data(s: &Session) -> (i64, i64) {
     s.ok(
         "sales_save_company",
         json!({ "company": {
@@ -230,7 +235,7 @@ fn master_data(s: &Session) -> (i64, i64) {
 }
 
 /// Borrador de `kind` con una unidad del producto.
-fn draft(s: &Session, kind: &str, customer: i64, product: i64) -> i64 {
+pub(super) fn draft(s: &Session, kind: &str, customer: i64, product: i64) -> i64 {
     let id = s.id(
         "sales_create_draft",
         json!({ "draft": { "kind": kind, "customer_id": customer } }),

@@ -65,6 +65,7 @@ import type {
   SalesCollection,
   SalesCompany,
   SalesCompanyData,
+  LetterheadMargins,
   SalesCustomer,
   SalesCustomerData,
   SalesDocument,
@@ -373,6 +374,14 @@ export const api = {
   salesRemoveCompanyLogo: () => invoke<void>("sales_remove_company_logo"),
   salesCompanyLogo: () => invoke<ArrayBuffer>("sales_company_logo"),
   salesLogoByHash: (sha256: string) => invoke<ArrayBuffer>("sales_logo_by_hash", { sha256 }),
+  // Membrete PDF de fondo (D222): el PDF viaja como datos binarios y la capa de aplicación lo
+  // comprueba con PDFium; los márgenes son milímetros enteros.
+  salesSetLetterhead: (bytes: Uint8Array) => invoke<void>("sales_set_letterhead", bytes),
+  salesRemoveLetterhead: () => invoke<void>("sales_remove_letterhead"),
+  salesSetLetterheadMargins: (margins: LetterheadMargins) => invoke<void>("sales_set_letterhead_margins", { margins }),
+  // PDF de un documento emitido (D76, D223): la ruta se genera si falta; abrirlo usa el visor del sistema.
+  salesDocumentPdf: (id: number) => invoke<string>("sales_document_pdf", { id }),
+  salesOpenDocumentPdf: (id: number) => invoke<void>("sales_open_document_pdf", { id }),
   salesCustomers: (retired = false) => invoke<SalesCustomer[]>("sales_customers", { retired }),
   salesCustomer: (id: number) => invoke<SalesCustomer>("sales_customer", { id }),
   salesCreateCustomer: (data: SalesCustomerData) => invoke<number>("sales_create_customer", { data }),

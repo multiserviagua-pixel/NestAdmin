@@ -34,5 +34,6 @@ Cada decisión (`D<n>`) tiene un número definitivo desde que se escribe, para q
 | D213–D219 | Correcciones tras la revisión de E1–E3a de la conexión de la venta (el bloque D193–D212 se agotó), 2026-11-10 | Asignado |
 | D220–D221 | Correcciones tras el recorrido de la venta en `tauri dev`, 2026-11-10 | Asignado |
 | D222–D222 | Membrete PDF de fondo en los documentos de venta (cambio de alcance), 2026-11-10 | Asignado |
+| D223–D227 | PDF de los documentos de venta y membrete (etapa E4a), 2026-11-10 | Asignado |
 
-Siguiente número libre: **D223**.
+Siguiente número libre: **D228**.

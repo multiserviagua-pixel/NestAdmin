@@ -9,12 +9,14 @@
 //! * Un presupuesto o un albarán se emite sin registro y no exige productor.
 //! * Nada se remite a la AEAT: solo se dejan los registros listos y verificables.
 
+use std::fs;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use nestadmin_core::sales::{
-    ChainStatus, Company, Customer, CustomerData, DraftInput, ReceivedDeliveryNote,
-    RecurringRecord, RecurringRun, SalesDocument, SalesFilter, SalesStoreError, VerifactuContext,
-    VerifactuRecordRow,
+    ChainStatus, Company, Customer, CustomerData, DraftInput, Letterhead, LetterheadMargins,
+    ReceivedDeliveryNote, RecurringRecord, RecurringRun, SalesDocument, SalesFilter,
+    SalesStoreError, VerifactuContext, VerifactuRecordRow,
 };
 use nestadmin_documents::IsoDate;
 use nestadmin_sales::{
@@ -22,10 +24,12 @@ use nestadmin_sales::{
     Product, RectificationKind, RectificationMethod, Status,
 };
 use nestadmin_verifactu::tipos::validar_nif;
-use nestadmin_verifactu::{FechaHoraHuso, Persona, SistemaInformatico};
+use nestadmin_verifactu::{
+    CodigoQr, Entorno, FechaHoraHuso, Persona, RegistroFacturacion, SistemaInformatico,
+};
 use rust_decimal::Decimal;
 
-use crate::{App, AppError, AppResult};
+use crate::{sales_pdf, App, AppError, AppResult};
 
 /// Código del error al emitir o anular una factura sin productor de software configurado.
 pub const CODE_NOT_CONFIGURED: &str = "verifactu_not_configured";
@@ -84,6 +88,17 @@ fn clock_error(why: String) -> AppError {
     AppError::Sales(SalesStoreError::External {
         code: CODE_CLOCK_UNAVAILABLE.to_owned(),
         message: why,
+    })
+}
+
+/// Códigos de los errores del PDF: PDFium no está disponible o la generación falló.
+pub const CODE_PDF_UNAVAILABLE: &str = "pdf_unavailable";
+pub const CODE_PDF_FAILED: &str = "pdf_failed";
+
+fn pdf_unavailable(e: nestadmin_extract::ExtractError) -> AppError {
+    AppError::Sales(SalesStoreError::External {
+        code: CODE_PDF_UNAVAILABLE.to_owned(),
+        message: e.to_string(),
     })
 }
 
@@ -179,6 +194,153 @@ impl App {
     /// Logotipo (contenido y tipo MIME) con ese SHA-256.
     pub fn sales_company_logo(&self, sha256: &str) -> AppResult<Option<(Vec<u8>, String)>> {
         Ok(self.store.company_logo_by_hash(sha256)?)
+    }
+
+    // --- Membrete (D222, D223) ---
+
+    /// Membrete vigente de la empresa (PDF y márgenes), si lo hay.
+    pub fn sales_letterhead(&self) -> AppResult<Option<Letterhead>> {
+        Ok(self.store.sales_letterhead()?)
+    }
+
+    /// Márgenes guardados del área útil, con o sin membrete.
+    pub fn sales_letterhead_margins(&self) -> AppResult<LetterheadMargins> {
+        Ok(self.store.sales_letterhead_margins()?)
+    }
+
+    /// Membrete (contenido) con ese SHA-256, el `issuer.letterhead_sha256` de un documento.
+    pub fn sales_letterhead_by_hash(&self, sha256: &str) -> AppResult<Option<Vec<u8>>> {
+        Ok(self.store.letterhead_by_hash(sha256)?)
+    }
+
+    /// Guarda un PDF como membrete tras comprobarlo con PDFium: se abre, sin contraseña, de una o
+    /// dos páginas A4 verticales y de hasta 5 MB. Conserva los márgenes actuales. Un PDF no
+    /// válido da `invalid_input` con el motivo; sin PDFium, `pdf_unavailable`.
+    pub fn set_sales_letterhead(&mut self, bytes: &[u8]) -> AppResult<()> {
+        let pdfium = self.extractor.pdfium().map_err(pdf_unavailable)?;
+        sales_pdf::check_letterhead(pdfium, bytes)
+            .map_err(|why| SalesStoreError::invalid("letterhead", why))?;
+        let margins = self.store.sales_letterhead_margins()?;
+        self.store.set_sales_letterhead(bytes, margins)?;
+        Ok(())
+    }
+
+    /// Quita el membrete vigente. Los documentos ya emitidos conservan el suyo.
+    pub fn remove_sales_letterhead(&mut self) -> AppResult<()> {
+        Ok(self.store.remove_sales_letterhead()?)
+    }
+
+    /// Cambia los márgenes del área útil; solo afecta a los documentos que se emitan después.
+    pub fn set_sales_letterhead_margins(&mut self, margins: LetterheadMargins) -> AppResult<()> {
+        Ok(self.store.set_sales_letterhead_margins(margins)?)
+    }
+
+    // --- PDF del documento emitido (E4a, D76, D223) ---
+
+    /// Ruta del PDF de un documento emitido, que se genera si falta. Se guarda en
+    /// `documentos/ventas/<número>.pdf` (`<número>-r<n>.pdf` desde la revisión 2) y se escribe
+    /// entero o no se escribe: un archivo existente es siempre un PDF completo. Un borrador no
+    /// tiene PDF (`conflict`); una factura sin su registro de alta tampoco, porque el QR sale de
+    /// ese registro.
+    pub fn sales_document_pdf(&mut self, id: i64) -> AppResult<PathBuf> {
+        let doc = self.store.sales_document(id)?;
+        let number = match (&doc.number, doc.status) {
+            (Some(number), status) if status != Status::Draft => number.clone(),
+            _ => {
+                return Err(SalesStoreError::Conflict(
+                    "solo se genera el PDF de un documento emitido".into(),
+                )
+                .into())
+            }
+        };
+        let mut name: String = number
+            .chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                    c
+                } else {
+                    '_'
+                }
+            })
+            .collect();
+        if doc.revision > 1 {
+            name.push_str(&format!("-r{}", doc.revision));
+        }
+        let folder = self.documents.join("ventas");
+        let path = folder.join(format!("{name}.pdf"));
+        if path.metadata().is_ok_and(|m| m.is_file() && m.len() > 0) {
+            return Ok(path);
+        }
+        let bytes = self.render_sales_pdf(&doc)?;
+        fs::create_dir_all(&folder)?;
+        let part = folder.join(format!("{name}.pdf.part"));
+        fs::write(&part, &bytes)?;
+        fs::rename(&part, &path)?;
+        Ok(path)
+    }
+
+    /// Dibuja el PDF de un documento emitido sin guardarlo: lee el logotipo y el membrete que cita
+    /// su copia del emisor (no los vigentes) y, en una factura, el QR de su registro de alta.
+    pub fn render_sales_pdf(&self, doc: &SalesDocument) -> AppResult<Vec<u8>> {
+        let pdfium = self.extractor.pdfium().map_err(pdf_unavailable)?;
+        let issuer = doc.issuer.as_ref();
+        let logo = match issuer.and_then(|i| i.logo_sha256.as_deref()) {
+            Some(hash) => self.store.company_logo_by_hash(hash)?.map(|(b, _)| b),
+            None => None,
+        };
+        let letterhead = match issuer.and_then(|i| i.letterhead_sha256.as_deref()) {
+            Some(hash) => Some(self.store.letterhead_by_hash(hash)?.ok_or_else(|| {
+                SalesStoreError::Corrupt(format!("el membrete {hash} citado por el documento"))
+            })?),
+            None => None,
+        };
+        let rectified_number = match doc.rectifies_id {
+            Some(id) => self.store.sales_document(id)?.number,
+            None => None,
+        };
+        let qr = if doc.kind.is_invoice() {
+            let alta = self
+                .store
+                .verifactu_records()?
+                .into_iter()
+                .find_map(|row| match row.record {
+                    RegistroFacturacion::Alta(a) if row.document_id == doc.id => Some(a),
+                    _ => None,
+                })
+                .ok_or_else(|| {
+                    SalesStoreError::Conflict(
+                        "la factura no tiene registro de alta Verifactu: no se puede generar su \
+                         QR"
+                        .into(),
+                    )
+                })?;
+            Some(
+                CodigoQr::de_registro(Entorno::Produccion, &alta).map_err(|e| {
+                    SalesStoreError::External {
+                        code: CODE_PDF_FAILED.to_owned(),
+                        message: format!("no se pudo construir el QR: {e}"),
+                    }
+                })?,
+            )
+        } else {
+            None
+        };
+        sales_pdf::render(
+            pdfium,
+            &sales_pdf::PdfSource {
+                document: doc,
+                rectified_number,
+                logo,
+                letterhead,
+                qr,
+            },
+        )
+        .map_err(|e| {
+            AppError::Sales(SalesStoreError::External {
+                code: CODE_PDF_FAILED.to_owned(),
+                message: e.to_string(),
+            })
+        })
     }
 
     // --- Clientes y productos ---

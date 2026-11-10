@@ -7,6 +7,7 @@
 // pulsar «Volver a leer» una vez), `?cadena-rota` (cadena de registros rota).
 
 import type {
+  LetterheadMargins,
   SalesCollection,
   SalesCompany,
   SalesCustomer,
@@ -22,6 +23,8 @@ import type {
   SalesTotals,
   VerifactuRecord,
 } from "./types";
+
+import { parseMargins } from "./ventas-text";
 
 const params = new URLSearchParams(typeof location === "undefined" ? "" : location.search);
 const TODAY = "2026-11-10";
@@ -66,7 +69,9 @@ function totalsOf(lines: SalesLine[], withholding: string | null): SalesTotals |
 
 // ---- Estado en memoria ----
 
-let company: SalesCompany | null = { name: "Taller Ejemplo, S.L.", tax_id: "B12345674", address: "Calle Falsa 1, 28000 Madrid", email: "facturas@taller-ejemplo.test", iban: "ES7921000813610123456789", has_logo: false, logo_mime: null };
+const DEFAULT_MARGINS: LetterheadMargins = { top_mm: 35, right_mm: 20, bottom_mm: 25, left_mm: 20 };
+let company: SalesCompany | null = { name: "Taller Ejemplo, S.L.", tax_id: "B12345674", address: "Calle Falsa 1, 28000 Madrid", email: "facturas@taller-ejemplo.test", iban: "ES7921000813610123456789", has_logo: false, logo_mime: null, has_letterhead: false, letterhead_margins: DEFAULT_MARGINS };
+let letterhead = false;
 let logo: Uint8Array | null = null;
 let nextId = 100;
 const id = () => ++nextId;
@@ -162,7 +167,7 @@ function issue(d: SalesDocument, date: string | null): SalesDocument {
   }
   d.status = "issued";
   d.issue_date = day;
-  d.issuer = { party: { name: company?.name ?? null, tax_id: company?.tax_id ?? null, address: company?.address ?? null }, email: company?.email ?? null, iban: company?.iban ?? null, logo_sha256: logo ? "a".repeat(64) : null };
+  d.issuer = { party: { name: company?.name ?? null, tax_id: company?.tax_id ?? null, address: company?.address ?? null }, email: company?.email ?? null, iban: company?.iban ?? null, logo_sha256: logo ? "a".repeat(64) : null, letterhead_sha256: letterhead ? "b".repeat(64) : null, letterhead_margins: letterhead ? (company?.letterhead_margins ?? DEFAULT_MARGINS) : null };
   d.recipient = customer ? { name: customer.data.name, tax_id: customer.data.tax_id, address: customer.data.address } : null;
   d.totals = totalsOf(d.lines, d.withholding_percent);
   d.lines = d.lines.map((l, i) => ({ ...l, amount: d.totals?.line_amounts[i] ?? null }));
@@ -204,7 +209,7 @@ export const salesHandlers: Record<string, (a: any, options?: any) => unknown> =
   }),
   sales_company: () => company,
   sales_save_company: ({ company: data }) => {
-    company = { ...(company ?? { has_logo: false, logo_mime: null }), ...data, has_logo: company?.has_logo ?? false, logo_mime: company?.logo_mime ?? null } as SalesCompany;
+    company = { ...(company ?? { has_logo: false, logo_mime: null, has_letterhead: false, letterhead_margins: DEFAULT_MARGINS }), ...data, has_logo: company?.has_logo ?? false, logo_mime: company?.logo_mime ?? null } as SalesCompany;
   },
   sales_set_company_logo: (bytes: Uint8Array, options?: { headers: Record<string, string> }) => {
     const mime = options?.headers?.["x-nestadmin-mime"];
@@ -216,6 +221,33 @@ export const salesHandlers: Record<string, (a: any, options?: any) => unknown> =
   sales_remove_company_logo: () => {
     logo = null;
     if (company) company = { ...company, has_logo: false, logo_mime: null };
+  },
+  // Membrete (D222): el simulado solo conoce la cabecera `%PDF-`; PDFium decide páginas, tamaño y
+  // contraseña en el backend real.
+  sales_set_letterhead: (bytes: Uint8Array) => {
+    if (!(bytes instanceof Uint8Array) || bytes.length === 0) fail("invalid_input", "datos no válidos: letterhead: el archivo está vacío");
+    if (bytes.length > 5 * 1024 * 1024) fail("invalid_input", "datos no válidos: letterhead: el PDF supera los 5 MB");
+    if (String.fromCharCode(...bytes.slice(0, 5)) !== "%PDF-") fail("invalid_input", "datos no válidos: letterhead: el archivo no es un PDF válido o está dañado");
+    letterhead = true;
+    company = { ...(company ?? ({ name: null, tax_id: null, address: null, email: null, iban: null, has_logo: false, logo_mime: null, letterhead_margins: DEFAULT_MARGINS } as SalesCompany)), has_letterhead: true };
+  },
+  sales_remove_letterhead: () => {
+    letterhead = false;
+    if (company) company = { ...company, has_letterhead: false };
+  },
+  sales_set_letterhead_margins: ({ margins }) => {
+    const parsed = parseMargins({ top_mm: String(margins.top_mm), right_mm: String(margins.right_mm), bottom_mm: String(margins.bottom_mm), left_mm: String(margins.left_mm) });
+    if (!parsed.ok) fail("invalid_input", `datos no válidos: letterhead.margins: ${parsed.problems[0]}`);
+    else company = { ...(company as SalesCompany), letterhead_margins: parsed.margins };
+  },
+  sales_document_pdf: ({ id: d }) => {
+    const doc = get(d);
+    if (doc.status === "draft" || !doc.number) fail("conflict", "solo se genera el PDF de un documento emitido");
+    return `documentos\\ventas\\${doc.number}.pdf`;
+  },
+  sales_open_document_pdf: ({ id: d }) => {
+    const doc = get(d);
+    if (doc.status === "draft" || !doc.number) fail("conflict", "solo se genera el PDF de un documento emitido");
   },
   sales_company_logo: () => mockLogo(),
   sales_logo_by_hash: () => mockLogo(),

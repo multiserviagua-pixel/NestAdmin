@@ -23,6 +23,7 @@ pub mod profile;
 pub mod refine;
 pub mod rules;
 pub mod sales;
+pub mod sales_pdf;
 pub mod search;
 pub mod suggest;
 

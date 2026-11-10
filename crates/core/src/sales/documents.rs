@@ -15,7 +15,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use super::master::{
-    company_logo_sha256, load_company, load_customer, load_product, Company, Customer,
+    company_letterhead_ref, company_logo_sha256, load_company, load_customer, load_product,
+    Company, Customer, LetterheadMargins,
 };
 use super::{
     audit, clean, clean_tax_id, dec, kind_from, method_from, method_text, money, parse_date, plain,
@@ -101,6 +102,14 @@ pub struct IssuerSnapshot {
     /// no cambia aunque la empresa cambie de logotipo después (D76, D90).
     #[serde(default)]
     pub logo_sha256: Option<String>,
+    /// SHA-256 del membrete PDF vigente al emitir (D222), leído con
+    /// `Store::letterhead_by_hash`. Los documentos emitidos antes del membrete, o sin él, no lo
+    /// llevan y se dibujan con el diseño normal y el logotipo.
+    #[serde(default)]
+    pub letterhead_sha256: Option<String>,
+    /// Márgenes del área útil vigentes al emitir; solo con membrete.
+    #[serde(default)]
+    pub letterhead_margins: Option<LetterheadMargins>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -758,11 +767,16 @@ where
     let company = load_company(tx)?;
     let customer = doc.customer_id.map(|c| load_customer(tx, c)).transpose()?;
     let logo_sha256 = company_logo_sha256(tx)?;
+    // El membrete y los márgenes vigentes se copian como el logotipo: un cambio posterior no
+    // altera este documento (D222).
+    let letterhead = company_letterhead_ref(tx)?;
     let issuer = company.as_ref().map(|c| IssuerSnapshot {
         party: party_of_company(c),
         email: clean(&c.email),
         iban: clean(&c.iban),
         logo_sha256: logo_sha256.clone(),
+        letterhead_sha256: letterhead.as_ref().map(|(hash, _)| hash.clone()),
+        letterhead_margins: letterhead.as_ref().map(|(_, margins)| *margins),
     });
     let recipient = customer.as_ref().map(party_of_customer);
     let lines: Vec<LineInput> = doc.lines.iter().map(|l| l.input.clone()).collect();

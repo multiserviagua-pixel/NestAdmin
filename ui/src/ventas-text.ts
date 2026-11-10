@@ -33,6 +33,8 @@ const ERROR_HEADLINE: Record<string, string> = {
   conflict: "Conflicto con otro documento",
   not_found: "No encontrado",
   storage: "Error al leer o guardar los datos",
+  pdf_unavailable: "PDFium no está disponible",
+  pdf_failed: "No se pudo generar el PDF",
 };
 
 /** Texto para el usuario: el encabezado del código y, detrás, el detalle del backend sin tocar. */
@@ -539,3 +541,79 @@ export function exemptionText(exemption: { qualification: SalesQualification; de
 export const EMPTY_LIST = "Todavía no hay documentos. Cree un borrador con «Nuevo documento».";
 export const NO_TOTALS = "Los totales aparecerán cuando el borrador tenga al menos una línea válida y se guarde.";
 export const VERIFACTU_READONLY = "Vista de solo lectura: los registros no se pueden editar ni borrar. Se crean al emitir o anular una factura.";
+
+// ---- Membrete PDF de fondo (D222, D223) ----
+
+/** Tope del PDF de membrete: el mismo que comprueba el backend. */
+export const LETTERHEAD_MAX_BYTES = 5 * 1024 * 1024;
+
+export const LETTERHEAD_HELP =
+  "El membrete es un PDF propio (su papel de carta o diseño) de una o dos páginas A4 verticales, sin contraseña y de hasta 5 MB. La primera página es el fondo de la primera hoja de cada presupuesto, albarán y factura; la segunda, si existe, el de las siguientes, y si no, se repite la primera. Con membrete no se dibuja el logotipo.";
+
+export const LETTERHEAD_MARGINS_HELP =
+  "Los márgenes marcan el área útil, en milímetros: NestAdmin escribe los datos, las líneas y los totales dentro de ella para no pisar el diseño. Elija márgenes que dejen libre lo que su membrete ya imprime.";
+
+export const LETTERHEAD_WARNING =
+  "El membrete no oculta ni sustituye ningún dato obligatorio: el emisor, el cliente, los importes, el código QR y la leyenda VERI*FACTU se dibujan siempre encima.";
+
+export const LETTERHEAD_SCOPE = "Un cambio de membrete o de márgenes solo afecta a los documentos que se emitan después: los ya emitidos conservan el suyo y su PDF no cambia.";
+
+export const LETTERHEAD_REMOVE_CONFIRM = "Se quitará el membrete de la empresa. Los documentos ya emitidos conservan el suyo y los nuevos se dibujarán con el diseño normal y el logotipo.\n\n¿Quitarlo?";
+
+export const MARGIN_FIELDS = [
+  ["top_mm", "Margen superior (mm)"],
+  ["right_mm", "Margen derecho (mm)"],
+  ["bottom_mm", "Margen inferior (mm)"],
+  ["left_mm", "Margen izquierdo (mm)"],
+] as const;
+
+export type MarginKey = (typeof MARGIN_FIELDS)[number][0];
+export type MarginsText = Record<MarginKey, string>;
+export type MarginsNumbers = Record<MarginKey, number>;
+
+/** Lo que comprueba la ventana antes de enviar el archivo; PDFium decide el resto en el backend. */
+export function letterheadFileProblem(file: { name: string; size: number; type: string } | null | undefined): string | null {
+  if (!file) return "Elija primero un archivo PDF.";
+  if (file.type !== "application/pdf" && !/\.pdf$/i.test(file.name)) return "El membrete debe ser un archivo PDF.";
+  if (file.size === 0) return "El archivo está vacío.";
+  if (file.size > LETTERHEAD_MAX_BYTES) return "El PDF supera los 5 MB.";
+  return null;
+}
+
+export function marginsToText(margins: MarginsNumbers): MarginsText {
+  return { top_mm: String(margins.top_mm), right_mm: String(margins.right_mm), bottom_mm: String(margins.bottom_mm), left_mm: String(margins.left_mm) };
+}
+
+/**
+ * Lee los cuatro márgenes (milímetros enteros de 0 a 100) y comprueba que el área útil no baja de
+ * 100 x 150 mm en una hoja de 210 x 297 mm, como el backend. Devuelve los números o los problemas,
+ * uno por campo o general.
+ */
+export function parseMargins(text: MarginsText): { ok: true; margins: MarginsNumbers } | { ok: false; problems: string[] } {
+  const problems: string[] = [];
+  const margins = {} as MarginsNumbers;
+  for (const [key, label] of MARGIN_FIELDS) {
+    const raw = text[key].trim();
+    if (!/^\d{1,3}$/.test(raw)) {
+      problems.push(`${label}: escriba milímetros enteros, de 0 a 100.`);
+      continue;
+    }
+    const value = Number(raw);
+    if (value > 100) {
+      problems.push(`${label}: el máximo es 100 mm.`);
+      continue;
+    }
+    margins[key] = value;
+  }
+  if (problems.length) return { ok: false, problems };
+  if (210 - margins.left_mm - margins.right_mm < 100) problems.push("Los márgenes izquierdo y derecho dejan menos de 100 mm de ancho útil.");
+  if (297 - margins.top_mm - margins.bottom_mm < 150) problems.push("Los márgenes superior e inferior dejan menos de 150 mm de alto útil.");
+  return problems.length ? { ok: false, problems } : { ok: true, margins };
+}
+
+/** «Ver PDF» solo existe para un documento emitido: un borrador no tiene PDF. */
+export function canViewPdf(doc: Pick<SalesDocument, "status" | "number">): boolean {
+  return doc.status !== "draft" && doc.number !== null;
+}
+
+export const VIEW_PDF_LABEL = "Ver PDF";

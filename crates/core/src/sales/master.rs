@@ -86,6 +86,114 @@ pub(crate) fn company_logo_sha256(conn: &Connection) -> SalesResult<Option<Strin
         .flatten())
 }
 
+/// Márgenes, en milímetros enteros, del área útil de una hoja A4 con membrete (D222): lo que el
+/// documento deja libre para no pisar el diseño del membrete.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LetterheadMargins {
+    pub top_mm: u16,
+    pub right_mm: u16,
+    pub bottom_mm: u16,
+    pub left_mm: u16,
+}
+
+impl Default for LetterheadMargins {
+    fn default() -> Self {
+        Self {
+            top_mm: 35,
+            right_mm: 20,
+            bottom_mm: 25,
+            left_mm: 20,
+        }
+    }
+}
+
+/// Tope de cada margen y del área que queda: una hoja A4 mide 210 x 297 mm (D223).
+const MAX_MARGIN_MM: u16 = 100;
+const MIN_USABLE_WIDTH_MM: u16 = 100;
+const MIN_USABLE_HEIGHT_MM: u16 = 150;
+/// Tope del PDF de membrete (D222).
+pub const MAX_LETTERHEAD_BYTES: usize = 5 * 1024 * 1024;
+
+impl LetterheadMargins {
+    /// Comprueba que cada margen está entre 0 y 100 mm y que el área útil no baja de 100 x
+    /// 150 mm, para que quepan la tabla de líneas y el QR (D223).
+    pub fn validate(&self) -> SalesResult<()> {
+        for (field, value) in [
+            ("top_mm", self.top_mm),
+            ("right_mm", self.right_mm),
+            ("bottom_mm", self.bottom_mm),
+            ("left_mm", self.left_mm),
+        ] {
+            if value > MAX_MARGIN_MM {
+                return Err(SalesStoreError::invalid(
+                    &format!("letterhead.{field}"),
+                    "el margen va de 0 a 100 mm",
+                ));
+            }
+        }
+        if 210 - i32::from(self.left_mm) - i32::from(self.right_mm) < i32::from(MIN_USABLE_WIDTH_MM)
+        {
+            return Err(SalesStoreError::invalid(
+                "letterhead.margins",
+                "los márgenes izquierdo y derecho dejan menos de 100 mm de ancho útil",
+            ));
+        }
+        if 297 - i32::from(self.top_mm) - i32::from(self.bottom_mm)
+            < i32::from(MIN_USABLE_HEIGHT_MM)
+        {
+            return Err(SalesStoreError::invalid(
+                "letterhead.margins",
+                "los márgenes superior e inferior dejan menos de 150 mm de alto útil",
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// Membrete vigente de la empresa: el PDF y los márgenes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Letterhead {
+    pub sha256: String,
+    pub data: Vec<u8>,
+    pub margins: LetterheadMargins,
+}
+
+/// SHA-256 (si lo hay) y márgenes de la fila de la empresa; sin fila, sin membrete y con los
+/// márgenes por defecto.
+fn company_letterhead_row(conn: &Connection) -> SalesResult<(Option<String>, LetterheadMargins)> {
+    let found: Option<(Option<String>, i64, i64, i64, i64)> = conn
+        .query_row(
+            "SELECT letterhead_sha256, letterhead_top_mm, letterhead_right_mm, \
+             letterhead_bottom_mm, letterhead_left_mm FROM company WHERE id = 1",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+        )
+        .optional()?;
+    let Some((hash, top, right, bottom, left)) = found else {
+        return Ok((None, LetterheadMargins::default()));
+    };
+    let mm = |v: i64| {
+        u16::try_from(v).map_err(|_| SalesStoreError::Corrupt("márgenes del membrete".into()))
+    };
+    Ok((
+        hash,
+        LetterheadMargins {
+            top_mm: mm(top)?,
+            right_mm: mm(right)?,
+            bottom_mm: mm(bottom)?,
+            left_mm: mm(left)?,
+        },
+    ))
+}
+
+/// SHA-256 y márgenes del membrete actual de la empresa, si lo hay.
+pub(crate) fn company_letterhead_ref(
+    conn: &Connection,
+) -> SalesResult<Option<(String, LetterheadMargins)>> {
+    let (hash, margins) = company_letterhead_row(conn)?;
+    Ok(hash.map(|h| (h, margins)))
+}
+
 fn sha256_hex(data: &[u8]) -> String {
     use std::fmt::Write;
     Sha256::digest(data)
@@ -94,6 +202,34 @@ fn sha256_hex(data: &[u8]) -> String {
             let _ = write!(hex, "{byte:02x}");
             hex
         })
+}
+
+/// Escribe el membrete vigente y sus márgenes en la fila de la empresa, creándola si no existe
+/// (`updated_at` solo cambia en la creación: los datos del emisor no se tocan).
+fn write_letterhead_ref(
+    conn: &Connection,
+    hash: Option<&str>,
+    margins: LetterheadMargins,
+) -> SalesResult<()> {
+    conn.execute(
+        "INSERT INTO company (id, updated_at, letterhead_sha256, letterhead_top_mm, \
+         letterhead_right_mm, letterhead_bottom_mm, letterhead_left_mm) \
+         VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6) \
+         ON CONFLICT(id) DO UPDATE SET letterhead_sha256 = excluded.letterhead_sha256, \
+         letterhead_top_mm = excluded.letterhead_top_mm, \
+         letterhead_right_mm = excluded.letterhead_right_mm, \
+         letterhead_bottom_mm = excluded.letterhead_bottom_mm, \
+         letterhead_left_mm = excluded.letterhead_left_mm",
+        params![
+            now_ms(),
+            hash,
+            margins.top_mm,
+            margins.right_mm,
+            margins.bottom_mm,
+            margins.left_mm
+        ],
+    )?;
+    Ok(())
 }
 
 pub(crate) fn load_customer(conn: &Connection, id: i64) -> SalesResult<Customer> {
@@ -315,6 +451,103 @@ impl Store {
         if let Some((data, _)) = &found {
             if sha256_hex(data) != sha256 {
                 return Err(SalesStoreError::Corrupt(format!("logotipo {sha256}")));
+            }
+        }
+        Ok(found)
+    }
+
+    // --- Membrete (D222, D223) ---
+
+    /// Membrete vigente de la empresa con sus márgenes, o `None` si no tiene.
+    pub fn sales_letterhead(&self) -> SalesResult<Option<Letterhead>> {
+        let Some((sha256, margins)) = company_letterhead_ref(&self.conn)? else {
+            return Ok(None);
+        };
+        let data = self
+            .letterhead_by_hash(&sha256)?
+            .ok_or_else(|| SalesStoreError::Corrupt(format!("membrete {sha256} ausente")))?;
+        Ok(Some(Letterhead {
+            sha256,
+            data,
+            margins,
+        }))
+    }
+
+    /// Márgenes guardados del área útil (los de fábrica si nunca se cambiaron), con o sin
+    /// membrete.
+    pub fn sales_letterhead_margins(&self) -> SalesResult<LetterheadMargins> {
+        Ok(company_letterhead_row(&self.conn)?.1)
+    }
+
+    /// Guarda el PDF como membrete vigente con sus márgenes. Solo comprueba lo que el núcleo
+    /// sabe (no vacío, hasta 5 MB, cabecera `%PDF-`, márgenes); que PDFium lo abra y cumpla
+    /// páginas, tamaño y contraseña lo comprueba la capa de aplicación antes de llamar aquí. Se
+    /// guarda una vez por contenido y nunca se modifica.
+    pub fn set_sales_letterhead(
+        &mut self,
+        data: &[u8],
+        margins: LetterheadMargins,
+    ) -> SalesResult<String> {
+        if data.is_empty() || data.len() > MAX_LETTERHEAD_BYTES {
+            return Err(SalesStoreError::invalid(
+                "letterhead",
+                "el membrete está vacío o supera los 5 MB",
+            ));
+        }
+        if !data.starts_with(b"%PDF-") {
+            return Err(SalesStoreError::invalid(
+                "letterhead",
+                "el membrete debe ser un PDF",
+            ));
+        }
+        margins.validate()?;
+        let hash = sha256_hex(data);
+        let tx = self.conn.transaction()?;
+        tx.execute(
+            "INSERT OR IGNORE INTO company_letterheads (sha256, data, created_at) \
+             VALUES (?1, ?2, ?3)",
+            params![hash, data, now_ms()],
+        )?;
+        write_letterhead_ref(&tx, Some(&hash), margins)?;
+        tx.commit()?;
+        Ok(hash)
+    }
+
+    /// Cambia los márgenes del área útil (valen para el membrete vigente y para el que se suba
+    /// después). Solo afectan a los documentos que se emitan a partir de ahora (D222).
+    pub fn set_sales_letterhead_margins(&mut self, margins: LetterheadMargins) -> SalesResult<()> {
+        margins.validate()?;
+        let tx = self.conn.transaction()?;
+        let (hash, _) = company_letterhead_row(&tx)?;
+        write_letterhead_ref(&tx, hash.as_deref(), margins)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Quita el membrete vigente (el contenido queda guardado para los documentos que lo citan)
+    /// y deja los márgenes como están.
+    pub fn remove_sales_letterhead(&mut self) -> SalesResult<()> {
+        let tx = self.conn.transaction()?;
+        let (_, margins) = company_letterhead_row(&tx)?;
+        write_letterhead_ref(&tx, None, margins)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Membrete (contenido) con ese SHA-256, incluso si la empresa ya usa otro: así el PDF de un
+    /// documento emitido se regenera igual (D76, D222). Comprueba el hash del contenido.
+    pub fn letterhead_by_hash(&self, sha256: &str) -> SalesResult<Option<Vec<u8>>> {
+        let found: Option<Vec<u8>> = self
+            .conn
+            .query_row(
+                "SELECT data FROM company_letterheads WHERE sha256 = ?1",
+                [sha256],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if let Some(data) = &found {
+            if sha256_hex(data) != sha256 {
+                return Err(SalesStoreError::Corrupt(format!("membrete {sha256}")));
             }
         }
         Ok(found)

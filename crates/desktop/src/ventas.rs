@@ -24,8 +24,8 @@ use std::sync::MutexGuard;
 use nestadmin_app::{App, AppError, AppResult};
 use nestadmin_core::sales::{
     ChainStatus, Company, Customer, CustomerData, DraftInput, DraftLine, IssuerSnapshot,
-    ReceivedDeliveryNote, RectificationDraft, RecurringRecord, RecurringRun, SalesDocument,
-    SalesFilter, SalesLineRecord, VerifactuKind, VerifactuRecordRow,
+    LetterheadMargins, ReceivedDeliveryNote, RectificationDraft, RecurringRecord, RecurringRun,
+    SalesDocument, SalesFilter, SalesLineRecord, VerifactuKind, VerifactuRecordRow,
 };
 use nestadmin_documents::IsoDate;
 use nestadmin_sales::{
@@ -240,6 +240,10 @@ pub struct CompanyOut {
     pub data: CompanyData,
     pub has_logo: bool,
     pub logo_mime: Option<String>,
+    /// Membrete PDF vigente (D222); el contenido no viaja a la ventana.
+    pub has_letterhead: bool,
+    /// Márgenes del área útil en milímetros (los de fábrica si nunca se cambiaron).
+    pub letterhead_margins: LetterheadMargins,
 }
 
 impl From<Company> for CompanyOut {
@@ -247,6 +251,8 @@ impl From<Company> for CompanyOut {
         Self {
             has_logo: c.logo.is_some(),
             logo_mime: c.logo_mime,
+            has_letterhead: false,
+            letterhead_margins: LetterheadMargins::default(),
             data: CompanyData {
                 name: c.name,
                 tax_id: c.tax_id,
@@ -773,7 +779,15 @@ fn sales_setup_status(shared: State<'_, SharedState>) -> CmdResult<SetupStatus> 
 
 #[tauri::command]
 fn sales_company(shared: State<'_, SharedState>) -> CmdResult<Option<CompanyOut>> {
-    Ok(sale(lock(&shared)?.sales_company())?.map(CompanyOut::from))
+    let app = lock(&shared)?;
+    let has_letterhead = sale(app.sales_letterhead())?.is_some();
+    let margins = sale(app.sales_letterhead_margins())?;
+    Ok(sale(app.sales_company())?.map(|c| {
+        let mut out = CompanyOut::from(c);
+        out.has_letterhead = has_letterhead;
+        out.letterhead_margins = margins;
+        out
+    }))
 }
 
 /// Guarda los datos del emisor conservando su logotipo actual.
@@ -839,6 +853,56 @@ fn sales_logo_by_hash(shared: State<'_, SharedState>, sha256: String) -> CmdResu
     sale(lock(&shared)?.sales_company_logo(&sha256))?
         .map(|(bytes, _mime)| Response::new(bytes))
         .ok_or_else(|| coded("not_found", "logotipo inexistente"))
+}
+
+// ---- Membrete y PDF de los documentos (E4a, D222, D223) ----
+
+/// El PDF del membrete llega como cuerpo binario. Se comprueba con PDFium (una o dos páginas A4
+/// verticales, sin contraseña, hasta 5 MB): si no vale, `[invalid_input]` con el motivo; sin
+/// PDFium, `[pdf_unavailable]`. Conserva los márgenes actuales.
+#[tauri::command]
+fn sales_set_letterhead(
+    shared: State<'_, SharedState>,
+    request: tauri::ipc::Request<'_>,
+) -> CmdResult<()> {
+    let tauri::ipc::InvokeBody::Raw(bytes) = request.body() else {
+        return Err(bad(
+            "letterhead",
+            "el membrete debe enviarse como datos binarios",
+        ));
+    };
+    sale(lock(&shared)?.set_sales_letterhead(bytes))
+}
+
+#[tauri::command]
+fn sales_remove_letterhead(shared: State<'_, SharedState>) -> CmdResult<()> {
+    sale(lock(&shared)?.remove_sales_letterhead())
+}
+
+/// Márgenes del área útil en milímetros enteros (0 a 100, con un área mínima de 100 x 150 mm).
+/// Solo afectan a los documentos que se emitan después.
+#[tauri::command]
+fn sales_set_letterhead_margins(
+    shared: State<'_, SharedState>,
+    margins: LetterheadMargins,
+) -> CmdResult<()> {
+    sale(lock(&shared)?.set_sales_letterhead_margins(margins))
+}
+
+/// Ruta del PDF de un documento emitido (`documentos\ventas\F-2026-0001.pdf`), que se genera si
+/// falta. Un borrador da `[conflict]`.
+#[tauri::command]
+fn sales_document_pdf(shared: State<'_, SharedState>, id: i64) -> CmdResult<String> {
+    let path = sale(lock(&shared)?.sales_document_pdf(id))?;
+    Ok(path.to_string_lossy().into_owned())
+}
+
+/// Genera el PDF si falta y lo abre con el visor del sistema, como «Abrir original» (D49): la
+/// ventana solo envía el id del documento, nunca una ruta.
+#[tauri::command]
+fn sales_open_document_pdf(shared: State<'_, SharedState>, id: i64) -> CmdResult<()> {
+    let path = sale(lock(&shared)?.sales_document_pdf(id))?;
+    crate::open_file(&path).map_err(|e| coded("io", e))
 }
 
 // ---- Clientes y productos ----
@@ -1204,6 +1268,11 @@ pub fn handler<R: Runtime>() -> impl Fn(Invoke<R>) -> bool + Send + Sync + 'stat
         sales_remove_company_logo,
         sales_company_logo,
         sales_logo_by_hash,
+        sales_set_letterhead,
+        sales_remove_letterhead,
+        sales_set_letterhead_margins,
+        sales_document_pdf,
+        sales_open_document_pdf,
         sales_customers,
         sales_customer,
         sales_create_customer,

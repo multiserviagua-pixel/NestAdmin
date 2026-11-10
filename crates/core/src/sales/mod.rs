@@ -31,7 +31,10 @@ pub use documents::{
     SalesLineRecord,
 };
 pub use error::{SalesResult, SalesStoreError};
-pub use master::{Company, Customer, CustomerData, ReceivedDeliveryNote};
+pub use master::{
+    Company, Customer, CustomerData, Letterhead, LetterheadMargins, ReceivedDeliveryNote,
+    MAX_LETTERHEAD_BYTES,
+};
 pub use verifactu::{
     ChainStatus, VerifactuContext, VerifactuKind, VerifactuRecordRow, CODE_CHAIN_BROKEN,
     CODE_CLOCK_BEHIND, CODE_RECORD_INVALID,

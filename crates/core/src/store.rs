@@ -89,6 +89,9 @@ CREATE TABLE rules (
     include_str!("migrations/012_verifactu.sql"),
     // Número de instalación, de una sola fila y solo inserción (fase 11); ver installation.rs.
     include_str!("migrations/013_installation.sql"),
+    // Membretes PDF de solo inserción y membrete vigente de la empresa (D222, D223); ver
+    // sales/master.rs.
+    include_str!("migrations/014_letterhead.sql"),
 ];
 
 /// Base de datos local. Cada operación pública se confirma en una transacción,
