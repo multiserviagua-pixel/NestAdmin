@@ -352,6 +352,11 @@ Etapa E2: capa de aplicación de venta (`crates/app/src/sales.rs`).
 - **D218 Verificación de la cadena por columnas.** Además de la huella y los eslabones, cada fila debe coincidir con su `record_json` en tipo, emisor, número, fecha, tipo de factura, total, cuota, hora de generación y `previous_hash` (que también debe ser la huella de la fila precedente). Una discrepancia es `Broken`.
 - **D219 Pruebas de las correcciones.** `crates/core/tests/verifactu_fixes.rs` (incluye la migración desde la versión 11 con facturas emitidas) y `crates/app/tests/sales_clock.rs`, aparte de las anteriores (D197).
 
+### Correcciones tras el recorrido en `tauri dev`
+
+- **D220 NIF normalizado al guardar.** El NIF de la empresa y de los clientes se guarda sin espacios ni guiones y en mayúsculas, igual que lo normaliza la validación y lo lleva el registro Verifactu. Así la factura muestra el mismo NIF que su registro; antes una empresa escrita «b12345674» salía así en la factura y como «B12345674» en el registro. Reescribir el mismo NIF con otra grafía no cuenta como cambio de NIF (D213). Prueba propia en `crates/core/tests/sales_tax_id_case.rs` (D197).
+- **D221 Líneas en la ventana de venta.** La cantidad admite signo negativo, porque una rectificativa por diferencias lo necesita; en los demás documentos lo rechaza el núcleo con su propio mensaje. Una línea sin empezar (sin descripción, precio ni descuento) se ignora al guardar, para que la línea vacía con que abre un documento nuevo no impida añadir un producto del catálogo. El motivo de un productor no válido se muestra como frase. Pruebas en `ui/tests/ventas-text.test.mjs`. Recorrido en `tauri dev` (2026-11-10), con carpeta de datos aislada y productor sintético: empresa, clientes con y sin NIF, producto, F1, cobro parcial, F2 sin destinatario, anulación, rectificativa R4 por diferencias, presupuesto aceptado convertido en factura y vista de registros con la cadena íntegra.
+
 ## Versiones de desarrollo fijadas
 
 | Componente | Versión | Licencia | Dónde se fija |

@@ -69,6 +69,14 @@ export interface SetupNotice {
 export const SETUP_RELOAD = "Volver a leer";
 
 /** Avisos de la cabecera de Ventas. Vacío si todo está en orden. */
+/** Un motivo del backend como frase: mayúscula inicial y punto final. */
+export function asSentence(text: string): string {
+  const t = text.trim();
+  if (!t) return t;
+  const first = t.charAt(0).toUpperCase() + t.slice(1);
+  return /[.!?…»)]$/.test(first) ? first : `${first}.`;
+}
+
 export function setupNotices(status: SetupLike | null): SetupNotice[] {
   if (!status) return [];
   const notices: SetupNotice[] = [];
@@ -76,7 +84,7 @@ export function setupNotices(status: SetupLike | null): SetupNotice[] {
     notices.push({
       tone: "warn",
       title: "Productor de Verifactu sin configurar",
-      detail: `${status.producer_problem ?? "No se encontró el archivo verifactu-productor.json en la carpeta de datos."} Los presupuestos y los albaranes funcionan; emitir o anular una factura queda bloqueado hasta que se configure. Corrija el archivo y pulse «${SETUP_RELOAD}».`,
+      detail: `${status.producer_problem ? asSentence(status.producer_problem) : "No se encontró el archivo verifactu-productor.json en la carpeta de datos."} Los presupuestos y los albaranes funcionan; emitir o anular una factura queda bloqueado hasta que se configure. Corrija el archivo y pulse «${SETUP_RELOAD}».`,
       canReload: true,
       blocksInvoices: true,
     });
@@ -481,10 +489,21 @@ export interface LineValidation {
   };
 }
 
+/**
+ * Línea que la persona no ha empezado a rellenar (sin descripción, precio ni descuento): se
+ * ignora al guardar, para que la línea vacía con que abre un documento nuevo no impida añadir
+ * un producto del catálogo (visto en tauri dev).
+ */
+export function isBlankLine(text: LineDraftText): boolean {
+  return !text.description.trim() && !text.unit_price.trim() && !text.discount_percent.trim();
+}
+
 /** Traduce los textos de una línea al formato del backend o dice qué falta. */
 export function validateLine(text: LineDraftText): LineValidation {
   if (!text.description.trim()) return { ok: false, problem: "Falta la descripción" };
-  const quantity = parseDecimalInput(text.quantity);
+  // Signo admitido: una rectificativa por diferencias necesita cantidades negativas; en los
+  // demás documentos el backend rechaza la cantidad no positiva con su propio mensaje.
+  const quantity = parseDecimalInput(text.quantity, { negative: true });
   if (quantity === null) return { ok: false, problem: "La cantidad no es un número" };
   const unit = parseDecimalInput(text.unit_price, { negative: true });
   if (unit === null) return { ok: false, problem: "El precio no es un número" };

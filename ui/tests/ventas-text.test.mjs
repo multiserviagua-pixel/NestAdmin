@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
-  allowedActions, documentTitle, formatDate, formatMoney, formatNumber, fractionToPercent, isIsoDate, issueConfirmText,
-  parseDecimalInput, percentToFraction, recurringResultText, shiftDecimal, validateLine, voidConfirmText,
+  allowedActions, asSentence, setupNotices, documentTitle, formatDate, formatMoney, formatNumber, fractionToPercent, isIsoDate, issueConfirmText,
+  isBlankLine, parseDecimalInput, percentToFraction, recurringResultText, shiftDecimal, validateLine, voidConfirmText,
 } from "../src/ventas-text.ts";
 
 test("importes en formato español sin pasar por Number", () => {
@@ -50,6 +50,26 @@ test("una línea válida se traduce al formato del backend", () => {
   const v = validateLine({ ...base, discount_percent: "10" });
   assert.equal(v.ok, true);
   assert.deepEqual(v.line, { description: "Servicio de prueba", quantity: "2", unit_price: "10.5", discount: "0.1", tax_percent: "21", exemption: null });
+});
+
+test("el motivo del productor se muestra como frase (visto en el simulado)", () => {
+  assert.equal(asSentence("el archivo conserva los marcadores PONER-AQUI"), "El archivo conserva los marcadores PONER-AQUI.");
+  assert.equal(asSentence("Ya es frase."), "Ya es frase.");
+  const [n] = setupNotices({ producer_configured: false, producer_problem: "verifactu-productor.json: tiene marcadores sin rellenar", chain: { state: "empty" }, today: "2026-11-10" });
+  assert.match(n.detail, /^Verifactu-productor\.json: tiene marcadores sin rellenar\. Los presupuestos/);
+});
+
+test("la línea sin empezar no bloquea el guardado; una a medias sí cuenta (visto en tauri dev)", () => {
+  const blank = { description: "", quantity: "1", unit_price: "", discount_percent: "", tax_percent: "21", qualification: "", exemption_text: "" };
+  assert.equal(isBlankLine(blank), true);
+  assert.equal(isBlankLine({ ...blank, unit_price: "10" }), false);
+  assert.equal(isBlankLine({ ...blank, description: "Algo" }), false);
+});
+
+test("una rectificativa por diferencias admite cantidad negativa (visto en tauri dev)", () => {
+  const v = validateLine({ ...base, quantity: "-1", unit_price: "45" });
+  assert.equal(v.ok, true);
+  assert.equal(v.line.quantity, "-1");
 });
 
 test("las líneas no válidas dicen qué falta; al 0 % exigen la causa", () => {

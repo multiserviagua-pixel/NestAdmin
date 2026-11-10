@@ -8,8 +8,8 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use super::{
-    audit, clean, dec, parse_date, plain, qualification_from, tax_rate_from, SalesResult,
-    SalesStoreError,
+    audit, clean, clean_tax_id, dec, parse_date, plain, qualification_from, tax_rate_from,
+    SalesResult, SalesStoreError,
 };
 use crate::store::{now_ms, Store};
 
@@ -265,7 +265,7 @@ impl Store {
             tx.query_row("SELECT count(*) FROM verifactu_records", [], |r| r.get(0))?;
         if has_records > 0 {
             let current = load_company(&tx)?.and_then(|c| c.tax_id);
-            if clean(&company.tax_id) != current {
+            if clean_tax_id(&company.tax_id) != clean_tax_id(&current) {
                 return Err(SalesStoreError::Conflict(
                     "el NIF de la empresa no se puede cambiar: ya hay registros Verifactu".into(),
                 ));
@@ -288,7 +288,7 @@ impl Store {
             "INSERT INTO company (id, name, tax_id, address, email, iban, logo_sha256, updated_at)              VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7)              ON CONFLICT(id) DO UPDATE SET name = excluded.name, tax_id = excluded.tax_id,              address = excluded.address, email = excluded.email, iban = excluded.iban,              logo_sha256 = excluded.logo_sha256, updated_at = excluded.updated_at",
             params![
                 clean(&company.name),
-                clean(&company.tax_id),
+                clean_tax_id(&company.tax_id),
                 clean(&company.address),
                 clean(&company.email),
                 clean(&company.iban),
@@ -330,7 +330,7 @@ impl Store {
              VALUES (?1, ?2, ?3, ?4, 0, ?5, ?5)",
             params![
                 data.name.trim(),
-                clean(&data.tax_id),
+                clean_tax_id(&data.tax_id),
                 clean(&data.address),
                 clean(&data.email),
                 now
@@ -347,7 +347,7 @@ impl Store {
             params![
                 id,
                 data.name.trim(),
-                clean(&data.tax_id),
+                clean_tax_id(&data.tax_id),
                 clean(&data.address),
                 clean(&data.email),
                 now_ms()

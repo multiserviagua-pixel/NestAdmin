@@ -139,3 +139,17 @@ pub(crate) fn clean(value: &Option<String>) -> Option<String> {
         .filter(|v| !v.is_empty())
         .map(str::to_owned)
 }
+
+/// NIF tal como se guarda y se copia en las facturas: sin espacios ni guiones y en mayúsculas,
+/// igual que lo normaliza `validate_tax_id` y lo lleva el registro Verifactu (D220). Vacío
+/// equivale a ausencia.
+pub(crate) fn clean_tax_id(value: &Option<String>) -> Option<String> {
+    clean(value)
+        .map(|v| {
+            v.chars()
+                .filter(|c| !c.is_whitespace() && *c != '-')
+                .collect::<String>()
+                .to_uppercase()
+        })
+        .filter(|v| !v.is_empty())
+}

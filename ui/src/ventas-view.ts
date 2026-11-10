@@ -69,6 +69,7 @@ import {
   salesErrorText,
   setupNotices,
   statusTone,
+  isBlankLine,
   validateLine,
   voidConfirmText,
   type LineDraftText,
@@ -328,6 +329,7 @@ export function createSalesView(ctx: Context) {
     const problems: string[] = [];
     const out: NonNullable<ReturnType<typeof validateLine>["line"]>[] = [];
     lines.forEach((line, index) => {
+      if (isBlankLine(line)) return;
       const result = validateLine(line);
       if (!result.ok) problems.push(`Línea ${index + 1}: ${result.problem}`);
       else out.push(result.line!);

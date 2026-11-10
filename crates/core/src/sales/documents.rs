@@ -18,7 +18,7 @@ use super::master::{
     company_logo_sha256, load_company, load_customer, load_product, Company, Customer,
 };
 use super::{
-    audit, clean, dec, kind_from, method_from, method_text, money, parse_date, plain,
+    audit, clean, clean_tax_id, dec, kind_from, method_from, method_text, money, parse_date, plain,
     qualification_from, rect_kind_from, rect_kind_text, status_from, tax_rate_from, SalesResult,
     SalesStoreError,
 };
@@ -533,7 +533,7 @@ fn check_draft_input(
 fn party_of_company(company: &Company) -> Party {
     Party {
         name: clean(&company.name),
-        tax_id: clean(&company.tax_id),
+        tax_id: clean_tax_id(&company.tax_id),
         address: clean(&company.address),
     }
 }
@@ -541,7 +541,7 @@ fn party_of_company(company: &Company) -> Party {
 fn party_of_customer(customer: &Customer) -> Party {
     Party {
         name: clean(&Some(customer.data.name.clone())),
-        tax_id: clean(&customer.data.tax_id),
+        tax_id: clean_tax_id(&customer.data.tax_id),
         address: clean(&customer.data.address),
     }
 }
@@ -1325,7 +1325,7 @@ impl Store {
         let mut checks = Vec::with_capacity(sources.len());
         for s in &sources {
             let tax_id = match s.customer_id {
-                Some(c) => clean(&load_customer(&tx, c)?.data.tax_id),
+                Some(c) => clean_tax_id(&load_customer(&tx, c)?.data.tax_id),
                 None => None,
             };
             checks.push(nestadmin_sales::ConversionSource {

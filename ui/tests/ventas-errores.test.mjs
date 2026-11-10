@@ -30,7 +30,7 @@ test("avisos de estado: productor sin configurar con motivo y cadena rota bloque
   assert.equal(missing.length, 1);
   assert.equal(missing[0].canReload, true);
   assert.equal(missing[0].blocksInvoices, true);
-  assert.match(missing[0].detail, /el NIF no es válido/);
+  assert.match(missing[0].detail, /^El NIF no es válido. /);
   assert.match(missing[0].detail, /Volver a leer/);
   const broken = setupNotices({ ...ok, chain: { state: "broken", at_id: 7, reason: "huella distinta" } });
   assert.equal(broken[0].tone, "error");

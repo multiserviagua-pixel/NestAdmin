@@ -32,5 +32,6 @@ Cada decisión (`D<n>`) tiene un número definitivo desde que se escribe, para q
 | D179–D192 | Chat de la aplicación: asistente y búsqueda (D179–D190; D191–D192, reserva), 2026-11-10 | Asignado |
 | D193–D212 | `claude/fase-11-conexion`: conexión de la venta a la aplicación (registros Verifactu, capa de aplicación, ventana, PDF, envío y remisión), 2026-11-10 | Reservado |
 | D213–D219 | Correcciones tras la revisión de E1–E3a de la conexión de la venta (el bloque D193–D212 se agotó), 2026-11-10 | Asignado |
+| D220–D221 | Correcciones tras el recorrido de la venta en `tauri dev`, 2026-11-10 | Asignado |
 
-Siguiente número libre: **D220**.
+Siguiente número libre: **D222**.
