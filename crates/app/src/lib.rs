@@ -2694,6 +2694,14 @@ impl App {
             return Ok(existing);
         }
         let result = source.result.clone().unwrap_or(Value::Null);
+        // Una tarea cerrada porque la persona ya respondió desde su programa de correo (D178) no
+        // admite otra respuesta redactada.
+        if result["closed"]["reason"] == "replied_outside" {
+            return Err(AppError::Invalid(
+                "Este correo ya lo respondió usted desde su programa de correo: no se puede pedir otra respuesta."
+                    .into(),
+            ));
+        }
         if result.get("redraft_of").is_some_and(|v| !v.is_null()) {
             return Err(AppError::Invalid(
                 "esta tarea ya es una respuesta redactada a mano".into(),

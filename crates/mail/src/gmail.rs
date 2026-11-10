@@ -11,7 +11,7 @@ use base64::engine::general_purpose::{URL_SAFE, URL_SAFE_NO_PAD};
 use base64::Engine;
 use nestadmin_core::mail_signals;
 use nestadmin_simulators::{
-    codes, Attachment, Message, MessagePage, NewDraft, OwnReply, ReceivedExtra,
+    codes, Attachment, Message, MessagePage, NewDraft, OwnReply, OwnReplyMeta, ReceivedExtra,
 };
 use serde_json::{json, Value};
 
@@ -443,9 +443,66 @@ fn thread_own_reply(thread: &Value, after_id: &str) -> Option<OwnReply> {
     })
 }
 
+/// Metadatos de los mensajes `SENT` del hilo (`threads.get` en `format=metadata`) con
+/// `internalDate` posterior al de `after_id`, por fecha (D178). Se ignoran borradores y papelera.
+/// Sin `after_id` en el hilo no se puede ordenar: lista vacía. No lee ningún cuerpo.
+fn thread_own_replies_meta(thread: &Value, after_id: &str) -> Vec<OwnReplyMeta> {
+    let Some(messages) = thread.get("messages").and_then(Value::as_array) else {
+        return Vec::new();
+    };
+    let Some(after) = messages
+        .iter()
+        .find(|m| m.get("id").and_then(Value::as_str) == Some(after_id))
+        .and_then(internal_millis)
+    else {
+        return Vec::new();
+    };
+    let mut found: Vec<(u64, OwnReplyMeta)> = messages
+        .iter()
+        .filter(|m| {
+            let labels = labels(m);
+            is_sent(m) && !labels.contains(&"DRAFT") && !labels.contains(&"TRASH")
+        })
+        .filter_map(|m| {
+            let millis = internal_millis(m).filter(|d| *d > after)?;
+            Some((
+                millis,
+                OwnReplyMeta {
+                    id: m.get("id").and_then(Value::as_str)?.to_owned(),
+                    date: Some(format_utc_millis(millis)),
+                    to: header(m, "To").map(header_addresses).unwrap_or_default(),
+                },
+            ))
+        })
+        .collect();
+    found.sort_by_key(|(millis, _)| *millis);
+    found.into_iter().map(|(_, meta)| meta).collect()
+}
+
 impl MailProvider for Gmail {
     fn supports_sent(&self) -> bool {
         true
+    }
+
+    /// `threads.get` con `format=metadata`, solo la cabecera `To` y sin `payload.body` (D178):
+    /// ningún cuerpo llega. Un 404 es «no hay respuesta».
+    fn own_replies_meta(&self, thread_key: &str, after_id: &str) -> MailResult<Vec<OwnReplyMeta>> {
+        let url = self.api.url(
+            &["threads", thread_key],
+            &[
+                ("format", "metadata"),
+                ("metadataHeaders", "To"),
+                (
+                    "fields",
+                    "messages(id,labelIds,internalDate,payload/headers)",
+                ),
+            ],
+        );
+        match self.api.call(Method::Get, &url, None) {
+            Ok(thread) => Ok(thread_own_replies_meta(&thread, after_id)),
+            Err(e) if e.code == codes::NOT_FOUND => Ok(Vec::new()),
+            Err(e) => Err(e),
+        }
     }
 
     /// `threads.get` con `format=full` (D168): el único caso en que se lee el cuerpo de un

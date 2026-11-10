@@ -87,6 +87,8 @@ test("botones del correo en revisión", () => {
   assert.ok(noReply.approveHint);
   const bounce = reviewEmailActions({ triage: { route: "rebote" }, needs_reply: false });
   assert.equal(bounce.redraft, true);
+  // Cerrado como respondido fuera de NestAdmin (D178): no se ofrece pedir otra respuesta.
+  assert.equal(reviewEmailActions({ needs_reply: false, closed: { reason: "replied_outside", replied_at: null } }).redraft, false);
   const attempted = reviewEmailActions({ needs_reply: true, draft: { body: "x" }, attempt: { version: 1 } });
   assert.equal(attempted.archive, false);
   assert.equal(reviewEmailActions({ needs_reply: true, draft: { body: "   " } }).editor, false);

@@ -14,8 +14,8 @@ use nestadmin_ai::CredentialStore;
 use nestadmin_core::{Connector, ConnectorError};
 use nestadmin_mail::{Gmail, Graph, Mailbox, OAuthConfig, TokenSource, Tokens};
 use nestadmin_simulators::{
-    codes, MailConnector, MailSimulator, Message, MessagePage, NewDraft, OwnReply, ReceivedExtra,
-    SendReceipt,
+    codes, MailConnector, MailSimulator, Message, MessagePage, NewDraft, OwnReply, OwnReplyMeta,
+    ReceivedExtra, SendReceipt,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -329,6 +329,13 @@ impl MailConnector for SharedSimulator {
         after_id: &str,
     ) -> Result<Option<OwnReply>, ConnectorError> {
         self.0.own_reply_in_thread(thread_key, after_id)
+    }
+    fn own_replies_meta(
+        &self,
+        thread_key: &str,
+        after_id: &str,
+    ) -> Result<Vec<OwnReplyMeta>, ConnectorError> {
+        self.0.own_replies_meta(thread_key, after_id)
     }
     fn received_extra(&self, message_id: &str) -> Result<ReceivedExtra, ConnectorError> {
         self.0.received_extra(message_id)
@@ -808,6 +815,17 @@ impl Accounts {
     ) -> Result<Option<OwnReply>, ConnectorError> {
         self.connector(account)?
             .own_reply_in_thread(thread_key, after_id)
+    }
+
+    /// Metadatos de las respuestas propias del hilo posteriores a `after_id` (D178), sin cuerpo.
+    pub(crate) fn own_replies_meta(
+        &self,
+        account: &str,
+        thread_key: &str,
+        after_id: &str,
+    ) -> Result<Vec<OwnReplyMeta>, ConnectorError> {
+        self.connector(account)?
+            .own_replies_meta(thread_key, after_id)
     }
 
     /// Cuerpo sin cita y nombre visible del remitente de un mensaje recibido con ID del conector

@@ -11,8 +11,8 @@ mod state;
 pub use admin::{AdminSimulator, Invoice, InvoiceCriteria, InvoiceMatch, InvoiceReceipt};
 pub use contracts::{AdminConnector, MailConnector, MAX_ATTACHMENT_BYTES};
 pub use mail::{
-    Attachment, Draft, MailSimulator, Message, MessagePage, NewDraft, OwnReply, ReceivedExtra,
-    SendReceipt, SentMessage,
+    Attachment, Draft, MailSimulator, Message, MessagePage, NewDraft, OwnReply, OwnReplyMeta,
+    ReceivedExtra, SendReceipt, SentMessage,
 };
 pub use nestadmin_core::ConnectorError;
 

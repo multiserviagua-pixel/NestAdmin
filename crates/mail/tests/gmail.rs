@@ -69,8 +69,10 @@ fn handler(req: &Req, w: &mut World) -> Resp {
         ("GET", ["threads", id]) => {
             // Como Gmail: sin `format=metadata` y `metadataHeaders=X-NestAdmin-Id` no hay
             // cabeceras propias que comparar, y solo se devuelven las cabeceras pedidas.
+            // D178 pide la cabecera `To` (destinatarios): lo mismo, sin cuerpo.
+            let wanted = req.query("metadataHeaders").unwrap_or_default();
             if req.query("format").as_deref() != Some("metadata")
-                || req.query("metadataHeaders").as_deref() != Some("X-NestAdmin-Id")
+                || !["X-NestAdmin-Id", "To"].contains(&wanted.as_str())
             {
                 return Resp::Json(400, json!({ "error": { "status": "INVALID_ARGUMENT" } }));
             }
@@ -80,7 +82,7 @@ fn handler(req: &Req, w: &mut World) -> Resp {
                     .and_then(Value::as_array)
                     .into_iter()
                     .flatten()
-                    .filter(|h| h["name"] == "X-NestAdmin-Id")
+                    .filter(|h| h["name"] == wanted.as_str())
                     .cloned()
                     .collect();
                 json!({
@@ -1165,4 +1167,66 @@ fn gmail_received_extra_gives_only_the_sender_name() {
         assert_eq!(r.query("format").as_deref(), Some("metadata"));
         assert_eq!(r.query("metadataHeaders").as_deref(), Some("From"));
     }
+}
+
+/// D178: todas las respuestas propias posteriores, por fecha, solo con metadatos. La petición es
+/// `format=metadata` con la cabecera `To` y `fields` sin `payload/body`: no pide ningún cuerpo.
+#[test]
+fn gmail_own_replies_meta_lists_every_later_sent_message_without_asking_for_a_body() {
+    let (mailbox, world) = mailbox();
+    world.lock().unwrap().messages = vec![
+        full_message("out-0", json!(["SENT"]), "500000", "anterior"),
+        full_message("in-1", json!(["INBOX"]), "1000000", "pregunta"),
+        full_message("in-2", json!(["INBOX"]), "1500000", "otro"),
+        full_message("dr-1", json!(["DRAFT", "SENT"]), "1600000", "borrador"),
+        full_message("tr-1", json!(["SENT", "TRASH"]), "1700000", "papelera"),
+        full_message("out-2", json!(["SENT"]), "3000000", "segunda"),
+        full_message("out-1", json!(["SENT"]), "2000000", "primera"),
+    ];
+    let metas = mailbox.own_replies_meta("t-9", "in-1").unwrap();
+    assert_eq!(
+        metas.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(),
+        ["out-1", "out-2"]
+    );
+    assert_eq!(metas[0].date.as_deref(), Some("1970-01-01T00:33:20Z"));
+    assert_eq!(
+        metas[0].to,
+        vec![
+            "ana@cliente.test".to_owned(),
+            "jefe@empresa.test".to_owned()
+        ]
+    );
+    // Una sola petición de lectura, sin cuerpo.
+    let w = world.lock().unwrap();
+    assert_eq!(w.requests.len(), 1);
+    assert_eq!(w.requests[0].method, "GET");
+    assert!(w.requests[0].url.path().ends_with("/threads/t-9"));
+    assert_eq!(w.requests[0].query("format").as_deref(), Some("metadata"));
+    assert_eq!(
+        w.requests[0].query("metadataHeaders").as_deref(),
+        Some("To")
+    );
+    let fields = w.requests[0].query("fields").unwrap();
+    assert!(
+        !fields.contains("body") && !fields.contains("snippet"),
+        "{fields}"
+    );
+    drop(w);
+
+    // Sin respuestas posteriores, recibido desconocido, hilo inexistente y claves vacías.
+    assert!(mailbox
+        .own_replies_meta("t-9", "no-esta")
+        .unwrap()
+        .is_empty());
+    assert!(mailbox.own_replies_meta("t-0", "in-1").unwrap().is_empty());
+    let before = world.lock().unwrap().requests.len();
+    assert!(mailbox.own_replies_meta("  ", "in-1").unwrap().is_empty());
+    assert!(mailbox.own_replies_meta("t-9", "").unwrap().is_empty());
+    assert_eq!(world.lock().unwrap().requests.len(), before);
+    // Un fallo del servicio es un error, no una lista vacía.
+    world.lock().unwrap().force = Some(("/threads/".into(), 500));
+    assert_eq!(
+        mailbox.own_replies_meta("t-9", "in-1").unwrap_err().code,
+        "unavailable"
+    );
 }

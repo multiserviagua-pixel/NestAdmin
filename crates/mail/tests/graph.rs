@@ -733,3 +733,42 @@ fn graph_received_extra_gives_the_unique_body_and_the_sender_name() {
     let w = world.lock().unwrap();
     assert!(w.requests.iter().all(|r| r.method == "GET"));
 }
+
+/// D178: todas las respuestas propias posteriores al recibido, por fecha, solo con metadatos. El
+/// `$select` de Enviados no pide `body` ni `uniqueBody`.
+#[test]
+fn graph_own_replies_meta_lists_every_later_reply_without_asking_for_a_body() {
+    let (mailbox, world) = mailbox();
+    world.lock().unwrap().messages.extend([
+        sent_item("s-0", "c-1", "2026-11-01T08:00:00Z", "vieja"),
+        sent_item("s-2", "c-1", "2026-11-04T10:00:00Z", "segunda"),
+        sent_item("s-1", "c-1", "2026-11-03T10:00:00Z", "primera"),
+        sent_item("s-x", "c-9", "2026-11-03T09:00:00Z", "ajena"),
+    ]);
+    let metas = mailbox.own_replies_meta("c-1", "m-1").unwrap();
+    assert_eq!(
+        metas.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(),
+        ["s-1", "s-2"]
+    );
+    assert_eq!(metas[0].date.as_deref(), Some("2026-11-03T10:00:00Z"));
+    assert_eq!(metas[0].to, vec!["ana@cliente.test".to_owned()]);
+    {
+        let w = world.lock().unwrap();
+        let select = w
+            .requests
+            .iter()
+            .find(|r| r.url.path().ends_with("/sentitems/messages"))
+            .and_then(|r| r.query("$select"))
+            .unwrap();
+        assert!(!select.to_lowercase().contains("body"), "{select}");
+        assert!(select.contains("toRecipients") && select.contains("sentDateTime"));
+    }
+    assert!(mailbox.own_replies_meta("c-7", "m-1").unwrap().is_empty());
+    assert!(mailbox
+        .own_replies_meta("c-1", "no-existe")
+        .unwrap()
+        .is_empty());
+    let before = world.lock().unwrap().requests.len();
+    assert!(mailbox.own_replies_meta(" ", "m-1").unwrap().is_empty());
+    assert_eq!(world.lock().unwrap().requests.len(), before);
+}

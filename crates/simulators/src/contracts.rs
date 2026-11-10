@@ -6,7 +6,7 @@
 use nestadmin_core::{Connector, ConnectorError};
 
 use crate::admin::{Invoice, InvoiceCriteria, InvoiceMatch, InvoiceReceipt};
-use crate::mail::{MessagePage, NewDraft, OwnReply, ReceivedExtra, SendReceipt};
+use crate::mail::{MessagePage, NewDraft, OwnReply, OwnReplyMeta, ReceivedExtra, SendReceipt};
 
 /// Tamaño máximo de un adjunto que se descarga (igual que el de un documento importado).
 pub const MAX_ATTACHMENT_BYTES: u64 = 50_000_000;
@@ -59,6 +59,18 @@ pub trait MailConnector: Connector {
         _after_id: &str,
     ) -> Result<Option<OwnReply>, ConnectorError> {
         Ok(None)
+    }
+
+    /// Metadatos (id, fecha y destinatarios) de **todas** las respuestas propias (Enviados) del
+    /// hilo `thread_key` posteriores al mensaje recibido `after_id` (sin prefijo de cuenta), por
+    /// fecha (D178). **Nunca el cuerpo**: la petición al proveedor no lo pide. Solo lectura.
+    /// Por defecto, sin Enviados (lista vacía; consulte [`supports_sent`](Self::supports_sent)).
+    fn own_replies_meta(
+        &self,
+        _thread_key: &str,
+        _after_id: &str,
+    ) -> Result<Vec<OwnReplyMeta>, ConnectorError> {
+        Ok(Vec::new())
     }
 
     /// Datos extra de un mensaje recibido que solo hacen falta para aprender (D168, D169): la

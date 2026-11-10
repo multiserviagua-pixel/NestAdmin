@@ -9,9 +9,16 @@
 //!   que no se apruebe una segunda respuesta.
 //!
 //! No llama a la IA: la categoría y `needs_reply` son los que el triaje o la clasificación ya
-//! dejaron en la tarea. El cuerpo que devuelve el conector se descarta en memoria en cuanto se
-//! comprueba el destinatario: no se guarda, no se registra, no entra en ningún `Debug` ni en la
-//! auditoría y no sale hacia ninguna IA. El resumen lleva solo recuentos y códigos.
+//! dejaron en la tarea. Solo se piden **metadatos** a Enviados (`own_replies_meta`: id, fecha y
+//! destinatarios; D162): ningún cuerpo llega al equipo por esta vía, así que nada de eso se guarda,
+//! se registra ni sale hacia ninguna IA. El resumen lleva solo recuentos y códigos.
+//!
+//! # Respuestas de NestAdmin
+//!
+//! Si en el hilo hay un envío de NestAdmin (`pending`, `failed` sin resolver o `confirmed`)
+//! posterior al recibido, la tarea no se consulta, no se cierra y no da evidencia: lo que se vería
+//! en Enviados puede ser esa respuesta, a otro correo del hilo. Se decide en local, al planificar
+//! y otra vez justo antes de consultar.
 //!
 //! # Por pasos
 //!
@@ -24,8 +31,15 @@
 //! # Fallos
 //!
 //! Un error de red, de credenciales o del conector detiene la pasada de ese buzón sin escribir
-//! nada más y deja su código en el resumen (`last_error`); se reintenta en la siguiente pasada. Con
-//! el ajuste desactivado, sin credenciales o con la cuenta desconectada no se hace ninguna consulta.
+//! nada más y deja su código en el resumen (`last_error`); se reintenta en la siguiente pasada. Un
+//! error propio de una tarea (`not_found`, `invalid_input`) la salta y la pasada sigue: la tarea se
+//! anota como comprobada antes de consultar. Con el ajuste desactivado, sin credenciales o con la
+//! cuenta desconectada no se hace ninguna consulta.
+//!
+//! # Por cuenta
+//!
+//! Las pasadas y los recuentos se guardan por identificador de cuenta. Si al dar un paso la cuenta
+//! ya no existe o su fuente cambió, la pasada se descarta.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::{Duration, Instant};
@@ -49,8 +63,10 @@ use crate::{App, AppResult, EMAIL};
 pub const CONTINUOUS_WINDOW_DAYS: i64 = 14;
 /// Tareas que se comprueban como mucho en una pasada.
 pub const CONTINUOUS_MAX_PER_PASS: usize = 25;
-/// Separación mínima entre dos pasadas de un mismo buzón.
+/// Separación habitual entre dos pasadas de un mismo buzón.
 pub const CONTINUOUS_EVERY: Duration = Duration::from_secs(15 * 60);
+/// Separación mínima aunque «Consultar correo» adelante la pasada.
+pub const CONTINUOUS_MIN_GAP: Duration = Duration::from_secs(2 * 60);
 
 const SETTING_KEY: &str = "continuous_learning";
 const REPLIED_OUTSIDE: &str = "replied_outside";
@@ -106,6 +122,8 @@ pub enum ContinuousStep {
 
 #[derive(Default)]
 struct Stats {
+    /// Fuente con la que se contó: si la cuenta cambia de fuente, los recuentos empiezan de cero.
+    source: String,
     last_pass_at: Option<i64>,
     checked: u64,
     observed: u64,
@@ -140,14 +158,14 @@ struct Candidate {
 
 /// Una pasada en curso. Sin `Debug` por la misma razón.
 struct Pass {
-    account: String,
+    /// Fuente de la cuenta al planificar: si cambia, la pasada se descarta.
+    source: String,
     queue: VecDeque<Candidate>,
-    changed: bool,
 }
 
 #[derive(Default)]
 pub(crate) struct ContinuousRuntime {
-    /// Pasadas en curso por buzón (clave de la fuente).
+    /// Pasadas en curso por identificador de cuenta.
     passes: HashMap<String, Pass>,
     /// Cuándo empezó la última pasada de cada cuenta (la puerta de 15 minutos).
     last_started: HashMap<String, Instant>,
@@ -156,7 +174,21 @@ pub(crate) struct ContinuousRuntime {
     /// Orden de la última comprobación de cada tarea: la que lleva más sin comprobarse va antes.
     checked_order: HashMap<i64, u64>,
     counter: u64,
+    /// Recuentos por identificador de cuenta.
     stats: HashMap<String, Stats>,
+}
+
+impl ContinuousRuntime {
+    fn stats_mut(&mut self, account: &str, source: &str) -> &mut Stats {
+        let stats = self.stats.entry(account.to_owned()).or_default();
+        if stats.source != source {
+            *stats = Stats {
+                source: source.to_owned(),
+                ..Stats::default()
+            };
+        }
+        stats
+    }
 }
 
 // ---- Fechas ----
@@ -205,6 +237,10 @@ fn evidence_of(result: &Value, message: &Message, source: &str) -> Option<Learne
     if result["needs_reply"].as_bool() != Some(true) {
         return None;
     }
+    // Un borrador editado dice que el borrador no servía (como un rechazo, D172).
+    if result["edited"] == json!(true) {
+        return None;
+    }
     let category = result["category"].as_str()?.trim();
     if !CATEGORIES.contains(&category) || REVIEW_ONLY_CATEGORIES.contains(&category) {
         return None;
@@ -216,8 +252,8 @@ fn evidence_of(result: &Value, message: &Message, source: &str) -> Option<Learne
     if decide(&signals, None, None).route != Route::Ia {
         return None;
     }
-    // Una sola dirección.
-    if from.matches('@').count() != 1 {
+    // Una sola dirección (analizadas, no contando arrobas).
+    if !is_single_address(from) {
         return None;
     }
     let (address, _) = sender_parts(from)?;
@@ -228,6 +264,35 @@ fn evidence_of(result: &Value, message: &Message, source: &str) -> Option<Learne
         subject_key: format!("{category}|{address}"),
         source_key: format!("learned|{source}|{}", message.id),
     })
+}
+
+/// Si el remitente es una sola dirección: se separa por comas y punto y coma fuera de comillas y
+/// de ángulos y exactamente un trozo lleva una dirección legible. `"ana@x.test <ana@x.test>"` es
+/// una; `Ana <a@x.test>, Luis <l@x.test>` son dos.
+fn is_single_address(from: &str) -> bool {
+    let mut parts: Vec<String> = vec![String::new()];
+    let (mut quoted, mut angle) = (false, false);
+    for c in from.chars() {
+        match c {
+            '"' => quoted = !quoted,
+            '<' if !quoted => angle = true,
+            '>' if !quoted => angle = false,
+            ',' | ';' if !quoted && !angle => {
+                parts.push(String::new());
+                continue;
+            }
+            _ => {}
+        }
+        if let Some(last) = parts.last_mut() {
+            last.push(c);
+        }
+    }
+    let addresses = parts
+        .iter()
+        .filter(|p| p.contains('@'))
+        .map(|p| sender_parts(p).map(|(a, _)| a))
+        .collect::<Vec<_>>();
+    matches!(addresses.as_slice(), [Some(_)])
 }
 
 fn is_closed_outside(result: &Value) -> bool {
@@ -278,9 +343,13 @@ impl App {
             .accounts
             .into_iter()
             .map(|a| {
+                // Los recuentos son de la fuente actual de la cuenta.
+                let source = self.account_read_source(&a.id);
                 let stats = self
-                    .account_read_source(&a.id)
-                    .and_then(|source| self.continuous.stats.get(&source));
+                    .continuous
+                    .stats
+                    .get(&a.id)
+                    .filter(|s| Some(&s.source) == source.as_ref());
                 ContinuousMailbox {
                     account: a.id,
                     label: a.label,
@@ -304,46 +373,64 @@ impl App {
         })
     }
 
-    /// Una consulta de correo correcta adelanta la siguiente pasada de la cuenta (D178).
+    /// Una consulta de correo correcta adelanta la siguiente pasada de la cuenta (D178), con al
+    /// menos [`CONTINUOUS_MIN_GAP`] desde la anterior.
     pub(crate) fn continuous_advance(&mut self, account: &str) {
         self.continuous.advanced.insert(account.to_owned());
     }
 
+    /// Descarta las pasadas cuya cuenta ya no existe o cambió de fuente.
+    fn drop_orphan_passes(&mut self) {
+        let orphans: Vec<String> = self
+            .continuous
+            .passes
+            .iter()
+            .filter(|(account, pass)| {
+                self.account_read_source(account).as_deref() != Some(pass.source.as_str())
+            })
+            .map(|(account, _)| account.clone())
+            .collect();
+        for account in orphans {
+            self.continuous.passes.remove(&account);
+        }
+    }
+
     /// Un paso del aprendizaje continuo para el hilo en reposo: con la puerta de 15 minutos por
-    /// buzón, empieza una pasada o avanza la que haya un solo paso (una consulta a Enviados). No
-    /// llama nunca a la IA. Sin la cola en pausa y con el ajuste activado.
+    /// buzón (2 como mínimo si «Consultar correo» la adelanta), empieza una pasada o avanza la que
+    /// haya un solo paso (una consulta a Enviados). No llama nunca a la IA. Sin la cola en pausa y
+    /// con el ajuste activado.
     pub fn continuous_learning_tick(&mut self) -> AppResult<ContinuousStep> {
+        self.continuous_learning_tick_at(Instant::now())
+    }
+
+    /// Como [`App::continuous_learning_tick`] con el instante de «ahora» dado (para probar la
+    /// puerta de tiempo sin esperar).
+    pub fn continuous_learning_tick_at(&mut self, now: Instant) -> AppResult<ContinuousStep> {
         if self.paused || !self.continuous_enabled_now() {
             return Ok(ContinuousStep::Idle);
         }
-        // Una pasada en curso avanza antes de empezar otra.
-        let running: Option<String> = self
-            .continuous
-            .passes
-            .values()
-            .next()
-            .map(|p| p.account.clone());
-        if let Some(account) = running {
+        // Una pasada en curso avanza antes de empezar otra; una huérfana se descarta.
+        self.drop_orphan_passes();
+        if let Some(account) = self.continuous.passes.keys().next().cloned() {
             return self.step_continuous_pass(&account);
         }
-        let now = Instant::now();
         let due: Option<String> = self
             .mail_accounts()
             .accounts
             .into_iter()
             .map(|a| a.id)
-            .find(|id| {
-                self.continuous.advanced.contains(id)
-                    || self
-                        .continuous
-                        .last_started
-                        .get(id)
-                        .is_none_or(|t| now.duration_since(*t) >= CONTINUOUS_EVERY)
+            .find(|id| match self.continuous.last_started.get(id) {
+                None => true,
+                Some(t) => {
+                    let since = now.duration_since(*t);
+                    since >= CONTINUOUS_EVERY
+                        || (self.continuous.advanced.contains(id) && since >= CONTINUOUS_MIN_GAP)
+                }
             });
         let Some(account) = due else {
             return Ok(ContinuousStep::Idle);
         };
-        if self.begin_continuous_pass(&account)? == 0 {
+        if self.begin_continuous_pass_at(&account, now)? == 0 {
             return Ok(ContinuousStep::Idle);
         }
         Ok(ContinuousStep::Progress)
@@ -372,6 +459,10 @@ impl App {
     /// desconectada o con un conector sin Enviados devuelve 0 sin consultar nada y deja el motivo
     /// en el resumen.
     pub fn begin_continuous_pass(&mut self, account: &str) -> AppResult<usize> {
+        self.begin_continuous_pass_at(account, Instant::now())
+    }
+
+    fn begin_continuous_pass_at(&mut self, account: &str, now: Instant) -> AppResult<usize> {
         self.continuous.advanced.remove(account);
         if !self.continuous_enabled_now() {
             return Ok(0);
@@ -379,10 +470,8 @@ impl App {
         let Some(source) = self.account_read_source(account) else {
             return Ok(0);
         };
-        self.continuous
-            .last_started
-            .insert(account.to_owned(), Instant::now());
-        self.continuous.passes.remove(&source);
+        self.continuous.last_started.insert(account.to_owned(), now);
+        self.continuous.passes.remove(account);
         let status = self
             .mail_accounts()
             .accounts
@@ -397,39 +486,34 @@ impl App {
             None => return Ok(0),
         };
         if let Some(code) = refusal {
-            self.finish_pass(&source, Some(code.to_owned()));
+            self.finish_pass(account, &source, Some(code.to_owned()));
             return Ok(0);
         }
         match self.mail.supports_sent(account) {
             Ok(true) => {}
             Ok(false) => {
-                self.finish_pass(&source, Some("no_sent_folder".to_owned()));
+                self.finish_pass(account, &source, Some("no_sent_folder".to_owned()));
                 return Ok(0);
             }
             Err(e) => {
-                self.finish_pass(&source, Some(e.code));
+                self.finish_pass(account, &source, Some(e.code));
                 return Ok(0);
             }
         }
         let queue = self.plan_continuous(account, &source)?;
         if queue.is_empty() {
-            self.finish_pass(&source, None);
+            self.finish_pass(account, &source, None);
             return Ok(0);
         }
         let count = queue.len();
-        self.continuous.passes.insert(
-            source,
-            Pass {
-                account: account.to_owned(),
-                queue,
-                changed: false,
-            },
-        );
+        self.continuous
+            .passes
+            .insert(account.to_owned(), Pass { source, queue });
         Ok(count)
     }
 
-    fn finish_pass(&mut self, source: &str, error: Option<String>) {
-        let stats = self.continuous.stats.entry(source.to_owned()).or_default();
+    fn finish_pass(&mut self, account: &str, source: &str, error: Option<String>) {
+        let stats = self.continuous.stats_mut(account, source);
         stats.last_pass_at = Some(now_ms());
         stats.last_error = error;
     }
@@ -477,6 +561,21 @@ impl App {
             .chain(archived)
             .take(CONTINUOUS_MAX_PER_PASS)
             .collect())
+    }
+
+    /// Si NestAdmin tiene en ese hilo (misma cuenta) un envío confirmado, en curso o sin resolver
+    /// posterior al recibido (D178): la respuesta que se vería en Enviados puede ser la suya.
+    fn nestadmin_sent_after(
+        &self,
+        account: &str,
+        thread_key: &str,
+        received_ms: i64,
+    ) -> AppResult<bool> {
+        Ok(self
+            .store
+            .thread_send_times(account, thread_key)?
+            .iter()
+            .any(|at| *at > received_ms))
     }
 
     /// La tarea como candidata de esta pasada, con el id completo de su mensaje, si lo es.
@@ -530,6 +629,10 @@ impl App {
         if today - day > CONTINUOUS_WINDOW_DAYS {
             return Ok(None);
         }
+        // Un envío de NestAdmin posterior en el hilo: ni se consulta, ni se cierra, ni da evidencia.
+        if self.nestadmin_sent_after(account, thread_key, received_ms)? {
+            return Ok(None);
+        }
         let evidence = evidence_of(result, &message, source);
         match kind {
             Kind::Review => {
@@ -575,26 +678,25 @@ impl App {
     }
 
     /// Un paso de la pasada de una cuenta: una consulta a Enviados (o descartar una tarea que ya
-    /// cambió). `Idle` cuando la pasada terminó o no había ninguna.
+    /// cambió). `Idle` cuando la pasada terminó o no había ninguna. Una pasada cuya cuenta ya no
+    /// existe o cambió de fuente se descarta.
     pub fn step_continuous_pass(&mut self, account: &str) -> AppResult<ContinuousStep> {
-        let Some(source) = self.account_read_source(account) else {
+        let Some(mut pass) = self.continuous.passes.remove(account) else {
             return Ok(ContinuousStep::Idle);
         };
-        if !self.continuous_enabled_now() {
-            self.continuous.passes.remove(&source);
+        if !self.continuous_enabled_now()
+            || self.account_read_source(account).as_deref() != Some(pass.source.as_str())
+        {
             return Ok(ContinuousStep::Idle);
         }
-        let Some(mut pass) = self.continuous.passes.remove(&source) else {
-            return Ok(ContinuousStep::Idle);
-        };
+        let source = pass.source.clone();
         let Some(candidate) = pass.queue.pop_front() else {
-            self.finish_pass(&source, None);
+            self.finish_pass(account, &source, None);
             return Ok(ContinuousStep::Idle);
         };
-        match self.check_candidate(&source, &pass.account, &candidate) {
+        match self.check_candidate(account, &source, &candidate) {
             Ok(changed) => {
-                pass.changed |= changed;
-                self.continuous.passes.insert(source, pass);
+                self.continuous.passes.insert(account.to_owned(), pass);
                 Ok(if changed {
                     ContinuousStep::Changed
                 } else {
@@ -602,12 +704,13 @@ impl App {
                 })
             }
             Err(CheckFailure::Connector(code)) => {
-                // Un fallo del conector detiene la pasada de este buzón sin escribir nada más.
-                self.finish_pass(&source, Some(code));
+                // Un fallo de red, de límite o de credenciales detiene la pasada de este buzón
+                // sin escribir nada más.
+                self.finish_pass(account, &source, Some(code));
                 Ok(ContinuousStep::Idle)
             }
             Err(CheckFailure::Store(error)) => {
-                self.finish_pass(&source, Some("store_error".to_owned()));
+                self.finish_pass(account, &source, Some("store_error".to_owned()));
                 Err(error)
             }
         }
@@ -616,12 +719,12 @@ impl App {
     /// Comprueba una tarea. `Ok(true)` si cambió algo (cerró la tarea o insertó evidencia).
     fn check_candidate(
         &mut self,
-        source: &str,
         account: &str,
+        source: &str,
         candidate: &Candidate,
     ) -> Result<bool, CheckFailure> {
-        // La tarea debe seguir como estaba al planificar: otra persona o el hilo de la ventana
-        // pudieron aprobarla, archivarla, editarla o rechazarla entre un paso y el siguiente.
+        // La tarea debe seguir como estaba al planificar: la persona pudo aprobarla, archivarla,
+        // editarla o rechazarla entre un paso y el siguiente.
         let Some(task) = self
             .store
             .task_by_id(candidate.task_id)
@@ -645,41 +748,55 @@ impl App {
         {
             return Ok(false);
         }
-        let reply = self
-            .mail
-            .own_reply_in_thread(account, &candidate.thread_key, &candidate.inner_id)
-            .map_err(|e| CheckFailure::Connector(e.code))?;
+        // Y NestAdmin pudo enviar otra respuesta del hilo desde que se planificó la pasada.
+        if self
+            .nestadmin_sent_after(account, &candidate.thread_key, candidate.received_ms)
+            .map_err(CheckFailure::Store)?
+        {
+            return Ok(false);
+        }
+        // Se anota como comprobada antes de consultar: un fallo propio de esta tarea no la deja
+        // siempre la primera de la cola; rota con las demás.
         self.continuous.counter += 1;
         let order = self.continuous.counter;
         self.continuous
             .checked_order
             .insert(candidate.task_id, order);
-        let stats = self.continuous.stats.entry(source.to_owned()).or_default();
-        stats.checked += 1;
-        let Some(reply) = reply else {
+        let replies =
+            match self
+                .mail
+                .own_replies_meta(account, &candidate.thread_key, &candidate.inner_id)
+            {
+                Ok(replies) => replies,
+                // Un error propio de la tarea (el hilo o el mensaje ya no existen) la salta.
+                Err(e) if e.code == "not_found" || e.code == "invalid_input" => return Ok(false),
+                Err(e) => return Err(CheckFailure::Connector(e.code)),
+            };
+        self.continuous.stats_mut(account, source).checked += 1;
+        // La primera respuesta dirigida al remitente, aunque antes haya otra a un tercero (un
+        // reenvío interno). Solo metadatos: no hay cuerpo que descartar.
+        let Some(reply) = replies
+            .into_iter()
+            .find(|r| replies_to(&r.to, &candidate.address))
+        else {
             return Ok(false);
         };
-        // Solo cuenta una respuesta dirigida al remitente. Del conector solo se usan el destino y
-        // la fecha: el cuerpo se descarta aquí mismo.
+        self.continuous.stats_mut(account, source).observed += 1;
         let replied_at = reply.date.clone();
-        let valid = replies_to(&reply.to, &candidate.address);
-        drop(reply);
-        if !valid {
-            return Ok(false);
-        }
-        stats.observed += 1;
 
-        // ¿Pudo ser la respuesta de NestAdmin (confirmada o en curso, posterior al recibido)? Si
-        // es así ya cuenta como `approved`: se prefiere no contar a contar dos veces.
+        // Sin evidencia si una edición o un rechazo del mismo remitente y categoría se registraron
+        // después de la respuesta (la fila contaría tras ese corte, D172), o si la fecha de la
+        // respuesta no se puede leer para compararlos.
         let evidence = match &candidate.evidence {
             None => None,
-            Some(signal) => {
-                let sends = self
+            Some(signal) => match replied_at.as_deref().and_then(date_ms) {
+                None => None,
+                Some(reply_ms) => (!self
                     .store
-                    .thread_send_times(account, &candidate.thread_key)
-                    .map_err(store_failure)?;
-                (!sends.iter().any(|at| *at > candidate.received_ms)).then_some(signal)
-            }
+                    .series_break_after(&signal.subject_key, reply_ms)
+                    .map_err(store_failure)?)
+                .then_some(signal),
+            },
         };
         match candidate.kind {
             Kind::Review => {
@@ -694,7 +811,7 @@ impl App {
                     .store
                     .close_replied_outside(task.id, candidate.updated_at, &result, evidence)
                     .map_err(store_failure)?;
-                let stats = self.continuous.stats.entry(source.to_owned()).or_default();
+                let stats = self.continuous.stats_mut(account, source);
                 Ok(match closed {
                     Some((_, inserted)) => {
                         stats.closed += 1;
@@ -713,8 +830,7 @@ impl App {
                     .store
                     .insert_learned_outside(task.id, signal)
                     .map_err(store_failure)?;
-                let stats = self.continuous.stats.entry(source.to_owned()).or_default();
-                stats.learned += u64::from(inserted);
+                self.continuous.stats_mut(account, source).learned += u64::from(inserted);
                 Ok(inserted)
             }
         }
@@ -826,5 +942,295 @@ mod tests {
         assert_eq!(date_ms("1970-01-01"), Some(0));
         assert!(date_ms("1970-01-01T10:00:00Z") < date_ms("1970-01-01T12:00:00Z"));
         assert_eq!(date_ms("no es una fecha"), None);
+    }
+
+    #[test]
+    fn the_sender_must_be_one_parsed_address() {
+        for one in [
+            "ana@x.test",
+            "Ana <ana@x.test>",
+            "ana@x.test <ana@x.test>",
+            "\"ana@x.test\" <ana@x.test>",
+            "\"Pérez, Ana\" <ana@x.test>",
+        ] {
+            assert!(is_single_address(one), "{one}");
+        }
+        for many in [
+            "ana@x.test, luis@x.test",
+            "Ana <a@x.test>, Luis <l@x.test>",
+            "ana@x.test; luis@x.test",
+            "Ana Alfa",
+            "",
+        ] {
+            assert!(!is_single_address(many), "{many}");
+        }
+        let ok = message("ana@x.test <ana@x.test>", Some(&[]));
+        assert!(evidence(&result(json!(true), "cita"), &ok).is_some());
+    }
+
+    #[test]
+    fn an_edited_draft_is_never_evidence() {
+        let ok = message("ana@alfa.test", Some(&[]));
+        let mut edited = result(json!(true), "cita");
+        edited["edited"] = json!(true);
+        assert!(evidence(&edited, &ok).is_none());
+        edited["edited"] = json!(false);
+        assert!(evidence(&edited, &ok).is_some());
+    }
+
+    // ---- Pasadas por cuenta (M3, B4): cuentas inyectadas con un conector propio ----
+
+    use std::path::Path;
+    use std::sync::Arc;
+
+    use nestadmin_ai::{AiError, GenerateRequest, GenerateResult, Provider, ProviderKind};
+    use nestadmin_core::Connector;
+    use nestadmin_extract::{ExtractError, Extractor, Ocr};
+    use nestadmin_simulators::{
+        MailConnector, MailSimulator, MessagePage, NewDraft, OwnReplyMeta, SendReceipt, SentMessage,
+    };
+
+    use crate::AppPaths;
+
+    struct NeverCalled;
+
+    impl Provider for NeverCalled {
+        fn kind(&self) -> ProviderKind {
+            ProviderKind::OllamaCloud
+        }
+        fn model(&self) -> &str {
+            "modelo-sintetico"
+        }
+        fn destination(&self) -> Option<String> {
+            Some("ollama.test".into())
+        }
+        fn generate(&self, _request: &GenerateRequest) -> Result<GenerateResult, AiError> {
+            panic!("no debe llamarse a la IA");
+        }
+    }
+
+    struct NoOcr;
+
+    impl Ocr for NoOcr {
+        fn recognize(&self, _image: &Path, page: usize) -> Result<String, ExtractError> {
+            Err(ExtractError::OcrUnavailable(format!("página {page}")))
+        }
+    }
+
+    /// Un conector con Enviados que envuelve a su propio simulador.
+    struct Mailbox(MailSimulator);
+
+    impl Connector for Mailbox {
+        fn lookup(&self, key: &str) -> Result<Option<Value>, nestadmin_core::ConnectorError> {
+            self.0.lookup(key)
+        }
+        fn execute(
+            &self,
+            key: &str,
+            payload: &Value,
+        ) -> Result<Value, nestadmin_core::ConnectorError> {
+            self.0.execute(key, payload)
+        }
+    }
+
+    impl MailConnector for Mailbox {
+        fn list_messages(
+            &self,
+            cursor: Option<&str>,
+        ) -> Result<MessagePage, nestadmin_core::ConnectorError> {
+            self.0.list_messages(cursor)
+        }
+        fn create_draft(
+            &self,
+            message_id: &str,
+            draft: &NewDraft,
+            key: &str,
+        ) -> Result<String, nestadmin_core::ConnectorError> {
+            self.0.create_draft(message_id, draft, key)
+        }
+        fn send_draft(
+            &self,
+            draft_id: &str,
+            key: &str,
+        ) -> Result<SendReceipt, nestadmin_core::ConnectorError> {
+            self.0.send_draft(draft_id, key)
+        }
+        fn fetch_attachment(
+            &self,
+            m: &str,
+            a: &str,
+        ) -> Result<Vec<u8>, nestadmin_core::ConnectorError> {
+            self.0.fetch_attachment(m, a)
+        }
+        fn supports_sent(&self) -> bool {
+            true
+        }
+        fn own_replies_meta(
+            &self,
+            thread_key: &str,
+            after_id: &str,
+        ) -> Result<Vec<OwnReplyMeta>, nestadmin_core::ConnectorError> {
+            self.0.own_replies_meta(thread_key, after_id)
+        }
+    }
+
+    const FUTURE: &str = "2099-01-01T10:00:00Z";
+
+    fn received(n: usize) -> Message {
+        Message {
+            id: format!("m{n}"),
+            subject: Some(format!("Consulta {n}")),
+            from: Some("ana@cliente.test".into()),
+            to: None,
+            body: Some("Necesito la factura.".into()),
+            date: Some(FUTURE.into()),
+            attachments: Vec::new(),
+            signals: Some(Vec::new()),
+            thread_key: Some(format!("t{n}")),
+        }
+    }
+
+    /// Un buzón con los correos `1..=n`, todos ya respondidos a Ana.
+    fn answered_mailbox(n: usize) -> Mailbox {
+        let sim = MailSimulator::with_messages((1..=n).map(received).collect());
+        for i in 1..=n {
+            sim.add_sent_message(SentMessage {
+                id: format!("s{i}"),
+                thread_key: format!("t{i}"),
+                date: Some("2099-01-01T12:00:00Z".into()),
+                body: None,
+                to: vec!["ana@cliente.test".into()],
+            })
+            .unwrap();
+        }
+        Mailbox(sim)
+    }
+
+    /// Una tarea en revisión del correo `n` de la cuenta `account`.
+    fn review_task(app: &mut App, account: &str, n: usize) -> i64 {
+        let mut message = received(n);
+        message.id = format!("{account}:m{n}");
+        let input = json!({ "message_id": message.id, "account": account });
+        let result = json!({
+            "type": EMAIL, "version": 1, "message": message,
+            "needs_reply": true, "category": "solicitud_factura",
+            "draft": { "to": ["ana@cliente.test"], "subject": "Re", "body": "Hola." },
+        });
+        app.store
+            .enqueue_review(EMAIL, &input.to_string(), &result, "borrador")
+            .unwrap()
+            .id
+    }
+
+    fn two_accounts() -> (tempfile::TempDir, App) {
+        let dir = tempfile::tempdir().unwrap();
+        let extractor = Extractor::new(dir.path().join("sin-pdfium"), Box::new(NoOcr));
+        let mut app = App::open(
+            &AppPaths::new(dir.path()),
+            Arc::new(NeverCalled),
+            Arc::new(extractor),
+        )
+        .unwrap();
+        // Las dos cuentas comparten la misma fuente (la misma dirección y proveedor).
+        app.mail
+            .insert_test_connector("a1", Box::new(answered_mailbox(3)));
+        app.mail
+            .insert_test_connector("a2", Box::new(answered_mailbox(3)));
+        assert_eq!(app.account_read_source("a1"), app.account_read_source("a2"));
+        (dir, app)
+    }
+
+    fn stats_of<'a>(overview: &'a ContinuousOverview, account: &str) -> &'a ContinuousMailbox {
+        overview
+            .mailboxes
+            .iter()
+            .find(|m| m.account == account)
+            .unwrap()
+    }
+
+    #[test]
+    fn two_accounts_with_the_same_source_keep_their_own_pass_and_counts() {
+        let (_dir, mut app) = two_accounts();
+        let t1 = review_task(&mut app, "a1", 1);
+        let t2 = review_task(&mut app, "a2", 1);
+        let t3 = review_task(&mut app, "a2", 2);
+
+        assert_eq!(app.begin_continuous_pass("a1").unwrap(), 1);
+        assert_eq!(app.begin_continuous_pass("a2").unwrap(), 2);
+        assert_eq!(app.continuous.passes.len(), 2, "no se pisan");
+        for account in ["a1", "a2", "a1", "a2", "a2", "a1", "a2"] {
+            app.step_continuous_pass(account).unwrap();
+        }
+        for id in [t1, t2, t3] {
+            let task = app.store.task_by_id(id).unwrap().unwrap();
+            assert!(is_closed_outside(task.result.as_ref().unwrap()), "{id}");
+        }
+        let overview = app.continuous_learning_overview().unwrap();
+        let (a1, a2) = (stats_of(&overview, "a1"), stats_of(&overview, "a2"));
+        assert_eq!((a1.checked, a1.observed, a1.closed), (1, 1, 1));
+        assert_eq!((a2.checked, a2.observed, a2.closed), (2, 2, 2));
+        // Cada cuenta tiene sus filas `learned`: el mismo id de mensaje en dos cuentas son dos
+        // correos distintos (el id lleva la cuenta).
+        let a1_row = app
+            .store
+            .learned_source_exists(&format!(
+                "learned|{}|a1:m1",
+                app.account_read_source("a1").unwrap()
+            ))
+            .unwrap();
+        assert!(a1_row);
+    }
+
+    #[test]
+    fn an_orphan_pass_is_dropped_and_another_mailbox_carries_on() {
+        let (_dir, mut app) = two_accounts();
+        review_task(&mut app, "a1", 1);
+        let t2 = review_task(&mut app, "a2", 1);
+        app.begin_continuous_pass("a1").unwrap();
+        app.begin_continuous_pass("a2").unwrap();
+
+        // Se quita la cuenta a1 entre dos pasos: su pasada se descarta, la de a2 sigue.
+        app.mail.remove("a1").unwrap();
+        let now = Instant::now();
+        let mut steps = 0;
+        while app.continuous_learning_tick_at(now).unwrap() != ContinuousStep::Idle {
+            steps += 1;
+            assert!(steps < 20, "el aprendizaje no se queda parado");
+        }
+        assert!(app.continuous.passes.is_empty());
+        let closed = app.store.task_by_id(t2).unwrap().unwrap();
+        assert!(is_closed_outside(closed.result.as_ref().unwrap()));
+        // Dar un paso a la cuenta que ya no existe no hace nada.
+        assert_eq!(
+            app.step_continuous_pass("a1").unwrap(),
+            ContinuousStep::Idle
+        );
+
+        // Cambiar la fuente de una cuenta entre dos pasos descarta su pasada y no la deja colgada.
+        let t3 = review_task(&mut app, "a2", 2);
+        assert_eq!(app.begin_continuous_pass("a2").unwrap(), 1);
+        app.continuous.passes.get_mut("a2").unwrap().source =
+            "account:simulator:otro@x.test".into();
+        assert_eq!(
+            app.step_continuous_pass("a2").unwrap(),
+            ContinuousStep::Idle
+        );
+        assert!(app.continuous.passes.is_empty());
+        assert_eq!(
+            app.store.task_by_id(t3).unwrap().unwrap().state,
+            TaskState::AwaitingReview
+        );
+        // Y la cuenta puede volver a pasar después.
+        assert_eq!(app.begin_continuous_pass("a2").unwrap(), 1);
+        while app.step_continuous_pass("a2").unwrap() != ContinuousStep::Idle {}
+        assert!(is_closed_outside(
+            app.store
+                .task_by_id(t3)
+                .unwrap()
+                .unwrap()
+                .result
+                .as_ref()
+                .unwrap()
+        ));
     }
 }

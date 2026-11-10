@@ -48,6 +48,23 @@ impl Store {
             .is_some())
     }
 
+    /// Si hay un rechazo o una edición (señales `rejected` y `edited`, no anuladas) del mismo
+    /// `categoría|remitente` registrados después de `after_ms` (D178): una fila `learned` que se
+    /// insertara ahora contaría tras ese corte de la serie (D172).
+    pub fn series_break_after(&self, subject_key: &str, after_ms: i64) -> Result<bool> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT 1 FROM rule_signals
+                 WHERE kind IN ('rejected', 'edited') AND subject_key = ?1 AND at > ?2
+                   AND state <> 'void' LIMIT 1",
+                params![subject_key, after_ms],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some())
+    }
+
     /// Instantes (ms) de los envíos de respuesta de NestAdmin confirmados o en curso (`pending`,
     /// `failed` sin resolver, `confirmed`) de las tareas de correo del mismo hilo y de la misma
     /// cuenta (el id del mensaje empieza por `<cuenta>:`). Un envío `superseded` no ocurrió.

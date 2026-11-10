@@ -49,6 +49,18 @@ impl Message {
     }
 }
 
+/// Metadatos de una respuesta propia de Enviados (D178): solo id, fecha y destinatarios. Nunca
+/// lleva cuerpo: el aprendizaje continuo no lo necesita y los conectores no lo piden.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OwnReplyMeta {
+    pub id: String,
+    /// Fecha de envío tal como la da el proveedor; `None` si no la da.
+    pub date: Option<String>,
+    /// Destinatarios (direcciones); vacía si no constan.
+    #[serde(default)]
+    pub to: Vec<String>,
+}
+
 /// Respuesta propia hallada en Enviados (D168): lo mínimo para emparejarla con el recibido. El
 /// cuerpo va en texto plano tal como llega, con la cita incluida: recortarla es cosa de quien
 /// aprende (E2).
@@ -206,6 +218,11 @@ struct ThreadStates {
     sent_failure: Option<FailureMode>,
     /// El conector simulado dice que no lee Enviados.
     no_sent_folder: bool,
+    /// Consultas a Enviados que devolvieron el cuerpo (`own_reply_in_thread`, la de la primera
+    /// carga): el aprendizaje continuo no debe sumar ninguna.
+    body_lookups: usize,
+    /// Error propio de un hilo (por ejemplo `invalid_input`) en las consultas de metadatos.
+    sent_thread_errors: HashMap<String, String>,
 }
 
 const DEFAULT_PAGE_SIZE: usize = 20;
@@ -280,6 +297,23 @@ impl MailSimulator {
     /// Para pruebas: el simulador se comporta como un conector sin Enviados (D168).
     pub fn set_no_sent_folder(&self, none: bool) {
         self.threads.lock().expect("mutex").no_sent_folder = none;
+    }
+
+    /// Para pruebas: toda consulta de metadatos de Enviados de ese hilo falla con ese código.
+    pub fn set_sent_thread_error(&self, thread_key: &str, code: Option<&str>) {
+        let mut threads = self.threads.lock().expect("mutex");
+        match code {
+            Some(code) => threads
+                .sent_thread_errors
+                .insert(thread_key.to_owned(), code.to_owned()),
+            None => threads.sent_thread_errors.remove(thread_key),
+        };
+    }
+
+    /// Consultas a Enviados que entregaron el cuerpo de una respuesta propia (la de la primera
+    /// carga, D168); las de metadatos (D178) no cuentan.
+    pub fn sent_body_lookups(&self) -> usize {
+        self.threads.lock().expect("mutex").body_lookups
     }
 
     /// Consultas a Enviados hasta ahora (espía: clave del hilo e id del recibido, nunca contenido).
@@ -457,6 +491,7 @@ impl MailConnector for MailSimulator {
             if let Some(mode) = threads.sent_failure {
                 return Err(error(mode.code(), "fallo simulado al consultar Enviados"));
             }
+            threads.body_lookups += 1;
         }
         self.state.read(|s| {
             let Some(after) = s
@@ -481,8 +516,53 @@ impl MailConnector for MailSimulator {
         })
     }
 
+    /// Metadatos (id, fecha, destinatarios) de las respuestas propias del hilo posteriores al
+    /// recibido `after_id`, por fecha (D178). Sin cuerpo. Cuenta como consulta a Enviados y admite
+    /// el mismo fallo forzado que `own_reply_in_thread`.
+    fn own_replies_meta(&self, thread_key: &str, after_id: &str) -> SimResult<Vec<OwnReplyMeta>> {
+        {
+            let mut threads = self.threads.lock().expect("mutex");
+            threads
+                .sent_lookups
+                .push((thread_key.to_owned(), after_id.to_owned()));
+            if let Some(mode) = threads.sent_failure {
+                return Err(error(mode.code(), "fallo simulado al consultar Enviados"));
+            }
+            if let Some(code) = threads.sent_thread_errors.get(thread_key) {
+                return Err(error(code, "fallo simulado propio de este hilo"));
+            }
+        }
+        self.state.read(|s| {
+            let Some(after) = s
+                .messages
+                .iter()
+                .find(|m| m.id == after_id)
+                .and_then(|m| m.date.as_deref())
+            else {
+                return Ok(Vec::new());
+            };
+            let mut found: Vec<(&str, &SentMessage)> = s
+                .own_replies
+                .iter()
+                .filter(|r| r.thread_key == thread_key)
+                .filter_map(|r| Some((r.date.as_deref().filter(|d| *d > after)?, r)))
+                .collect();
+            found.sort_by_key(|(date, _)| *date);
+            Ok(found
+                .into_iter()
+                .map(|(_, r)| OwnReplyMeta {
+                    id: r.id.clone(),
+                    date: r.date.clone(),
+                    to: r.to.clone(),
+                })
+                .collect())
+        })
+    }
+
     /// Envía un borrador una sola vez. La misma clave para el mismo borrador devuelve el
-    /// recibo original; otra clave para un borrador ya enviado es `conflict`.
+    /// recibo original; otra clave para un borrador ya enviado es `conflict`. Lo enviado aparece
+    /// en Enviados (con el hilo del mensaje, la fecha de envío y los destinatarios), como pasa en
+    /// Gmail y Graph.
     fn send_draft(&self, draft_id: &str, idempotency_key: &str) -> SimResult<SendReceipt> {
         check_key(idempotency_key)?;
         self.state.mutate(|s| {
@@ -514,6 +594,25 @@ impl MailConnector for MailSimulator {
                 idempotency_key: idempotency_key.to_owned(),
             };
             s.sent.push(receipt.clone());
+            let (to, body, message_id) = (
+                draft.content.to.clone(),
+                draft.content.body.clone(),
+                draft.message_id.clone(),
+            );
+            if let Some(thread_key) = s
+                .messages
+                .iter()
+                .find(|m| m.id == message_id)
+                .and_then(|m| m.thread_key.clone())
+            {
+                s.own_replies.push(SentMessage {
+                    id: format!("sent-{}", receipt.receipt_id),
+                    thread_key,
+                    date: utc_now(),
+                    body: Some(body),
+                    to,
+                });
+            }
             Ok((receipt, true))
         })
     }

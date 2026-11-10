@@ -6,7 +6,7 @@
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use nestadmin_ai::tasks::document_text;
 use nestadmin_ai::{
@@ -29,18 +29,19 @@ const REPLY_SENTINEL: &str = "RESPUESTA-SENTINELA-789 IBAN ES91 2100 0418 4502 0
 /// Clasifica según marcas del correo: `[[SIN-RESPUESTA]]` (`needs_reply = false`), `[[SIN-CLAVE]]`
 /// (sin `needs_reply`), `[[CAT-OTROS]]` y `[[CAT-RECLAMACION]]` (categorías de solo revisión).
 struct Spy {
+    kind: ProviderKind,
     calls: AtomicUsize,
 }
 
 impl Provider for Spy {
     fn kind(&self) -> ProviderKind {
-        ProviderKind::OllamaCloud
+        self.kind
     }
     fn model(&self) -> &str {
         "simulado"
     }
     fn destination(&self) -> Option<String> {
-        Some("ollama.test".into())
+        (self.kind != ProviderKind::Ollama).then(|| "ollama.test".to_owned())
     }
     fn generate(&self, request: &GenerateRequest) -> Result<GenerateResult, AiError> {
         self.calls.fetch_add(1, Ordering::SeqCst);
@@ -68,11 +69,23 @@ impl Provider for Spy {
                 json!({ "category": "solicitud_factura", "needs_reply": true })
             }
             AiTask::Draft => json!({ "draft": "Adjuntamos la factura solicitada." }),
+            AiTask::LearnReplies => {
+                let pairs: Vec<Value> = c
+                    .lines()
+                    .filter_map(|l| l.strip_prefix("id: "))
+                    .map(|id| {
+                        json!({ "pair_id": id, "category": "solicitud_factura", "needs_reply": true,
+                                "reply_kind": "confirm" })
+                    })
+                    .collect();
+                json!({ "style": { "tone": "cercano", "length": "breve", "greeting": "Hola,", "closing": "Un saludo" },
+                        "pairs": pairs })
+            }
             _ => json!({}),
         };
         Ok(GenerateResult {
             request_id: request.request_id.clone(),
-            provider: ProviderKind::OllamaCloud,
+            provider: self.kind,
             model: "simulado".into(),
             output,
             latency_ms: 1,
@@ -158,19 +171,26 @@ fn process_all(app: &mut App) {
     while app.process_next().unwrap().is_some() {}
 }
 
-/// Abre la aplicación con esos mensajes, los consulta y los procesa hasta dejarlos en revisión.
-fn env(messages: Vec<Message>) -> Env {
+/// Abre la aplicación con esos mensajes, sin consultarlos todavía.
+fn open_env(kind: ProviderKind, messages: Vec<Message>) -> Env {
     let dir = tempfile::tempdir().unwrap();
     seed_mail(dir.path(), messages);
     let spy = Arc::new(Spy {
+        kind,
         calls: AtomicUsize::new(0),
     });
     let extractor = Extractor::new(dir.path().join("sin-pdfium"), Box::new(NoOcr));
     let mut app = App::open(&AppPaths::new(dir.path()), spy.clone(), Arc::new(extractor)).unwrap();
     app.set_mail_limit(500).unwrap();
-    app.fetch_mail().unwrap();
-    process_all(&mut app);
     Env { dir, app, spy }
+}
+
+/// Abre la aplicación con esos mensajes, los consulta y los procesa hasta dejarlos en revisión.
+fn env(messages: Vec<Message>) -> Env {
+    let mut e = open_env(ProviderKind::OllamaCloud, messages);
+    e.app.fetch_mail().unwrap();
+    process_all(&mut e.app);
+    e
 }
 
 impl Env {
@@ -377,7 +397,7 @@ fn without_evidence_the_review_task_is_still_closed_and_a_nestadmin_send_blocks_
             "No entregado.",
         ), // rebote
         incoming(8, &sender_of(8), "Necesito la factura."), // se rechaza
-        incoming(9, &sender_of(9), "Necesito la factura."), // envío de NestAdmin posterior
+        incoming(9, &sender_of(9), "Necesito la factura."), // envío de NestAdmin posterior: no se toca
         incoming(10, &sender_of(9), "Otra consulta más."),  // ...en el mismo hilo
         incoming(11, &sender_of(11), "Necesito la factura."), // control: envío anterior al recibido
         incoming(12, &sender_of(11), "Otra consulta más."),
@@ -407,8 +427,7 @@ fn without_evidence_the_review_task_is_still_closed_and_a_nestadmin_send_blocks_
         )
         .unwrap();
     assert!(e.task(3).result.unwrap().get("needs_reply").is_none());
-    // El envío de NestAdmin al mensaje 10 (hilo t9) es posterior al recibido 9: la respuesta que
-    // se ve en Enviados puede ser la suya y ya cuenta como `approved`.
+    // El envío de NestAdmin al mensaje 10 (hilo t9) es posterior al recibido 9 (D178).
     e.app.approve(e.task(10).id, 1).unwrap();
     // El control: el envío del hilo t11 es anterior al recibido 11 (se retrasa su marca de tiempo).
     e.app.approve(e.task(12).id, 1).unwrap();
@@ -429,9 +448,13 @@ fn without_evidence_the_review_task_is_still_closed_and_a_nestadmin_send_blocks_
 
     assert_eq!(e.pass(), ContinuousStep::Changed);
 
-    for i in [1, 2, 3, 4, 5, 6, 7, 9, 11] {
+    for i in [1, 2, 3, 4, 5, 6, 7, 11] {
         assert!(is_closed_outside(&e.task(i)), "la tarea {i} debía cerrarse");
     }
+    // Con un envío de NestAdmin posterior en el hilo (el 10, aprobado) la 9 no se consulta, no se
+    // cierra y no da evidencia, aunque haya una respuesta manual: ese envío pudo ser la respuesta.
+    assert_eq!(e.task(9).state, TaskState::AwaitingReview);
+    assert!(!e.lookups().iter().any(|(thread, _)| thread == "t9"));
     // Solo el correo limpio (1) y el del control (11) dan evidencia.
     let source = e.app.account_read_source(ACCOUNT).unwrap();
     let keys: Vec<String> = e.learned().into_iter().map(|(_, k)| k).collect();
@@ -733,6 +756,9 @@ fn a_pass_never_calls_the_ai_and_the_reply_text_is_stored_nowhere() {
         calls,
         "ninguna llamada de IA en la pasada"
     );
+    // El conector espía no entregó ningún cuerpo: solo metadatos (D178, D162).
+    assert!(!e.lookups().is_empty());
+    assert_eq!(e.sim().sent_body_lookups(), 0);
 
     // El texto de la respuesta no está en ninguna tabla, en el Historial ni en el resumen.
     let needle = "SENTINELA-789";
@@ -823,30 +849,41 @@ fn a_task_changed_between_planning_and_the_step_is_not_closed_and_nothing_is_dup
 }
 
 #[test]
-fn the_idle_loop_step_waits_fifteen_minutes_and_a_successful_fetch_brings_the_next_pass_forward() {
+fn the_idle_loop_step_waits_fifteen_minutes_and_a_fetch_brings_the_next_pass_forward_but_not_under_two(
+) {
     let mut e = env(vec![incoming(1, &sender_of(1), "Necesito la factura.")]);
-    let run = |app: &mut App| {
+    let base = Instant::now();
+    let minutes = |m: u64| base + Duration::from_secs(m * 60);
+    let run = |app: &mut App, at: Instant| {
         let mut steps = 0;
-        while app.continuous_learning_tick().unwrap() != ContinuousStep::Idle {
+        while app.continuous_learning_tick_at(at).unwrap() != ContinuousStep::Idle {
             steps += 1;
             assert!(steps < 50);
         }
         steps
     };
-    assert!(run(&mut e.app) > 0, "la primera vez toca ya");
+    assert!(run(&mut e.app, minutes(0)) > 0, "la primera vez toca ya");
     assert_eq!(e.lookups().len(), 1);
     // Sin respuesta la tarea sigue esperando, pero la puerta de tiempo impide otra pasada.
-    assert_eq!(run(&mut e.app), 0);
-    assert_eq!(e.lookups().len(), 1);
-    // Una consulta de correo correcta la adelanta.
+    assert_eq!(run(&mut e.app, minutes(1)), 0);
+    // Una consulta de correo correcta la adelanta, pero no antes de 2 minutos desde la anterior.
     e.app.fetch_mail().unwrap();
-    assert!(run(&mut e.app) > 0);
+    assert_eq!(run(&mut e.app, minutes(1)), 0, "menos de 2 minutos");
+    assert_eq!(e.lookups().len(), 1);
+    assert!(
+        run(&mut e.app, minutes(3)) > 0,
+        "adelantada, pasados 2 minutos"
+    );
     assert_eq!(e.lookups().len(), 2);
+    // Sin adelanto, solo a los 15 minutos de la última.
+    assert_eq!(run(&mut e.app, minutes(17)), 0);
+    assert!(run(&mut e.app, minutes(19)) > 0);
+    assert_eq!(e.lookups().len(), 3);
     // Desactivado: ni la puerta ni el adelanto consultan.
     e.app.set_continuous_learning(false).unwrap();
     e.app.fetch_mail().unwrap();
-    assert_eq!(run(&mut e.app), 0);
-    assert_eq!(e.lookups().len(), 2);
+    assert_eq!(run(&mut e.app, minutes(60)), 0);
+    assert_eq!(e.lookups().len(), 3);
 }
 
 // ---- T34d (parte de fondo) ----
@@ -941,4 +978,281 @@ fn the_batch_also_gives_rodaje_to_a_rule_born_from_observed_replies() {
     let origin = rodaje_of(&e, &outcome.rules[0].rule_id);
     assert_eq!(origin["batch"], json!(true));
     assert_eq!(origin["rodaje"], json!({ "left": 3, "of": 3 }));
+}
+
+// ---- Revisión de arquitectura (A1, M1, M2, B1, B2, B3, fuente única) ----
+
+#[test]
+fn nestadmins_reply_to_another_mail_of_the_thread_does_not_close_an_unanswered_task() {
+    // M9 y M10 del mismo remitente y del mismo hilo, los dos en revisión. La persona aprueba el 10
+    // en NestAdmin y se envía. Nadie sembró ninguna respuesta manual.
+    let mut m10 = incoming(10, &sender_of(9), "Otra consulta más.");
+    m10.thread_key = Some("t9".into());
+    m10.date = Some(at(1, 9));
+    let mut e = env(vec![
+        incoming(9, &sender_of(9), "Necesito la factura."),
+        m10,
+    ]);
+    e.app.approve(e.task(10).id, 1).unwrap();
+    assert_eq!(e.sends(), 1);
+    assert_eq!(e.task(9).state, TaskState::AwaitingReview);
+
+    assert_ne!(e.pass(), ContinuousStep::Changed);
+
+    assert_eq!(
+        e.task(9).state,
+        TaskState::AwaitingReview,
+        "sigue pidiendo respuesta"
+    );
+    assert!(closed_reason(&e.task(9)).is_none());
+    assert!(e.learned().is_empty());
+    assert!(e.lookups().is_empty(), "ni se consultó Enviados para ella");
+    // La segunda pasada tampoco consulta nada.
+    e.pass();
+    assert!(e.lookups().is_empty());
+
+    // El simulador es realista: lo que envía NestAdmin consta en Enviados del hilo, dirigido al
+    // remitente (se comprueba al final porque preguntar cuenta como consulta).
+    use nestadmin_simulators::MailConnector;
+    let sent = e.sim().own_replies_meta("t9", "m9").unwrap();
+    assert_eq!(sent.len(), 1);
+    assert_eq!(sent[0].to, vec![sender_of(9)]);
+}
+
+#[test]
+fn an_archived_mail_with_a_nestadmin_send_after_it_in_the_thread_is_not_queried_either() {
+    let mut second = incoming(2, &sender_of(1), "Otra consulta más.");
+    second.thread_key = Some("t1".into());
+    second.date = Some(at(1, 9));
+    let mut e = env(vec![
+        incoming(1, &sender_of(1), "Necesito la factura."),
+        second,
+    ]);
+    e.app.archive(e.task(1).id).unwrap();
+    e.app.approve(e.task(2).id, 1).unwrap();
+    e.pass();
+    assert!(e.lookups().is_empty());
+    assert!(e.learned().is_empty());
+}
+
+#[test]
+fn the_first_reply_to_the_sender_counts_even_after_an_internal_forward() {
+    let mut e = env(vec![incoming(1, &sender_of(1), "Necesito la factura.")]);
+    // Primero un reenvío interno a un tercero y después la respuesta al remitente.
+    e.sim()
+        .add_sent_message(SentMessage {
+            id: "s1-fwd".into(),
+            thread_key: "t1".into(),
+            date: Some(at(2, 11)),
+            body: Some("Reenvío interno.".into()),
+            to: vec!["jefe@empresa.test".into()],
+        })
+        .unwrap();
+    e.sim()
+        .add_sent_message(SentMessage {
+            id: "s1-ans".into(),
+            thread_key: "t1".into(),
+            date: Some(at(2, 13)),
+            body: Some("Respuesta.".into()),
+            to: vec![sender_of(1)],
+        })
+        .unwrap();
+    assert_eq!(e.pass(), ContinuousStep::Changed);
+    let task = e.task(1);
+    assert!(is_closed_outside(&task));
+    assert_eq!(
+        task.result.unwrap()["closed"]["replied_at"],
+        json!(at(2, 13)),
+        "la fecha es la de la respuesta al remitente"
+    );
+    assert_eq!(e.learned().len(), 1);
+}
+
+#[test]
+fn a_task_that_always_fails_with_its_own_error_does_not_block_the_others() {
+    for code in ["invalid_input", "not_found"] {
+        let mut e = env(vec![
+            incoming(1, &sender_of(1), "Necesito la factura."),
+            incoming(2, &sender_of(2), "Necesito la factura."),
+            incoming(3, &sender_of(3), "Necesito la factura."),
+            incoming(4, &sender_of(4), "Necesito la factura."),
+        ]);
+        e.sim().set_sent_thread_error("t1", Some(code));
+        e.reply(2);
+        e.reply(3);
+
+        // La primera de la cola falla siempre; las demás se comprueban en la misma pasada.
+        assert_eq!(e.pass(), ContinuousStep::Changed, "{code}");
+        assert!(
+            is_closed_outside(&e.task(2)) && is_closed_outside(&e.task(3)),
+            "{code}"
+        );
+        assert_eq!(e.task(1).state, TaskState::AwaitingReview);
+        let overview = e.app.continuous_learning_overview().unwrap();
+        assert!(
+            overview.mailboxes[0].last_error.is_none(),
+            "{code}: no es un error del buzón"
+        );
+        assert_eq!(
+            overview.mailboxes[0].checked, 3,
+            "{code}: la 2, la 3 y la 4"
+        );
+
+        // La pasada siguiente también sigue: una respuesta nueva a la 4 se recoge.
+        e.reply(4);
+        assert_eq!(e.pass(), ContinuousStep::Changed, "{code}");
+        assert!(is_closed_outside(&e.task(4)), "{code}");
+        assert!(e.lookups().iter().filter(|(t, _)| t == "t1").count() >= 2);
+    }
+}
+
+#[test]
+fn a_rejection_or_an_edit_after_the_reply_cuts_the_evidence_but_one_before_does_not() {
+    // A: otro correo del mismo remitente se rechaza después. B: se edita su borrador después.
+    // C: se edita, pero la señal es anterior a la respuesta. D: control limpio.
+    let mut e = env(vec![
+        incoming(1, &sender_of(1), "Necesito la factura."),
+        incoming(2, &sender_of(1), "Necesito otra factura."),
+        incoming(3, &sender_of(3), "Necesito la factura."),
+        incoming(4, &sender_of(3), "Necesito otra factura."),
+        incoming(5, &sender_of(5), "Necesito la factura."),
+        incoming(6, &sender_of(5), "Necesito otra factura."),
+        incoming(7, &sender_of(7), "Necesito la factura."),
+    ]);
+    for i in [1, 3, 5, 7] {
+        e.reply(i);
+    }
+    e.app.reject(e.task(2).id).unwrap();
+    e.app.edit_draft(e.task(4).id, "Texto distinto.").unwrap();
+    e.app.edit_draft(e.task(6).id, "Texto distinto.").unwrap();
+    // La señal de C se registró antes de la respuesta: se retrasa su marca de tiempo.
+    e.sql()
+        .execute(
+            "UPDATE rule_signals SET at = at - 30 * 86400000 WHERE kind = 'edited' AND task_id = ?1",
+            [e.task(6).id],
+        )
+        .unwrap();
+
+    assert_eq!(e.pass(), ContinuousStep::Changed);
+
+    for i in [1, 3, 5, 7] {
+        assert!(
+            is_closed_outside(&e.task(i)),
+            "la tarea {i} se cierra igualmente"
+        );
+    }
+    let source = e.app.account_read_source(ACCOUNT).unwrap();
+    let keys: Vec<String> = e.learned().into_iter().map(|(_, k)| k).collect();
+    assert_eq!(
+        keys,
+        vec![
+            format!("learned|{source}|simulador:m5"),
+            format!("learned|{source}|simulador:m7")
+        ],
+        "A y B quedan sin fila; C y D la dan"
+    );
+}
+
+#[test]
+fn an_edited_draft_in_the_task_itself_gives_no_evidence() {
+    let mut e = env(vec![incoming(1, &sender_of(1), "Necesito la factura.")]);
+    e.app.edit_draft(e.task(1).id, "Texto distinto.").unwrap();
+    // Aunque la señal no existiera, el propio borrador editado basta.
+    e.sql().execute("DELETE FROM rule_signals", []).unwrap();
+    e.reply(1);
+    e.pass();
+    assert!(is_closed_outside(&e.task(1)));
+    assert!(e.learned().is_empty());
+}
+
+#[test]
+fn a_sender_written_as_its_own_address_in_angle_brackets_is_one_address() {
+    let mut e = env(vec![
+        incoming(1, "ana@x.test <ana@x.test>", "Necesito la factura."),
+        incoming(2, "Ana <a@x.test>, Luis <l@x.test>", "Necesito la factura."),
+    ]);
+    e.reply_to(1, &["ana@x.test"], "Hola.");
+    e.reply_to(2, &["l@x.test"], "Hola.");
+    e.pass();
+    let source = e.app.account_read_source(ACCOUNT).unwrap();
+    assert_eq!(
+        e.learned(),
+        vec![(
+            "solicitud_factura|ana@x.test".to_owned(),
+            format!("learned|{source}|simulador:m1")
+        )]
+    );
+}
+
+#[test]
+fn redraft_is_refused_on_a_task_closed_as_replied_outside() {
+    let mut e = env(vec![
+        incoming(1, &sender_of(1), "Consulta. [[SIN-RESPUESTA]]"),
+        incoming(2, &sender_of(2), "Consulta. [[SIN-RESPUESTA]]"),
+    ]);
+    e.reply(1);
+    e.pass();
+    let closed = e.task(1);
+    assert!(is_closed_outside(&closed));
+    let error = e.app.redraft(closed.id).unwrap_err().to_string();
+    assert!(error.contains("ya lo respondió usted"), "{error}");
+    // El control: archivada a mano, sin respuesta fuera, sigue pudiendo redactar.
+    e.app.archive(e.task(2).id).unwrap();
+    assert!(e.app.redraft(e.task(2).id).is_ok());
+}
+
+#[test]
+fn the_first_load_and_the_continuous_learning_write_the_same_source_in_the_signal_key() {
+    // La primera carga (local, para no necesitar consentimiento) aprende del correo 1, que ya
+    // tiene su respuesta; el 2 se responde después y lo recoge el aprendizaje continuo.
+    let mut old = incoming(1, &sender_of(1), "Necesito la factura.");
+    old.date = Some(at(30, 10));
+    let mut e = open_env(
+        ProviderKind::Ollama,
+        vec![old, incoming(2, &sender_of(2), "Necesito la factura.")],
+    );
+    e.sim()
+        .add_sent_message(SentMessage {
+            id: "s1".into(),
+            thread_key: "t1".into(),
+            date: Some(at(30, 12)),
+            body: Some("Hola, aquí la factura.".into()),
+            to: vec![sender_of(1)],
+        })
+        .unwrap();
+    e.app
+        .set_refine_mode(nestadmin_app::refine::RefineMode::OnDemand);
+    let info = e.app.provider();
+    let expect = nestadmin_app::initial_read::ReadExpectation {
+        provider: info.provider.to_string(),
+        model: info.model,
+        host: String::new(),
+        volume: 25,
+    };
+    e.app
+        .start_initial_read(ACCOUNT, Some(25), Some(&expect))
+        .unwrap();
+    process_all(&mut e.app);
+    e.app.run_learning_ticks().unwrap();
+    let first_load = e.learned();
+    assert_eq!(
+        first_load.len(),
+        1,
+        "la primera carga dejó su fila: {first_load:?}"
+    );
+
+    // El correo 2 entra con una consulta normal y espera revisión; se responde fuera después.
+    e.app.fetch_mail().unwrap();
+    process_all(&mut e.app);
+    e.reply(2);
+    e.pass();
+    let all = e.learned();
+    assert_eq!(all.len(), 2, "{all:?}");
+    let source = e.app.account_read_source(ACCOUNT).unwrap();
+    let prefix = format!("learned|{source}|");
+    for (_, key) in &all {
+        assert!(key.starts_with(&prefix), "{key} no empieza por {prefix}");
+    }
+    assert_eq!(all[0].1, format!("{prefix}simulador:m1"));
+    assert_eq!(all[1].1, format!("{prefix}simulador:m2"));
 }

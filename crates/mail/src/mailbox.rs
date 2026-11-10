@@ -7,7 +7,7 @@ use std::path::Path;
 
 use nestadmin_core::{Connector, ConnectorError};
 use nestadmin_simulators::{
-    codes, MailConnector, MessagePage, NewDraft, OwnReply, ReceivedExtra, SendReceipt,
+    codes, MailConnector, MessagePage, NewDraft, OwnReply, OwnReplyMeta, ReceivedExtra, SendReceipt,
 };
 use serde_json::Value;
 
@@ -68,6 +68,16 @@ pub trait MailProvider {
         _after_id: &str,
     ) -> MailResult<Option<OwnReply>> {
         Ok(None)
+    }
+    /// Metadatos (id, fecha y destinatarios) de todas las respuestas propias del hilo posteriores
+    /// a `after_id`, por fecha (D178). La petición **no pide ningún cuerpo**. Por defecto, lista
+    /// vacía sin llamar a nadie.
+    fn own_replies_meta(
+        &self,
+        _thread_key: &str,
+        _after_id: &str,
+    ) -> MailResult<Vec<OwnReplyMeta>> {
+        Ok(Vec::new())
     }
     /// Cuerpo sin cita y nombre visible del remitente de un mensaje recibido (solo para
     /// aprender, D169). Por defecto, nada.
@@ -244,6 +254,18 @@ impl<P: MailProvider> MailConnector for Mailbox<P> {
             return Ok(None);
         }
         self.provider.own_reply_in_thread(thread_key, after_id)
+    }
+
+    /// Solo lectura y solo metadatos. Claves vacías no llaman al servicio.
+    fn own_replies_meta(
+        &self,
+        thread_key: &str,
+        after_id: &str,
+    ) -> Result<Vec<OwnReplyMeta>, ConnectorError> {
+        if thread_key.trim().is_empty() || after_id.trim().is_empty() {
+            return Ok(Vec::new());
+        }
+        self.provider.own_replies_meta(thread_key, after_id)
     }
 
     /// Solo lectura. Un identificador vacío no llama al servicio.

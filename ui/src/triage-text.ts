@@ -151,7 +151,8 @@ export function reviewEmailActions(result: Record<string, any> | null): ReviewEm
     approve: editor,
     approveHint: editor ? null : "No hay borrador que enviar. Puede archivar el correo, descartarlo o pedir una respuesta.",
     archive: !attempted,
-    redraft: noAnswer && !redrafted,
+    // Un correo cerrado porque ya se respondió fuera de NestAdmin (D178) no admite otra respuesta.
+    redraft: noAnswer && !redrafted && result?.closed?.reason !== "replied_outside",
   };
 }
 

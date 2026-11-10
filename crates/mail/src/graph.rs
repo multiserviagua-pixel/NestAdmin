@@ -11,7 +11,7 @@ use base64::engine::general_purpose::STANDARD;
 use base64::Engine;
 use nestadmin_core::mail_signals;
 use nestadmin_simulators::{
-    codes, Attachment, Message, MessagePage, NewDraft, OwnReply, ReceivedExtra,
+    codes, Attachment, Message, MessagePage, NewDraft, OwnReply, OwnReplyMeta, ReceivedExtra,
 };
 use serde_json::{json, Value};
 
@@ -251,6 +251,62 @@ impl MailProvider for Graph {
                 .map(|list| list.iter().filter_map(address).collect())
                 .unwrap_or_default(),
         }))
+    }
+
+    /// D178. Como `own_reply_in_thread`, pero con `$select=id,sentDateTime,toRecipients,
+    /// conversationId`: ni `body` ni `uniqueBody`. Devuelve todas las posteriores al recibido,
+    /// ordenadas por `sentDateTime`. Sin verificar contra un buzón real.
+    fn own_replies_meta(&self, thread_key: &str, after_id: &str) -> MailResult<Vec<OwnReplyMeta>> {
+        let url = self.api.url(
+            &["me", "messages", after_id],
+            &[("$select", "id,receivedDateTime")],
+        );
+        let received = match self.api.call(Method::Get, &url, None) {
+            Ok(value) => non_empty(value.get("receivedDateTime")),
+            Err(e) if e.code == codes::NOT_FOUND => return Ok(Vec::new()),
+            Err(e) => return Err(e),
+        };
+        let Some(received) = received else {
+            return Ok(Vec::new());
+        };
+        let filter = format!("conversationId eq {}", odata_quote(thread_key));
+        let url = self.api.url(
+            &["me", "mailFolders", "sentitems", "messages"],
+            &[
+                ("$filter", filter.as_str()),
+                ("$select", "id,sentDateTime,toRecipients,conversationId"),
+                ("$top", SENT_PAGE),
+            ],
+        );
+        let body = self.api.call(Method::Get, &url, None)?;
+        let list = body.get("value").and_then(Value::as_array).ok_or_else(|| {
+            error(
+                codes::UNAVAILABLE,
+                "respuesta de Graph sin lista de mensajes enviados",
+            )
+        })?;
+        let mut found: Vec<(String, OwnReplyMeta)> = list
+            .iter()
+            .filter(|m| m.get("conversationId").and_then(Value::as_str) == Some(thread_key))
+            .filter_map(|m| Some((non_empty(m.get("sentDateTime"))?, m)))
+            .filter(|(sent, _)| sent.as_str() > received.as_str())
+            .filter_map(|(sent, m)| {
+                Some((
+                    sent.clone(),
+                    OwnReplyMeta {
+                        id: m.get("id").and_then(Value::as_str)?.to_owned(),
+                        date: Some(sent),
+                        to: m
+                            .get("toRecipients")
+                            .and_then(Value::as_array)
+                            .map(|list| list.iter().filter_map(address).collect())
+                            .unwrap_or_default(),
+                    },
+                ))
+            })
+            .collect();
+        found.sort_by(|a, b| a.0.cmp(&b.0));
+        Ok(found.into_iter().map(|(_, meta)| meta).collect())
     }
 
     /// `uniqueBody` (sin el texto citado del hilo) y nombre visible del remitente del recibido.
