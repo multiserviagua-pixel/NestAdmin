@@ -137,8 +137,8 @@ fn a_learned_row_is_unique_by_its_message_even_if_the_account_source_changed() {
     // Otro mensaje, aunque su id acabe igual o empiece igual, sí cuenta.
     for other in [
         "learned|account:gmail:ana@cliente.test|a1:m11",
-        "learned|account:gmail:ana@cliente.test|1:m1",
-        "learned|account:gmail:ana@cliente.test|a2:m1",
+        "learned|account:gmail:ana@cliente.test|a1:xm1",
+        "learned|account:gmail:ana@cliente.test|a1:m2",
     ] {
         assert!(!store.learned_source_exists(other).unwrap(), "{other}");
         assert!(store
@@ -148,6 +148,58 @@ fn a_learned_row_is_unique_by_its_message_even_if_the_account_source_changed() {
             .insert_learned_outside(task.id, &signal(other))
             .unwrap());
     }
+}
+
+#[test]
+fn a_mailbox_removed_and_added_again_does_not_count_its_mail_twice() {
+    let mut store = Store::open_in_memory().unwrap();
+    let task = store
+        .enqueue_review("email", "{}", &json!({}), "borrador")
+        .unwrap();
+    let source = "learned|account:gmail:ana@cliente.test";
+    // El mismo buzón con otro id de cuenta (gmail-1 -> gmail-3): el mismo correo.
+    assert!(store
+        .insert_learned_outside(task.id, &signal(&format!("{source}|gmail-1:m1")))
+        .unwrap());
+    assert!(store
+        .learned_source_exists(&format!("{source}|gmail-3:m1"))
+        .unwrap());
+    assert!(!store
+        .insert_learned_outside(task.id, &signal(&format!("{source}|gmail-3:m1")))
+        .unwrap());
+    // Otro correo del mismo buzón, o el mismo id interno en otro buzón (otra fuente), sí cuenta.
+    assert!(store
+        .insert_learned_outside(task.id, &signal(&format!("{source}|gmail-3:m2")))
+        .unwrap());
+    assert!(store
+        .insert_learned_outside(
+            task.id,
+            &signal("learned|account:gmail:bea@cliente.test|gmail-3:m1")
+        )
+        .unwrap());
+}
+
+#[test]
+fn an_address_with_a_pipe_in_its_local_part_still_finds_the_message() {
+    let mut store = Store::open_in_memory().unwrap();
+    let task = store
+        .enqueue_review("email", "{}", &json!({}), "borrador")
+        .unwrap();
+    // Dirección sintética con `|` en la parte local, primero por dirección y luego por id.
+    let by_address = "learned|account:gmail:a|b@cliente.test|a1:m1";
+    let by_id = "learned|account:gmail:id:a1|a1:m1";
+    assert!(store
+        .insert_learned_outside(task.id, &signal(by_address))
+        .unwrap());
+    assert!(store.learned_source_exists(by_address).unwrap());
+    assert!(store.learned_source_exists(by_id).unwrap());
+    assert!(!store
+        .insert_learned_outside(task.id, &signal(by_id))
+        .unwrap());
+    // Otro mensaje con esa misma dirección no se confunde.
+    assert!(!store
+        .learned_source_exists("learned|account:gmail:a|b@cliente.test|a1:m2")
+        .unwrap());
 }
 
 #[test]

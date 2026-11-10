@@ -856,17 +856,9 @@ impl Store {
         if let Some(evidence) = evidence {
             let now = now_ms();
             for s in &evidence.signals {
-                // Única también por el mensaje: la fuente de la cuenta puede haber cambiado
-                // desde que el aprendizaje continuo contó ese correo (D178).
-                tx.execute(
-                    &crate::continuous::insert_learned_sql(),
-                    params![
-                        s.subject_key,
-                        s.source_key,
-                        now,
-                        crate::continuous::learned_message_id(&s.source_key)
-                    ],
-                )?;
+                // Única también por fuente + id interno del mensaje: la fuente o el id de la cuenta
+                // pueden haber cambiado desde que el aprendizaje continuo contó ese correo (D178).
+                crate::continuous::insert_learned(&tx, &s.subject_key, &s.source_key, now)?;
             }
             if first_result {
                 for (category, kind) in &evidence.reply_style {

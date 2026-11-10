@@ -17,57 +17,105 @@ pub const REPLIED_OUTSIDE: &str = "replied_outside";
 /// Estado de la entrada cuando una tarea ya archivada aporta evidencia.
 pub const LEARNED_OUTSIDE: &str = "learned_outside";
 
-/// Condición «ya hay una fila `learned` de ese mensaje» sobre el id del mensaje en `?4`.
-const SAME_MESSAGE: &str = "kind = 'learned' AND source_key IS NOT NULL
-           AND length(source_key) > length(?4)
-           AND substr(source_key, length(source_key) - length(?4)) = '|' || ?4";
-
-/// Inserta una fila `learned` si no hay ya una de ese mensaje. La clave es
-/// `learned|<fuente>|<id del mensaje>` y la fuente de una cuenta cambia cuando el proveedor da la
-/// dirección más tarde (de `…:id:<id>` a `…:<dirección>`); el id del mensaje, que lleva el prefijo
-/// de la cuenta, no cambia. Por eso la unicidad se comprueba también por el mensaje (`?4`,
-/// [`learned_message_id`]), además del índice único de `source_key`: un mismo correo no cuenta
-/// dos veces entre la primera carga y el aprendizaje continuo (D172, D178).
-pub(crate) fn insert_learned_sql() -> String {
-    format!(
-        "INSERT OR IGNORE INTO rule_signals
-     (kind, action_kind, subject_key, edit_state, task_id, content_version, source_key, at, state)
-     SELECT 'learned', 'send_draft', ?1, 'unknown', NULL, 0, ?2, ?3, 'valid'
-     WHERE NOT EXISTS (SELECT 1 FROM rule_signals WHERE {SAME_MESSAGE})"
-    )
+/// Partes de una clave `learned|<fuente>|<id del mensaje>`: la fuente (puede llevar `|` en la
+/// dirección) y el id, que es lo que sigue al último `|`. `None` si no tiene esa forma.
+fn parse_learned_key(source_key: &str) -> Option<(&str, &str)> {
+    let rest = source_key.strip_prefix("learned|")?;
+    let (source, id) = rest.rsplit_once('|')?;
+    (!source.is_empty() && !id.is_empty()).then_some((source, id))
 }
 
 /// Id del mensaje de una clave `learned|<fuente>|<id del mensaje>`; si la clave no tiene esa
 /// forma, la clave entera (entonces solo la deduplica el índice único).
 pub(crate) fn learned_message_id(source_key: &str) -> &str {
-    let mut parts = source_key.splitn(3, '|');
+    parse_learned_key(source_key).map_or(source_key, |(_, id)| id)
+}
+
+/// Id del mensaje sin el prefijo de la cuenta (`<cuenta>:<id interno>`): quitar y volver a añadir
+/// un buzón cambia el id de la cuenta, no el del correo.
+fn inner_message_id(id: &str) -> &str {
+    id.split_once(':').map_or(id, |(_, inner)| inner)
+}
+
+/// Proveedor de una fuente de cuenta `account:<proveedor>:<dirección>` o
+/// `account:<proveedor>:id:<id de la cuenta>`, y si va por identificador.
+fn account_source(source: &str) -> Option<(&str, bool)> {
+    let mut parts = source.splitn(3, ':');
     match (parts.next(), parts.next(), parts.next()) {
-        (Some("learned"), Some(_), Some(id)) if !id.is_empty() => id,
-        _ => source_key,
+        (Some("account"), Some(provider), Some(rest)) => Some((provider, rest.starts_with("id:"))),
+        _ => None,
     }
+}
+
+/// Si dos claves `learned` son del mismo correo (D178): misma fuente e igual id interno del
+/// mensaje (sin el prefijo de la cuenta), o, si una de las fuentes va por el identificador de la
+/// cuenta (aún sin dirección), otra fuente del mismo proveedor con el mismo id interno.
+fn same_learned_message(a: &str, b: &str) -> bool {
+    if a == b {
+        return true;
+    }
+    let (Some((source_a, id_a)), Some((source_b, id_b))) =
+        (parse_learned_key(a), parse_learned_key(b))
+    else {
+        return false;
+    };
+    if inner_message_id(id_a) != inner_message_id(id_b) {
+        return false;
+    }
+    if source_a == source_b {
+        return true;
+    }
+    match (account_source(source_a), account_source(source_b)) {
+        (Some((pa, by_id_a)), Some((pb, by_id_b))) => pa == pb && (by_id_a || by_id_b),
+        _ => false,
+    }
+}
+
+/// Si ya hay una fila `learned` de ese mismo correo (ver [`same_learned_message`]).
+fn learned_duplicate_exists(conn: &rusqlite::Connection, source_key: &str) -> Result<bool> {
+    let inner = inner_message_id(learned_message_id(source_key));
+    let mut stmt = conn.prepare(
+        "SELECT source_key FROM rule_signals
+         WHERE kind = 'learned' AND source_key IS NOT NULL
+           AND (source_key = ?1 OR (length(?2) > 0 AND substr(source_key, -length(?2)) = ?2))",
+    )?;
+    let rows = stmt.query_map(params![source_key, inner], |r| r.get::<_, String>(0))?;
+    for row in rows {
+        if same_learned_message(&row?, source_key) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// Inserta una fila `learned` si no hay ya una de ese correo. La clave es
+/// `learned|<fuente>|<id del mensaje>`; la fuente de una cuenta cambia cuando el proveedor da la
+/// dirección más tarde y el id del mensaje cambia de prefijo si el buzón se quita y se vuelve a
+/// añadir. Por eso la unicidad se comprueba también por fuente + id interno
+/// ([`same_learned_message`]), además del índice único de `source_key`: un mismo correo no cuenta
+/// dos veces entre la primera carga y el aprendizaje continuo (D172, D178). `false` si ya existía.
+pub(crate) fn insert_learned(
+    conn: &rusqlite::Connection,
+    subject_key: &str,
+    source_key: &str,
+    at: i64,
+) -> Result<bool> {
+    if learned_duplicate_exists(conn, source_key)? {
+        return Ok(false);
+    }
+    Ok(conn.execute(
+        "INSERT OR IGNORE INTO rule_signals
+         (kind, action_kind, subject_key, edit_state, task_id, content_version, source_key, at, state)
+         VALUES ('learned', 'send_draft', ?1, 'unknown', NULL, 0, ?2, ?3, 'valid')",
+        params![subject_key, source_key, at],
+    )? > 0)
 }
 
 impl Store {
     /// Si ya hay una fila `learned` con esa clave o de ese mismo mensaje con otra fuente de la
     /// cuenta (la primera carga o una pasada anterior).
     pub fn learned_source_exists(&self, source_key: &str) -> Result<bool> {
-        Ok(self
-            .conn
-            .query_row(
-                &format!(
-                    "SELECT 1 FROM rule_signals
-                     WHERE (kind = 'learned' AND source_key = ?1) OR ({SAME_MESSAGE}) LIMIT 1"
-                ),
-                params![
-                    source_key,
-                    rusqlite::types::Null,
-                    rusqlite::types::Null,
-                    learned_message_id(source_key)
-                ],
-                |_| Ok(()),
-            )
-            .optional()?
-            .is_some())
+        learned_duplicate_exists(&self.conn, source_key)
     }
 
     /// Si la tarea tiene una señal de ese tipo (`rejected`, `approved`…), sea cual sea su estado.
@@ -134,15 +182,7 @@ impl Store {
     /// contenido ligada a la tarea de la que sale, en una transacción. `false` si ya existía.
     pub fn insert_learned_outside(&mut self, task_id: i64, signal: &LearnedSignal) -> Result<bool> {
         let tx = self.conn.transaction()?;
-        let inserted = tx.execute(
-            &insert_learned_sql(),
-            params![
-                signal.subject_key,
-                signal.source_key,
-                now_ms(),
-                learned_message_id(&signal.source_key)
-            ],
-        )? > 0;
+        let inserted = insert_learned(&tx, &signal.subject_key, &signal.source_key, now_ms())?;
         if inserted {
             insert_event(&tx, task_id, (MAIL_ACTION, LEARNED_OUTSIDE, &json!({})))?;
         }
@@ -223,20 +263,31 @@ impl Store {
         )?;
         insert_event(&tx, id, (MAIL_ACTION, REPLIED_OUTSIDE, &json!({})))?;
         let inserted = match signal {
-            Some(s) => {
-                tx.execute(
-                    &insert_learned_sql(),
-                    params![
-                        s.subject_key,
-                        s.source_key,
-                        now_ms(),
-                        learned_message_id(&s.source_key)
-                    ],
-                )? > 0
-            }
+            Some(s) => insert_learned(&tx, &s.subject_key, &s.source_key, now_ms())?,
             None => false,
         };
         tx.commit()?;
         Ok(Some((task, inserted)))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_message_id_is_what_follows_the_last_pipe() {
+        assert_eq!(
+            learned_message_id("learned|account:g:a@b.test|a1:m1"),
+            "a1:m1"
+        );
+        // Una dirección sintética con `|` en la parte local no rompe la extracción.
+        assert_eq!(
+            learned_message_id("learned|account:g:a|b@c.test|a1:m1"),
+            "a1:m1"
+        );
+        // Sin el prefijo `learned|` o sin id, la clave entera.
+        assert_eq!(learned_message_id("x|y|z"), "x|y|z");
+        assert_eq!(learned_message_id("learned|y|"), "learned|y|");
     }
 }

@@ -26,7 +26,9 @@
 //! con el hilo pendiente y se ordenan como las demás. Su paso pide el hilo con `thread_of`
 //! (solo metadatos), lo guarda con una escritura que solo ocurre si la tarea no cambió
 //! ([`nestadmin_core::Store::record_recovered_thread`]) y sigue como cualquier otra. Cada
-//! consulta, de hilo o de Enviados, descuenta del tope de la pasada.
+//! consulta, de hilo o de Enviados, descuenta del tope de la pasada; una tarea sin hilo solo se
+//! anota como comprobada cuando llega a consultar Enviados (o falla por su cuenta), de modo que si
+//! el tope se gasta en su `thread_of` conserva su turno en la pasada siguiente.
 //!
 //! # Por pasos
 //!
@@ -163,9 +165,6 @@ struct Candidate {
     /// El resultado no lleva `message.thread_key` (tarea anterior a ese dato): el primer paso
     /// pide el hilo al conector con `thread_of` (D178).
     thread_pending: bool,
-    /// El hilo se recuperó con `thread_of` (en una pasada anterior o en esta): las comprobaciones
-    /// de envíos de NestAdmin también miran las tareas sin hilo guardado.
-    recovered: bool,
     address: String,
     /// Instante del recibido (ms) con el que se compara un envío de NestAdmin en el hilo.
     received_ms: i64,
@@ -596,22 +595,17 @@ impl App {
 
     /// Si NestAdmin tiene en ese hilo (misma cuenta) un envío confirmado, en curso o sin resolver
     /// posterior al recibido (D178): la respuesta que se vería en Enviados puede ser la suya.
-    /// Con `recovered` (el hilo no estaba en el resultado), falla cerrado: también cuenta un
-    /// envío de una tarea de la cuenta que sigue sin hilo guardado, que podría ser de este mismo
-    /// hilo sin que se sepa.
+    /// Falla cerrado: también cuenta un envío de cualquier tarea de la cuenta que no guarda hilo
+    /// (anterior a ese dato), que podría ser de este mismo hilo sin que se sepa; el bloqueo no
+    /// depende de que la tarea comprobada lleve un hilo recuperado o guardado.
     fn nestadmin_sent_after(
         &self,
         account: &str,
         thread_key: &str,
         received_ms: i64,
-        recovered: bool,
     ) -> AppResult<bool> {
         let in_thread = self.store.thread_send_times(account, thread_key)?;
-        let unknown = if recovered {
-            self.store.unthreaded_send_times(account)?
-        } else {
-            Vec::new()
-        };
+        let unknown = self.store.unthreaded_send_times(account)?;
         Ok(in_thread
             .iter()
             .chain(unknown.iter())
@@ -675,10 +669,7 @@ impl App {
         }
         // Un envío de NestAdmin posterior en el hilo: ni se consulta, ni se cierra, ni da evidencia.
         // Sin hilo todavía no se puede saber: se vuelve a comprobar al recuperarlo.
-        let recovered = result["message"]["thread_recovered"] == json!(true);
-        if !thread_pending
-            && self.nestadmin_sent_after(account, thread_key, received_ms, recovered)?
-        {
+        if !thread_pending && self.nestadmin_sent_after(account, thread_key, received_ms)? {
             return Ok(None);
         }
         let evidence = evidence_of(result, &message, source);
@@ -719,7 +710,6 @@ impl App {
                 message_id: message.id.clone(),
                 thread_key: thread_key.to_owned(),
                 thread_pending,
-                recovered,
                 address,
                 received_ms,
                 evidence,
@@ -773,6 +763,13 @@ impl App {
         }
     }
 
+    /// Anota la tarea como comprobada ahora: pasa al final del orden de esta sesión.
+    fn mark_checked(&mut self, task_id: i64) {
+        self.continuous.counter += 1;
+        let order = self.continuous.counter;
+        self.continuous.checked_order.insert(task_id, order);
+    }
+
     /// Comprueba una tarea. `Ok(true)` si cambió algo (cerró la tarea o insertó evidencia).
     fn check_candidate(
         &mut self,
@@ -812,26 +809,17 @@ impl App {
         // Y NestAdmin pudo enviar otra respuesta del hilo desde que se planificó la pasada.
         if !candidate.thread_pending
             && self
-                .nestadmin_sent_after(
-                    account,
-                    &candidate.thread_key,
-                    candidate.received_ms,
-                    candidate.recovered,
-                )
+                .nestadmin_sent_after(account, &candidate.thread_key, candidate.received_ms)
                 .map_err(CheckFailure::Store)?
         {
             return Ok(false);
         }
-        // Se anota como comprobada antes de consultar: un fallo propio de esta tarea no la deja
-        // siempre la primera de la cola; rota con las demás.
-        self.continuous.counter += 1;
-        let order = self.continuous.counter;
-        self.continuous
-            .checked_order
-            .insert(candidate.task_id, order);
         let mut thread_key = candidate.thread_key.clone();
         if candidate.thread_pending {
-            // Recuperar el hilo (D178): solo metadatos y una consulta del tope.
+            // Recuperar el hilo (D178): solo metadatos y una consulta del tope. Un fallo propio
+            // de la tarea o del conector la anota como comprobada antes de salir (rota con las
+            // demás); si solo queda presupuesto para esta consulta, no se anota: su turno es el
+            // de la pasada siguiente.
             *budget = budget.saturating_sub(1);
             match self.mail.thread_of(account, &candidate.inner_id) {
                 Ok(Some(found)) if !found.trim().is_empty() => {
@@ -839,19 +827,27 @@ impl App {
                 }
                 // Un mensaje que ya no existe o que no da hilo: no se vuelve a pedir en la sesión.
                 Ok(_) => {
+                    self.mark_checked(candidate.task_id);
                     self.continuous
                         .no_thread
                         .insert(candidate.message_id.clone());
                     return Ok(false);
                 }
                 Err(e) if e.code == "not_found" => {
+                    self.mark_checked(candidate.task_id);
                     self.continuous
                         .no_thread
                         .insert(candidate.message_id.clone());
                     return Ok(false);
                 }
-                Err(e) if e.code == "invalid_input" => return Ok(false),
-                Err(e) => return Err(CheckFailure::Connector(e.code)),
+                Err(e) if e.code == "invalid_input" => {
+                    self.mark_checked(candidate.task_id);
+                    return Ok(false);
+                }
+                Err(e) => {
+                    self.mark_checked(candidate.task_id);
+                    return Err(CheckFailure::Connector(e.code));
+                }
             }
             // Solo se escribe si la tarea no cambió desde que se leyó.
             match self
@@ -864,16 +860,20 @@ impl App {
             }
             // Con el hilo ya conocido, NestAdmin pudo haber respondido a otro correo de él.
             if self
-                .nestadmin_sent_after(account, &thread_key, candidate.received_ms, true)
+                .nestadmin_sent_after(account, &thread_key, candidate.received_ms)
                 .map_err(CheckFailure::Store)?
             {
                 return Ok(false);
             }
-            // Sin consultas que gastar, la comprobación sigue en la siguiente pasada.
+            // Sin consultas que gastar, la comprobación sigue en la siguiente pasada, con el
+            // turno intacto (el hilo ya queda guardado).
             if *budget == 0 {
                 return Ok(false);
             }
         }
+        // Se anota como comprobada antes de consultar Enviados: un fallo propio de esta tarea no
+        // la deja siempre la primera de la cola; rota con las demás.
+        self.mark_checked(candidate.task_id);
         *budget = budget.saturating_sub(1);
         let replies = match self
             .mail
@@ -1281,16 +1281,23 @@ mod tests {
         let (a1, a2) = (stats_of(&overview, "a1"), stats_of(&overview, "a2"));
         assert_eq!((a1.checked, a1.observed, a1.closed), (1, 1, 1));
         assert_eq!((a2.checked, a2.observed, a2.closed), (2, 2, 2));
-        // Cada cuenta tiene sus filas `learned`: el mismo id de mensaje en dos cuentas son dos
-        // correos distintos (el id lleva la cuenta).
-        let a1_row = app
+        // Las dos cuentas comparten fuente y el correo `m1` es el mismo (el buzón se quitó y se
+        // volvió a añadir con otro id de cuenta): cuenta una sola vez, la del primero que lo
+        // observó. Las pasadas y los recuentos de comprobadas y cerradas siguen siendo por cuenta.
+        let source = app.account_read_source("a1").unwrap();
+        for key in ["a1:m1", "a2:m1", "a9:m1", "a2:m2"] {
+            assert!(
+                app.store
+                    .learned_source_exists(&format!("learned|{source}|{key}"))
+                    .unwrap(),
+                "{key}"
+            );
+        }
+        assert!(!app
             .store
-            .learned_source_exists(&format!(
-                "learned|{}|a1:m1",
-                app.account_read_source("a1").unwrap()
-            ))
-            .unwrap();
-        assert!(a1_row);
+            .learned_source_exists(&format!("learned|{source}|a2:m3"))
+            .unwrap());
+        assert_eq!((a1.learned, a2.learned), (1, 1), "m1 no cuenta dos veces");
     }
 
     #[test]

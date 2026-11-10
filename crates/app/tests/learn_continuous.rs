@@ -1570,9 +1570,12 @@ fn the_cap_of_25_counts_the_recoveries() {
     );
     assert_eq!(e.task(13).state, TaskState::AwaitingReview);
     assert!((1..=12).all(|i| is_closed_outside(&e.task(i))));
-    // La siguiente empieza por las que nunca se comprobaron; la 13.ª, ya anotada, espera su turno.
+    // Gastó el tope en su `thread_of`, sin llegar a Enviados: no se anota como comprobada y
+    // empieza la pasada siguiente (con el hilo ya guardado no vuelve a pedirse).
     e.pass();
-    assert_eq!(e.lookups()[12], ("t14".to_owned(), "m14".to_owned()));
+    assert_eq!(e.lookups()[12], ("t13".to_owned(), "m13".to_owned()));
+    assert!(is_closed_outside(&e.task(13)));
+    assert_eq!(e.thread_calls().iter().filter(|m| *m == "m13").count(), 1);
     assert_eq!(e.thread_calls().len() + e.lookups().len(), 2 * 25);
 }
 
@@ -1660,4 +1663,42 @@ fn a_send_by_nestadmin_in_an_old_task_without_thread_blocks_the_others_recovered
         ["m2"],
         "la recuperada no vuelve a pedirse"
     );
+}
+
+#[test]
+fn a_send_of_an_old_task_without_thread_blocks_a_task_with_its_own_thread_never_recovered() {
+    // Ana escribe m1 (tarea antigua, sin hilo guardado) y m2 (con hilo normal), del mismo hilo.
+    // NestAdmin responde a m1 después de recibir m2: lo que se ve en Enviados es esa respuesta, no
+    // una hecha fuera a m2. m2 no se cierra, no da evidencia y ni se consulta Enviados.
+    let ana = sender_of(9);
+    let mut first = incoming(1, &ana, "Necesito la factura.");
+    first.thread_key = Some("tx".into());
+    let mut second = incoming(2, &ana, "Otra consulta más.");
+    second.thread_key = Some("tx".into());
+    second.date = Some(at(2, 11));
+    let mut e = env(vec![first, second]);
+    e.app.approve(e.task(1).id, 1).unwrap();
+    e.strip_thread(1);
+    assert!(e.sends() > 0);
+    e.sim()
+        .add_sent_message(SentMessage {
+            id: "s-tx".into(),
+            thread_key: "tx".into(),
+            date: Some(at(2, 12)),
+            body: None,
+            to: vec![ana.clone()],
+        })
+        .unwrap();
+
+    for _ in 0..2 {
+        assert_ne!(e.pass(), ContinuousStep::Changed);
+        let task = e.task(2);
+        assert_eq!(task.state, TaskState::AwaitingReview);
+        assert!(closed_reason(&task).is_none());
+        // m2 lleva su hilo desde el principio: no se recuperó nada.
+        assert_eq!(thread_of_task(&task), (Some("tx".into()), None));
+        assert!(e.lookups().is_empty(), "no se consultó Enviados");
+        assert!(e.thread_calls().is_empty());
+        assert!(e.learned().is_empty());
+    }
 }
