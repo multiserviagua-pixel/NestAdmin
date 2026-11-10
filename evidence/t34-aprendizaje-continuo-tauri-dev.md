@@ -59,4 +59,6 @@ No se envió ningún correo: 0 enviados y 0 borradores en el simulador, y 0 acci
 
 La consulta de metadatos de Enviados respondió sin error en las dos cuentas reales (Gmail `format=metadata`, Graph `$select` sin cuerpo). Ninguna de las dos tareas consultables tenía respuesta propia posterior, así que no se cerró nada ni hubo evidencia nueva. No se envió nada y no se creó ni activó ninguna regla.
 
+**Nota:** a los pocos segundos de abrir esta versión, otra sesión de trabajo volvió a abrir su propia versión de desarrollo sobre la misma carpeta de datos. Esa versión ya incluía el mismo código de D178 (`cebf498`), así que los recuentos no dependen de qué ventana los mostró.
+
 **Límite:** las demás tareas reales se descargaron antes de que NestAdmin guardara el hilo del mensaje y el aprendizaje continuo no puede consultarlas; y no había correo nuevo. Falta ver con cuentas reales un cierre por respuesta hecha fuera, que exige un correo nuevo respondido desde Gmail u Outlook.
