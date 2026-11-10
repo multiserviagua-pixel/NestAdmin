@@ -40,9 +40,35 @@ Con `npm run dev` de `ui/` y los datos sintéticos de `ui/src/mock.ts`, commit `
 | Tema oscuro | el panel se lee bien |
 | Consola | sin errores |
 
+## Recorrido en `tauri dev` (aplicación de escritorio)
+
+2026-11-10, `tauri dev --features lectura-bajo-demanda` con `NESTADMIN_DATA_DIR` en una carpeta nueva y vacía, sin copiar nada de la instalación. **Sin IA configurada** (el asistente de primer uso se cerró con «Ahora no»), así que ningún proveedor de IA podía recibir peticiones. La ventana se manejó por su puerto de depuración (WebView2), leyendo el contenido real que pinta y llamando a los comandos reales. Solo datos sintéticos: el buzón simulado (6 correos, uno con adjunto) y una factura inventada de texto.
+
+**Preparación.** Sin IA, las 8 tareas quedaron `queued` y el índice vacío. Para simular tareas anteriores al índice se marcaron como `completed`, directamente en la base de datos de pruebas, 4 correos y las 2 facturas; quedaron 2 correos en cola.
+
+| Paso | Resultado |
+|---|---|
+| Pasada de fondo, con la aplicación abierta y 2 tareas aún en cola | indexó sola las 6 tareas terminadas: 4 correos con su cuerpo y 2 facturas con el texto extraído en local; `pending_index` 0, `no_text` 0, `failed` 0 |
+| Asistente de primer uso en pantalla | no hay botón «Chat» y Ctrl+K no abre el panel |
+| Ctrl+K desde Pendientes | abre el panel con el foco en el cuadro y `aria-expanded` verdadero |
+| Escribir sin enviar | no añade turnos ni resultados |
+| «¿Dónde está la factura de la luz de octubre?» | 1 factura: la sintética, encontrada por «luz» y «octubre» en su texto, sin exigir la palabra «factura» |
+| «correo del pedido 2231» | 1 correo, encontrado por su cuerpo |
+| «rectificativa» | 1 documento |
+| «algo que no existe zzzqqq» | sin resultados; tras la corrección solo busca «zzzqqq» |
+| Cada respuesta | dice que es una búsqueda por palabras hecha en el equipo y no una respuesta de la IA |
+| Tarjeta de la factura (tarea terminada) | abre la vista Tareas con su fila localizada y con el foco; el panel sigue abierto |
+| Tarjeta del correo (tarea terminada) | abre Tareas con su fila localizada; no ofrece «Abrir el documento» |
+| «Abrir el documento» | aparece solo en la factura; no se pulsó, porque abre el archivo con un programa del sistema |
+| Esc | cierra el panel y devuelve el foco al botón «Chat» |
+
+**Corregido durante el recorrido** (commit siguiente a `9ae735c`): la tarjeta de una tarea ya terminada solo decía que no se podía abrir; ahora lleva a Tareas con la fila localizada y, en facturas, ofrece «Abrir el documento». Se amplió la lista de palabras vacías. Tras la corrección: `cargo fmt`, clippy, `cargo test` de `nestadmin-app` y `nestadmin-desktop`, `npm run build` y `npm test` (276) en verde, y el recorrido de la tabla repetido.
+
 ## Pendiente
 
-- **Recorrido en `tauri dev`** (T35d) con una carpeta de datos solo sintética: no se ha hecho. Falta ver en la aplicación real el panel, la apertura de una tarea desde una tarjeta y que ninguna petición sale al preguntar.
-- **Pasada de fondo que indexa lo anterior** (`index_pass` en `crates/desktop/src/main.rs`): sus dos fases están probadas en `crates/app`, pero el hilo que las encadena solo está compilado, no ejecutado.
+- **Sin IA utilizable, lo importado no llega al índice.** Las tareas esperan a la IA en `queued` y solo se indexan al terminar, así que el chat no encuentra un documento recién importado hasta que se procesa. D179 lo define así; cambiarlo (indexar con la extracción local mientras la tarea espera) es una decisión abierta.
+- No se probó en la aplicación con tareas en revisión ni Informativos (sin IA no se llega a esos estados); ese camino de la tarjeta está visto en la vista previa.
+- No se pulsó «Abrir el documento» ni se probó «Volver a intentar los que fallaron» en la aplicación.
+- La suite completa del espacio de trabajo no se repitió tras las dos últimas correcciones.
 - El filtro `party` no distingue mayúsculas solo en ASCII (`lower()` de SQLite); la búsqueda por texto sí ignora tildes y mayúsculas.
 - Los documentos que la primera lectura omitió por no parecer factura quedan `no_text`, porque su copia se borra.
