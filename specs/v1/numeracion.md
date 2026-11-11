@@ -29,7 +29,7 @@ Cada decisión (`D<n>`) tiene un número definitivo desde que se escribe, para q
 | D167–D176 | Aprender a responder en la primera carga (D167–D175; D176, reserva), 2026-11-09 | Asignado |
 | D177–D177 | Catálogo de categorías ampliado, 2026-11-10 | Asignado |
 | D178–D178 | Aprendizaje continuo de las respuestas hechas fuera, 2026-11-10 | Asignado |
-| D179–D192 | Chat de la aplicación: asistente y búsqueda (D179–D191; D192, reserva), 2026-11-10 | Asignado |
+| D179–D192 | Chat de la aplicación: asistente y búsqueda (D179–D192), 2026-11-10 | Asignado |
 | D193–D212 | `claude/fase-11-conexion`: conexión de la venta a la aplicación (registros Verifactu, capa de aplicación, ventana, PDF, envío y remisión), 2026-11-10 | Reservado |
 
 Siguiente número libre: **D213**.
