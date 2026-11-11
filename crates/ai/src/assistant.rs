@@ -208,7 +208,23 @@ pub fn skills_for(view: View, question: &str) -> Vec<Skill> {
     );
     add(
         Skill::Rules,
-        view == View::Rules || mentions(&q, &["regla", "automatiz"]),
+        view == View::Rules
+            || mentions(
+                &q,
+                &[
+                    "regla",
+                    "automatiz",
+                    "automatic",
+                    "sugerenc",
+                    "siempre",
+                    "a partir de ahora",
+                    "de ahora en adelante",
+                    "en adelante",
+                    "cada vez que",
+                    "no volver a proponer",
+                    "no vuelvas a proponer",
+                ],
+            ),
     );
     add(
         Skill::Summary,
@@ -1509,6 +1525,29 @@ mod tests {
         assert!(!block.contains('\u{200B}'));
         // Solo quedan los dos marcadores propios: nada del contenido forma `<<<`.
         assert_eq!(block.matches("<<<").count(), 2);
+    }
+
+    #[test]
+    fn a_standing_instruction_brings_the_rules_block_without_saying_rule() {
+        // Hallado en `tauri dev` (T37d): «A partir de ahora registra siempre…» no nombra «regla».
+        for question in [
+            "A partir de ahora registra siempre las facturas de Alfa",
+            "Registra SIEMPRE las de Alfa hasta 100 euros",
+            "De ahora en adelante envía las respuestas a Beta",
+            "¿Hay alguna sugerencia?",
+            "No vuelvas a proponer eso",
+            "Hazlo automáticamente",
+        ] {
+            let skills = skills_for(View::Review, question);
+            assert!(skills.contains(&Skill::Rules), "{question}");
+            assert!(
+                tools_for(&skills)
+                    .iter()
+                    .any(|t| t.name == "propose_create_rule"),
+                "{question}"
+            );
+        }
+        assert!(!skills_for(View::Review, "¿Cuál es la factura de Alfa?").contains(&Skill::Rules));
     }
 
     #[test]

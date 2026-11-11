@@ -56,3 +56,61 @@
 - La tarjeta de una factura muestra «Moneda: No consta» aunque el índice tiene EUR: el resumen usa la moneda del resultado, no la evidencia local.
 - Con la IA local en CPU, preparar una propuesta tardó entre 69 y 125 s.
 - La suite de inyección del asistente contra un modelo real (T37c) es la etapa E5.
+
+## E4 — Reglas, sugerencias e importación desde el asistente (T37d, D191)
+
+2026-11-11, Windows 11. Solo datos sintéticos.
+
+### Qué se ejecutó
+
+| Comprobación | Resultado |
+|---|---|
+| `cargo fmt --all -- --check` | sin cambios pendientes |
+| `cargo clippy --workspace --all-targets --locked -- -D warnings` | sin avisos |
+| `cargo test --workspace --locked` | 1402 pasan, 0 fallan, 15 ignoradas |
+| `npm test --prefix ui` | 315 pasan, 0 fallan |
+| `python scripts/check.py` | correcto |
+
+### Pruebas automáticas
+
+| Dónde | Qué comprueba |
+|---|---|
+| `crates/app/tests/assistant_rules.rs` | `list_suggestions` devuelve las de `suggest::suggest` y no escribe nada. Proponer crear, aceptar, editar o descartar no cambia reglas ni sugerencias. Confirmar crea una sola regla, inactiva, con origen `chat`; confirmar dos veces devuelve el mismo recibo; los cortes entre ejecutar y anotar (crear, aceptar, descartar, editar) se reconcilian sin duplicar y sin atribuir al chat un cambio hecho por el panel. Editar una regla activa ampliándola la deja inactiva; estrechándola, activa. Sugerencia o regla cambiada por el panel: propuesta obsoleta. Rechazos: envío sin remitente ni dominio, categoría de solo revisión, referencia no devuelta (con la lista adjunta), condición desconocida, caracteres invisibles o no ASCII en el remitente, regla aprendida, `needs_limit`. Tras cualquier confirmación ninguna regla nueva está activa y no existe herramienta que active reglas. Un correo sintético que ordena crear una regla de envío: la tarjeta muestra el remitente literal y la regla queda inactiva. Importar: cancelar deja la propuesta pendiente y cero tareas; un corte no la repite; descartar o borrar la conversación con el diálogo abierto se rechaza. |
+| `crates/app/tests/assistant.rs` | Con destino externo, el nombre de una sugerencia con una dirección de correo sale enmascarado, también en «Ver lo enviado». |
+| `crates/core/tests/schema.rs` | La migración 013 conserva las propuestas existentes y no reutiliza números. |
+| `crates/ai/src/assistant.rs`, `crates/ai/src/ollama.rs` | Una instrucción permanente («a partir de ahora… siempre») carga el bloque de reglas; solo el turno del asistente con la IA local pide más contexto. |
+
+### Revisión
+
+`arquitecto` revisó el cambio con la lista de `revisar-envio-reglas`: apto con correcciones. No encontró ningún camino para activar una regla, crearla activa, ampliar una activa dejándola activa ni conceder «cualquier remitente». Encontró y se corrigieron: identificador de regla reutilizable con recibo falso, descarte con el diálogo de importar abierto, conjunto de importaciones en curso que podía atascarse, reconciliación de una edición que podía atribuirse mal, caracteres engañosos en el remitente y una tarjeta que solo mostraba cinco condiciones. Las correcciones no han pasado una segunda revisión.
+
+### Recorrido en `tauri dev` con la IA local
+
+`tauri dev --features lectura-bajo-demanda` sobre la carpeta sintética de T35–T37, con Ollama `qwen3:8b` en CPU. Nada salió del equipo. La carpeta no tenía reglas ni sugerencias.
+
+**Fallos encontrados y corregidos.**
+
+1. «A partir de ahora registra siempre las facturas de…» no cargaba las herramientas de reglas (solo con las palabras «regla» o «automatiz»); el modelo eligió otra herramienta y la aplicación la rechazó, sin efectos. Ahora también las cargan «siempre», «a partir de ahora», «en adelante», «cada vez que», «sugerenc…» y «no volver a proponer».
+2. Al pedir editar una regla, el modelo llamó a `propose_edit_rule` con una referencia que no había pedido, y se rindió. Ahora el rechazo adjunta la lista de reglas (o de sugerencias) con sus referencias y esa llamada puede repetirse.
+3. El texto enviado a la IA local pasaba del contexto por defecto de Ollama (4096) y se recortaba en silencio. El turno del asistente pide ahora 8192 a la IA local.
+
+| Paso | Resultado |
+|---|---|
+| «¿Hay alguna sugerencia de automatización?» | `list_suggestions`; responde que no hay ninguna; 46 s |
+| «A partir de ahora registra siempre las facturas de Aguas Imaginarias de Levante S.A. de hasta 100 euros» | `propose_create_rule`; tarjeta «Propuesta: crear una regla (quedará inactiva)» con acción, proveedor, importe máximo y «Habría cubierto 1 caso anterior»; ninguna regla creada; 197 s |
+| Doble clic en «Crear regla» | una sola regla (`chat-…`), inactiva, versión 1; tras el primer clic el botón deja de estar disponible; Historial: `rule` inactiva y `assistant_proposal` confirmada, ambas con origen `chat` |
+| «Abrir en Reglas» | abre la pantalla Reglas |
+| «Cambia la regla de Aguas Imaginarias para que el importe máximo sea 80 euros» (tras la corrección) | `propose_edit_rule`; tarjeta con «Condiciones antes» y «Condiciones después» y «La regla está inactiva y seguirá así»; 144 s. El modelo acortó el nombre del proveedor y la tarjeta lo muestra, con «No habría cubierto ningún caso anterior» |
+| «No hacerlo» en esa tarjeta | «Descartada · No se hizo: usted la descartó»; la regla sigue igual (versión 1, mismas condiciones); un solo evento, `assistant_proposal` rechazada |
+| «Quiero importar una factura que tengo en el equipo» | `propose_import`; tarjeta «Propuesta: importar documentos» con «Elegir archivos…» y «No hacerlo»; ninguna tarea nueva; 113 s |
+
+### Pendiente
+
+- **El diálogo del sistema para importar no se abrió en la aplicación**: no se puede manejar por el puerto de depuración. Faltan por ver: cancelar (la tarjeta sigue pendiente), importar un archivo y el recibo con sus recuentos, y que el diálogo sea modal.
+- **Aceptar y «no volver a proponer» una sugerencia no se vieron en la aplicación**: la carpeta de pruebas no tiene sugerencias. Solo pruebas automáticas.
+- No se probó una regla de envío de correo ni la edición de una regla activa en la aplicación.
+- No se probó con un proveedor externo.
+- Las correcciones de la revisión y las tres del recorrido no han pasado una segunda revisión de `arquitecto`.
+- Calidad del modelo local: al editar acortó el nombre del proveedor, y el texto de su respuesta contradecía a la tarjeta («no se puede editar») aunque la propuesta estaba preparada.
+- Con la IA local en CPU, la primera pregunta tras abrir la aplicación agota los 180 s (carga del modelo); las siguientes tardan entre 46 y 197 s. Pedir 8192 de contexto a la IA local usa más memoria; no se ha medido.
+- No hay prueba de que `suggest` oculte las categorías de solo revisión vista desde el asistente; la cubren las pruebas de `suggest`.

@@ -6,7 +6,7 @@ use ureq::Agent;
 
 use crate::http;
 use crate::provider::{
-    parse_output, AiError, GenerateRequest, GenerateResult, Provider, ProviderKind, Usage,
+    parse_output, AiError, GenerateRequest, GenerateResult, Provider, ProviderKind, Task, Usage,
 };
 
 pub const DEFAULT_URL: &str = "http://127.0.0.1:11434";
@@ -134,7 +134,7 @@ impl Provider for OllamaProvider {
 
     fn generate(&self, request: &GenerateRequest) -> Result<GenerateResult, AiError> {
         self.ensure_local_model()?;
-        let body = chat_body(&self.model, request);
+        let body = local_chat_body(&self.model, request);
         let started = Instant::now();
         let response =
             http::post_json_local(&self.agent, &format!("{}/api/chat", self.base_url), &body)?;
@@ -148,6 +148,20 @@ impl Provider for OllamaProvider {
         )
     }
 }
+
+/// Cuerpo para la IA local: el de `chat_body` y, en un turno del asistente, el contexto.
+/// Hallado en `tauri dev` (T37d): las instrucciones del asistente con sus bloques y la
+/// conversación pasan del contexto por defecto de Ollama (4096) y se recortaban en silencio.
+pub(crate) fn local_chat_body(model: &str, request: &GenerateRequest) -> Value {
+    let mut body = chat_body(model, request);
+    if request.task == Task::Assistant {
+        body["options"]["num_ctx"] = json!(ASSISTANT_NUM_CTX);
+    }
+    body
+}
+
+/// Contexto que se pide a Ollama para un turno del asistente.
+pub(crate) const ASSISTANT_NUM_CTX: u32 = 8192;
 
 /// Cuerpo de `POST /chat` de la API nativa de Ollama; lo comparten el adaptador local y el
 /// de la nube.
@@ -196,4 +210,25 @@ pub(crate) fn chat_result(
             output_tokens: response.get("eval_count").and_then(Value::as_u64),
         },
     })
+}
+
+#[cfg(test)]
+mod context_tests {
+    use super::*;
+
+    #[test]
+    fn only_the_local_assistant_turn_asks_for_a_larger_context() {
+        let request = crate::assistant::assistant_request(
+            "prueba",
+            crate::assistant::View::Review,
+            &[],
+            "¿Qué hay pendiente?",
+            &[],
+        );
+        let local = local_chat_body("modelo", &request);
+        assert_eq!(local["options"]["num_ctx"], ASSISTANT_NUM_CTX);
+        assert_eq!(local["options"]["temperature"], 0);
+        // El cuerpo compartido con la nube no cambia.
+        assert!(chat_body("modelo", &request)["options"]["num_ctx"].is_null());
+    }
 }

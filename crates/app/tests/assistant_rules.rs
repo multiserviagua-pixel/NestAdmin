@@ -889,6 +889,15 @@ fn proposals_that_break_the_closed_rules_are_refused_with_a_closed_code_and_crea
     );
     assert_eq!(outs[0]["error"], "ref_not_returned");
     assert_eq!(outs[1]["error"], "ref_not_returned");
+    // La aplicación dice qué llamar antes (hallado en `tauri dev`, T37d).
+    assert!(outs[0]["next"]
+        .as_str()
+        .unwrap()
+        .contains("list_suggestions"));
+    assert!(outs[1]["next"].as_str().unwrap().contains("list_rules"));
+    // …y adjunta la lista, la misma lectura libre que el modelo podía pedir.
+    assert!(outs[0]["suggestions"].is_object() || outs[0]["suggestions"].is_array());
+    assert!(outs[1]["rules"].is_object() || outs[1]["rules"].is_array());
 
     // Con las reglas ya devueltas por una herramienta (en un turno de verdad, que las guarda).
     let first = turn(&mut w, None, vec![tool("list_rules", json!({}))]);

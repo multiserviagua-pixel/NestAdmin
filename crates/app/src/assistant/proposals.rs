@@ -587,6 +587,20 @@ impl App {
         };
         let built = match self.build_proposal(kind, args, &known, &targets) {
             Ok(built) => built,
+            // Hallado en `tauri dev` (T37d): el modelo local propone sobre una referencia que no
+            // pidió antes y, con solo el código, se rinde. La aplicación le dice qué llamar.
+            Err("ref_not_returned") => {
+                let next = match kind {
+                    Kind::EditRule => {
+                        "Llame primero a list_rules y repita con la referencia rule:N que devuelva."
+                    }
+                    Kind::AcceptSuggestion | Kind::DiscardSuggestion => {
+                        "Llame primero a list_suggestions y repita con la referencia sug:N que devuelva."
+                    }
+                    _ => "Llame primero a search o list_tasks y repita con la referencia que devuelva.",
+                };
+                return reply(json!({ "error": "ref_not_returned", "next": next }));
+            }
             Err(code) => return failure(code),
         };
         match self.save_proposal(kind, &built, conversation_id, &created) {

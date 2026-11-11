@@ -727,7 +727,11 @@ impl AssistantJob {
                     if !state.tools.contains(&name) {
                         state.tools.push(name.clone());
                     }
-                    made.insert(key);
+                    // Un rechazo por referencia no devuelta trae la lista con las referencias
+                    // válidas: el modelo puede repetir la misma llamada, que ahora sí vale.
+                    if out.value["error"] != "ref_not_returned" {
+                        made.insert(key);
+                    }
                     let proposed = name.starts_with("propose_")
                         && out.value["status"] == "created"
                         && out.value["proposal"].is_string();

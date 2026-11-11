@@ -429,7 +429,33 @@ impl App {
     pub fn assistant_tool(&self, call: &ToolCall) -> ToolOutput {
         // Las herramientas de nivel «propone» solo guardan una propuesta (D185); no ejecutan nada.
         if call.name.starts_with("propose_") {
-            return self.tool_propose(&call.name, &call.args);
+            let mut out = self.tool_propose(&call.name, &call.args);
+            // Hallado en `tauri dev` (T37d): el modelo local propone sobre una regla o una
+            // sugerencia sin haberlas listado. La aplicación adjunta la lista (la misma lectura
+            // libre que podía pedir) para que repita con una referencia devuelta.
+            if out.value["error"] == "ref_not_returned" {
+                let (list, field) = match call.name.as_str() {
+                    "propose_edit_rule" => ("list_rules", "rules"),
+                    "propose_accept_suggestion" | "propose_discard_suggestion" => {
+                        ("list_suggestions", "suggestions")
+                    }
+                    _ => return out,
+                };
+                let listed = self.assistant_read_tool(&ToolCall {
+                    name: list.to_owned(),
+                    args: Map::new(),
+                    external: call.external,
+                });
+                if let Ok(mut ctx) = self.assistant.turn.lock() {
+                    if ctx.active {
+                        ctx.known.extend(listed.refs.iter().cloned());
+                    }
+                }
+                out.value[field] = listed.value;
+                out.refs = listed.refs;
+                out.withheld += listed.withheld;
+            }
+            return out;
         }
         let out = self.assistant_read_tool(call);
         // Las referencias devueltas valen, en esta conversación, para proponer una acción.
