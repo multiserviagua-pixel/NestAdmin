@@ -23,6 +23,7 @@ pub mod collections;
 pub mod documents;
 pub mod error;
 pub mod master;
+pub mod sends;
 pub mod verifactu;
 
 pub use collections::{GeneratedDraft, RecurringRecord, RecurringRun};
@@ -34,6 +35,10 @@ pub use error::{SalesResult, SalesStoreError};
 pub use master::{
     Company, Customer, CustomerData, Letterhead, LetterheadMargins, ReceivedDeliveryNote,
     MAX_LETTERHEAD_BYTES,
+};
+pub use sends::{
+    is_sendable, send_input_ref, NewSalesSend, SalesSend, SendCompletion, CODE_SEND_IN_PROGRESS,
+    SEND_SALES_DOCUMENT,
 };
 pub use verifactu::{
     ChainStatus, VerifactuContext, VerifactuKind, VerifactuRecordRow, CODE_CHAIN_BROKEN,

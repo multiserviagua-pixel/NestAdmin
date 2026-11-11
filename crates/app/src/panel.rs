@@ -17,7 +17,7 @@ use crate::rules::{
 };
 use crate::{
     action_kind, check_rule, check_rule_id, check_rule_inner, App, AppError, AppResult, EMAIL,
-    INVOICE, REGISTER_INVOICE, SEND_DRAFT,
+    INVOICE, REGISTER_INVOICE, SEND_DRAFT, SEND_SALES_DOCUMENT,
 };
 
 /// Número de tareas que mira la simulación si no se indica otro.
@@ -490,6 +490,7 @@ impl App {
         check_rule_inner(action_kind, conditions, true, true)?;
         let task_kind = match action_kind {
             REGISTER_INVOICE => INVOICE,
+            SEND_SALES_DOCUMENT => SEND_SALES_DOCUMENT,
             _ => EMAIL,
         };
         let (mut rules, mut any_sender) = self.rules_for_evaluation()?;
@@ -568,6 +569,8 @@ impl App {
                 }
                 let label = if task_kind == INVOICE {
                     result["document"].as_str()
+                } else if task_kind == SEND_SALES_DOCUMENT {
+                    result["document"]["number"].as_str()
                 } else {
                     result["message"]["subject"].as_str()
                 }
@@ -1027,6 +1030,11 @@ fn replace_id(value: &mut Value, to: &str) {
 /// que la regla no llegó a hacer, y corta la serie (D132). Una ejecución por regla (tarea
 /// completada) sigue sin ser evidencia ni aprobación.
 pub(crate) fn signal_for(task: &Task, result: &Value, signal: &str) -> Option<SignalDraft> {
+    // El envío de un documento de venta no enseña qué reglas sugerir: ni su aprobación ni su
+    // rechazo dejan señal (D232, D129).
+    if task.kind == SEND_SALES_DOCUMENT {
+        return None;
+    }
     let by_rule = signal != "rejected"
         && (result["authorization"]["type"] == "rule" || result["rule_attempt"]["type"] == "rule");
     if result["part"]["of"].as_u64().is_some_and(|n| n > 1) || by_rule {

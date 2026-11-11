@@ -92,6 +92,9 @@ CREATE TABLE rules (
     // Membretes PDF de solo inserción y membrete vigente de la empresa (D222, D223); ver
     // sales/master.rs.
     include_str!("migrations/014_letterhead.sql"),
+    // Envíos de documentos de venta por correo, de solo inserción, y el disparo único de la
+    // regla por cliente al emitir (D233, D238, D239); ver sales/sends.rs.
+    include_str!("migrations/015_sales_document_sends.sql"),
 ];
 
 /// Base de datos local. Cada operación pública se confirma en una transacción,

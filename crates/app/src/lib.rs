@@ -63,6 +63,7 @@ use crate::accounts::{
 };
 use crate::rules::{
     evaluate_result_in_run, Evaluation, RuleDecision, REGISTER_INVOICE, SEND_DRAFT,
+    SEND_SALES_DOCUMENT,
 };
 
 pub const INVOICE: &str = "invoice";
@@ -977,6 +978,8 @@ impl App {
         app.store.recover()?;
         app.store.reconcile_actions(SEND_DRAFT, &app.mail)?;
         app.store.reconcile_actions(REGISTER_INVOICE, &app.admin)?;
+        // Los envíos de documentos de venta se reconcilian cada uno en su cuenta (D240).
+        app.reconcile_sales_sends()?;
         app.complete_confirmed_reviews()?;
         app.rebuild_registry()?;
         Ok(app)
@@ -1044,10 +1047,7 @@ impl App {
             .iter()
             .filter(|a| a.is_unsettled() && Some(a.version) != executing)
         {
-            let found = match kind {
-                REGISTER_INVOICE => self.admin.lookup(&action.idempotency_key),
-                _ => self.mail.lookup(&action.idempotency_key),
-            };
+            let found = self.lookup_action(task, kind, action);
             match found {
                 Ok(Some(receipt)) => {
                     self.store.reconcile_action(task.id, action, &receipt)?;
@@ -1079,6 +1079,23 @@ impl App {
         Ok(Previous::Clear)
     }
 
+    /// Pregunta al conector de la acción si ya la ejecutó. El registro de facturas tiene el suyo;
+    /// el envío de un documento de venta pregunta solo a la cuenta que lo hizo y, si esa cuenta no
+    /// responde, el resultado es `unavailable`, nunca «no enviado» (D240); el resto, a las cuentas
+    /// de correo conectadas.
+    fn lookup_action(
+        &self,
+        task: &Task,
+        kind: &str,
+        action: &ActionRecord,
+    ) -> Result<Option<Value>, ConnectorError> {
+        match kind {
+            REGISTER_INVOICE => self.admin.lookup(&action.idempotency_key),
+            SEND_SALES_DOCUMENT => self.sales_lookup(task, action),
+            _ => self.mail.lookup(&action.idempotency_key),
+        }
+    }
+
     /// Completa la tarea con el recibo de una versión ya realizada. Si no es la versión que
     /// se muestra, se recupera el contenido de ese intento y se indica cuál salió.
     fn complete_with(
@@ -1095,6 +1112,13 @@ impl App {
             {
                 result["draft"] = result["attempt"]["draft"].clone();
                 result["version"] = json!(version);
+                // El envío de un documento de venta también recupera el documento y la cuenta
+                // de ese intento (D234).
+                for key in ["document", "account"] {
+                    if !result["attempt"][key].is_null() {
+                        result[key] = result["attempt"][key].clone();
+                    }
+                }
             } else {
                 result["sent_version"] = json!(version);
             }
@@ -1104,6 +1128,13 @@ impl App {
         result["recovered"] = json!({ "version": version });
         if let Some(fields) = result.as_object_mut() {
             fields.remove("recovery");
+        }
+        // El envío de un documento de venta deja constancia en su historial y pasa el documento a
+        // «enviado» en la misma transacción que cierra la tarea (D233, D239). Todos los caminos
+        // que completan con un recibo ya confirmado (aprobar, reintentar, confirmar, reconciliar
+        // al abrir) pasan por aquí.
+        if self.store.task(task_id)?.kind == SEND_SALES_DOCUMENT {
+            return self.complete_sales_send(task_id, result, version);
         }
         self.complete_indexing(task_id, &result, doc)
     }
@@ -1763,7 +1794,10 @@ impl App {
             let mut found = None;
             for queued in self.store.ready_tasks()? {
                 let input: Value = serde_json::from_str(&queued.input_ref).unwrap_or(Value::Null);
-                if self.attempted_result(&queued)?.is_some() || split_preset(&input).is_some() {
+                if self.attempted_result(&queued)?.is_some()
+                    || split_preset(&input).is_some()
+                    || queued.kind == SEND_SALES_DOCUMENT
+                {
                     found = Some(queued.id);
                     break;
                 }
@@ -1869,6 +1903,16 @@ impl App {
                     )),
                     None => Err(task_error("not_found", "el mensaje ya no existe", false)),
                 },
+            },
+            // Un envío de documento de venta reintentado vuelve a revisión con su contenido; nunca
+            // se ejecuta solo ni usa la IA (D50, E4b).
+            SEND_SALES_DOCUMENT => match task.result.clone().filter(Value::is_object) {
+                Some(result) => Ok(Prepared::Resume(result)),
+                None => Err(task_error(
+                    "invalid_input",
+                    "el envío no conserva su contenido; descártelo y prepare otro",
+                    false,
+                )),
             },
             other => Err(task_error(
                 "invalid_input",
@@ -2587,6 +2631,11 @@ impl App {
                 current,
             });
         }
+        // El envío de un documento de venta tiene su propia aprobación: valida el contenido y no
+        // deja señales de aprendizaje (D232, D129).
+        if task.kind == SEND_SALES_DOCUMENT {
+            return self.approve_sales_send(task, result);
+        }
         // Sin borrador no hay nada que enviar: se rechaza antes de anotar señal, intento o acción.
         if task.kind == EMAIL
             && result["draft"]["body"]
@@ -2685,10 +2734,7 @@ impl App {
         }
         let mut unsent = Vec::new();
         for action in actions.iter().filter(|a| a.is_unsettled()) {
-            let found = match kind {
-                REGISTER_INVOICE => self.admin.lookup(&action.idempotency_key),
-                _ => self.mail.lookup(&action.idempotency_key),
-            };
+            let found = self.lookup_action(&task, kind, action);
             match found {
                 Ok(Some(receipt)) => {
                     self.store.reconcile_action(task.id, action, &receipt)?;
@@ -2812,6 +2858,12 @@ impl App {
     /// Descarta la tarea sin ejecutar ninguna acción.
     pub fn reject(&mut self, task_id: i64) -> AppResult<Task> {
         let before = self.store.task(task_id)?;
+        // Un envío de documento de venta con un intento sin cerrar no se descarta: pudo salir
+        // (D235). Sin intento se cancela, sin señales de aprendizaje.
+        if before.kind == SEND_SALES_DOCUMENT {
+            self.ensure_send_discardable(&before)?;
+            return Ok(self.store.cancel(task_id)?);
+        }
         // Solo cuenta como rechazo lo que estaba pendiente de revisión. Si la señal no se
         // guarda, el fallo queda en el resultado antes de cancelar.
         if before.state == TaskState::AwaitingReview {
@@ -3056,10 +3108,10 @@ pub(crate) fn task_is_triaged_or_redraft(task: &Task) -> bool {
 }
 
 fn action_kind(task: &Task) -> &'static str {
-    if task.kind == INVOICE {
-        REGISTER_INVOICE
-    } else {
-        SEND_DRAFT
+    match task.kind.as_str() {
+        INVOICE => REGISTER_INVOICE,
+        SEND_SALES_DOCUMENT => SEND_SALES_DOCUMENT,
+        _ => SEND_DRAFT,
     }
 }
 
@@ -3087,6 +3139,7 @@ pub(crate) fn check_rule_inner(
     let allowed: &[&str] = match action_kind {
         REGISTER_INVOICE => &["supplier", "max_total", "currency"],
         SEND_DRAFT => &["category", "sender", "sender_domain"],
+        SEND_SALES_DOCUMENT => rules::SALES_SEND_CONDITIONS,
         other => {
             return Err(AppError::Invalid(format!(
                 "tipo de acción desconocido: {other}"
@@ -3104,6 +3157,9 @@ pub(crate) fn check_rule_inner(
             .and_then(Value::as_str)
             .filter(|v| !v.trim().is_empty())
     };
+    if action_kind == SEND_SALES_DOCUMENT {
+        return check_sales_send_rule(map);
+    }
     if action_kind == SEND_DRAFT {
         if !nestadmin_ai::tasks::CATEGORIES.contains(&text("category").unwrap_or("")) {
             return Err(AppError::Invalid(
@@ -3136,6 +3192,59 @@ pub(crate) fn check_rule_inner(
             .map_err(|_| max_total_error()),
         Some(_) => Err(max_total_error()),
     }
+}
+
+/// Condiciones de una regla de envío de un documento de venta (D238): `customer_id`, `recipient`
+/// y `account` son obligatorias (no hay «cualquier cliente», «cualquier destinatario» ni
+/// «cualquier cuenta»); `document_kinds` es opcional y, si está, una lista no vacía de tipos.
+fn check_sales_send_rule(map: &serde_json::Map<String, Value>) -> AppResult<()> {
+    let invalid = |what: &str| AppError::Invalid(what.to_owned());
+    if map
+        .get("customer_id")
+        .and_then(Value::as_i64)
+        .is_none_or(|id| id < 1)
+    {
+        return Err(invalid(
+            "la regla de envío de documentos necesita un cliente (customer_id)",
+        ));
+    }
+    match map.get("recipient").and_then(Value::as_str).map(str::trim) {
+        Some(address) if rules::is_email_address(address) && address.chars().count() <= 254 => {}
+        _ => {
+            return Err(invalid(
+                "la regla de envío de documentos necesita la dirección exacta del destinatario                  (recipient)",
+            ))
+        }
+    }
+    match map.get("account").and_then(Value::as_str).map(str::trim) {
+        Some(account)
+            if !account.is_empty()
+                && account.len() <= 40
+                && account
+                    .bytes()
+                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-') => {}
+        _ => {
+            return Err(invalid(
+                "la regla de envío de documentos necesita la cuenta de correo desde la que se                  envía (account)",
+            ))
+        }
+    }
+    if let Some(kinds) = map.get("document_kinds") {
+        let valid = kinds.as_array().is_some_and(|list| {
+            !list.is_empty()
+                && list.iter().all(|k| {
+                    k.as_str()
+                        .and_then(nestadmin_sales::DocumentKind::parse)
+                        .is_some()
+                })
+        });
+        if !valid {
+            return Err(invalid(
+                "los tipos de documento de la regla deben ser una lista no vacía de tipos válidos",
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Remitente de una regla de envío: dirección exacta o dominio, nunca los dos (D126).

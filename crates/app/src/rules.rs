@@ -16,6 +16,8 @@ use crate::{EMAIL, INVOICE};
 
 pub const REGISTER_INVOICE: &str = "register_invoice";
 pub const SEND_DRAFT: &str = "send_draft";
+/// Acción de enviar por correo un documento de venta emitido (E4b, D238).
+pub const SEND_SALES_DOCUMENT: &str = nestadmin_core::sales::SEND_SALES_DOCUMENT;
 
 /// Regla aplicable o motivo por el que no se automatiza.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -77,6 +79,13 @@ pub enum ReasonCode {
     /// Una regla aprendida aceptada en lote aún está en rodaje (D174): sus primeros envíos se
     /// revisan. Va después de todos los bloqueos: nunca los sustituye.
     Rodaje,
+    /// Una regla de envío de un documento de venta coincide, pero algo del documento, del PDF, de
+    /// la cuenta o del destinatario impide enviarlo sin una persona (D238).
+    SalesSendBlocked,
+    /// El correo del cliente ya no es el destinatario que fija la regla (D238): no se envía solo.
+    RecipientChanged,
+    /// La acción no es de un tipo que esta versión sepa evaluar: fallo cerrado (D238).
+    UnknownAction,
 }
 
 /// Resultado de comprobar una regla contra los datos de una tarea. El motivo de no
@@ -92,6 +101,10 @@ pub struct RuleCheck {
     /// avanzada (D126). No se serializa si es `false`.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub sender_required: bool,
+    /// Solo una regla de envío de un documento que coincidiría de no haber cambiado el correo del
+    /// cliente respecto al destinatario de la regla (D238). No se serializa si es `false`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub recipient_changed: bool,
 }
 
 /// Explicación guardada en `result["evaluation"]`: sin contenido del correo.
@@ -144,6 +157,16 @@ impl Explanation {
             ),
             ReasonCode::CategoryReviewOnly => CATEGORY_REVIEW_ONLY.into(),
             ReasonCode::Rodaje => rodaje_reason(&self.facts),
+            ReasonCode::SalesSendBlocked => format!(
+                "la regla coincide, pero el envío necesita una persona: {}",
+                self.facts["reason"]
+                    .as_str()
+                    .unwrap_or("falta una comprobación")
+            ),
+            ReasonCode::RecipientChanged => RECIPIENT_CHANGED.into(),
+            ReasonCode::UnknownAction => {
+                "la acción no es de un tipo que esta versión sepa evaluar".into()
+            }
             ReasonCode::SenderRequired => format!(
                 "la regla no indica remitente; añádalo o valide la opción avanzada (regla: {})",
                 self.facts["rule_ids"]
@@ -217,6 +240,10 @@ impl Explanation {
         }
     }
 }
+
+/// Motivo cuando el correo del cliente ya no es el destinatario que fija la regla (D238).
+pub const RECIPIENT_CHANGED: &str =
+    "el correo del cliente ya no es el destinatario de la regla; revise el envío";
 
 /// Motivo cuando el pipeline continuó sin un paso (D150).
 pub const PIPELINE_WAIVED: &str =
@@ -351,6 +378,7 @@ pub fn evaluate_with(
                 active: r.active,
                 matches: mismatch.is_none(),
                 sender_required: mismatch.as_ref().is_some_and(|m| m.sender_required),
+                recipient_changed: mismatch.as_ref().is_some_and(|m| m.recipient_changed),
                 mismatch: mismatch.map(|m| m.text),
             };
             (r, check)
@@ -359,6 +387,11 @@ pub fn evaluate_with(
     let sender_required: Vec<&str> = candidates
         .iter()
         .filter(|(r, c)| r.active && c.sender_required)
+        .map(|(r, _)| r.id.as_str())
+        .collect();
+    let recipient_changed: Vec<&str> = candidates
+        .iter()
+        .filter(|(r, c)| r.active && c.recipient_changed)
         .map(|(r, _)| r.id.as_str())
         .collect();
     let matching: Vec<&Rule> = candidates
@@ -370,6 +403,11 @@ pub fn evaluate_with(
         ([], _) if !sender_required.is_empty() => (
             ReasonCode::SenderRequired,
             json!({ "rule_ids": sender_required }),
+            None,
+        ),
+        ([], _) if !recipient_changed.is_empty() => (
+            ReasonCode::RecipientChanged,
+            json!({ "rule_ids": recipient_changed }),
             None,
         ),
         ([], _) => (ReasonCode::NoActiveRuleMatches, json!({}), None),
@@ -459,7 +497,63 @@ fn blockers(action_kind: &str, result: &Value) -> Option<(ReasonCode, Value)> {
             Some(_) => None,
         },
         SEND_DRAFT => send_draft_blocker(result),
-        _ => None,
+        SEND_SALES_DOCUMENT => sales_send_blocker(result),
+        // Fallo cerrado (D238): una acción que esta función no conoce no se automatiza nunca.
+        _ => Some((ReasonCode::UnknownAction, json!({}))),
+    }
+}
+
+/// Bloqueos del envío de un documento de venta (D238). Cada dato ausente o sin comprobar bloquea:
+/// `result["checks"]` lo escribe la preparación del envío y sin él nada se automatiza. Los
+/// motivos no llevan contenido: solo códigos y textos fijos.
+fn sales_send_blocker(result: &Value) -> Option<(ReasonCode, Value)> {
+    let checks = &result["checks"];
+    let blocked = |code: &str, reason: &str| {
+        Some((
+            ReasonCode::SalesSendBlocked,
+            json!({ "reason": reason, "code": code }),
+        ))
+    };
+    if !checks.is_object() {
+        return blocked("not_checked", "no consta la comprobación del envío");
+    }
+    if checks["sendable"].as_bool() != Some(true) {
+        return blocked(
+            "status_not_sendable",
+            "el documento no está en un estado enviable",
+        );
+    }
+    match checks["pdf"].as_str() {
+        Some("ok") => {}
+        Some("too_large") => {
+            return blocked(
+                "attachment_too_large",
+                "el PDF supera el tamaño que se puede adjuntar",
+            )
+        }
+        Some(_) => return blocked("pdf_failed", "no se pudo generar el PDF"),
+        None => return blocked("not_checked", "no consta la comprobación del PDF"),
+    }
+    match checks["account"].as_str() {
+        Some("ok") => {}
+        Some("unavailable") => {
+            return blocked(
+                "account_unavailable",
+                "la cuenta de correo no está disponible",
+            )
+        }
+        Some(_) => {
+            return blocked(
+                "account_required",
+                "no hay una cuenta de correo para enviarlo",
+            )
+        }
+        None => return blocked("not_checked", "no consta la comprobación de la cuenta"),
+    }
+    match checks["recipient"].as_str() {
+        Some("ok") => None,
+        Some(_) => blocked("recipient_missing", "el cliente no tiene un correo válido"),
+        None => blocked("not_checked", "no consta la comprobación del destinatario"),
     }
 }
 
@@ -529,12 +623,15 @@ fn send_draft_blocker(result: &Value) -> Option<(ReasonCode, Value)> {
 struct Mismatch {
     text: String,
     sender_required: bool,
+    /// Solo falta que el destinatario de la regla sea el correo actual del cliente (D238).
+    recipient_changed: bool,
 }
 
 fn no(text: impl Into<String>) -> Option<Mismatch> {
     Some(Mismatch {
         text: text.into(),
         sender_required: false,
+        recipient_changed: false,
     })
 }
 
@@ -548,6 +645,7 @@ fn mismatch(rule: &Rule, any_sender_ack: bool, result: &Value) -> Option<Mismatc
     let allowed: &[&str] = match rule.action_kind.as_str() {
         REGISTER_INVOICE => &["supplier", "max_total", "currency"],
         SEND_DRAFT => &["category", "sender", "sender_domain"],
+        SEND_SALES_DOCUMENT => SALES_SEND_CONDITIONS,
         _ => return no("tipo de regla no reconocido"),
     };
     if let Some(key) = conditions.keys().find(|k| !allowed.contains(&k.as_str())) {
@@ -555,6 +653,7 @@ fn mismatch(rule: &Rule, any_sender_ack: bool, result: &Value) -> Option<Mismatc
     }
     let condition = |key: &str| conditions.get(key).and_then(Value::as_str);
     match rule.action_kind.as_str() {
+        SEND_SALES_DOCUMENT => sales_send_mismatch(conditions, result),
         REGISTER_INVOICE => {
             let Some(supplier) = condition("supplier") else {
                 return no("la regla no indica proveedor");
@@ -626,6 +725,83 @@ fn mismatch(rule: &Rule, any_sender_ack: bool, result: &Value) -> Option<Mismatc
     }
 }
 
+/// Condiciones de una regla de envío de un documento de venta (D238): `customer_id`, `recipient` y
+/// `account` son obligatorias; `document_kinds` es opcional.
+pub const SALES_SEND_CONDITIONS: &[&str] =
+    &["customer_id", "recipient", "account", "document_kinds"];
+
+/// Coincidencia de una regla de envío de un documento (D238) con los datos de `result`
+/// (`customer_id`, `document.kind`, `account.id`, `draft.to` y `customer_email_at_prepare`). Una
+/// regla sin `customer_id`, `recipient` o `account` no coincide nunca (fallo cerrado): no hay
+/// «cualquier cliente», «cualquier destinatario» ni «cualquier cuenta». La regla solo coincide si
+/// el destinatario del borrador es el correo del cliente al preparar y es el que fija la regla:
+/// un destinatario editado a mano nunca lo cubre.
+fn sales_send_mismatch(
+    conditions: &serde_json::Map<String, Value>,
+    result: &Value,
+) -> Option<Mismatch> {
+    let Some(customer) = conditions.get("customer_id").and_then(Value::as_i64) else {
+        return no("la regla no indica cliente");
+    };
+    let Some(recipient) = conditions
+        .get("recipient")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|r| is_email_address(r))
+    else {
+        return no("la regla no indica un destinatario válido");
+    };
+    let Some(account) = conditions
+        .get("account")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|a| !a.is_empty())
+    else {
+        return no("la regla no indica cuenta de envío");
+    };
+    match conditions.get("document_kinds") {
+        None => {}
+        Some(Value::Array(kinds)) if !kinds.is_empty() => {
+            let actual = result["document"]["kind"].as_str();
+            if !kinds
+                .iter()
+                .any(|k| k.as_str().is_some() && k.as_str() == actual)
+            {
+                return no(format!(
+                    "el documento es de tipo «{}» y la regla no lo incluye",
+                    actual.unwrap_or("desconocido")
+                ));
+            }
+        }
+        Some(_) => return no("los tipos de documento de la regla no son una lista válida"),
+    }
+    if result["customer_id"].as_i64() != Some(customer) {
+        return no("el documento es de otro cliente que el de la regla");
+    }
+    let to = result["draft"]["to"].as_array().filter(|t| t.len() == 1);
+    let to = to.and_then(|t| t[0].as_str());
+    let at_prepare = result["customer_email_at_prepare"].as_str();
+    let same = |a: Option<&str>| a.is_some_and(|a| a.trim().eq_ignore_ascii_case(recipient));
+    if !same(at_prepare) {
+        return Some(Mismatch {
+            text: "el correo del cliente ya no es el destinatario de la regla".into(),
+            sender_required: false,
+            recipient_changed: true,
+        });
+    }
+    if !same(to) {
+        return Some(Mismatch {
+            text: "el destinatario del borrador no es el de la regla".into(),
+            sender_required: false,
+            recipient_changed: true,
+        });
+    }
+    if result["account"]["id"].as_str() != Some(account) {
+        return no("la cuenta de envío no es la de la regla");
+    }
+    None
+}
+
 /// Condición de remitente de una regla de envío (D126). La comparación no distingue
 /// mayúsculas y usa `message.from`, que es solo la dirección. El dominio es exacto: la parte
 /// tras la `@`, sin subdominios.
@@ -649,6 +825,7 @@ fn sender_mismatch(
                     text: "la regla no indica remitente; añádalo o valide la opción avanzada"
                         .into(),
                     sender_required: true,
+                    recipient_changed: false,
                 })
             }
         }
@@ -1410,9 +1587,11 @@ fn region_others(
 /// más a menos grave: primero los choques con las dos reglas activas. Las archivadas no
 /// entran; las inactivas sí, indicando que solo chocarán si se activan.
 pub fn analyze(rules: &[Rule], marks: &Marks) -> Vec<RuleFinding> {
+    // Las reglas de envío de documentos de venta no se comparan entre sí (D238): si dos coinciden
+    // con un envío, `evaluate_with` lo manda a revisión (`SeveralRulesMatch`).
     let mut live: Vec<&Rule> = rules
         .iter()
-        .filter(|r| !marks.archived.contains(&r.id))
+        .filter(|r| !marks.archived.contains(&r.id) && r.action_kind != SEND_SALES_DOCUMENT)
         .collect();
     live.sort_by(|a, b| a.id.cmp(&b.id));
     let parsed: Vec<Result<Cond, Defect>> = live.iter().map(|r| parse_cond(r, marks)).collect();

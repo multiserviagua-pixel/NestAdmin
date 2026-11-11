@@ -71,7 +71,7 @@ fn count(path: &std::path::Path, table: &str) -> i64 {
 
 #[test]
 fn migration_11_applies_on_a_new_database_and_on_a_v10_one() {
-    assert_eq!(SCHEMA_VERSION, 14);
+    assert_eq!(SCHEMA_VERSION, 15);
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("n.db");
     let mut store = Store::open(&path).unwrap();
@@ -96,7 +96,7 @@ fn migration_11_applies_on_a_new_database_and_on_a_v10_one() {
     // Una base v10: sin las tablas del asistente y con datos previos.
     let conn = rusqlite::Connection::open(&path).unwrap();
     conn.execute_batch(
-        "DROP TABLE company_letterheads; ALTER TABLE company DROP COLUMN letterhead_sha256; ALTER TABLE company DROP COLUMN letterhead_top_mm; ALTER TABLE company DROP COLUMN letterhead_right_mm; ALTER TABLE company DROP COLUMN letterhead_bottom_mm; ALTER TABLE company DROP COLUMN letterhead_left_mm; DROP TABLE installation; DROP TABLE verifactu_records; DROP TABLE assistant_calls; DROP TABLE assistant_turns; DROP TABLE assistant_conversations;
+        "DROP TABLE sales_send_triggers; DROP TABLE sales_document_sends; DROP TABLE company_letterheads; ALTER TABLE company DROP COLUMN letterhead_sha256; ALTER TABLE company DROP COLUMN letterhead_top_mm; ALTER TABLE company DROP COLUMN letterhead_right_mm; ALTER TABLE company DROP COLUMN letterhead_bottom_mm; ALTER TABLE company DROP COLUMN letterhead_left_mm; DROP TABLE installation; DROP TABLE verifactu_records; DROP TABLE assistant_calls; DROP TABLE assistant_turns; DROP TABLE assistant_conversations;
          PRAGMA user_version = 10;",
     )
     .unwrap();

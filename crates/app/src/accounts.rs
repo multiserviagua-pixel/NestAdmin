@@ -391,7 +391,6 @@ impl Accounts {
     }
 
     /// Para pruebas: añade una cuenta con un conector propio (por ejemplo, uno sin Enviados).
-    #[cfg(test)]
     pub(crate) fn insert_test_connector(
         &mut self,
         id: &str,
@@ -889,7 +888,6 @@ impl Accounts {
     /// cuenta indicada y devuelve `<cuenta>:<borrador>` (D230). La clave se pasa a la cuenta como
     /// `<cuenta>/<clave>`. Un conector sin soporte da `unavailable`; una cuenta desconocida,
     /// `not_found`.
-    #[allow(dead_code)] // lo usa el envío de documentos de venta (E4b, encargo B)
     pub(crate) fn create_new_draft(
         &self,
         account: &str,
@@ -907,7 +905,6 @@ impl Accounts {
     /// conector no está disponible, el resultado es `unavailable`, nunca `Ok(None)`: «no
     /// enviado» solo se afirma tras preguntar a la cuenta que pudo enviarlo. Las demás cuentas no
     /// se consultan.
-    #[allow(dead_code)] // lo usa la recuperación del envío de documentos de venta (E4b, encargo B)
     pub(crate) fn lookup_in(
         &self,
         account: &str,

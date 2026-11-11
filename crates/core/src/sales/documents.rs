@@ -569,7 +569,12 @@ fn number_detail(doc: &SalesDocument) -> serde_json::Value {
     json!({ "id": doc.id, "number": doc.number, "revision": doc.revision })
 }
 
-fn touch_status(conn: &Connection, id: i64, from: Status, to: Status) -> SalesResult<()> {
+pub(crate) fn touch_status(
+    conn: &Connection,
+    id: i64,
+    from: Status,
+    to: Status,
+) -> SalesResult<()> {
     let changed = conn.execute(
         "UPDATE sales_documents SET status = ?3, updated_at = ?4 WHERE id = ?1 AND status = ?2",
         params![id, from.as_str(), to.as_str(), now_ms()],
@@ -1236,6 +1241,9 @@ impl Store {
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         let doc = load_document(&tx, id)?;
         can_void(doc.kind, doc.status)?;
+        // Un envío por correo sin cerrar bloquea la anulación; uno solo en revisión se cancela
+        // (D235). Va dentro de la transacción: si la anulación falla, nada de esto se aplica.
+        super::sends::guard_void(&tx, id)?;
         let in_force: i64 = tx.query_row(
             "SELECT count(*) FROM sales_documents WHERE rectifies_id = ?1              AND status IN ('issued', 'sent')",
             [id],

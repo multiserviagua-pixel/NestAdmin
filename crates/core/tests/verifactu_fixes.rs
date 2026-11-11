@@ -469,14 +469,14 @@ fn a_version_11_database_with_issued_invoices_migrates_to_the_current_version() 
     // Como la dejaría la 11: sin registros Verifactu ni número de instalación.
     let conn = rusqlite::Connection::open(&path).unwrap();
     conn.execute_batch(
-        "DROP TABLE company_letterheads; ALTER TABLE company DROP COLUMN letterhead_sha256; ALTER TABLE company DROP COLUMN letterhead_top_mm; ALTER TABLE company DROP COLUMN letterhead_right_mm; ALTER TABLE company DROP COLUMN letterhead_bottom_mm; ALTER TABLE company DROP COLUMN letterhead_left_mm; DROP TABLE installation; DROP TABLE verifactu_records; PRAGMA user_version = 11;",
+        "DROP TABLE sales_send_triggers; DROP TABLE sales_document_sends; DROP TABLE company_letterheads; ALTER TABLE company DROP COLUMN letterhead_sha256; ALTER TABLE company DROP COLUMN letterhead_top_mm; ALTER TABLE company DROP COLUMN letterhead_right_mm; ALTER TABLE company DROP COLUMN letterhead_bottom_mm; ALTER TABLE company DROP COLUMN letterhead_left_mm; DROP TABLE installation; DROP TABLE verifactu_records; PRAGMA user_version = 11;",
     )
     .unwrap();
     drop(conn);
 
     let mut store = Store::open(&path).unwrap();
     assert_eq!(store.schema_version().unwrap(), SCHEMA_VERSION);
-    assert_eq!(SCHEMA_VERSION, 14);
+    assert_eq!(SCHEMA_VERSION, 15);
     let doc = store.sales_document(invoice_id).unwrap();
     assert_eq!(doc.status, Status::Issued);
     assert_eq!(doc.number.as_deref(), Some(number.as_str()));
