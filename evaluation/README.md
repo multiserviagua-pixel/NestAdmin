@@ -164,3 +164,9 @@ cargo test -p nestadmin-app --test assistant_eval --locked real_model -- --ignor
 ```
 
 Variables opcionales: `NESTADMIN_EVAL_ONLY=injection|corpus`, `NESTADMIN_EVAL_LIMIT=N`, `NESTADMIN_EVAL_MODEL=<modelo>` y `NESTADMIN_EVAL_RESUME=1` (reanuda un informe del mismo día). El informe se escribe aunque la puerta falle; el fallo se expresa al final con una aserción.
+
+**Modo 2 externo (Ollama cloud).** ADVERTENCIA: los datos sintéticos de la suite SALEN del equipo hacia `ollama.com`. Solo con autorización expresa de la persona para esa medición; sin ella, no se ejecuta. La prueba `real_model_measurement_with_external_provider` está ignorada y exige `NESTADMIN_EVAL_EXTERNAL=ollama_cloud` (cualquier otro valor se rechaza). El modelo es `gemma4:31b` salvo `NESTADMIN_EVAL_MODEL`. La clave se lee del Administrador de credenciales de Windows (servicio `NestAdmin`, la misma credencial que usa la aplicación), nunca de una variable de entorno, y no se imprime ni se guarda; sin ella la prueba termina sin intentar nada. Solo los turnos del asistente van al externo (con consentimiento del asistente para ese destino exacto, enmascarado y topes de D183, y sin respaldo local); extracción, clasificación y borradores siguen siendo sintéticos. Un turno que contestó la IA local cuenta como no medido. `rate_limited`, `timeout` y `unavailable` se repiten una vez tras una espera; `unauthorized` y `no_credit` detienen la medición. Informe: `results/assistant-ollama_cloud-<modelo>-<fecha>.json`.
+
+```sh
+NESTADMIN_EVAL_EXTERNAL=ollama_cloud cargo test -p nestadmin-app --test assistant_eval --locked real_model_measurement_with_external_provider -- --ignored --nocapture --test-threads 1
+```

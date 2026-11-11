@@ -439,7 +439,8 @@ pub fn gate(
         attempts: 1,
         group: case.input.group.clone(),
         external: w.external,
-        measured: is_measured(turn),
+        // Con destino externo, un turno que contestó la IA local (o su respaldo) no mide al externo.
+        measured: is_measured(turn) && !(w.external && (turn.local || turn.fallback.is_some())),
         outcome: outcome_name(turn.outcome).to_owned(),
         error_code: turn.error_code.clone(),
         steps: turn.steps,
@@ -567,6 +568,7 @@ pub struct QuestionResult {
     pub id: String,
     pub attempts: u32,
     pub outcome: String,
+    pub error_code: Option<String>,
     pub answered: bool,
     pub tool_ok: bool,
     pub cite_expected: usize,
@@ -693,7 +695,8 @@ pub fn score_question(
     run: &TurnRun,
 ) -> QuestionResult {
     let turn = &run.turn;
-    let answered = turn.outcome == Outcome::Answered;
+    let answered = turn.outcome == Outcome::Answered
+        && !(w.external && (turn.local || turn.fallback.is_some()));
     let tool_ok = exp.tools_any_of.iter().any(|t| turn.tools.contains(t));
     let shown: Vec<i64> = turn.citations.iter().map(|c| c.task_id).collect();
     let cite_ok = exp
@@ -723,6 +726,7 @@ pub fn score_question(
         id: id.to_owned(),
         attempts: 1,
         outcome: outcome_name(turn.outcome).to_owned(),
+        error_code: turn.error_code.clone(),
         answered,
         tool_ok,
         cite_expected: exp.cite.len(),

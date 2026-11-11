@@ -24,6 +24,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use nestadmin_ai::assistant::{assistant_request, View};
 use nestadmin_ai::ollama::{OllamaProvider, DEFAULT_MODEL, DEFAULT_URL};
+use nestadmin_ai::ollama_cloud::OllamaCloudProvider;
 use nestadmin_ai::Provider;
 use nestadmin_app::assistant::Outcome;
 use nestadmin_app::learn::mask;
@@ -517,6 +518,8 @@ struct Report {
     suite: String,
     provider: String,
     model: String,
+    /// Servidor al que salen los turnos del asistente (`local` con la IA local).
+    server: String,
     date: String,
     cases_injection: usize,
     cases_corpus: usize,
@@ -542,7 +545,6 @@ fn civil_date() -> String {
     let year = yoe + era * 400 + i64::from(month <= 2);
     format!("{year:04}-{month:02}-{day:02}")
 }
-
 fn save(path: &PathBuf, report: &Report) {
     let tmp = path.with_extension("json.tmp");
     std::fs::write(&tmp, serde_json::to_string_pretty(report).unwrap()).unwrap();
@@ -553,9 +555,9 @@ fn env(name: &str) -> Option<String> {
     std::env::var(name).ok().filter(|v| !v.trim().is_empty())
 }
 
-/// Calienta el modelo con una petición real del asistente: la primera llamada carga el modelo y
-/// puede agotar el plazo. Solo se informa de si llegó a responder.
-fn warm_up(provider: &Arc<OllamaProvider>) -> bool {
+/// Calienta el modelo local con una petición real del asistente: la primera llamada carga el
+/// modelo y puede agotar el plazo. Solo se informa de si llegó a responder.
+fn warm_up(provider: &Arc<dyn Provider>) -> bool {
     let request = assistant_request("calentamiento", View::Other, &[], "Hola", &[]);
     for attempt in 1..=2 {
         let started = std::time::Instant::now();
@@ -572,13 +574,40 @@ fn warm_up(provider: &Arc<OllamaProvider>) -> bool {
     false
 }
 
-fn run_injection_real(
-    corpus: &Corpus,
-    cases: &[InjectionCase],
-    provider: &Arc<OllamaProvider>,
-    report: &mut Report,
-    path: &PathBuf,
-) {
+/// Los errores que detienen una medición externa: no se arreglan reintentando.
+fn is_fatal(code: Option<&str>) -> bool {
+    matches!(code, Some("unauthorized" | "no_credit"))
+}
+
+fn fatal_message(code: &str) -> &'static str {
+    if code == "unauthorized" {
+        "el proveedor rechazó la clave (unauthorized): corríjala en Configuración; la medición se detiene"
+    } else {
+        "la cuenta del proveedor no tiene crédito (no_credit); la medición se detiene"
+    }
+}
+
+/// Espera antes del reintento de un turno sin medir: solo con un proveedor externo.
+fn wait_before_retry(external: bool, code: Option<&str>) {
+    if !external {
+        return;
+    }
+    let seconds = if code == Some("rate_limited") { 60 } else { 20 };
+    println!(
+        "  sin medir ({}); espero {seconds} s y repito una vez",
+        code.unwrap_or("?")
+    );
+    std::thread::sleep(Duration::from_secs(seconds));
+}
+
+struct Run<'a> {
+    corpus: &'a Corpus,
+    provider: Arc<dyn Provider>,
+    external: bool,
+    path: PathBuf,
+}
+
+fn run_injection_real(run: &Run, cases: &[InjectionCase], report: &mut Report) {
     for case in cases {
         if report
             .injection
@@ -588,11 +617,12 @@ fn run_injection_real(
             continue;
         }
         report.injection.retain(|r| r.id != case.id);
-        let backend = || Backend::Real(Arc::clone(provider) as Arc<dyn Provider>);
-        let mut result = injection_case(corpus, case, false, backend());
-        if !result.measured {
-            // Un plazo agotado (o un fallo del proveedor) se repite una vez.
-            let again = injection_case(corpus, case, false, backend());
+        let backend = || Backend::Real(Arc::clone(&run.provider));
+        let mut result = injection_case(run.corpus, case, run.external, backend());
+        if !result.measured && !is_fatal(result.error_code.as_deref()) {
+            // Un plazo agotado, un límite de peticiones o un fallo del proveedor se repite una vez.
+            wait_before_retry(run.external, result.error_code.as_deref());
+            let again = injection_case(run.corpus, case, run.external, backend());
             result = InjectionResult {
                 attempts: 2,
                 ..again
@@ -607,31 +637,42 @@ fn run_injection_real(
             result.measured,
             result.flags.any()
         );
+        let code = result.error_code.clone();
         report.injection.push(result);
-        save(path, report);
+        save(&run.path, report);
+        if let Some(code) = code.as_deref().filter(|c| is_fatal(Some(c))) {
+            panic!(
+                "{} (informe parcial: {})",
+                fatal_message(code),
+                run.path.display()
+            );
+        }
     }
 }
 
-fn run_corpus_real(
-    corpus: &Corpus,
-    limit: Option<usize>,
-    provider: &Arc<OllamaProvider>,
-    report: &mut Report,
-    path: &PathBuf,
-) {
+fn run_corpus_real(run: &Run, limit: Option<usize>, report: &mut Report) {
     let mut w = build(
-        corpus,
+        run.corpus,
         None,
-        local(Backend::Real(Arc::clone(provider) as Arc<dyn Provider>)),
+        Setup {
+            external: run.external,
+            backend: Backend::Real(Arc::clone(&run.provider)),
+        },
     );
-    for (id, question) in corpus.questions.iter().take(limit.unwrap_or(usize::MAX)) {
+    for (id, question) in run
+        .corpus
+        .questions
+        .iter()
+        .take(limit.unwrap_or(usize::MAX))
+    {
         if report.corpus.iter().any(|r| &r.id == id && r.answered) {
             continue;
         }
         report.corpus.retain(|r| &r.id != id);
-        let exp = &corpus.question_expected[id];
+        let exp = &run.corpus.question_expected[id];
         let mut result = ask_question(&mut w, id, question, exp);
-        if matches!(result.outcome.as_str(), "error" | "cancelled") && !result.answered {
+        if !result.answered && !is_fatal(result.error_code.as_deref()) {
+            wait_before_retry(run.external, result.error_code.as_deref());
             let again = ask_question(&mut w, id, question, exp);
             result = QuestionResult {
                 attempts: 2,
@@ -643,14 +684,22 @@ fn run_corpus_real(
             result.outcome,
             result.elapsed_ms / 1_000
         );
+        let code = result.error_code.clone();
         report.corpus.push(result);
-        save(path, report);
+        save(&run.path, report);
+        if let Some(code) = code.as_deref().filter(|c| is_fatal(Some(c))) {
+            panic!(
+                "{} (informe parcial: {})",
+                fatal_message(code),
+                run.path.display()
+            );
+        }
     }
 }
 
-#[test]
-#[ignore = "requiere Ollama local con qwen3:8b"]
-fn real_model_measurement_with_local_ollama() {
+/// Medición completa o limitada contra `provider`. Escribe el informe aunque la puerta no se
+/// cumpla; el fallo se expresa al final con una aserción. Por consola, solo recuentos.
+fn measure(provider: Arc<dyn Provider>, external: bool, server: &str) {
     let only = env("NESTADMIN_EVAL_ONLY");
     if let Some(o) = &only {
         assert!(
@@ -659,19 +708,12 @@ fn real_model_measurement_with_local_ollama() {
         );
     }
     let limit: Option<usize> = env("NESTADMIN_EVAL_LIMIT").map(|v| v.parse().expect("un número"));
-    let model = env("NESTADMIN_EVAL_MODEL").unwrap_or_else(|| DEFAULT_MODEL.to_owned());
-    // Esta medición es solo de la IA local: un modelo «cloud» de Ollama sale del equipo.
-    assert!(
-        !model.contains("cloud"),
-        "la medición usa solo la IA local; un modelo cloud necesita autorización expresa y otra prueba"
-    );
-    let provider =
-        Arc::new(OllamaProvider::new(DEFAULT_URL, &model, Duration::from_secs(180)).unwrap());
+    let model = provider.model().to_owned();
+    let provider_name = provider.kind().to_string();
     let corpus = corpus();
-    let cases = injection();
     let run_injection = only.as_deref() != Some("corpus");
     let run_corpus = only.as_deref() != Some("injection");
-    let cases_taken: Vec<InjectionCase> = cases
+    let cases_taken: Vec<InjectionCase> = injection()
         .into_iter()
         .take(limit.unwrap_or(usize::MAX))
         .collect();
@@ -679,18 +721,21 @@ fn real_model_measurement_with_local_ollama() {
     let dir = root().join("evaluation/results");
     std::fs::create_dir_all(&dir).unwrap();
     let date = civil_date();
-    let path = dir.join(format!(
-        "assistant-{}-{date}.json",
-        model.replace([':', '/', '\\'], "-")
-    ));
+    let safe = model.replace([':', '/', '\\'], "-");
+    let path = dir.join(if external {
+        format!("assistant-{provider_name}-{safe}-{date}.json")
+    } else {
+        format!("assistant-{safe}-{date}.json")
+    });
     let mut report = match (env("NESTADMIN_EVAL_RESUME"), path.exists()) {
         (Some(_), true) => serde_json::from_str(&std::fs::read_to_string(&path).unwrap())
             .expect("informe anterior ilegible"),
         _ => Report::default(),
     };
     report.suite = data::INJECTION_SUITE.to_owned();
-    report.provider = "ollama".to_owned();
+    report.provider = provider_name.clone();
     report.model = model.clone();
+    report.server = server.to_owned();
     report.date = date;
     report.cases_injection = if run_injection { cases_taken.len() } else { 0 };
     report.cases_corpus = if run_corpus {
@@ -702,37 +747,44 @@ fn real_model_measurement_with_local_ollama() {
     save(&path, &report);
 
     println!(
-        "modelo {model}, solo local, informe parcial en {}",
+        "proveedor {provider_name}, modelo {model}, servidor {server}; informe parcial en {}",
         path.display()
     );
-    warm_up(&provider);
+    if !external {
+        warm_up(&provider);
+    }
+    let run = Run {
+        corpus: &corpus,
+        provider,
+        external,
+        path: path.clone(),
+    };
     if run_injection {
-        run_injection_real(&corpus, &cases_taken, &provider, &mut report, &path);
+        run_injection_real(&run, &cases_taken, &mut report);
     }
     if run_corpus {
-        run_corpus_real(&corpus, limit, &provider, &mut report, &path);
+        run_corpus_real(&run, limit, &mut report);
     }
     report.finished = true;
     save(&path, &report);
 
-    // Solo recuentos por consola.
     let gate_summary = summarize(&report.injection);
     let corpus_summary: CorpusSummary = summarize_questions(&report.corpus);
+    let label = format!("{provider_name} {model} ({server})");
     if run_injection {
-        println!(
-            "{}",
-            gate_summary.render(&format!("inyección con {model} (IA local)"))
-        );
+        println!("{}", gate_summary.render(&format!("inyección con {label}")));
         let retried = report.injection.iter().filter(|r| r.attempts > 1).count();
-        println!("casos repetidos por tiempo agotado: {retried}");
+        let mut times: Vec<u128> = report.injection.iter().map(|r| r.elapsed_ms).collect();
+        times.sort_unstable();
+        println!(
+            "casos repetidos: {retried}; tiempo por caso: mediana {} ms, máximo {} ms",
+            times.get(times.len() / 2).copied().unwrap_or(0),
+            times.last().copied().unwrap_or(0)
+        );
     }
     if run_corpus {
-        println!(
-            "{}",
-            corpus_summary.render(&format!("corpus con {model} (IA local)"))
-        );
+        println!("{}", corpus_summary.render(&format!("corpus con {label}")));
     }
-    // La medición escribe el informe aunque la puerta no se cumpla; el fallo se expresa aquí.
     let mut failures = Vec::new();
     if run_injection {
         let missing = cases_taken.len().saturating_sub(report.injection.len());
@@ -754,7 +806,80 @@ fn real_model_measurement_with_local_ollama() {
     }
     assert!(
         failures.is_empty(),
-        "la puerta de D192 no se cumple con {model}: {failures:?} (informe: {})",
+        "la puerta de D192 no se cumple con {provider_name} {model}: {failures:?} (informe: {})",
         path.display()
     );
+}
+
+#[test]
+#[ignore = "requiere Ollama local con qwen3:8b"]
+fn real_model_measurement_with_local_ollama() {
+    assert!(
+        env("NESTADMIN_EVAL_EXTERNAL").is_none(),
+        "NESTADMIN_EVAL_EXTERNAL está definida: esta prueba es solo local; use real_model_measurement_with_external_provider"
+    );
+    let model = env("NESTADMIN_EVAL_MODEL").unwrap_or_else(|| DEFAULT_MODEL.to_owned());
+    // Esta medición es solo de la IA local: un modelo «cloud» de Ollama sale del equipo.
+    assert!(
+        !model.contains("cloud"),
+        "la medición local usa solo la IA local; un modelo cloud necesita NESTADMIN_EVAL_EXTERNAL=ollama_cloud y autorización expresa"
+    );
+    let provider: Arc<dyn Provider> =
+        Arc::new(OllamaProvider::new(DEFAULT_URL, &model, Duration::from_secs(180)).unwrap());
+    measure(provider, false, "local");
+}
+
+/// La clave de Ollama cloud, leída del almacén protegido con el mismo nombre de credencial que
+/// usa la aplicación. Nunca de una variable de entorno, y nunca se imprime ni se guarda.
+fn cloud_key() -> Result<nestadmin_ai::Secret, String> {
+    #[cfg(windows)]
+    {
+        use nestadmin_ai::credentials::{WindowsCredentialStore, OLLAMA_CLOUD_API_KEY};
+        use nestadmin_ai::CredentialStore;
+        let store = WindowsCredentialStore::new()
+            .map_err(|_| "no se pudo abrir el Administrador de credenciales".to_owned())?;
+        store
+            .get(OLLAMA_CLOUD_API_KEY)
+            .map_err(|_| "no se pudo leer el Administrador de credenciales".to_owned())?
+            .ok_or_else(|| {
+                "no hay clave de Ollama cloud en el Administrador de credenciales (servicio NestAdmin): guárdela en Configuración".to_owned()
+            })
+    }
+    #[cfg(not(windows))]
+    {
+        Err(
+            "la medición externa lee la clave del Administrador de credenciales de Windows"
+                .to_owned(),
+        )
+    }
+}
+
+#[test]
+#[ignore = "requiere autorización expresa y la clave de Ollama cloud en el almacén protegido"]
+fn real_model_measurement_with_external_provider() {
+    // Opt-in explícito: el contenido sintético de la suite SALE del equipo hacia ollama.com.
+    match env("NESTADMIN_EVAL_EXTERNAL").as_deref() {
+        Some("ollama_cloud") => {}
+        Some(other) => {
+            panic!("NESTADMIN_EVAL_EXTERNAL admite solo ollama_cloud (recibido: {other})")
+        }
+        None => panic!(
+            "medición externa no activada: defina NESTADMIN_EVAL_EXTERNAL=ollama_cloud solo con autorización expresa de la persona para esta medición"
+        ),
+    }
+    let model = env("NESTADMIN_EVAL_MODEL").unwrap_or_else(|| "gemma4:31b".to_owned());
+    let key = match cloud_key() {
+        Ok(key) => key,
+        Err(message) => panic!("{message}; no se intentó nada"),
+    };
+    // La clave real se añade a los centinelas: no puede salir en una respuesta ni en lo enviado.
+    let _ = world::EXTRA_SECRETS.set(vec![key.expose().to_owned()]);
+    let provider: Arc<dyn Provider> = Arc::new(OllamaCloudProvider::new(
+        &model,
+        key,
+        Duration::from_secs(180),
+    ));
+    let server = provider.destination().unwrap_or_default();
+    assert_eq!(server, "ollama.com", "servidor inesperado");
+    measure(provider, true, &server);
 }
