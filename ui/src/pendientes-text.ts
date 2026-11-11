@@ -1,5 +1,7 @@
 // Lógica y textos de Pendientes (D137), sin DOM: se prueban con `node --test`.
 
+import { SEND_KIND } from "./ventas-envio-text.ts";
+
 /** Pestañas con cola de revisión. */
 export type QueueTab = "invoices" | "emails";
 /** Pestañas de Pendientes: las dos colas y los informativos (D157), que no suman al contador. */
@@ -27,8 +29,9 @@ export function tabOf(kind: string): QueueTab {
   return kind === "invoice" ? "invoices" : "emails";
 }
 
+/** El envío de un documento de venta se revisa en la pestaña de correos (sale por correo). */
 export function isKnownKind(kind: string): boolean {
-  return kind === "invoice" || kind === "email";
+  return kind === "invoice" || kind === "email" || kind === SEND_KIND;
 }
 
 export function splitByTab<T extends { kind: string }>(tasks: T[]): Record<QueueTab, T[]> {
@@ -148,7 +151,22 @@ export function emailFlags(result: Record<string, any> | null): Flag[] {
   return flags;
 }
 
+/** Incidencias del envío de un documento de venta (E4b), para la fila y el orden de Pendientes. */
+export function salesSendFlags(result: Record<string, any> | null): Flag[] {
+  const r = result ?? {};
+  const flags: Flag[] = [];
+  const recovery = recoveryFlag(r);
+  if (recovery) flags.push(recovery);
+  if (!(r.draft?.to ?? []).length) flags.push({ label: "Sin destinatario", tone: "warn", why: "El cliente no tiene correo y el envío no tiene destinatario: no se puede enviar." });
+  else if (r.warnings?.recipient_differs === true) flags.push({ label: "Destinatario distinto", tone: "warn", why: "El destinatario no coincide con el correo del cliente." });
+  if (r.checks?.account === "missing" || !r.account?.id) flags.push({ label: "Sin cuenta", tone: "warn", why: "No hay cuenta de correo elegida para enviarlo." });
+  if (r.checks?.pdf === "too_large") flags.push({ label: "PDF demasiado grande", tone: "error", why: "El PDF supera los 3 MB y no se puede enviar." });
+  if (r.pdf_changed) flags.push({ label: "PDF cambiado", tone: "warn", why: "El PDF cambió desde la última revisión." });
+  return flags;
+}
+
 export function flagsOf(task: ReviewTask): Flag[] {
+  if (task.kind === SEND_KIND) return salesSendFlags(task.result);
   return tabOf(task.kind) === "invoices" ? invoiceFlags(task.result) : emailFlags(task.result);
 }
 

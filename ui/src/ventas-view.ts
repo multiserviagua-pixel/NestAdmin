@@ -26,6 +26,8 @@ import type {
   SalesQualification,
   SalesRectificationKind,
   SalesRectificationMethod,
+  SalesSend,
+  Task,
   VerifactuRecord,
 } from "./types";
 import {
@@ -90,11 +92,15 @@ import {
   type MarginsText,
 } from "./ventas-text";
 
+import { SEND_BUTTON, SEND_CHECK_BUTTON, SEND_HISTORY_EMPTY, SEND_HISTORY_TITLE, canSendByMail, openSendStatus, sendHistoryRows } from "./ventas-envio-text";
+
 type Tab = "documents" | "customers" | "products" | "company" | "recurring" | "received" | "records";
 
 interface Context {
   render: () => void;
   ask: (message: string) => Promise<boolean>;
+  /** Lleva a la tarjeta de revisión del envío (Pendientes). */
+  openSendTask: (taskId: number) => Promise<void>;
 }
 
 interface Editor {
@@ -124,6 +130,9 @@ interface Detail {
   links: SalesLink[];
   payments: SalesPayment[];
   collection: SalesCollection | null;
+  /** Tarea de envío por correo abierta del documento y envíos ya confirmados (E4b). */
+  send: Task | null;
+  sends: SalesSend[];
   logoUrl: string | null;
   pay: { date: string; amount: string; method: SalesPaymentMethod };
 }
@@ -254,6 +263,7 @@ export function createSalesView(ctx: Context) {
 
   /** Se llama al abrir la sección. */
   function enter() {
+    s.message = null;
     s.loading = true;
     void reload();
   }
@@ -680,6 +690,12 @@ export function createSalesView(ctx: Context) {
         isInvoiceKind(doc.kind) && doc.status !== "draft" ? api.salesPayments(id) : Promise.resolve([] as SalesPayment[]),
         isInvoiceKind(doc.kind) && doc.status !== "draft" ? api.salesCollection(id) : Promise.resolve(null),
       ]);
+      // El envío por correo no tumba el detalle: sin poder leerlo, se muestra como sin envíos.
+      const issued = doc.status !== "draft";
+      const [send, sends] = await Promise.all([
+        issued ? api.salesSendTask(id).catch(() => null) : Promise.resolve(null),
+        issued ? api.salesDocumentSends(id).catch(() => [] as SalesSend[]) : Promise.resolve([] as SalesSend[]),
+      ]);
       let logoUrl: string | null = null;
       if (doc.issuer?.logo_sha256) {
         try {
@@ -689,7 +705,7 @@ export function createSalesView(ctx: Context) {
         }
       }
       if (s.detail?.logoUrl) URL.revokeObjectURL(s.detail.logoUrl);
-      s.detail = { doc, links, payments, collection, logoUrl, pay: s.detail?.doc.id === id ? s.detail.pay : { date: today(), amount: "", method: "transfer" } };
+      s.detail = { doc, links, payments, collection, send, sends, logoUrl, pay: s.detail?.doc.id === id ? s.detail.pay : { date: today(), amount: "", method: "transfer" } };
       s.editor = null;
     } catch (error) {
       s.message = { kind: "error", text: salesErrorText(error) };
@@ -802,6 +818,7 @@ export function createSalesView(ctx: Context) {
         : null,
       invoicing && d.collection ? collectionView(d) : null,
       actions.includes("corrective") ? correctiveView(doc) : null,
+      doc.status !== "draft" ? sendView(d) : null,
       actionBar(
         blocked && (actions.includes("issue") || actions.includes("void")) ? "Emitir y anular facturas están bloqueados hasta resolver el aviso de Verifactu." : null,
         ...direct.map((a) =>
@@ -815,7 +832,65 @@ export function createSalesView(ctx: Context) {
         canViewPdf(doc)
           ? h("button", { "data-focus-key": "ventas:action:pdf", onclick: () => void run(() => api.salesOpenDocumentPdf(doc.id), "El PDF se abre con el visor del sistema.") }, VIEW_PDF_LABEL)
           : null,
+        sendButton(d),
       ),
+    );
+  }
+
+  /**
+   * Envío por correo (E4b): el botón prepara el envío o lleva al que ya está abierto; la revisión y
+   * la aprobación son siempre las de Pendientes (una sola vía, R07). Aquí solo se ve el estado y el
+   * historial.
+   */
+  function sendButton(d: Detail): HTMLElement | null {
+    const doc = d.doc;
+    if (!canSendByMail(doc)) return null;
+    const open = d.send ? openSendStatus(d.send) : null;
+    if (open?.action === "check") {
+      return h(
+        "button",
+        {
+          "data-focus-key": "ventas:action:send-check",
+          onclick: () =>
+            void (async () => {
+              if (!(await attempt(() => api.retry(d.send!.id), "Comprobando si el envío salió; el resultado aparecerá en Pendientes."))) return;
+              await openDetail(doc.id);
+            })(),
+        },
+        SEND_CHECK_BUTTON,
+      );
+    }
+    return h(
+      "button",
+      {
+        class: "primary",
+        disabled: open?.action === "wait",
+        title: open?.action === "wait" ? open.text : undefined,
+        "data-focus-key": "ventas:action:send",
+        onclick: () =>
+          void (async () => {
+            const task = d.send ?? (await run(() => api.salesPrepareSend(doc.id)));
+            if (task) await ctx.openSendTask(task.id);
+          })(),
+      },
+      SEND_BUTTON,
+    );
+  }
+
+  function sendView(d: Detail): HTMLElement {
+    const open = d.send ? openSendStatus(d.send) : null;
+    const rows = sendHistoryRows(d.sends);
+    return h(
+      "div",
+      {},
+      sectionHeader(SEND_HISTORY_TITLE),
+      open ? h("div", { class: `notice ${open.tone}`, role: open.tone === "error" ? "alert" : "status" }, h("span", {}, open.text)) : null,
+      rows.length
+        ? dataTable(
+            [{ label: "Fecha" }, { label: "Destinatario" }, { label: "Cuenta" }, { label: "Autorizado por" }, { label: "Adjunto" }],
+            rows.map((r) => [r.when, r.recipient, r.account, r.authorization, r.attachment]),
+          )
+        : h("p", { class: "meta" }, SEND_HISTORY_EMPTY),
     );
   }
 

@@ -2,7 +2,7 @@
 // reales con datos sintéticos (dominio .test); no decide nada que la capa Rust no decida.
 
 import { isPublicDomain, senderParts } from "./preferences-text";
-import { salesHandlers } from "./mock-ventas";
+import { bindSendMock, recoverSend, salesHandlers } from "./mock-ventas";
 import type {
   SeenInvoice,
   AccountFetch,
@@ -91,6 +91,8 @@ const changed = () => setTimeout(() => listeners.forEach((l) => l()), 0);
 
 let nextId = 1;
 const tasks: Task[] = [];
+// El envío de documentos de venta (E4b) vive en `mock-ventas.ts`, sobre esta lista de tareas y estas cuentas.
+bindSendMock(tasks, () => mailAccounts);
 const rules: Rule[] = [];
 const audit: AuditEntry[] = [];
 const mockPrefs: SenderPreference[] = [];
@@ -2744,6 +2746,7 @@ const handlers: Record<string, (a: any, options?: any) => unknown> = {
   retry: ({ id }) => {
     const t = find(id);
     if (t.state !== "failed") throw "solo se reintentan tareas fallidas";
+    if (t.kind === "send_sales_document") return recoverSend(t);
     return Object.assign(t, { state: "queued" });
   },
   task_templates: (): TaskTemplate[] => templateStore.map((t) => ({ ...t })),
@@ -3496,6 +3499,11 @@ const mutating = new Set([
   "remove_mail_account",
   "rename_mail_account",
   "add_simulated_mail_account",
+  "sales_prepare_send",
+  "sales_edit_send",
+  "sales_approve_send",
+  "sales_confirm_send_not_sent",
+  "sales_reject_send",
 ]);
 
 export async function invoke<T>(

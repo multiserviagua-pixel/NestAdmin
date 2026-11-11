@@ -1522,3 +1522,26 @@ export interface ProducerState {
   configured: boolean;
   problem: string | null;
 }
+
+// ---- Envío de documentos de venta por correo (E4b, D232–D241) ----
+
+/** Un envío confirmado de un documento, del historial (solo de inserción, sin cuerpo). */
+export interface SalesSend {
+  id: number;
+  document_id: number;
+  task_id: number;
+  version: number;
+  idempotency_key: string;
+  account: string;
+  account_address: string | null;
+  recipient: string;
+  subject: string;
+  attachment_name: string;
+  attachment_size: number;
+  attachment_sha256: string;
+  /** `aprobación` o la regla que lo autorizó (`regla <id> v<n>`). */
+  authorization: string;
+  sent_message_id: string | null;
+  /** Segundos Unix. */
+  sent_at: number;
+}

@@ -1,5 +1,7 @@
 // Textos de Tareas, sin DOM: se prueban con `node --test`.
 
+import { SEND_KIND, sendTaskTitle } from "./ventas-envio-text.ts";
+
 /** Lo mínimo de una tarea que necesita esta lógica. */
 export interface TitledTask {
   id: number;
@@ -45,6 +47,7 @@ function text(value: unknown): string | null {
 export function taskTitle(task: TitledTask): string {
   const input = parseTaskInput(task);
   if (task.kind === "invoice") return task.result?.document ?? input.document ?? `Documento ${task.id}`;
+  if (task.kind === SEND_KIND) return sendTaskTitle(task.result);
   const subject = text(task.result?.message?.subject) ?? text(input.message?.subject);
   if (subject) return subject;
   const from = text(task.result?.message?.from) ?? text(input.message?.from);

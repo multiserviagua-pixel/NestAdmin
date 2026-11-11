@@ -82,6 +82,7 @@ import type {
   SalesRecurringRun,
   SalesRectificationKind,
   SalesRectificationMethod,
+  SalesSend,
   SalesSetupStatus,
   SalesKind,
   SalesStatus,
@@ -382,6 +383,15 @@ export const api = {
   // PDF de un documento emitido (D76, D223): la ruta se genera si falta; abrirlo usa el visor del sistema.
   salesDocumentPdf: (id: number) => invoke<string>("sales_document_pdf", { id }),
   salesOpenDocumentPdf: (id: number) => invoke<void>("sales_open_document_pdf", { id }),
+  // Envío por correo (E4b): la revisión vive en Pendientes; estos comandos devuelven errores `[codigo] mensaje`.
+  salesPrepareSend: (id: number) => invoke<Task>("sales_prepare_send", { id }),
+  salesEditSend: (id: number, to: string, subject: string, body: string, account: string) => invoke<Task>("sales_edit_send", { id, to, subject, body, account }),
+  salesApproveSend: (id: number, version: number) => invoke<Task>("sales_approve_send", { id, version }),
+  salesConfirmSendNotSent: (id: number) => invoke<Task>("sales_confirm_send_not_sent", { id }),
+  salesRejectSend: (id: number) => invoke<Task>("sales_reject_send", { id }),
+  salesSendTask: (id: number) => invoke<Task | null>("sales_send_task", { id }),
+  salesDocumentSends: (id: number) => invoke<SalesSend[]>("sales_document_sends", { id }),
+  salesSendAccounts: () => invoke<MailAccount[]>("sales_send_accounts"),
   salesCustomers: (retired = false) => invoke<SalesCustomer[]>("sales_customers", { retired }),
   salesCustomer: (id: number) => invoke<SalesCustomer>("sales_customer", { id }),
   salesCreateCustomer: (data: SalesCustomerData) => invoke<number>("sales_create_customer", { data }),

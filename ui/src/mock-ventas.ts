@@ -8,6 +8,9 @@
 
 import type {
   LetterheadMargins,
+  MailAccount,
+  SalesSend,
+  Task,
   SalesCollection,
   SalesCompany,
   SalesCustomer,
@@ -195,7 +198,210 @@ const mockLogo = (): ArrayBuffer => {
   return logo!.slice().buffer;
 };
 
+// ---- Envío de documentos por correo (E4b): tareas `send_sales_document` en la lista de tareas del
+// simulado (la comparte `mock.ts`) y un historial de envíos. Aproxima las reglas del backend con
+// los mismos códigos de error; `?envio-falla` hace que el primer envío falle para ver la
+// recuperación (D50).
+
+const SEND = "send_sales_document";
+let sendTasks: Task[] = [];
+let sendAccounts: () => MailAccount[] = () => [];
+const sends: SalesSend[] = [];
+let nextSendTask = 9000;
+let nextSend = 0;
+let failNextSend = params.has("envio-falla");
+
+/** `mock.ts` entrega su lista de tareas y sus cuentas de correo. */
+export function bindSendMock(tasks: Task[], accounts: () => MailAccount[]) {
+  sendTasks = tasks;
+  sendAccounts = accounts;
+}
+
+const SIMPLE_ADDRESS = /^[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)+$/;
+
+const sendable = (d: SalesDocument) =>
+  d.kind === "delivery_note" ? ["issued", "sent", "delivered"].includes(d.status) : ["issued", "sent"].includes(d.status);
+
+/** Cuentas elegibles: las conectadas, sin «Correo simulado» si hay alguna real. */
+function sendPool(): MailAccount[] {
+  const connected = sendAccounts().filter((a) => a.status === "connected");
+  const real = connected.filter((a) => a.provider !== "simulator");
+  return real.length ? real : connected;
+}
+
+const accountOf = (a: MailAccount) => ({ id: a.id, provider: a.provider, label: a.label, address: a.address });
+
+function openSend(docId: number): Task | undefined {
+  return sendTasks.find((t) => t.kind === SEND && t.result?.document?.id === docId && t.state !== "completed" && t.state !== "cancelled");
+}
+
+function sendTaskOf(id: number): Task {
+  const t = sendTasks.find((x) => x.id === id && x.kind === SEND);
+  if (!t) fail("not_found", `tarea ${id} inexistente`);
+  return t!;
+}
+
+function reviewableSend(id: number): Task {
+  const t = sendTaskOf(id);
+  if (t.state !== "awaiting_review") fail("conflict", `la tarea ${id} no está pendiente de revisión`);
+  return t;
+}
+
+function pdfName(d: SalesDocument): string {
+  return `${(d.number ?? "documento").replace(/[^A-Za-z0-9_-]/g, "_")}${d.revision > 1 ? `-r${d.revision}` : ""}.pdf`;
+}
+
+function recipientState(to: string): "ok" | "missing" | "invalid" {
+  return !to ? "missing" : SIMPLE_ADDRESS.test(to) && to.length <= 254 ? "ok" : "invalid";
+}
+
+function checkSendContent(to: string, subject: string, body: string, account: string) {
+  const state = recipientState(to);
+  if (state === "missing") fail("recipient_missing", "el cliente no tiene correo: falta el destinatario");
+  if (state === "invalid") fail("recipient_invalid", "el destinatario no es una dirección válida");
+  if (!subject || subject.length > 200 || /[\u0000-\u001f\u007f]/.test(subject)) fail("subject_invalid", "el asunto no es válido");
+  if (!body.trim()) fail("body_empty", "el cuerpo está vacío");
+  if (!account) fail("account_required", "elija una cuenta de correo conectada");
+  if (!sendAccounts().some((a) => a.id === account && a.status === "connected")) fail("account_unavailable", "la cuenta elegida no está conectada");
+}
+
+function prepareSend(docId: number): Task {
+  const d = get(docId);
+  if (d.status === "voided") fail("document_voided", "el documento está anulado y no se envía");
+  if (d.superseded_by !== null) fail("document_revised", "el documento tiene una revisión posterior");
+  if (!d.number || !sendable(d)) fail("status_not_sendable", `un documento en estado «${d.status}» no se puede enviar por correo`);
+  if (openSend(docId)) fail("send_in_progress", "este documento ya tiene un envío por correo abierto");
+  const pool = sendPool();
+  if (pool.length === 0) fail("no_mail_account", "no hay ninguna cuenta de correo conectada para enviar");
+  const mine = company?.email?.toLowerCase();
+  const chosen = pool.find((a) => a.address?.toLowerCase() === mine) ?? (pool.length === 1 ? pool[0] : undefined);
+  const customer = customers.find((c) => c.id === d.customer_id);
+  const email = customer?.data.email?.trim() || null;
+  const subject = `${KIND_TITLE[d.kind]} ${d.number}${d.revision > 1 ? ` (revisión ${d.revision})` : ""}${company?.name ? ` — ${company.name}` : ""}`;
+  const body = [`Hola${customer ? `, ${customer.data.name}` : ""}:`, "", `Le adjuntamos ${KIND_WITH_ARTICLE[d.kind]} ${d.number}${d.issue_date ? ` del ${d.issue_date.split("-").reverse().join("/")}` : ""}.`, "", "Un saludo,", company?.name ?? ""].join("\n");
+  const task: Task = {
+    id: ++nextSendTask,
+    kind: SEND,
+    input_ref: `sales_document:${docId}`,
+    state: "awaiting_review",
+    attempts: 0,
+    error: null,
+    created_at: Date.now(),
+    updated_at: Date.now(),
+    result: {
+      type: SEND,
+      version: 1,
+      document: { id: d.id, kind: d.kind, number: d.number, revision: d.revision, status: d.status },
+      customer_id: d.customer_id,
+      customer_email_at_prepare: email,
+      draft: { to: email ? [email] : [], subject, body, attachments: [{ name: pdfName(d), mime: "application/pdf", size: 48_000 + d.id, sha256: String(d.id).padStart(64, "c") }] },
+      account: chosen ? accountOf(chosen) : null,
+      checks: { sendable: true, pdf: "ok", account: chosen ? "ok" : "missing", recipient: recipientState(email ?? "") },
+      warnings: { recipient_differs: false },
+      review_reason: "todo envío por correo requiere su aprobación",
+      action: { kind: SEND },
+    },
+  };
+  sendTasks.push(task);
+  return task;
+}
+
+const KIND_TITLE: Record<SalesKind, string> = { quote: "Presupuesto", delivery_note: "Albarán", invoice: "Factura", simplified_invoice: "Factura simplificada", corrective_invoice: "Factura rectificativa" };
+const KIND_WITH_ARTICLE: Record<SalesKind, string> = { quote: "el presupuesto", delivery_note: "el albarán", invoice: "la factura", simplified_invoice: "la factura simplificada", corrective_invoice: "la factura rectificativa" };
+
+function editSend(id: number, to: string, subject: string, body: string, account: string): Task {
+  const t = reviewableSend(id);
+  const r = t.result!;
+  to = String(to).trim();
+  subject = String(subject).trim();
+  checkSendContent(to, subject, String(body), String(account).trim());
+  const chosen = sendAccounts().find((a) => a.id === String(account).trim())!;
+  const email = r.customer_email_at_prepare as string | null;
+  t.result = {
+    ...r,
+    version: (r.version ?? 1) + 1,
+    edited: true,
+    draft: { ...r.draft, to: [to], subject, body },
+    account: accountOf(chosen),
+    checks: { ...r.checks, account: "ok", recipient: "ok" },
+    warnings: { recipient_differs: email !== null && email.toLowerCase() !== to.toLowerCase() },
+  };
+  t.updated_at = Date.now();
+  return t;
+}
+
+function approveSend(id: number, version: number): Task {
+  const t = reviewableSend(id);
+  const r = t.result!;
+  if ((r.version ?? 1) !== version) fail("stale_version", `el contenido cambió (versión ${r.version}, se aprobó la ${version})`);
+  checkSendContent(r.draft.to?.[0] ?? "", r.draft.subject, r.draft.body, r.account?.id ?? "");
+  if (r.recovery?.needs_confirmation) return t;
+  if (failNextSend) {
+    failNextSend = false;
+    Object.assign(t, { state: "failed", attempts: t.attempts + 1, error: { code: "unavailable", message: "el servicio de correo no respondió" } });
+    t.result = { ...r, attempt: { version } };
+    return t;
+  }
+  const d = get(r.document.id);
+  const account = r.account;
+  sends.push({
+    id: ++nextSend,
+    document_id: d.id,
+    task_id: t.id,
+    version,
+    idempotency_key: `task-${t.id}/send_sales_document/v${version}`,
+    account: account.id,
+    account_address: account.address ?? null,
+    recipient: r.draft.to[0],
+    subject: r.draft.subject,
+    attachment_name: r.draft.attachments[0].name,
+    attachment_size: r.draft.attachments[0].size,
+    attachment_sha256: r.draft.attachments[0].sha256,
+    authorization: "aprobación",
+    sent_message_id: `simulado-${nextSend}`,
+    sent_at: Math.floor(Date.now() / 1000),
+  });
+  if (d.status === "issued") d.status = "sent";
+  Object.assign(t, { state: "completed", error: null });
+  t.result = { ...r, receipt: { simulated: true } };
+  return t;
+}
+
+/** Reintentar un envío fallido: vuelve a revisión con el aviso de intento sin confirmar (D50). */
+export function recoverSend(t: Task): Task {
+  const version = t.result?.attempt?.version ?? t.result?.version ?? 1;
+  t.state = "awaiting_review";
+  t.result = { ...t.result, recovery: { version, error: t.error?.message ?? null } };
+  t.error = null;
+  return t;
+}
+
+function confirmSendNotSent(id: number): Task {
+  const t = reviewableSend(id);
+  const r = t.result!;
+  if (!r.attempt) fail("conflict", `la tarea ${id} no tiene ningún intento anterior`);
+  const { recovery: _recovery, ...rest } = r;
+  t.result = { ...rest, version: (r.version ?? 1) + 1, review_reason: "versión nueva tras confirmar que el intento anterior no se realizó" };
+  return t;
+}
+
+function rejectSend(id: number): Task {
+  const t = sendTaskOf(id);
+  if (t.state === "completed" || t.state === "cancelled") fail("conflict", `la tarea ${id} ya no se puede descartar`);
+  if (t.result?.attempt && t.result?.recovery) fail("send_in_progress", "el envío tiene un intento sin cerrar: confirme que no se envió antes de descartarlo");
+  t.state = "cancelled";
+  return t;
+}
+
 export const salesHandlers: Record<string, (a: any, options?: any) => unknown> = {
+  sales_prepare_send: ({ id: d }) => prepareSend(d),
+  sales_edit_send: ({ id: t, to, subject, body, account }) => editSend(t, to, subject, body, account),
+  sales_approve_send: ({ id: t, version }) => approveSend(t, version),
+  sales_confirm_send_not_sent: ({ id: t }) => confirmSendNotSent(t),
+  sales_reject_send: ({ id: t }) => rejectSend(t),
+  sales_send_task: ({ id: d }) => openSend(d) ?? null,
+  sales_document_sends: ({ id: d }) => sends.filter((s) => s.document_id === d),
+  sales_send_accounts: () => sendPool(),
   reload_verifactu_producer: () => {
     // Simula corregir el archivo: la primera recarga lo deja válido.
     producerOk = true;

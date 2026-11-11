@@ -571,6 +571,9 @@ export const REASON_CODES = [
   "draft_flagged",
   "category_review_only",
   "rodaje",
+  "sales_send_blocked",
+  "recipient_changed",
+  "unknown_action",
 ] as const;
 
 export type ReasonCode = (typeof REASON_CODES)[number];
@@ -644,6 +647,13 @@ export function reasonText(code: string, facts?: Record<string, unknown> | null)
       if (seen < min) text += `; hacen falta aprobaciones de al menos ${min} direcciones distintas del dominio (llevan ${seen})`;
       return text;
     }
+    case "sales_send_blocked":
+      // Envío de un documento de venta (D238): la causa concreta no lleva contenido, solo texto fijo.
+      return `la regla coincide, pero el envío necesita una persona: ${typeof f.reason === "string" && f.reason ? f.reason : "falta una comprobación"}`;
+    case "recipient_changed":
+      return "el correo del cliente ya no es el destinatario de la regla; revise el envío";
+    case "unknown_action":
+      return "la acción no es de un tipo que esta versión sepa evaluar";
     default:
       return `motivo no reconocido (${code})`;
   }

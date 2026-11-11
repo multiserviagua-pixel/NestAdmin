@@ -2935,6 +2935,8 @@ mod espera;
 #[cfg(test)]
 mod recorrido;
 #[cfg(test)]
+mod recorrido_envio;
+#[cfg(test)]
 mod recorrido_pdf;
 #[cfg(test)]
 mod recorrido_venta;

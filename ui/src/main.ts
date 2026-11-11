@@ -229,6 +229,8 @@ import {
 } from "./rules-text";
 
 import { createSalesView } from "./ventas-view";
+import { salesErrorText } from "./ventas-text";
+import { SEND_APPROVE_BUTTON, SEND_DISCARD_BUTTON, SEND_KIND, SEND_OPEN_PDF_BUTTON, SEND_SAVE_BUTTON, formatSize, sendApproveBlock, sendAttachment, sendConfirmText, sendDiscardText, sendDocumentLabel, sendNotices, sendOutcome, sendRecipient } from "./ventas-envio-text";
 import { actionBar, dataTable, emptyState, h, helpTip, icon, sectionHeader, statusChip, tabs, type Child, type IconName, type Tone } from "./components";
 import {
   BOARD_COLUMNS,
@@ -294,7 +296,7 @@ import {
   statusOf as profileStatus,
   warningTexts,
 } from "./profile-text";
-import { ageText, chooseTab, emailFlags, formatAmount, invoiceFlags, isKnownKind, nextSelection, sortForReview, splitByTab, tabOf, totalIsProposed, type Flag, type QueueTab, type ReviewTab } from "./pendientes-text";
+import { ageText, chooseTab, emailFlags, formatAmount, invoiceFlags, isKnownKind, nextSelection, salesSendFlags, sortForReview, splitByTab, tabOf, totalIsProposed, type Flag, type QueueTab, type ReviewTab } from "./pendientes-text";
 import {
   ARCHIVED_NOTICE,
   ARCHIVE_LABEL,
@@ -617,6 +619,8 @@ const state = {
   // Borradores editados y aún no guardados, para no perderlos al refrescar.
   // Incluye los formularios de reglas en curso, con clave «rule:new» o «rule:edit:<id>».
   drafts: {} as Record<string, string>,
+  /** Cuentas entre las que se puede elegir para enviar un documento de venta (E4b). */
+  sendAccounts: [] as MailAccount[],
   // Tareas (D147): vista elegida, filtro por estado de la lista, tarjetas mostradas en cada columna
   // del tablero y tarjetas con el motivo completo desplegado.
   tasksView: readTasksView(),
@@ -697,7 +701,7 @@ async function ask(message: string): Promise<boolean> {
 }
 
 // Sección Ventas (E3b): lleva su propio estado y repinta con `render`.
-const sales = createSalesView({ render: () => render(), ask: async (message) => await ask(message) });
+const sales = createSalesView({ render: () => render(), ask: async (message) => await ask(message), openSendTask: (taskId) => openSendTask(taskId) });
 
 function notify(kind: "ok" | "error", text: unknown) {
   state.notice = { kind, text: String(text) };
@@ -785,7 +789,7 @@ function afterApproval(task: Task, done: string) {
 
 /// Explica un intento anterior sin confirmar (D50) y, si el borrador ya no existe, ofrece
 /// confirmar que no se envió para preparar una versión nueva.
-function recoveryBox(task: Task, verb: string) {
+function recoveryBox(task: Task, verb: string, salesSend = false) {
   const r = task.result ?? {};
   // Tras confirmar que no salió, la versión mostrada ya es otra y el aviso no aplica.
   if (!r.recovery && r.attempt?.version !== (r.version ?? 1)) return null;
@@ -800,7 +804,7 @@ function recoveryBox(task: Task, verb: string) {
       {},
       h("strong", {}, `Ya se intentó ${verb} la versión ${version} y no consta confirmado`),
       error ? ` (último error: ${error})` : "",
-      ". Se conserva el contenido aprobado; la IA no ha propuesto otro.",
+      salesSend ? ". Se conserva el contenido aprobado." : ". Se conserva el contenido aprobado; la IA no ha propuesto otro.",
     ),
     missing
       ? h(
@@ -819,7 +823,7 @@ function recoveryBox(task: Task, verb: string) {
           { class: "buttons" },
           h(
             "button",
-            { onclick: () => void act(() => api.confirmNotSent(task.id).then((t) => afterConfirm(t))) },
+            { onclick: () => void act(() => (salesSend ? api.salesConfirmSendNotSent(task.id).catch((e) => Promise.reject(salesErrorText(e))) : api.confirmNotSent(task.id)).then((t) => afterConfirm(t))) },
             "Confirmo que no se envió: preparar uno nuevo",
           ),
         )
@@ -897,6 +901,8 @@ async function refresh(background = false) {
       api.assistantConsent().catch(() => state.assistantConsent),
     ]);
     await pipelineLoad;
+    // Las cuentas para enviar un documento de venta solo se piden si hay un envío por revisar; un fallo conserva las últimas.
+    if (tasks.some((t) => t.kind === SEND_KIND && t.state === "awaiting_review")) state.sendAccounts = await api.salesSendAccounts().catch(() => state.sendAccounts);
     Object.assign(state, { assistantConsent, tasks, preferences, rules, findings, findingsError, suggestions, suggestionsError, refinement, refinePreview, refineError, audit, settings, mail, read, readError, profile, profilePreview, profileError, learningError, learnedBatch, learnedBatchError, continuous, continuousError });
     await syncLearning(learningOverview?.accounts ?? null);
     // La oferta de la IA local necesita saber si está preparada: se comprueba al aparecer la espera.
@@ -962,6 +968,20 @@ function openInReview(task: Task, tab: ReviewTab = tabOf(task.kind)) {
   state.selected[tab] = task.id;
   state.originFilter = "";
   state.notice = null;
+  render();
+}
+
+/** Desde el detalle de un documento: lleva a la tarjeta del envío en Pendientes (una sola vía de aprobación). */
+async function openSendTask(taskId: number) {
+  await refresh();
+  const task = state.tasks.find((t) => t.id === taskId);
+  if (!task || task.state !== "awaiting_review") {
+    state.notice = { kind: "warn", text: "El envío ya no está pendiente de revisión." };
+    render();
+    return;
+  }
+  openInReview(task);
+  state.notice = { kind: "ok", text: "Envío preparado: revise el destinatario, la cuenta, el asunto y el cuerpo, y apruébelo para enviar. No se envía nada hasta que lo apruebe." };
   render();
 }
 
@@ -1154,6 +1174,19 @@ function invoiceRow(task: Task, ageLabel: string): Child[] {
 }
 
 /** Fila de un correo (R13, D48): remitente, asunto y cuenta, categoría y qué falla. */
+/** Fila del envío de un documento de venta (E4b): documento, destinatario, cuenta y qué falla. */
+function salesSendRow(task: Task): Child[] {
+  const r = task.result ?? {};
+  const to = sendRecipient(r);
+  const flags = salesSendFlags(r);
+  return [
+    h("span", { class: "item-line" }, h("span", { class: "item-title" }, sendDocumentLabel(r)), h("span", { class: "item-side" }, shortDate(task.created_at))),
+    h("span", { class: "item-sub" }, to ? `Para: ${to}` : h("span", { class: "missing" }, "Sin destinatario")),
+    h("span", { class: "item-sub" }, `Cuenta: ${r.account?.id ? accountShort(taskMailOrigin(task), originKey(task)) : "sin elegir"}`),
+    flags.length ? h("span", { class: "item-flags" }, ...flagChips(flags)) : null,
+  ];
+}
+
 function emailRow(task: Task): Child[] {
   const input = safeJson(task.input_ref);
   const message = task.result?.message ?? input.message ?? {};
@@ -1311,7 +1344,7 @@ function reviewView() {
                 moveTo(rows[target]!.id);
               },
             },
-            ...(isInfo ? informativeRow(t) : tabOf(t.kind) === "invoices" ? invoiceRow(t, ageText(t.created_at, now)) : emailRow(t)),
+            ...(isInfo ? informativeRow(t) : tabOf(t.kind) === "invoices" ? invoiceRow(t, ageText(t.created_at, now)) : t.kind === SEND_KIND ? salesSendRow(t) : emailRow(t)),
           ),
         ),
         hiddenInfo > 0
@@ -1335,7 +1368,7 @@ function reviewView() {
           : null,
       ),
     ),
-    selected ? guardActions(isInfo ? informativeDetail(selected) : tabOf(selected.kind) === "invoices" ? invoiceDetail(selected) : emailDetail(selected)) : h("div", { class: "detail" }),
+    selected ? guardActions(isInfo ? informativeDetail(selected) : tabOf(selected.kind) === "invoices" ? invoiceDetail(selected) : selected.kind === SEND_KIND ? salesSendDetail(selected) : emailDetail(selected)) : h("div", { class: "detail" }),
   );
 }
 
@@ -1828,6 +1861,136 @@ function emailDetail(task: Task) {
   );
 }
 
+/**
+ * Revisión del envío de un documento de venta por correo (E4b, D232–D241). Destinatario, cuenta,
+ * asunto y cuerpo son editables; «Guardar cambios» deja una versión nueva y «Aprobar y enviar» pide
+ * antes confirmación con el destinatario y el documento. Es la única vía de aprobación del envío.
+ * Los errores llegan con código y se muestran con el texto de `ventas-text.ts`.
+ */
+function salesSendDetail(task: Task) {
+  const r = task.result ?? {};
+  const draft = r.draft ?? {};
+  const key = (field: string) => `send:${task.id}:${field}`;
+  const saved = { to: sendRecipient(r) ?? "", account: (r.account?.id ?? "") as string, subject: (draft.subject ?? "") as string, body: (draft.body ?? "") as string };
+  const live = (field: keyof typeof saved) => state.drafts[key(field)] ?? saved[field];
+  const input = (field: "to" | "subject", label: string, type: string) => {
+    const control = h("input", { type, "aria-label": label, "data-focus-key": key(field), oninput: () => (state.drafts[key(field)] = control.value) }) as HTMLInputElement;
+    control.value = live(field);
+    return control;
+  };
+  const to = input("to", "Destinatario", "email");
+  const subject = input("subject", "Asunto", "text");
+  const body = h("textarea", { rows: "10", "aria-label": "Cuerpo del correo", "data-focus-key": key("body"), oninput: () => (state.drafts[key("body")] = body.value) }) as HTMLTextAreaElement;
+  body.value = live("body");
+  // La cuenta elegida siempre está entre las opciones, aunque ya no se pueda elegir otra vez.
+  const options = [...state.sendAccounts];
+  if (saved.account && !options.some((a) => a.id === saved.account)) options.unshift({ id: saved.account, provider: r.account.provider, label: r.account.label ?? saved.account, address: r.account.address ?? null, status: "signed_out", last_fetch: null });
+  const account = h(
+    "select",
+    { "aria-label": "Cuenta de correo", "data-focus-key": key("account"), onchange: () => (state.drafts[key("account")] = account.value) },
+    h("option", { value: "", selected: live("account") === "" }, "Elija una cuenta"),
+    ...options.map((a) => h("option", { value: a.id, selected: a.id === live("account") }, `${a.label} · ${a.address ?? "dirección no consta"}${a.id === saved.account && !state.sendAccounts.some((x) => x.id === a.id) ? " (no disponible)" : ""}`)),
+  ) as HTMLSelectElement;
+  const values = () => ({ to: to.value.trim(), subject: subject.value.trim(), body: body.value, account: account.value });
+  const changed = () => {
+    const v = values();
+    return v.to !== saved.to || v.subject !== saved.subject.trim() || v.body !== saved.body || v.account !== saved.account;
+  };
+  const clearDrafts = () => {
+    for (const f of ["to", "subject", "body", "account"]) delete state.drafts[key(f)];
+  };
+  /** Guarda lo editado como versión nueva y devuelve la tarea. */
+  const save = async () => {
+    const v = values();
+    return await api.salesEditSend(task.id, v.to, v.subject, v.body, v.account).catch((e) => Promise.reject(salesErrorText(e)));
+  };
+  const notices = sendNotices(r);
+  const attachment = sendAttachment(r);
+  const block = sendApproveBlock(r, { to: live("to"), account: live("account") });
+  const unrecoverable = r.recovery?.needs_confirmation === true || r.checks?.pdf === "too_large" || r.checks?.pdf === "failed";
+  const article = h(
+    "article",
+    {},
+    h("div", { class: "detail-head" }, h("h2", {}, sendDocumentLabel(r)), statusChip("Envío por correo")),
+    h("p", { class: "reason" }, `Motivo de la revisión: ${r.review_reason ?? "todo envío por correo requiere su aprobación"}`),
+    recoveryBox(task, "enviar", true),
+    notices.length ? h("div", { class: "triage-notices" }, ...notices.map((n) => h("div", { class: `notice ${n.tone}`, role: n.tone === "error" ? "alert" : "status" }, h("span", {}, n.text)))) : null,
+    h("div", { class: "field" }, h("label", {}, "Para"), to),
+    h("div", { class: "field" }, h("label", {}, "Cuenta"), account),
+    h("div", { class: "field" }, h("label", {}, "Asunto"), subject),
+    h("div", { class: "field" }, h("label", {}, "Cuerpo"), body),
+    h(
+      "dl",
+      { class: "origin" },
+      h("dt", {}, "Adjunto"),
+      h("dd", {}, attachment ? `${attachment.name} · ${formatSize(attachment.size)} · PDF` : missing("No consta el PDF")),
+      h("dt", {}, "Versión"),
+      h("dd", {}, String(r.version ?? 1)),
+    ),
+    h("p", { class: "meta" }, "No se envía nada hasta que lo apruebe. Si cambia algo, se guarda como versión nueva y hay que aprobarla. La entrega al destinatario no se comprueba."),
+  );
+  return h(
+    "div",
+    { class: "detail" },
+    h("div", { class: "detail-scroll", "data-scroll-key": `detail:${task.id}` }, article),
+    actionBar(
+      unrecoverable ? block : null,
+      h(
+        "button",
+        {
+          class: "primary",
+          disabled: unrecoverable && block !== null,
+          "data-focus-key": `send:approve:${task.id}`,
+          onclick: () =>
+            resolveTask(task, async () => {
+              const v = values();
+              const why = sendApproveBlock(r, { to: v.to, account: v.account });
+              if (why) throw why;
+              const chosen = options.find((a) => a.id === v.account);
+              if (!(await ask(sendConfirmText(r, v.to, chosen ? `${chosen.label} · ${chosen.address ?? "dirección no consta"}` : v.account)))) return;
+              let version: number = r.version ?? 1;
+              if (changed()) version = (await save()).result?.version;
+              const done = await api.salesApproveSend(task.id, version).catch((e) => Promise.reject(salesErrorText(e)));
+              clearDrafts();
+              state.notice = sendOutcome(done);
+            }),
+        },
+        SEND_APPROVE_BUTTON,
+      ),
+      h(
+        "button",
+        {
+          "data-focus-key": `send:save:${task.id}`,
+          onclick: () => {
+            if (!changed()) return notify("ok", "No hay cambios que guardar.");
+            void act(async () => {
+              await save();
+              clearDrafts();
+            }, "Cambios guardados como versión nueva; apruébela para enviar");
+          },
+        },
+        SEND_SAVE_BUTTON,
+      ),
+      h("button", { "data-focus-key": `send:pdf:${task.id}`, onclick: () => void act(() => api.salesOpenDocumentPdf(r.document?.id).catch((e) => Promise.reject(salesErrorText(e))), "El PDF se abre con el visor del sistema") }, SEND_OPEN_PDF_BUTTON),
+      h(
+        "button",
+        {
+          class: "danger",
+          "data-focus-key": `send:discard:${task.id}`,
+          onclick: () =>
+            resolveTask(task, async () => {
+              if (!(await ask(sendDiscardText(r)))) return;
+              await api.salesRejectSend(task.id).catch((e) => Promise.reject(salesErrorText(e)));
+              clearDrafts();
+              state.notice = { kind: "ok", text: "Envío descartado" };
+            }),
+        },
+        SEND_DISCARD_BUTTON,
+      ),
+    ),
+  );
+}
+
 const TASK_TONE: Record<string, Tone> = {
   queued: "info",
   running: "info",
@@ -1870,7 +2033,7 @@ function breakable(text: string): Child[] {
   return out;
 }
 
-const kindLabel = (kind: string) => (isKnownKind(kind) ? (kind === "invoice" ? "Factura" : "Correo") : "Tipo no reconocido");
+const kindLabel = (kind: string) => (isKnownKind(kind) ? (kind === "invoice" ? "Factura" : kind === SEND_KIND ? "Envío de venta" : "Correo") : "Tipo no reconocido");
 
 function reasonSpan(reason: TaskReason): HTMLElement {
   return reason.tone === "error"
@@ -4485,6 +4648,11 @@ function taskMailOrigin(task: Task): MailOrigin | null {
     const origin: DocumentOrigin | undefined = task.result?.origin ?? input.origin;
     return origin?.kind === "email" ? mailOrigin(origin.account, `${origin.account.account}:`) : null;
   }
+  // El envío de un documento de venta sale por la cuenta elegida en la tarea.
+  if (task.kind === SEND_KIND) {
+    const a = task.result?.account;
+    return a?.id ? mailOrigin({ account: a.id, provider: a.provider, label: a.label, address: a.address ?? null }, undefined) : null;
+  }
   const messageId = task.result?.message?.id ?? input.message_id;
   return mailOrigin(task.result?.origin ?? input.origin, messageId);
 }
@@ -4496,6 +4664,7 @@ function originKey(task: Task): string {
     const origin: DocumentOrigin | undefined = task.result?.origin ?? input.origin;
     return origin?.kind === "email" ? origin.account.account : "file";
   }
+  if (task.kind === SEND_KIND) return task.result?.account?.id ?? "sin-cuenta";
   return accountId(task.result?.message?.id ?? input.message_id);
 }
 

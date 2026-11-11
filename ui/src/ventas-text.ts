@@ -37,6 +37,31 @@ const ERROR_HEADLINE: Record<string, string> = {
   pdf_failed: "No se pudo generar el PDF",
 };
 
+/**
+ * Errores del envío de un documento por correo (E4b, D232–D241): el texto lo fija la interfaz y
+ * dice qué hacer; el detalle del backend solo se añade donde trae un dato útil (el tamaño del PDF).
+ */
+const SEND_ERROR: Record<string, { text: string; withDetail?: boolean }> = {
+  no_mail_account: { text: "No hay ninguna cuenta de correo conectada para enviar. Conecte una en Cuentas de correo." },
+  account_required: { text: "Elija la cuenta de correo desde la que se envía." },
+  account_unavailable: { text: "La cuenta de correo elegida no está disponible: reconéctela o elija otra." },
+  recipient_missing: { text: "El cliente no tiene correo: escriba el destinatario para poder enviarlo." },
+  recipient_invalid: { text: "El destinatario no es una dirección de correo válida: escriba una sola dirección." },
+  subject_invalid: { text: "El asunto no es válido: no puede estar vacío, pasar de 200 caracteres ni llevar saltos de línea." },
+  body_empty: { text: "El cuerpo del correo está vacío." },
+  attachment_too_large: { text: "El PDF supera los 3 MB y no se puede enviar", withDetail: true },
+  status_not_sendable: { text: "El documento no está en un estado que permita enviarlo por correo." },
+  document_revised: { text: "El documento tiene una revisión nueva: envíe la revisión vigente." },
+  document_voided: { text: "El documento está anulado y no se envía." },
+  pdf_changed: { text: "El PDF del documento ya no es el que revisó: compruébelo de nuevo antes de enviarlo." },
+  send_in_progress: { text: "Ya hay un envío en curso para este documento." },
+  stale_version: { text: "El envío cambió mientras lo revisaba: vuelva a leerlo y apruébelo de nuevo." },
+  unavailable: { text: "El servicio de correo no está disponible ahora mismo." },
+};
+
+/** Códigos de error propios del envío por correo. */
+export const SEND_ERROR_CODES: string[] = Object.keys(SEND_ERROR);
+
 /** `invalid_input` llega como «datos no válidos: campo: motivo»: el encabezado ya dice lo primero y
  * el campo del membrete (`letterhead`, `letterhead.margins`…) no le dice nada al usuario. */
 function cleanInvalidInput(detail: string): string {
@@ -48,6 +73,8 @@ function cleanInvalidInput(detail: string): string {
 /** Texto para el usuario: el encabezado del código y, detrás, el detalle del backend sin tocar. */
 export function salesErrorText(error: unknown): string {
   const { code, detail } = parseSalesError(error);
+  const send = code ? SEND_ERROR[code] : undefined;
+  if (send) return send.withDetail && detail ? `${send.text}: ${detail}` : send.text;
   const headline = code ? ERROR_HEADLINE[code] : undefined;
   if (!headline) return detail || "Error desconocido";
   const body = code === "invalid_input" ? cleanInvalidInput(detail) : detail;

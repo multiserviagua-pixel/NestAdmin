@@ -17,16 +17,24 @@
 //! reacciona al código (`verifactu_not_configured`, `verifactu_chain_broken`,
 //! `verifactu_clock_behind`, `invalid_input`, `conflict`, `not_found`, `storage`...) y muestra el
 //! resto como texto, sin interpretarlo.
+//!
+//! Envío de documentos por correo (E4b, D232–D241): `sales_prepare_send`, `sales_edit_send`,
+//! `sales_approve_send`, `sales_confirm_send_not_sent`, `sales_reject_send`, `sales_send_task`,
+//! `sales_document_sends` y `sales_send_accounts`. Aprobar, confirmar y descartar tienen comando
+//! propio (y no los de las tareas de correo) para que sus errores lleguen con código
+//! (`recipient_missing`, `stale_version`, `send_in_progress`...); hacen lo mismo que ellos.
 
 use std::str::FromStr;
 use std::sync::MutexGuard;
 
+use nestadmin_app::accounts::AccountView;
 use nestadmin_app::{App, AppError, AppResult};
 use nestadmin_core::sales::{
     ChainStatus, Company, Customer, CustomerData, DraftInput, DraftLine, IssuerSnapshot,
     LetterheadMargins, ReceivedDeliveryNote, RectificationDraft, RecurringRecord, RecurringRun,
-    SalesDocument, SalesFilter, SalesLineRecord, VerifactuKind, VerifactuRecordRow,
+    SalesDocument, SalesFilter, SalesLineRecord, SalesSend, VerifactuKind, VerifactuRecordRow,
 };
+use nestadmin_core::Task;
 use nestadmin_documents::IsoDate;
 use nestadmin_sales::{
     CollectionSummary, DocumentKind, Exemption, Frequency, IssueMode, LineInput, Party, Payment,
@@ -36,7 +44,7 @@ use nestadmin_sales::{
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use tauri::ipc::{Invoke, Response};
-use tauri::{Runtime, State};
+use tauri::{AppHandle, Runtime, State};
 
 use crate::productor::{self, ProducerState};
 use crate::SharedState;
@@ -905,6 +913,95 @@ fn sales_open_document_pdf(shared: State<'_, SharedState>, id: i64) -> CmdResult
     crate::open_file(&path).map_err(|e| coded("io", e))
 }
 
+// ---- Envío de documentos por correo (E4b, D232–D241) ----
+
+/// Prepara el envío de un documento emitido: crea la tarea `send_sales_document` en revisión con
+/// el destinatario (el correo del cliente), la cuenta, el asunto, el cuerpo y los metadatos del
+/// PDF. No envía nada: hay que aprobarla (R07). Un envío abierto da `[send_in_progress]`.
+#[tauri::command]
+fn sales_prepare_send<R: Runtime>(
+    shared: State<'_, SharedState>,
+    handle: AppHandle<R>,
+    id: i64,
+) -> CmdResult<Task> {
+    let task = sale(lock(&shared)?.prepare_sales_send(id))?;
+    crate::changed(&handle);
+    Ok(task)
+}
+
+/// Cambia destinatario, cuenta, asunto y cuerpo de un envío en revisión; deja una versión nueva
+/// que hay que aprobar otra vez.
+#[tauri::command]
+fn sales_edit_send<R: Runtime>(
+    shared: State<'_, SharedState>,
+    handle: AppHandle<R>,
+    id: i64,
+    to: String,
+    subject: String,
+    body: String,
+    account: String,
+) -> CmdResult<Task> {
+    let task = sale(lock(&shared)?.edit_sales_send(id, &to, &subject, &body, &account))?;
+    crate::changed(&handle);
+    Ok(task)
+}
+
+/// Aprueba la versión vista y envía. Devuelve la tarea (completada, fallida o de vuelta en
+/// revisión); un error de validación llega como `[codigo] mensaje`.
+#[tauri::command]
+fn sales_approve_send<R: Runtime>(
+    shared: State<'_, SharedState>,
+    handle: AppHandle<R>,
+    id: i64,
+    version: i64,
+) -> CmdResult<Task> {
+    let task = sale(lock(&shared)?.approve(id, version));
+    crate::changed(&handle);
+    task
+}
+
+/// El usuario confirma que el intento anterior no se envió; prepara una versión nueva (D50).
+#[tauri::command]
+fn sales_confirm_send_not_sent<R: Runtime>(
+    shared: State<'_, SharedState>,
+    handle: AppHandle<R>,
+    id: i64,
+) -> CmdResult<Task> {
+    let task = sale(lock(&shared)?.confirm_not_sent(id));
+    crate::changed(&handle);
+    task
+}
+
+/// Descarta un envío sin intento sin cerrar; con uno pendiente da `[send_in_progress]` (D235).
+#[tauri::command]
+fn sales_reject_send<R: Runtime>(
+    shared: State<'_, SharedState>,
+    handle: AppHandle<R>,
+    id: i64,
+) -> CmdResult<Task> {
+    let task = sale(lock(&shared)?.reject(id))?;
+    crate::changed(&handle);
+    Ok(task)
+}
+
+/// La tarea de envío abierta de un documento (en revisión, en curso o fallida), si la hay.
+#[tauri::command]
+fn sales_send_task(shared: State<'_, SharedState>, id: i64) -> CmdResult<Option<Task>> {
+    sale(lock(&shared)?.sales_send_task(id))
+}
+
+/// Envíos confirmados de un documento, del más antiguo al más reciente.
+#[tauri::command]
+fn sales_document_sends(shared: State<'_, SharedState>, id: i64) -> CmdResult<Vec<SalesSend>> {
+    sale(lock(&shared)?.sales_document_sends(id))
+}
+
+/// Cuentas entre las que se puede elegir para enviar un documento.
+#[tauri::command]
+fn sales_send_accounts(shared: State<'_, SharedState>) -> CmdResult<Vec<AccountView>> {
+    Ok(lock(&shared)?.sales_send_accounts())
+}
+
 // ---- Clientes y productos ----
 
 #[tauri::command]
@@ -1273,6 +1370,14 @@ pub fn handler<R: Runtime>() -> impl Fn(Invoke<R>) -> bool + Send + Sync + 'stat
         sales_set_letterhead_margins,
         sales_document_pdf,
         sales_open_document_pdf,
+        sales_prepare_send,
+        sales_edit_send,
+        sales_approve_send,
+        sales_confirm_send_not_sent,
+        sales_reject_send,
+        sales_send_task,
+        sales_document_sends,
+        sales_send_accounts,
         sales_customers,
         sales_customer,
         sales_create_customer,
