@@ -42,6 +42,7 @@ use nestadmin_app::profile::{
 use nestadmin_app::refine::{
     ConsentView, RefineExpectation, RefineMode, RefinePreview, RefineTrigger, RefinementView,
 };
+use nestadmin_app::remission::PumpStart;
 use nestadmin_app::rules::RuleFinding;
 use nestadmin_app::search::{extract_for_index, QuestionAnswer, INDEX_BATCH};
 use nestadmin_app::suggest::{RuleSeed, SeenInvoice, Suggestions, ThresholdSettings};
@@ -2373,6 +2374,35 @@ fn resume_initial_reads<R: Runtime>(shared: &SharedState, handle: &AppHandle<R>)
     }
 }
 
+/// Tick de la remisión Verifactu (E5, D250): cada vez que la cola queda ociosa (cada pocos
+/// segundos) reenvía el lote abierto o remite los pendientes cuando ya pasó la espera. La
+/// llamada de red se hace sin el cerrojo de la aplicación. Devuelve si hizo una remisión; un
+/// error solo se muestra, no detiene la cola.
+fn resume_verifactu<R: Runtime>(shared: &SharedState, handle: &AppHandle<R>) -> bool {
+    let start = match shared.app() {
+        Ok(mut app) => app.verifactu_pump_begin(false),
+        Err(_) => return false,
+    };
+    let job = match start {
+        Ok(PumpStart::Job(job)) => job,
+        Ok(PumpStart::Idle(_)) => return false,
+        Err(error) => {
+            eprintln!("no se pudo preparar la remisión de Verifactu: {error}");
+            return false;
+        }
+    };
+    let sent = job.run();
+    let finished = match shared.app() {
+        Ok(mut app) => app.verifactu_pump_finish(sent),
+        Err(_) => return false,
+    };
+    if let Err(error) = finished {
+        eprintln!("no se pudo guardar el resultado de la remisión: {error}");
+    }
+    changed(handle);
+    true
+}
+
 /// Procesa la cola sin bloquear la ventana: la llamada al modelo se hace sin el cerrojo.
 fn worker<R: Runtime>(shared: SharedState, handle: AppHandle<R>, wake: Receiver<()>) {
     let mut probe = probe::WaitProbe::default();
@@ -2394,7 +2424,8 @@ fn worker<R: Runtime>(shared: SharedState, handle: AppHandle<R>, wake: Receiver<
                 changed(&handle);
             }
             Ok(None) => {
-                if resume_initial_reads(&shared, &handle)
+                if resume_verifactu(&shared, &handle)
+                    || resume_initial_reads(&shared, &handle)
                     || resume_learning(&shared, &handle)
                     || resume_continuous_learning(&shared, &handle)
                 {

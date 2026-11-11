@@ -7,7 +7,9 @@
 //!   configurado (`set_verifactu_producer`) falla con `verifactu_not_configured` antes de tocar
 //!   nada: la factura sigue en borrador y la serie no consume número.
 //! * Un presupuesto o un albarán se emite sin registro y no exige productor.
-//! * Nada se remite a la AEAT: solo se dejan los registros listos y verificables.
+//! * Los registros se dejan listos y verificables; su remisión al simulador de la AEAT la hace la
+//!   bomba de `remission.rs`, en el worker y con «Remitir ahora»; emitir y anular solo dejan la
+//!   petición, sin red (E5, D250).
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -32,7 +34,7 @@ use nestadmin_sales::{
 use nestadmin_simulators::{NewDraft, OutgoingAttachment, MAX_OUTGOING_ATTACHMENT_BYTES};
 use nestadmin_verifactu::tipos::validar_nif;
 use nestadmin_verifactu::{
-    CodigoQr, Entorno, FechaHoraHuso, Persona, RegistroFacturacion, SistemaInformatico,
+    CodigoQr, FechaHoraHuso, Persona, RegistroFacturacion, SistemaInformatico,
 };
 use rust_decimal::Decimal;
 use serde_json::{json, Value};
@@ -94,7 +96,7 @@ impl SalesClock for LocalClock {
 /// Código del error cuando el reloj no da una hora representable (no se inventa una).
 pub const CODE_CLOCK_UNAVAILABLE: &str = "clock_unavailable";
 
-fn clock_error(why: String) -> AppError {
+pub(crate) fn clock_error(why: String) -> AppError {
     AppError::Sales(SalesStoreError::External {
         code: CODE_CLOCK_UNAVAILABLE.to_owned(),
         message: why,
@@ -171,7 +173,7 @@ impl App {
 
     /// Contexto Verifactu para registrar ahora: productor configurado, número de instalación
     /// (se genera la primera vez y no cambia) y hora del reloj.
-    fn verifactu_context(&mut self) -> AppResult<VerifactuContext> {
+    pub(crate) fn verifactu_context(&mut self) -> AppResult<VerifactuContext> {
         let producer = self.verifactu_producer.clone().ok_or_else(not_configured)?;
         let seed = self.documents.to_string_lossy().into_owned();
         let installation = self.store.ensure_installation_number(&seed)?;
@@ -309,12 +311,12 @@ impl App {
             None => None,
         };
         let qr = if doc.kind.is_invoice() {
-            let alta = self
+            let (record_id, alta) = self
                 .store
                 .verifactu_records()?
                 .into_iter()
                 .find_map(|row| match row.record {
-                    RegistroFacturacion::Alta(a) if row.document_id == doc.id => Some(a),
+                    RegistroFacturacion::Alta(a) if row.document_id == doc.id => Some((row.id, a)),
                     _ => None,
                 })
                 .ok_or_else(|| {
@@ -324,8 +326,11 @@ impl App {
                         .into(),
                     )
                 })?;
+            // El QR es el del entorno guardado con el registro (D248): pruebas para el simulador,
+            // producción para lo anterior a la migración 16 (D226). Sin fila es un error.
+            let environment = self.store.verifactu_record_environment(record_id)?;
             Some(
-                CodigoQr::de_registro(Entorno::Produccion, &alta).map_err(|e| {
+                CodigoQr::de_registro(environment.qr_entorno(), &alta).map_err(|e| {
                     SalesStoreError::External {
                         code: CODE_PDF_FAILED.to_owned(),
                         message: format!("no se pudo construir el QR: {e}"),
@@ -474,13 +479,20 @@ impl App {
         // La regla por cliente (D238) solo actúa al emitir y nunca puede impedir ni deshacer la
         // emisión: lo que falle queda anotado en el historial.
         self.send_on_issue(&issued);
+        // La remisión obligatoria a la AEAT corre después de confirmar la emisión y nunca la
+        // impide ni devuelve error: un fallo solo se anota (D250).
+        if issued.kind.is_invoice() {
+            self.pump_after_write();
+        }
         Ok(issued)
     }
 
     /// Anula una factura emitida y genera su registro de anulación Verifactu.
     pub fn void_sales_invoice(&mut self, id: i64) -> AppResult<SalesDocument> {
         let ctx = self.verifactu_context()?;
-        Ok(self.store.void_sales_invoice_registered(id, &ctx)?)
+        let voided = self.store.void_sales_invoice_registered(id, &ctx)?;
+        self.pump_after_write();
+        Ok(voided)
     }
 
     pub fn transition_sales_document(&mut self, id: i64, to: Status) -> AppResult<SalesDocument> {

@@ -21,6 +21,7 @@ pub mod pipelines;
 pub mod preferences;
 pub mod profile;
 pub mod refine;
+pub mod remission;
 pub mod rules;
 pub mod sales;
 pub mod sales_pdf;
@@ -361,6 +362,9 @@ pub struct App {
     sales_clock: Arc<dyn sales::SalesClock>,
     /// Productor del software para los registros Verifactu; lo fija quien arranca la app.
     verifactu_producer: Option<nestadmin_verifactu::Persona>,
+    /// Estado en memoria de la remisión Verifactu (E5, D250-D254): exclusión de la bomba y
+    /// simulador en proceso. No se guarda nada de esto.
+    remission: remission::RemissionRuntime,
 }
 
 /// Si se puede instalar una actualización sin cortar trabajo (actualizaciones.md, paso 5).
@@ -974,6 +978,7 @@ impl App {
             read_gate: Arc::new(Mutex::new(HashSet::new())),
             sales_clock: Arc::new(sales::LocalClock),
             verifactu_producer: None,
+            remission: remission::RemissionRuntime::from_env(),
         };
         app.store.recover()?;
         app.seed_account_counters()?;
@@ -982,6 +987,8 @@ impl App {
         // Los envíos de documentos de venta se reconcilian cada uno en su cuenta (D240).
         app.reconcile_sales_sends()?;
         app.complete_confirmed_reviews()?;
+        // Las tareas de remisión Verifactu a medias se cierran o esperan a la bomba (D252).
+        app.recover_verifactu();
         app.rebuild_registry()?;
         Ok(app)
     }
@@ -2455,6 +2462,10 @@ impl App {
             .ready_tasks()?
             .into_iter()
             .filter(|t| {
+                // La remisión Verifactu tiene camino propio: la lleva la bomba, no la cola.
+                if t.kind == remission::SUBMIT_VERIFACTU {
+                    return false;
+                }
                 let Ok(input) = serde_json::from_str::<Value>(&t.input_ref) else {
                     return true;
                 };

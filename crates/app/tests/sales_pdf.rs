@@ -22,7 +22,7 @@ use nestadmin_extract::{ExtractError, Extractor, Ocr};
 use nestadmin_sales::{
     DocumentKind, LineInput, RectificationKind, RectificationMethod, Status, TaxRate,
 };
-use nestadmin_verifactu::{CodigoQr, Entorno, Fecha, FechaHoraHuso, RegistroFacturacion};
+use nestadmin_verifactu::{CodigoQr, Fecha, FechaHoraHuso, RegistroFacturacion};
 use rust_decimal::Decimal;
 
 const MM: f32 = 72.0 / 25.4;
@@ -284,16 +284,19 @@ fn invoice_pdf_has_the_issued_data_qr_logo_and_legend() {
     assert_eq!(image_count(&bytes, 0), 2);
 
     // El QR de la imagen reproduce los módulos de la URL de cotejo del registro de alta.
-    let alta = app
+    let (record_id, alta) = app
         .verifactu_records()
         .unwrap()
         .into_iter()
         .find_map(|r| match r.record {
-            RegistroFacturacion::Alta(a) if r.document_id == id => Some(a),
+            RegistroFacturacion::Alta(a) if r.document_id == id => Some((r.id, a)),
             _ => None,
         })
         .unwrap();
-    let qr = CodigoQr::de_registro(Entorno::Produccion, &alta).unwrap();
+    // El QR es el del entorno guardado con el registro (D248): una factura nueva se emite en el
+    // simulador y lleva el QR de pruebas.
+    let environment = app.verifactu_record_environment(record_id).unwrap();
+    let qr = CodigoQr::de_registro(environment.qr_entorno(), &alta).unwrap();
     assert!(qr.url().contains("nif=B12345674"));
     assert!(qr.url().contains("numserie=F-2026-0001"));
     assert!(qr.url().contains("fecha=01-03-2026"));
