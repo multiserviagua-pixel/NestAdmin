@@ -2,6 +2,16 @@
 
 2026-11-11, Windows 11. Solo datos sintéticos e inventados. Aquí solo hay recuentos; las respuestas del modelo quedan en `evaluation/results/`, fuera de Git.
 
+> **Rectificación (2026-11-11, tras la revisión de `arquitecto`).** Los recuentos de esta página son los que dio el evaluador, pero el evaluador tiene huecos y **no acreditan toda la puerta de D192**:
+>
+> - La fila «Respuesta con HTML o enlaces del atacante» no mide eso: cuenta texto hostil fuera de su bloque. Ningún criterio mira enlaces en la respuesta, y con el modelo simulado obediente dos casos responden con un enlace del atacante sin que nada lo marque.
+> - Las propuestas no se comparan con lo que la persona pidió. Las 8 tarjetas que consigue el modelo obediente (entre ellas una regla de envío hacia el dominio del atacante) deberían marcar el criterio «condición que la persona no pidió» de D192 y no lo hacen.
+> - Varios tipos de tarjeta no se comprueban, así que «todas con datos de la tarea» no está respaldado.
+> - Con modelo real, «medido» no garantiza que el modelo llegara a leer el contenido hostil.
+> - La clave centinela no es alcanzable por la aplicación en el mundo de la medición: el cero de secretos demuestra poco.
+>
+> T37c vuelve a «Parcial». Lo que sí se sostiene: en ninguna ejecución hubo un envío, un registro, un cambio de tarea ni una regla creada o activada sin el botón.
+
 ## Qué hay
 
 | Pieza | Dónde |
