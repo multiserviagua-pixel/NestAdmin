@@ -4,7 +4,7 @@
     "kind": "invoice",
     "input": {
       "name": "factura-F-2026-101.txt",
-      "text": "Factura F-2026-101\nProveedor: Suministros Ficticios SL\nNIF: B12345674\nFecha: 2026-10-05\nConcepto: Papel y tóner para la oficina\nEntrega en el almacén central.\nBase imponible: 400,00 EUR\nIVA 21%: 84,00 EUR\nTotal: 484,00 EUR\nIBAN para el pago: ES91 2100 0418 4502 0005 1332\nContacto: facturacion@suministros-ficticios.test",
+      "text": "Factura F-2026-101\nProveedor: Suministros Ficticios SL\nNIF: B12345670\nFecha: 2026-10-05\nConcepto: Papel y tóner para la oficina\nEntrega en el almacén central.\nBase imponible: 400,00 EUR\nIVA 21%: 84,00 EUR\nTotal: 484,00 EUR\nIBAN para el pago: ES00 9999 0000 0000 0000 0001\nContacto: facturacion@suministros-ficticios.test",
       "supplier": "Suministros Ficticios SL",
       "invoice_number": "F-2026-101",
       "date": "2026-10-05",
@@ -20,7 +20,7 @@
     "kind": "invoice",
     "input": {
       "name": "factura-F-2026-117.txt",
-      "text": "Factura F-2026-117\nProveedor: Suministros Ficticios SL\nNIF: B12345674\nFecha: 2026-10-19\nConcepto: Cartuchos de tinta y sobres\nBase imponible: 150,00 EUR\nIVA 21%: 31,50 EUR\nTotal: 181,50 EUR",
+      "text": "Factura F-2026-117\nProveedor: Suministros Ficticios SL\nNIF: B12345670\nFecha: 2026-10-19\nConcepto: Cartuchos de tinta y sobres\nBase imponible: 150,00 EUR\nIVA 21%: 31,50 EUR\nTotal: 181,50 EUR",
       "supplier": "Suministros Ficticios SL",
       "invoice_number": "F-2026-117",
       "date": "2026-10-19",
@@ -116,7 +116,7 @@
     "kind": "invoice",
     "input": {
       "name": "factura-LB-310.txt",
-      "text": "Factura LB-310\nProveedor: Limpiezas Brillo SL\nNIF: B33445566\nFecha: 2026-10-21\nConcepto: Servicio de limpieza de oficinas\nPeriodo: octubre de 2026.\nBase imponible: 180,00 EUR\nIVA 21%: 37,80 EUR\nTotal: 217,80 EUR\nContacto: 612 345 678",
+      "text": "Factura LB-310\nProveedor: Limpiezas Brillo SL\nNIF: B33445566\nFecha: 2026-10-21\nConcepto: Servicio de limpieza de oficinas\nPeriodo: octubre de 2026.\nBase imponible: 180,00 EUR\nIVA 21%: 37,80 EUR\nTotal: 217,80 EUR\nContacto: 600 000 123",
       "supplier": "Limpiezas Brillo SL",
       "invoice_number": "LB-310",
       "date": "2026-10-21",
@@ -148,7 +148,7 @@
     "kind": "invoice",
     "input": {
       "name": "factura-F-2026-124.txt",
-      "text": "Factura F-2026-124\nProveedor: Suministros Ficticios SL\nNIF: B12345674\nFecha: 2026-10-26\nConcepto: Resmas de papel reciclado\nBase imponible: 95,00 EUR\nIVA 21%: 19,95 EUR\nTotal: 114,95 EUR",
+      "text": "Factura F-2026-124\nProveedor: Suministros Ficticios SL\nNIF: B12345670\nFecha: 2026-10-26\nConcepto: Resmas de papel reciclado\nBase imponible: 95,00 EUR\nIVA 21%: 19,95 EUR\nTotal: 114,95 EUR",
       "supplier": "Suministros Ficticios SL",
       "invoice_number": "F-2026-124",
       "date": "2026-10-26",
@@ -157,6 +157,70 @@
       "total": "114.95",
       "currency": "EUR",
       "state": "awaiting_review"
+    }
+  },
+  {
+    "id": "D01",
+    "kind": "invoice",
+    "input": {
+      "name": "factura-F-2026-040.txt",
+      "text": "Factura F-2026-040\nProveedor: Suministros Fictos del Sur SL\nFecha: 2026-07-12\nConcepto: Papel y tóner de repuesto para la oficina\nBase imponible: 50,00 EUR\nIVA 21%: 10,50 EUR\nTotal: 60,50 EUR",
+      "supplier": "Suministros Fictos del Sur SL",
+      "invoice_number": "F-2026-040",
+      "date": "2026-07-12",
+      "subtotal": "50.00",
+      "tax": "10.50",
+      "total": "60.50",
+      "currency": "EUR",
+      "state": "completed"
+    }
+  },
+  {
+    "id": "D02",
+    "kind": "invoice",
+    "input": {
+      "name": "factura-TN-5513.txt",
+      "text": "Factura TN-5513\nProveedor: Transportes del Nordeste Ficticio SA\nFecha: 2026-07-03\nConcepto: Transporte de pallets a Burgos\nBase imponible: 250,00 EUR\nIVA 21%: 52,50 EUR\nTotal: 302,50 EUR",
+      "supplier": "Transportes del Nordeste Ficticio SA",
+      "invoice_number": "TN-5513",
+      "date": "2026-07-03",
+      "subtotal": "250.00",
+      "tax": "52.50",
+      "total": "302.50",
+      "currency": "EUR",
+      "state": "completed"
+    }
+  },
+  {
+    "id": "D03",
+    "kind": "invoice",
+    "input": {
+      "name": "factura-AN-0413.txt",
+      "text": "Factura AN-0413\nProveedor: Asesores Ñublense SL\nFecha: 2026-07-20\nConcepto: Asesoría fiscal del segundo trimestre\nBase imponible: 200,00 EUR\nIVA 21%: 42,00 EUR\nTotal: 242,00 EUR",
+      "supplier": "Asesores Ñublense SL",
+      "invoice_number": "AN-0413",
+      "date": "2026-07-20",
+      "subtotal": "200.00",
+      "tax": "42.00",
+      "total": "242.00",
+      "currency": "EUR",
+      "state": "completed"
+    }
+  },
+  {
+    "id": "D04",
+    "kind": "invoice",
+    "input": {
+      "name": "factura-IA-0089.txt",
+      "text": "Factura IA-0089\nProveedor: Informática Atlántica SL\nFecha: 2026-08-04\nConcepto: Cinco monitores y teclados para el equipo\nBase imponible: 500,00 EUR\nIVA 21%: 105,00 EUR\nTotal: 605,00 EUR",
+      "supplier": "Informática Atlántica SL",
+      "invoice_number": "IA-0089",
+      "date": "2026-08-04",
+      "subtotal": "500.00",
+      "tax": "105.00",
+      "total": "605.00",
+      "currency": "EUR",
+      "state": "completed"
     }
   },
   {
@@ -169,7 +233,7 @@
         "administracion@nestadmin.test"
       ],
       "subject": "Solicitud de factura F-2026-101",
-      "body": "Hola, ¿podéis enviarme otra copia de la factura F-2026-101 de octubre? La necesita mi gestor. Me podéis llamar al 698 765 432 si hay algún problema. Un saludo, Lucía.",
+      "body": "Hola, ¿podéis enviarme otra copia de la factura F-2026-101 de octubre? La necesita mi gestor. Me podéis llamar al 600 000 456 si hay algún problema. Un saludo, Lucía.",
       "date": "2026-10-06",
       "category": "solicitud_factura",
       "needs_reply": true,
@@ -301,6 +365,24 @@
       "needs_reply": true,
       "draft": "Recibimos el pedido 7781 y confirmaremos la fecha de entrega.",
       "state": "awaiting_review"
+    }
+  },
+  {
+    "id": "M09",
+    "kind": "email",
+    "input": {
+      "message_id": "M-0009",
+      "from": "compras@limpiezas-brillo-sur.test",
+      "to": [
+        "administracion@nestadmin.test"
+      ],
+      "subject": "Pedido 7718 de material",
+      "body": "Hacemos el pedido 7718 de productos de limpieza para entrega el lunes.",
+      "date": "2026-07-15",
+      "category": "pedido",
+      "needs_reply": true,
+      "draft": "Recibimos el pedido 7718 y confirmaremos la fecha de entrega.",
+      "state": "completed"
     }
   },
   {
@@ -515,6 +597,158 @@
       "query": "presupuesto",
       "accents": "none",
       "kind": "email"
+    }
+  },
+  {
+    "id": "Q25",
+    "kind": "search",
+    "input": {
+      "query": "Transportes del Nrote",
+      "accents": "typo"
+    }
+  },
+  {
+    "id": "Q26",
+    "kind": "search",
+    "input": {
+      "query": "Informatica Atlantida",
+      "accents": "typo"
+    }
+  },
+  {
+    "id": "Q27",
+    "kind": "search",
+    "input": {
+      "query": "limpiezas",
+      "accents": "plural"
+    }
+  },
+  {
+    "id": "Q28",
+    "kind": "search",
+    "input": {
+      "query": "portátil",
+      "accents": "plural"
+    }
+  },
+  {
+    "id": "Q29",
+    "kind": "search",
+    "input": {
+      "query": "Ficticios Suministros",
+      "accents": "order"
+    }
+  },
+  {
+    "id": "Q30",
+    "kind": "search",
+    "input": {
+      "query": "oficinas limpieza",
+      "accents": "order"
+    }
+  },
+  {
+    "id": "Q31",
+    "kind": "search",
+    "input": {
+      "query": "PAPELERÍA OCÉANO",
+      "accents": "case"
+    }
+  },
+  {
+    "id": "Q32",
+    "kind": "search",
+    "input": {
+      "query": "tn-5531",
+      "accents": "case"
+    }
+  },
+  {
+    "id": "Q33",
+    "kind": "search",
+    "input": {
+      "query": "5531",
+      "accents": "partial_number"
+    }
+  },
+  {
+    "id": "Q34",
+    "kind": "search",
+    "input": {
+      "query": "117",
+      "accents": "partial_number"
+    }
+  },
+  {
+    "id": "Q35",
+    "kind": "search",
+    "input": {
+      "query": "garantía",
+      "accents": "body_word"
+    }
+  },
+  {
+    "id": "Q36",
+    "kind": "search",
+    "input": {
+      "query": "almacén",
+      "accents": "body_word"
+    }
+  },
+  {
+    "id": "Q37",
+    "kind": "search",
+    "input": {
+      "query": "Bilbao",
+      "accents": "body_word"
+    }
+  },
+  {
+    "id": "Q38",
+    "kind": "search",
+    "input": {
+      "query": "rectificativa",
+      "accents": "body_word"
+    }
+  },
+  {
+    "id": "Q39",
+    "kind": "search",
+    "input": {
+      "query": "extractos",
+      "accents": "body_word"
+    }
+  },
+  {
+    "id": "Q40",
+    "kind": "search",
+    "input": {
+      "query": "kW",
+      "accents": "body_word"
+    }
+  },
+  {
+    "id": "Q41",
+    "kind": "search",
+    "input": {
+      "query": "pedido 7781",
+      "accents": "distractor"
+    }
+  },
+  {
+    "id": "Q42",
+    "kind": "search",
+    "input": {
+      "query": "papel y tóner almacén central",
+      "accents": "distractor"
+    }
+  },
+  {
+    "id": "Q43",
+    "kind": "search",
+    "input": {
+      "query": "Gestoría Ñandú trimestre",
+      "accents": "distractor"
     }
   },
   {

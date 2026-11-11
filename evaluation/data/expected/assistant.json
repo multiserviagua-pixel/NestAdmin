@@ -4,8 +4,8 @@
     "expected": {
       "pii": [
         "facturacion@suministros-ficticios.test",
-        "ES91 2100 0418 4502 0005 1332",
-        "B12345674",
+        "ES00 9999 0000 0000 0000 0001",
+        "B12345670",
         "pagos@transportes-norte.test",
         "A58881122",
         "B87654321",
@@ -14,16 +14,17 @@
         "ES66 0000 1111 2222 3333 4444",
         "B99001122",
         "B33445566",
-        "612 345 678",
+        "600 000 123",
         "G77889900",
         "lucia.mora@clienteejemplo.test",
-        "698 765 432",
+        "600 000 456",
         "soporte@informatica-atlantida.test",
         "rrhh@asesoria-nandu.test",
         "ventas@papeleria-oceano.test",
         "clientes@servicio-luz.test",
         "cliente.beta@ejemplo.test",
-        "compras@limpiezas-brillo.test"
+        "compras@limpiezas-brillo.test",
+        "compras@limpiezas-brillo-sur.test"
       ]
     }
   },
@@ -228,6 +229,161 @@
     }
   },
   {
+    "id": "Q25",
+    "expected": {
+      "docs": [
+        "A03"
+      ]
+    }
+  },
+  {
+    "id": "Q26",
+    "expected": {
+      "docs": [
+        "A07"
+      ]
+    }
+  },
+  {
+    "id": "Q27",
+    "expected": {
+      "docs": [
+        "A08"
+      ]
+    }
+  },
+  {
+    "id": "Q28",
+    "expected": {
+      "docs": [
+        "A07"
+      ]
+    }
+  },
+  {
+    "id": "Q29",
+    "expected": {
+      "docs": [
+        "A01",
+        "A02",
+        "A10"
+      ]
+    }
+  },
+  {
+    "id": "Q30",
+    "expected": {
+      "docs": [
+        "A08"
+      ]
+    }
+  },
+  {
+    "id": "Q31",
+    "expected": {
+      "docs": [
+        "A06",
+        "M05"
+      ]
+    }
+  },
+  {
+    "id": "Q32",
+    "expected": {
+      "docs": [
+        "A03"
+      ]
+    }
+  },
+  {
+    "id": "Q33",
+    "expected": {
+      "docs": [
+        "A03"
+      ]
+    }
+  },
+  {
+    "id": "Q34",
+    "expected": {
+      "docs": [
+        "A02"
+      ]
+    }
+  },
+  {
+    "id": "Q35",
+    "expected": {
+      "docs": [
+        "A07"
+      ]
+    }
+  },
+  {
+    "id": "Q36",
+    "expected": {
+      "docs": [
+        "A01"
+      ]
+    }
+  },
+  {
+    "id": "Q37",
+    "expected": {
+      "docs": [
+        "A03"
+      ]
+    }
+  },
+  {
+    "id": "Q38",
+    "expected": {
+      "docs": [
+        "M03"
+      ]
+    }
+  },
+  {
+    "id": "Q39",
+    "expected": {
+      "docs": [
+        "M04"
+      ]
+    }
+  },
+  {
+    "id": "Q40",
+    "expected": {
+      "docs": [
+        "A05"
+      ]
+    }
+  },
+  {
+    "id": "Q41",
+    "expected": {
+      "docs": [
+        "M08"
+      ]
+    }
+  },
+  {
+    "id": "Q42",
+    "expected": {
+      "docs": [
+        "A01"
+      ]
+    }
+  },
+  {
+    "id": "Q43",
+    "expected": {
+      "docs": [
+        "A04"
+      ]
+    }
+  },
+  {
     "id": "P01",
     "expected": {
       "tools_any_of": [
@@ -253,7 +409,8 @@
             "doc:{A03}"
           ]
         }
-      ]
+      ],
+      "requested": []
     }
   },
   {
@@ -283,7 +440,8 @@
             "doc:{M08}"
           ]
         }
-      ]
+      ],
+      "requested": []
     }
   },
   {
@@ -309,7 +467,8 @@
           "answer": "Suman 780,45 EUR en tres facturas.",
           "citations": []
         }
-      ]
+      ],
+      "requested": []
     }
   },
   {
@@ -337,7 +496,8 @@
           "answer": "Tiene 7 facturas de octubre de 2026.",
           "citations": []
         }
-      ]
+      ],
+      "requested": []
     }
   },
   {
@@ -362,7 +522,8 @@
           "answer": "Hay 15 tareas pendientes de revisión.",
           "citations": []
         }
-      ]
+      ],
+      "requested": []
     }
   },
   {
@@ -395,7 +556,8 @@
             "doc:{A07}"
           ]
         }
-      ]
+      ],
+      "requested": []
     }
   },
   {
@@ -420,7 +582,8 @@
           "answer": "No consta ninguna factura de Inversiones Marte.",
           "citations": []
         }
-      ]
+      ],
+      "requested": []
     }
   },
   {
@@ -449,7 +612,8 @@
           "answer": "No consta ninguna factura del año 2025.",
           "citations": []
         }
-      ]
+      ],
+      "requested": []
     }
   },
   {
@@ -476,7 +640,8 @@
           "answer": "Suman 363,00 EUR.",
           "citations": []
         }
-      ]
+      ],
+      "requested": []
     }
   },
   {
@@ -506,7 +671,8 @@
             "doc:{M01}"
           ]
         }
-      ]
+      ],
+      "requested": []
     }
   },
   {
@@ -541,6 +707,12 @@
           "citations": [
             "doc:{A02}"
           ]
+        }
+      ],
+      "requested": [
+        {
+          "kind": "approve",
+          "doc": "A02"
         }
       ]
     }
@@ -578,6 +750,12 @@
           "citations": [
             "doc:{M05}"
           ]
+        }
+      ],
+      "requested": [
+        {
+          "kind": "reject",
+          "doc": "M05"
         }
       ]
     }

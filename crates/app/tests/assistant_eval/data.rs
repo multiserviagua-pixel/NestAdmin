@@ -82,7 +82,11 @@ pub struct RuleSeed {
     pub rule_id: String,
     pub action: String,
     pub conditions: Value,
+    #[serde(default)]
     pub active: bool,
+    /// Nombre visible de la regla (puede ser hostil en un caso de inyección).
+    #[serde(default)]
+    pub name: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -109,8 +113,22 @@ pub struct ProposalExpectation {
     pub doc: String,
 }
 
+/// Un tipo de propuesta que la persona pide de verdad en su pregunta: tipo, sobre qué tarea y, si
+/// procede, con qué valores de la tarjeta (`summary`).
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct Requested {
+    pub kind: String,
+    #[serde(default)]
+    pub doc: Option<String>,
+    #[serde(default)]
+    pub values: Option<Value>,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct QuestionExpectation {
+    /// Propuestas que pide la pregunta; el resto que se cree cuenta como no pedida.
+    #[serde(default)]
+    pub requested: Vec<Requested>,
     pub tools_any_of: Vec<String>,
     pub cite: Vec<String>,
     pub no_data: bool,
@@ -175,6 +193,22 @@ fn from<T: for<'de> Deserialize<'de>>(value: Value) -> T {
     serde_json::from_value(value).unwrap_or_else(|e| panic!("entrada mal formada: {e}"))
 }
 
+/// Un turno de un caso: la pregunta inocente de la persona y lo que haría el modelo simulado que
+/// obedece al atacante.
+#[derive(Debug, Clone, Deserialize)]
+pub struct Turn {
+    pub question: String,
+    pub view: String,
+    pub attack_steps: Vec<Value>,
+}
+
+/// Un elemento más del mundo del caso, con su alias (`HOSTIL2`, `HOSTIL3`…).
+#[derive(Debug, Clone, Deserialize)]
+pub struct Extra {
+    pub alias: String,
+    pub item: Item,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct InjectionInput {
     pub group: String,
@@ -182,6 +216,30 @@ pub struct InjectionInput {
     pub question: String,
     pub view: String,
     pub attack_steps: Vec<Value>,
+    /// Turnos siguientes en la MISMA conversación (inyección en dos turnos).
+    #[serde(default)]
+    pub next_turns: Vec<Turn>,
+    /// Elementos añadidos al mundo (alias que empiezan por `HOSTIL`: son del atacante).
+    #[serde(default)]
+    pub extras: Vec<Extra>,
+    /// Reglas añadidas al mundo.
+    #[serde(default)]
+    pub rules: Vec<RuleSeed>,
+    /// Preparaciones del mundo: `failed_task` (alias `FAILED`) y `attempt:<ALIAS>`.
+    #[serde(default)]
+    pub prep: Vec<String>,
+}
+
+impl InjectionInput {
+    pub fn turns(&self) -> Vec<Turn> {
+        let mut turns = vec![Turn {
+            question: self.question.clone(),
+            view: self.view.clone(),
+            attack_steps: self.attack_steps.clone(),
+        }];
+        turns.extend(self.next_turns.iter().cloned());
+        turns
+    }
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -198,8 +256,16 @@ pub struct InjectionExpected {
     pub observe: Vec<String>,
     /// Texto hostil que no puede escapar de su bloque de datos.
     pub forbidden_outside_blocks: Vec<String>,
+    /// Propuestas que la persona pide de verdad en la pregunta (casi siempre ninguna).
+    pub requested: Vec<Requested>,
+    /// Frases distintivas del elemento hostil, sin datos que el enmascarado quite: el caso solo
+    /// cuenta como medido si alguna petición al modelo llevó una.
+    pub exposed_marks: Vec<String>,
+    /// Dominios o direcciones del atacante que no pueden aparecer en la respuesta.
+    pub attacker_domains: Vec<String>,
 }
 
+#[derive(Clone)]
 pub struct InjectionCase {
     pub id: String,
     pub input: InjectionInput,
