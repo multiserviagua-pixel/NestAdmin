@@ -1,0 +1,355 @@
+{
+  "fecha": "2026-11-11T08:25:42.805Z",
+  "productor": {
+    "producer_configured": true,
+    "producer_problem": null,
+    "chain": {
+      "state": "empty"
+    },
+    "today": "2026-11-11"
+  },
+  "empresa": null,
+  "cliente": 1,
+  "facturaSinMembrete": {
+    "id": 1,
+    "numero": "F-2026-0001",
+    "pdf": "F-2026-0001.pdf"
+  },
+  "presupuesto": {
+    "id": 2,
+    "numero": "P-2026-0001",
+    "pdf": "P-2026-0001.pdf"
+  },
+  "rectificativa": {
+    "id": 3,
+    "editar": null,
+    "numero": "FR-2026-0001",
+    "pdf": "FR-2026-0001.pdf"
+  },
+  "textoAyuda": "Membrete\n\nEl membrete es un PDF propio (su papel de carta o diseño) de una o dos páginas A4 verticales, sin contraseña y de hasta 5 MB. La primera página es el fondo de la primera hoja de cada presupuesto, albarán y factura; la segunda, si existe, el de las siguientes, y si no, se repite la primera. Con membrete no se dibuja el logotipo. La zona donde va el texto (la que dejan los márgenes) debe ser clara: un membrete con fondo oscuro ahí se rechaza, porque el texto negro no se leería.\n\nEl membrete no oculta ni sustituye ningún dato obligatorio: el emisor, el cliente, los importes, el código QR y la leyenda VERI*FACTU se dibujan siempre encima.\n\nNo hay membrete: los documentos se dibujan con el diseño normal y el logotipo.\n\nElegir PDF de membrete\nGuardar membrete\n\nLos márgenes marcan el área útil, en milímetros: NestAdmin escribe los datos, las líneas y los totales dentro de ella para no pisar el",
+  "rechazos": {
+    "tres-paginas.pdf": {
+      "avisos": [
+        "Datos no válidos: el membrete debe tener una o dos páginas y este tiene 3"
+      ],
+      "empresa": {
+        "membrete": false,
+        "margenes": {
+          "top_mm": 35,
+          "right_mm": 20,
+          "bottom_mm": 25,
+          "left_mm": 20
+        }
+      }
+    },
+    "apaisado.pdf": {
+      "avisos": [
+        "Datos no válidos: todas las páginas deben ser A4 vertical (210 x 297 mm); la página 1 mide 297 x 210 mm"
+      ],
+      "empresa": {
+        "membrete": false,
+        "margenes": {
+          "top_mm": 35,
+          "right_mm": 20,
+          "bottom_mm": 25,
+          "left_mm": 20
+        }
+      }
+    },
+    "a5.pdf": {
+      "avisos": [
+        "Datos no válidos: todas las páginas deben ser A4 vertical (210 x 297 mm); la página 1 mide 148 x 210 mm"
+      ],
+      "empresa": {
+        "membrete": false,
+        "margenes": {
+          "top_mm": 35,
+          "right_mm": 20,
+          "bottom_mm": 25,
+          "left_mm": 20
+        }
+      }
+    },
+    "con-clave.pdf": {
+      "avisos": [
+        "Datos no válidos: el PDF está protegido con contraseña"
+      ],
+      "empresa": {
+        "membrete": false,
+        "margenes": {
+          "top_mm": 35,
+          "right_mm": 20,
+          "bottom_mm": 25,
+          "left_mm": 20
+        }
+      }
+    },
+    "grande.pdf": {
+      "avisos": [
+        "El PDF supera los 5 MB."
+      ],
+      "empresa": {
+        "membrete": false,
+        "margenes": {
+          "top_mm": 35,
+          "right_mm": 20,
+          "bottom_mm": 25,
+          "left_mm": 20
+        }
+      }
+    },
+    "vacio.pdf": {
+      "avisos": [
+        "El archivo está vacío."
+      ],
+      "empresa": {
+        "membrete": false,
+        "margenes": {
+          "top_mm": 35,
+          "right_mm": 20,
+          "bottom_mm": 25,
+          "left_mm": 20
+        }
+      }
+    },
+    "no-es-pdf.txt": {
+      "avisos": [
+        "El membrete debe ser un archivo PDF."
+      ],
+      "empresa": {
+        "membrete": false,
+        "margenes": {
+          "top_mm": 35,
+          "right_mm": 20,
+          "bottom_mm": 25,
+          "left_mm": 20
+        }
+      }
+    },
+    "oscuro.pdf": {
+      "avisos": [
+        "Datos no válidos: la zona donde va el texto de la página 1 es demasiado oscura y el texto no se leería; use un membrete con fondo claro en esa zona o ajuste antes los márgenes"
+      ],
+      "empresa": {
+        "membrete": false,
+        "margenes": {
+          "top_mm": 35,
+          "right_mm": 20,
+          "bottom_mm": 25,
+          "left_mm": 20
+        }
+      }
+    },
+    "banda-en-texto.pdf": {
+      "avisos": [
+        "Datos no válidos: la zona donde va el texto de la página 1 es demasiado oscura y el texto no se leería; use un membrete con fondo claro en esa zona o ajuste antes los márgenes"
+      ],
+      "empresa": {
+        "membrete": false,
+        "margenes": {
+          "top_mm": 35,
+          "right_mm": 20,
+          "bottom_mm": 25,
+          "left_mm": 20
+        }
+      }
+    }
+  },
+  "restringido": {
+    "avisos": [
+      "Membrete guardado."
+    ],
+    "empresa": {
+      "membrete": true,
+      "margenes": {
+        "top_mm": 35,
+        "right_mm": 20,
+        "bottom_mm": 25,
+        "left_mm": 20
+      }
+    }
+  },
+  "dosPaginas": {
+    "avisos": [
+      "Membrete guardado."
+    ],
+    "empresa": {
+      "membrete": true,
+      "margenes": {
+        "top_mm": 35,
+        "right_mm": 20,
+        "bottom_mm": 25,
+        "left_mm": 20
+      }
+    }
+  },
+  "margenes": {
+    "letras": {
+      "avisos": [
+        "Membrete guardado.",
+        "Margen superior (mm): escriba milímetros enteros, de 0 a 100."
+      ],
+      "empresa": {
+        "membrete": true,
+        "margenes": {
+          "top_mm": 35,
+          "right_mm": 20,
+          "bottom_mm": 25,
+          "left_mm": 20
+        }
+      }
+    },
+    "negativo": {
+      "avisos": [
+        "Membrete guardado.",
+        "Margen superior (mm): escriba milímetros enteros, de 0 a 100."
+      ],
+      "empresa": {
+        "membrete": true,
+        "margenes": {
+          "top_mm": 35,
+          "right_mm": 20,
+          "bottom_mm": 25,
+          "left_mm": 20
+        }
+      }
+    },
+    "masDe100": {
+      "avisos": [
+        "Membrete guardado.",
+        "Margen superior (mm): el máximo es 100 mm."
+      ],
+      "empresa": {
+        "membrete": true,
+        "margenes": {
+          "top_mm": 35,
+          "right_mm": 20,
+          "bottom_mm": 25,
+          "left_mm": 20
+        }
+      }
+    },
+    "anchoUtilInsuficiente": {
+      "avisos": [
+        "Membrete guardado.",
+        "Los márgenes izquierdo y derecho dejan menos de 100 mm de ancho útil."
+      ],
+      "empresa": {
+        "membrete": true,
+        "margenes": {
+          "top_mm": 35,
+          "right_mm": 20,
+          "bottom_mm": 25,
+          "left_mm": 20
+        }
+      }
+    },
+    "bandaEnZonaDeTexto": {
+      "avisos": [
+        "Datos no válidos: la zona donde va el texto de la página 1 es demasiado oscura y el texto no se leería; use un membrete con fondo claro en esa zona o ajuste antes los márgenes"
+      ],
+      "empresa": {
+        "membrete": true,
+        "margenes": {
+          "top_mm": 35,
+          "right_mm": 20,
+          "bottom_mm": 25,
+          "left_mm": 20
+        }
+      }
+    },
+    "validos": {
+      "avisos": [
+        "Márgenes guardados."
+      ],
+      "empresa": {
+        "membrete": true,
+        "margenes": {
+          "top_mm": 40,
+          "right_mm": 20,
+          "bottom_mm": 25,
+          "left_mm": 20
+        }
+      }
+    },
+    "estrechos": {
+      "avisos": [
+        "Márgenes guardados."
+      ],
+      "empresa": {
+        "membrete": true,
+        "margenes": {
+          "top_mm": 100,
+          "right_mm": 55,
+          "bottom_mm": 47,
+          "left_mm": 55
+        }
+      }
+    },
+    "restaurados": {
+      "avisos": [
+        "Márgenes guardados."
+      ],
+      "empresa": {
+        "membrete": true,
+        "margenes": {
+          "top_mm": 40,
+          "right_mm": 20,
+          "bottom_mm": 25,
+          "left_mm": 20
+        }
+      }
+    }
+  },
+  "facturaLarga": {
+    "id": 4,
+    "numero": "F-2026-0002",
+    "pdf": "F-2026-0002.pdf"
+  },
+  "facturaEstrecha": {
+    "id": 5,
+    "numero": "F-2026-0003",
+    "pdf": "F-2026-0003.pdf"
+  },
+  "abrirDetalle": true,
+  "verPdf": {
+    "boton": true,
+    "avisos": []
+  },
+  "quitar": {
+    "avisos": [
+      "Membrete quitado."
+    ],
+    "empresa": {
+      "membrete": false,
+      "margenes": {
+        "top_mm": 40,
+        "right_mm": 20,
+        "bottom_mm": 25,
+        "left_mm": 20
+      }
+    }
+  },
+  "regeneracion": {
+    "F-2026-0001.pdf": {
+      "sha256": "19f09bc92eb3b018a634b664826c15f7b94d986a8c8e39db0ce442ce7d07beb8",
+      "igual": true
+    },
+    "P-2026-0001.pdf": {
+      "sha256": "8c41ff0a24e7f2f55da22e27a9841f05962ad822eaafc94bf8799ccf8010d1ec",
+      "igual": true
+    },
+    "FR-2026-0001.pdf": {
+      "sha256": "fd819d103d1a5ccd2e79cebf3e9e58d7100335f02fe18d63b8e2fe61f6fe20de",
+      "igual": true
+    },
+    "F-2026-0002.pdf": {
+      "sha256": "ba1503bdf4e6ff78e6dedf1b435fd35fccd500349c2e51beaf37d425056f979f",
+      "igual": true
+    },
+    "F-2026-0003.pdf": {
+      "sha256": "6d8def8ad25b0fad4b6a36e18b7e918f85442b1a7e86762778cb5ce78492505c",
+      "igual": true
+    }
+  }
+}
