@@ -2,7 +2,9 @@
 //! `tauri dev`: la empresa guardada con «b12345674» salía así en la factura mientras su registro
 //! Verifactu llevaba «B12345674». Prueba independiente (D197). Solo datos sintéticos.
 
-use nestadmin_core::sales::{Company, CustomerData, DraftInput, DraftLine, VerifactuContext};
+use nestadmin_core::sales::{
+    Company, CustomerData, DraftInput, DraftLine, VerifactuContext, VerifactuEnvironment,
+};
 use nestadmin_core::Store;
 use nestadmin_documents::IsoDate;
 use nestadmin_sales::{DocumentKind, LineInput, TaxRate};
@@ -26,6 +28,7 @@ fn ctx() -> VerifactuContext {
             indicador_multiples_ot: false,
         },
         now: FechaHoraHuso::new(Fecha::new(2026, 3, 1).unwrap(), 10, 0, 0, 60).unwrap(),
+        environment: VerifactuEnvironment::Simulador,
     }
 }
 

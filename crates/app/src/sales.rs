@@ -187,6 +187,7 @@ impl App {
                 indicador_multiples_ot: false,
             },
             now: self.sales_clock.try_now().map_err(clock_error)?,
+            environment: self.store.verifactu_environment()?,
         })
     }
 

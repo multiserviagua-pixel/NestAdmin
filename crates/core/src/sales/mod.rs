@@ -7,6 +7,8 @@
 //!   conversión.
 //! * [`collections`]: cobros (D88) y plantillas recurrentes (D87).
 //! * [`verifactu`]: registros Verifactu de alta y anulación, encadenados (fase 11, migración 12).
+//! * [`verifactu_remission`]: entorno, lotes de remisión a la AEAT, estado derivado de cada
+//!   registro y subsanación (D248-D258, migración 16).
 
 use std::str::FromStr;
 
@@ -25,6 +27,7 @@ pub mod error;
 pub mod master;
 pub mod sends;
 pub mod verifactu;
+pub mod verifactu_remission;
 
 pub use collections::{GeneratedDraft, RecurringRecord, RecurringRun};
 pub use documents::{
@@ -43,6 +46,13 @@ pub use sends::{
 pub use verifactu::{
     ChainStatus, VerifactuContext, VerifactuKind, VerifactuRecordRow, CODE_CHAIN_BROKEN,
     CODE_CLOCK_BEHIND, CODE_RECORD_INVALID,
+};
+pub use verifactu_remission::{
+    BatchClosure, BatchOutcome, RecordEnvironment, VerifactuBatch, VerifactuBatchResult,
+    VerifactuBatchSummary, VerifactuEnvironment, VerifactuRecordState, VerifactuStatus,
+    VerifactuSubsanation, CODE_BATCH_OPEN, CODE_BATCH_REJECTED, CODE_ENVIRONMENT_BUSY,
+    CODE_ENVIRONMENT_CHANGED, MAX_AUTOMATIC_FAULTS, MIN_RETRY_WAIT_SECONDS,
+    OBLIGATION_AUTHORIZATION,
 };
 
 // Conversiones entre los tipos puros y el texto guardado.

@@ -95,6 +95,9 @@ CREATE TABLE rules (
     // Envíos de documentos de venta por correo, de solo inserción, y el disparo único de la
     // regla por cliente al emitir (D233, D238, D239); ver sales/sends.rs.
     include_str!("migrations/015_sales_document_sends.sql"),
+    // Remisión de los registros Verifactu a la AEAT: entorno, lotes, resultados y
+    // subsanaciones, de solo inserción (D248-D258); ver sales/verifactu_remission.rs.
+    include_str!("migrations/016_verifactu_remission.sql"),
 ];
 
 /// Base de datos local. Cada operación pública se confirma en una transacción,

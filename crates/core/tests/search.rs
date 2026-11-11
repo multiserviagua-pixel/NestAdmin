@@ -52,7 +52,7 @@ fn ids(store: &Store, query: &SearchQuery) -> Vec<i64> {
 
 #[test]
 fn migration_applies_on_new_and_on_v9_database() {
-    assert_eq!(SCHEMA_VERSION, 15);
+    assert_eq!(SCHEMA_VERSION, 16);
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("n.db");
     let mut store = Store::open(&path).unwrap();
@@ -62,7 +62,7 @@ fn migration_applies_on_new_and_on_v9_database() {
 
     // Una base v9: sin el índice y sin su FTS.
     let conn = rusqlite::Connection::open(&path).unwrap();
-    conn.execute_batch("DROP TABLE sales_send_triggers; DROP TABLE sales_document_sends; DROP TABLE company_letterheads; ALTER TABLE company DROP COLUMN letterhead_sha256; ALTER TABLE company DROP COLUMN letterhead_top_mm; ALTER TABLE company DROP COLUMN letterhead_right_mm; ALTER TABLE company DROP COLUMN letterhead_bottom_mm; ALTER TABLE company DROP COLUMN letterhead_left_mm; DROP TABLE installation; DROP TABLE verifactu_records; DROP TABLE assistant_calls; DROP TABLE assistant_turns; DROP TABLE assistant_conversations; DROP TABLE search_fts; DROP TABLE search_index; PRAGMA user_version = 9;")
+    conn.execute_batch("DROP TABLE verifactu_subsanations; DROP TABLE verifactu_record_results; DROP TABLE verifactu_batch_results; DROP TABLE verifactu_batch_attempts; DROP TABLE verifactu_batch_records; DROP TABLE verifactu_batches; DROP TABLE verifactu_record_environments; DROP TABLE verifactu_environment_changes; DROP TABLE sales_send_triggers; DROP TABLE sales_document_sends; DROP TABLE company_letterheads; ALTER TABLE company DROP COLUMN letterhead_sha256; ALTER TABLE company DROP COLUMN letterhead_top_mm; ALTER TABLE company DROP COLUMN letterhead_right_mm; ALTER TABLE company DROP COLUMN letterhead_bottom_mm; ALTER TABLE company DROP COLUMN letterhead_left_mm; DROP TABLE installation; DROP TABLE verifactu_records; DROP TABLE assistant_calls; DROP TABLE assistant_turns; DROP TABLE assistant_conversations; DROP TABLE search_fts; DROP TABLE search_index; PRAGMA user_version = 9;")
         .unwrap();
     drop(conn);
     let mut store = Store::open(&path).unwrap();

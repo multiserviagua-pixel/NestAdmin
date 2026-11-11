@@ -28,6 +28,10 @@ use rust_decimal::Decimal;
 
 use super::documents::SalesDocument;
 use super::master::load_company;
+use super::verifactu_remission::{
+    ensure_context_environment, insert_record_environment, registered_alta_exists,
+    VerifactuEnvironment,
+};
 use super::{SalesResult, SalesStoreError};
 use crate::store::now_ms;
 use crate::Store;
@@ -50,24 +54,28 @@ pub const CODE_RECORD_INVALID: &str = "verifactu_record_invalid";
 pub struct VerifactuContext {
     pub system: SistemaInformatico,
     pub now: FechaHoraHuso,
+    /// Entorno vigente al generar el registro (D248): se guarda junto al registro, en la misma
+    /// transacción. Debe coincidir con el vigente en la base; si cambió entre la lectura y la
+    /// emisión, no se genera nada (`verifactu_environment_changed`).
+    pub environment: VerifactuEnvironment,
 }
 
 /// Clase de un registro guardado.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum VerifactuKind {
     Alta,
     Anulacion,
 }
 
 impl VerifactuKind {
-    fn as_str(self) -> &'static str {
+    pub(super) fn as_str(self) -> &'static str {
         match self {
             Self::Alta => "alta",
             Self::Anulacion => "anulacion",
         }
     }
 
-    fn from_text(text: &str) -> SalesResult<Self> {
+    pub(super) fn from_text(text: &str) -> SalesResult<Self> {
         match text {
             "alta" => Ok(Self::Alta),
             "anulacion" => Ok(Self::Anulacion),
@@ -110,21 +118,21 @@ pub enum ChainStatus {
     Broken { at_id: i64, reason: String },
 }
 
-fn record_error(why: impl std::fmt::Display) -> SalesStoreError {
+pub(super) fn record_error(why: impl std::fmt::Display) -> SalesStoreError {
     SalesStoreError::External {
         code: CODE_RECORD_INVALID.to_owned(),
         message: format!("no se puede generar el registro Verifactu: {why}"),
     }
 }
 
-fn chain_error(why: impl std::fmt::Display) -> SalesStoreError {
+pub(super) fn chain_error(why: impl std::fmt::Display) -> SalesStoreError {
     SalesStoreError::External {
         code: CODE_CHAIN_BROKEN.to_owned(),
         message: format!("cadena de registros Verifactu: {why}"),
     }
 }
 
-fn from_vf(e: VfError) -> SalesStoreError {
+pub(super) fn from_vf(e: VfError) -> SalesStoreError {
     match e {
         VfError::RelojAtrasado { .. } => SalesStoreError::External {
             code: CODE_CLOCK_BEHIND.to_owned(),
@@ -360,7 +368,7 @@ fn build_alta(
 
 // --- Lectura y escritura de la cadena ---
 
-fn parse_record(id: i64, json: &str) -> SalesResult<RegistroFacturacion> {
+pub(super) fn parse_record(id: i64, json: &str) -> SalesResult<RegistroFacturacion> {
     serde_json::from_str(json)
         .map_err(|_| chain_error(format!("el registro {id} no se puede leer")))
 }
@@ -369,7 +377,7 @@ fn parse_record(id: i64, json: &str) -> SalesResult<RegistroFacturacion> {
 /// desde su JSON coincide con la guardada y con la columna `hash`, y su fecha-hora no supera en
 /// más de un minuto a la del nuevo registro. Devuelve también id y huella del último, para
 /// `previous_id` y `previous_hash`.
-fn next_link(
+pub(super) fn next_link(
     conn: &Connection,
     ctx: &VerifactuContext,
 ) -> SalesResult<(Encadenamiento, Option<(i64, String)>)> {
@@ -395,12 +403,14 @@ fn next_link(
     Ok((last.siguiente_encadenamiento(), Some((id, hash))))
 }
 
-fn insert_record(
+/// Inserta el registro y su entorno (D248) y devuelve su id.
+pub(super) fn insert_record(
     conn: &Connection,
     document_id: i64,
     record: &RegistroFacturacion,
     previous: Option<(i64, String)>,
-) -> SalesResult<()> {
+    environment: VerifactuEnvironment,
+) -> SalesResult<i64> {
     let (kind, invoice_type, total, tax_total) = match record {
         RegistroFacturacion::Alta(a) => (
             VerifactuKind::Alta,
@@ -437,7 +447,9 @@ fn insert_record(
             now_ms(),
         ],
     )?;
-    Ok(())
+    let record_id = conn.last_insert_rowid();
+    insert_record_environment(conn, record_id, environment)?;
+    Ok(record_id)
 }
 
 /// Genera, sella e inserta el alta de una factura recién emitida (dentro de su transacción).
@@ -450,6 +462,7 @@ fn write_alta(
     let issuer_name = load_company(conn)?
         .and_then(|c| c.name)
         .ok_or_else(|| record_error("la empresa emisora no tiene nombre"))?;
+    ensure_context_environment(conn, ctx.environment)?;
     let (chain, previous) = next_link(conn, ctx)?;
     let mut alta = build_alta(&issuer_name, input, chain, ctx)?;
     alta.sellar().map_err(from_vf)?;
@@ -458,7 +471,9 @@ fn write_alta(
         document_id,
         &RegistroFacturacion::Alta(alta),
         previous,
-    )
+        ctx.environment,
+    )?;
+    Ok(())
 }
 
 /// `IDFactura` (emisor, número, fecha) tal como quedó en el registro de ALTA guardado, para que
@@ -505,11 +520,16 @@ fn write_anulacion(
     ctx: &VerifactuContext,
 ) -> SalesResult<()> {
     let id_factura = registered_id(conn, doc.id)?;
+    ensure_context_environment(conn, ctx.environment)?;
     let (chain, previous) = next_link(conn, ctx)?;
+    // Si ningún alta de la factura consta en la AEAT ni va a remitirse (todas rechazadas), la
+    // baja se genera con `SinRegistroPrevio = S` (D253, ajuste 5). `RechazoPrevio` solo lo
+    // lleva la subsanación de una anulación rechazada.
+    let sin_registro_previo = !registered_alta_exists(conn, doc.id)?;
     let mut anulacion = RegistroAnulacion {
         id_factura,
         ref_externa: None,
-        sin_registro_previo: false,
+        sin_registro_previo,
         rechazo_previo: false,
         generado_por: None,
         generador: None,
@@ -524,7 +544,9 @@ fn write_anulacion(
         doc.id,
         &RegistroFacturacion::Anulacion(anulacion),
         previous,
-    )
+        ctx.environment,
+    )?;
+    Ok(())
 }
 
 /// Fila tal como está guardada, antes de interpretar `kind` y `record_json`.
@@ -571,14 +593,20 @@ impl RawRow {
     }
 }
 
-fn raw_rows(conn: &Connection) -> SalesResult<Vec<RawRow>> {
-    let mut stmt = conn.prepare(
-        "SELECT id, kind, document_id, issuer_tax_id, invoice_number, issue_date, invoice_type, \
-         total, tax_total, previous_id, previous_hash, generated_at, hash, record_json, \
-         created_at FROM verifactu_records ORDER BY id",
-    )?;
+const RAW_COLUMNS: &str = "id, kind, document_id, issuer_tax_id, invoice_number, issue_date, \
+     invoice_type, total, tax_total, previous_id, previous_hash, generated_at, hash, record_json, \
+     created_at";
+
+fn query_raw(
+    conn: &Connection,
+    tail: &str,
+    params: impl rusqlite::Params,
+) -> SalesResult<Vec<RawRow>> {
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {RAW_COLUMNS} FROM verifactu_records {tail}"
+    ))?;
     let rows = stmt
-        .query_map([], |r| {
+        .query_map(params, |r| {
             Ok(RawRow {
                 id: r.get(0)?,
                 kind: r.get(1)?,
@@ -599,6 +627,23 @@ fn raw_rows(conn: &Connection) -> SalesResult<Vec<RawRow>> {
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     Ok(rows)
+}
+
+fn raw_rows(conn: &Connection) -> SalesResult<Vec<RawRow>> {
+    query_raw(conn, "ORDER BY id", [])
+}
+
+/// Registros que cumplen una condición SQL (cola `WHERE ... ORDER BY ...` sobre
+/// `verifactu_records`), ya reconstruidos. Los usa la remisión (`verifactu_remission.rs`).
+pub(super) fn rows_matching(
+    conn: &Connection,
+    tail: &str,
+    params: impl rusqlite::Params,
+) -> SalesResult<Vec<VerifactuRecordRow>> {
+    query_raw(conn, tail, params)?
+        .into_iter()
+        .map(RawRow::into_row)
+        .collect()
 }
 
 impl Store {

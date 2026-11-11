@@ -8,6 +8,17 @@
 //! certificados ni censo real. Los envíos anticipados (antes del tiempo de espera y con menos
 //! de 1000 registros) se cuentan pero no se rechazan, porque la AEAT no publica qué hace con
 //! ellos.
+//!
+//! Subsanación (D253, E5): un alta con `Subsanacion=S` y `RechazoPrevio=X` se acepta aunque no
+//! haya registro previo (la AEAT rechazó el alta original y no consta); con `Subsanacion=S`
+//! sin `RechazoPrevio=X` y sin registro previo sigue dando 3002. Una anulación enviada de
+//! nuevo (por ejemplo porque se perdió la respuesta) recibe 3001 («ya dado de baja»), no un
+//! duplicado 3000: así responde también la AEAT y la aplicación lo cuenta como aceptado solo
+//! si esa anulación estuvo en un lote suyo sin resultado (ajuste 2 de la etapa E5). Se puede
+//! sembrar con registros ya aceptados ([`SimuladorAeat::sembrar`]) para que, tras reabrir la
+//! aplicación, no dé falsos rechazos de anulación (3002) por haber perdido su memoria.
+//! Documentación técnica citada: ver `FUENTES.md` (validaciones y errores 1.2.2, servicio web
+//! 1.0.3).
 
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read, Write};
@@ -22,7 +33,7 @@ use quick_xml::escape::escape;
 use crate::dom::{self, Nodo};
 use crate::huella::{self, CamposAlta, CamposAnulacion};
 use crate::xml::{NS_RESPUESTA_SUMINISTRO, NS_SOAP, NS_SUMINISTRO_INFORMACION};
-use crate::{FechaHoraHuso, MAX_REGISTROS_POR_ENVIO};
+use crate::{FechaHoraHuso, RegistroFacturacion, MAX_REGISTROS_POR_ENVIO};
 
 /// Error forzado para un número de serie concreto.
 #[derive(Debug, Clone)]
@@ -78,6 +89,43 @@ pub struct Estado {
     secuencia: u32,
 }
 
+impl Estado {
+    /// Guarda registros como ya aceptados, en orden: un alta queda `Correcta` y una anulación
+    /// deja la factura `Anulada` (también si no había alta). No cuenta como envío ni responde
+    /// nada; sirve para recuperar la memoria del simulador tras reabrir la aplicación.
+    pub fn sembrar(&mut self, registros: &[RegistroFacturacion]) {
+        for r in registros {
+            let id = r.id_factura();
+            let clave = (
+                id.nif_emisor.clone(),
+                id.num_serie.clone(),
+                id.fecha_expedicion.to_string(),
+            );
+            self.secuencia += 1;
+            let (estado, id_peticion) = match r {
+                RegistroFacturacion::Alta(_) => {
+                    ("Correcta", format!("SEMBRADO{:012}", self.secuencia))
+                }
+                RegistroFacturacion::Anulacion(_) => (
+                    "Anulada",
+                    self.registros
+                        .get(&clave)
+                        .map(|p| p.id_peticion.clone())
+                        .unwrap_or_else(|| format!("SEMBRADO{:012}", self.secuencia)),
+                ),
+            };
+            self.registros.insert(
+                clave,
+                Almacenado {
+                    id_peticion,
+                    estado: estado.to_owned(),
+                    huella: r.huella().to_owned(),
+                },
+            );
+        }
+    }
+}
+
 pub struct SimuladorAeat {
     direccion: SocketAddr,
     estado: Arc<Mutex<Estado>>,
@@ -123,6 +171,11 @@ impl SimuladorAeat {
 
     pub fn direccion(&self) -> SocketAddr {
         self.direccion
+    }
+
+    /// Siembra el simulador con registros ya aceptados (ver [`Estado::sembrar`]).
+    pub fn sembrar(&self, registros: &[RegistroFacturacion]) {
+        self.estado().sembrar(registros);
     }
 
     /// Acceso al estado para preparar escenarios y comprobar efectos.
@@ -366,6 +419,8 @@ fn alta(e: &mut Estado, a: &Nodo, id_peticion: &str) -> Linea {
     };
     let clave = (nif.clone(), serie.clone(), fecha.clone());
     let subsanacion = texto(a, &["Subsanacion"]) == "S";
+    // `RechazoPrevio=X`: la subsanación de un alta rechazada, que no consta en la AEAT.
+    let sin_registro_rechazado = texto(a, &["RechazoPrevio"]) == "X";
     if let Some(prev) = e.registros.get(&clave) {
         if !subsanacion {
             l.estado = "Incorrecto";
@@ -374,7 +429,7 @@ fn alta(e: &mut Estado, a: &Nodo, id_peticion: &str) -> Linea {
             l.duplicado = Some(prev.clone());
             return l;
         }
-    } else if subsanacion {
+    } else if subsanacion && !sin_registro_rechazado {
         l.estado = "Incorrecto";
         l.codigo = Some(3002);
         l.descripcion = Some("No existe el registro de facturación.".to_owned());

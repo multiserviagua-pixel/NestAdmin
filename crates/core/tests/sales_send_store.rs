@@ -7,7 +7,7 @@
 
 use nestadmin_core::sales::{
     is_sendable, send_input_ref, Company, CustomerData, DraftInput, DraftLine, NewSalesSend,
-    VerifactuContext, CODE_SEND_IN_PROGRESS, SEND_SALES_DOCUMENT,
+    VerifactuContext, VerifactuEnvironment, CODE_SEND_IN_PROGRESS, SEND_SALES_DOCUMENT,
 };
 use nestadmin_core::store::{backup_path, SCHEMA_VERSION};
 use nestadmin_core::{ActionRequest, Authorization, Connector, ConnectorError, Store, TaskState};
@@ -37,6 +37,7 @@ fn ctx() -> VerifactuContext {
             indicador_multiples_ot: false,
         },
         now: FechaHoraHuso::desde_unix(base, 60).unwrap(),
+        environment: VerifactuEnvironment::Simulador,
     }
 }
 
@@ -164,14 +165,14 @@ fn a_version_14_database_migrates_to_15_with_a_copy_and_keeps_its_documents() {
     // Como la dejaría la versión 14: sin las tablas de envíos.
     let conn = rusqlite::Connection::open(&path).unwrap();
     conn.execute_batch(
-        "DROP TABLE sales_send_triggers; DROP TABLE sales_document_sends; PRAGMA user_version = 14;",
+        "DROP TABLE verifactu_subsanations; DROP TABLE verifactu_record_results; DROP TABLE verifactu_batch_results; DROP TABLE verifactu_batch_attempts; DROP TABLE verifactu_batch_records; DROP TABLE verifactu_batches; DROP TABLE verifactu_record_environments; DROP TABLE verifactu_environment_changes; DROP TABLE sales_send_triggers; DROP TABLE sales_document_sends; PRAGMA user_version = 14;",
     )
     .unwrap();
     drop(conn);
 
     let store = Store::open(&path).unwrap();
     assert_eq!(store.schema_version().unwrap(), SCHEMA_VERSION);
-    assert_eq!(SCHEMA_VERSION, 15);
+    assert_eq!(SCHEMA_VERSION, 16);
     let backup = backup_path(&path, 14);
     assert_eq!(backup.file_name().unwrap(), "nestadmin.esquema-14.db");
     assert!(backup.exists(), "copia previa a migrar");

@@ -26,6 +26,8 @@ pasar a `specs/v1/decisiones.md` como detalle de D83–D85. Cada una cita su fue
 | DV-14 | D83 | Los XSD de la AEAT no se versionan (su aviso legal reserva la distribución): `tests/xsd/obtener.ps1` los descarga y comprueba el SHA-256; la validación usa `System.Xml` de .NET y sus pruebas son `#[ignore]`. | Aviso legal de la sede, «Propiedad intelectual». | `tests/xml.rs` (`--ignored`) |
 | DV-15 | D83, D60 | Versiones fijadas: `quick-xml =0.42.0`, `qrcode =0.14.1` (sin `image`), `png =0.18.1`. `THIRD_PARTY_NOTICES.md` no cambia mientras el crate no sea dependencia de `nestadmin-desktop`; cambiará cuando se enlace. | Reproducibilidad (D60). | `python scripts/third_party.py --check` |
 | DV-16 | D85 | El simulador escucha solo en `127.0.0.1` y reproduce únicamente comportamientos documentados (códigos 2000, 3000-3002, 4102-4104, 4114, 4116, 4135, 4136). No comprueba firma, certificado ni censo real. | `AGENTS.md`: sin red real ni datos personales. | `tests/simulador.rs` |
+| DV-17 | D253 | Subsanación: el alta lleva `Subsanacion = S` y `RechazoPrevio = X` cuando subsana un alta rechazada que no consta en la AEAT (`RegistroAlta::marcar_subsanacion_de_rechazado`); `RechazoPrevio` en un alta exige `Subsanacion = S` (validación propia, conservadora). La anulación de un registro rechazado lleva `RechazoPrevio = S` y `SinRegistroPrevio` según conste o no el alta (`RegistroAnulacion::marcar_subsanacion`). Documentación citada: validaciones y errores 1.2.2 (08/04/2026) y servicio web 1.0.3, ver `FUENTES.md`; el significado exacto de `RechazoPrevio` en la anulación queda por contrastar en preproducción (T18b). | Especificaciones de la AEAT de `FUENTES.md`. | `tests/subsanacion.rs` |
+| DV-18 | D85, D252, D254 | El simulador acepta un alta de subsanación con `RechazoPrevio = X` sin registro previo (con `Subsanacion = S` y otro valor sigue dando 3002). Una baja enviada de nuevo recibe 3001 (no 3000): decidir si es un reenvío propio es cosa de la aplicación (D252). Se puede sembrar con registros ya aceptados (`SimuladorAeat::sembrar`, que no cuenta como envío) para recuperar su memoria tras reabrir la aplicación. DV-12 se concreta en D252: el duplicado solo cuenta como propio si el lote se envió antes sin resultado, porque `RegistroDuplicado` no trae huella. | Códigos 3000-3002 y 2000 de `errores.properties`. | `tests/subsanacion.rs`, `tests/simulador.rs` |
 
 ## Concreción en la aplicación (2026-11-10)
 
@@ -35,5 +37,5 @@ La persistencia de los registros en el núcleo (`verifactu_records`, `crates/cor
 
 - Registros de evento (sistemas no VERI\*FACTU) y firma XAdES: no aplican a la modalidad
   VERI\*FACTU elegida.
-- Consulta de registros (`ConsultaLR`), remisión por requerimiento y subsanación guiada.
+- Consulta de registros (`ConsultaLR`), remisión por requerimiento y subsanación guiada con corrección de datos (la subsanación sin cambios existe desde E5, D253).
 - Transporte con certificado cualificado, almacén de la cadena y cola durable de envíos.

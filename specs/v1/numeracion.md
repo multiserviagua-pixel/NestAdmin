@@ -37,5 +37,6 @@ Cada decisión (`D<n>`) tiene un número definitivo desde que se escribe, para q
 | D223–D227 | PDF de los documentos de venta y membrete (etapa E4a), 2026-11-10 | Asignado |
 | D228–D228 | Membrete con la zona del texto demasiado oscura, rechazado (concreta D222), 2026-11-10 | Asignado |
 | D229–D246 | Envío de documentos de venta por correo con revisión (etapa E4b): contrato de adjuntos de salida y mensaje nuevo D229–D231, recuperación en una cuenta D240; tarea, estados, revisión nueva, anulación, plantilla, cuenta, regla y migración 15 D232–D239; pruebas y límites D241; correcciones de la revisión de seguridad (ids de cuenta que no se reutilizan, mismo buzón, cierre en lugar de descarte, una tarea por documento) D242–D245 y segunda ronda (lista simple y contadores aparte, salida explícita de un envío no comprobable, reparación al abrir, líneas de asunto de 76) D246, 2026-11-11 | Asignado |
+| D247–D262 | `claude/fase-11-conexion`: remisión de los registros Verifactu a la AEAT con el simulador local (etapa E5): alcance D247, entorno y QR D248, estado derivado D249, excepción de R07 y bomba D250, control de flujo D251, lote sin pérdida ni duplicado D252, subsanación D253, simulador y transporte D254–D255, cambio de entorno D256, composición del lote D257, entorno heredado D258, `Fault` D259 y pruebas D260 (D261–D262, reserva), 2026-11-11 | Reservado |
 
-Siguiente número libre: **D247**.
+Siguiente número libre: **D263**.

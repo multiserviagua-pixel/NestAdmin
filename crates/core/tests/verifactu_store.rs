@@ -5,8 +5,8 @@
 use std::path::Path;
 
 use nestadmin_core::sales::{
-    ChainStatus, Company, CustomerData, DraftInput, DraftLine, VerifactuContext, VerifactuKind,
-    CODE_CHAIN_BROKEN, CODE_CLOCK_BEHIND, CODE_RECORD_INVALID,
+    ChainStatus, Company, CustomerData, DraftInput, DraftLine, VerifactuContext,
+    VerifactuEnvironment, VerifactuKind, CODE_CHAIN_BROKEN, CODE_CLOCK_BEHIND, CODE_RECORD_INVALID,
 };
 use nestadmin_core::Store;
 use nestadmin_documents::IsoDate;
@@ -54,6 +54,7 @@ fn ctx(offset: i64) -> VerifactuContext {
     VerifactuContext {
         system: system(),
         now: FechaHoraHuso::desde_unix(base_unix() + offset, 60).unwrap(),
+        environment: VerifactuEnvironment::Simulador,
     }
 }
 

@@ -411,6 +411,14 @@ pub struct RegistroAlta {
 }
 
 impl RegistroAlta {
+    /// Marca el alta como subsanación de un alta rechazada por la AEAT, que no consta allí
+    /// (`Subsanacion = S`, `RechazoPrevio = X`; documentación técnica de la AEAT citada en
+    /// `FUENTES.md`). Hay que volver a sellar el registro.
+    pub fn marcar_subsanacion_de_rechazado(&mut self) {
+        self.subsanacion = true;
+        self.rechazo_previo = Some(RechazoPrevio::X);
+    }
+
     /// Cadena de entrada de la huella (especificación de huella, apartado 3.a).
     pub fn cadena_huella(&self) -> String {
         huella::cadena_alta(&huella::CamposAlta {
@@ -454,6 +462,12 @@ impl RegistroAlta {
             return Err(Error::Campo {
                 campo: "TipoRectificativa".to_owned(),
                 motivo: "obligatorio en R1-R5 y prohibido en F1-F3".to_owned(),
+            });
+        }
+        if self.rechazo_previo.is_some() && !self.subsanacion {
+            return Err(Error::Campo {
+                campo: "RechazoPrevio".to_owned(),
+                motivo: "solo se informa en una subsanación (Subsanacion = S)".to_owned(),
             });
         }
         if self.facturas_rectificadas.len() > 1000
@@ -535,6 +549,13 @@ pub struct RegistroAnulacion {
 }
 
 impl RegistroAnulacion {
+    /// Marca la anulación como reenvío de una anulación rechazada (`RechazoPrevio = S`) y fija
+    /// `SinRegistroPrevio` según conste o no el alta en la AEAT. Hay que volver a sellar.
+    pub fn marcar_subsanacion(&mut self, sin_registro_previo: bool) {
+        self.sin_registro_previo = sin_registro_previo;
+        self.rechazo_previo = true;
+    }
+
     /// Cadena de entrada de la huella (especificación de huella, apartado 3.b).
     pub fn cadena_huella(&self) -> String {
         huella::cadena_anulacion(&huella::CamposAnulacion {
