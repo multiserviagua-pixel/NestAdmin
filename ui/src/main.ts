@@ -230,6 +230,8 @@ import {
 
 import { createSalesView } from "./ventas-view";
 import { salesErrorText } from "./ventas-text";
+import { ENVIRONMENT_SIMULATOR_NOTE, environmentLine, environmentOptions } from "./ventas-verifactu-text";
+import type { VerifactuEnvironment, VerifactuStatusView } from "./types";
 import { SEND_APPROVE_BUTTON, SEND_CONFIRM_UNVERIFIED_BUTTON, SEND_DISCARD_BUTTON, SEND_KIND, SEND_OPEN_PDF_BUTTON, SEND_SAVE_BUTTON, SEND_UNVERIFIED_TEXT, formatSize, sendApproveBlock, sendAttachment, sendConfirmText, sendDiscardText, sendDocumentLabel, sendIsUnverifiable, sendNotices, sendOutcome, sendRecipient } from "./ventas-envio-text";
 import { actionBar, dataTable, emptyState, h, helpTip, icon, sectionHeader, statusChip, tabs, type Child, type IconName, type Tone } from "./components";
 import {
@@ -543,6 +545,8 @@ const state = {
     // «Ver lo enviado»: vista del propio panel con «Volver»; guarda el desplazamiento al que volver.
     sent: null as null | { turnId: number; calls: AssistantSentCall[] | null; error: string | null; scroll: number },
   },
+  // Entorno de la remisión de Verifactu en Configuración (E5, D247): se lee al abrir la sección.
+  verifactu: { status: null as VerifactuStatusView | null, error: null as string | null, loaded: false, busy: false, message: null as string | null },
   // Opción del asistente en Configuración (D183).
   assistantConsent: null as AssistantConsentView | null,
   assistantPreview: null as AssistantPreview | null,
@@ -6235,7 +6239,82 @@ function settingsView() {
     ),
     assistantSection(),
     profileSection(),
+    verifactuSection(),
     h("section", { class: "section" }, sectionHeader("Datos locales"), h("p", { class: "mono" }, s.data_dir || missing())),
+  );
+}
+
+// ---- Verifactu en Configuración (E5, D247, D256) ----
+
+async function loadVerifactuSettings() {
+  const v = state.verifactu;
+  v.loaded = true;
+  try {
+    v.status = await api.verifactuStatus();
+    v.error = null;
+  } catch (error) {
+    v.status = null;
+    v.error = salesErrorText(error);
+  }
+  render(true);
+}
+
+async function changeVerifactuEnvironment(environment: VerifactuEnvironment) {
+  const v = state.verifactu;
+  if (v.busy) return;
+  v.busy = true;
+  v.message = null;
+  render();
+  try {
+    await api.verifactuSetEnvironment(environment);
+    v.error = null;
+  } catch (error) {
+    v.error = salesErrorText(error);
+  }
+  v.busy = false;
+  try {
+    v.status = await api.verifactuStatus();
+  } catch (error) {
+    v.status = null;
+    v.error = salesErrorText(error);
+  }
+  render();
+}
+
+function verifactuSection(): HTMLElement {
+  const v = state.verifactu;
+  if (!v.loaded) void loadVerifactuSettings();
+  const current = v.status?.environment ?? null;
+  const options = environmentOptions(v.status?.selectable_environments ?? ["simulador"]);
+  return h(
+    "section",
+    { class: "section" },
+    sectionHeader("Verifactu"),
+    h("p", { class: "intro" }, "A dónde se remiten los registros de facturación. Hoy solo funciona el simulador local: no se envía nada a la AEAT. La remisión real llegará con el certificado y la declaración responsable."),
+    v.error ? h("div", { class: "notice error", role: "alert" }, h("span", {}, v.error)) : null,
+    !v.loaded || (!v.status && !v.error) ? h("p", { class: "meta" }, "Cargando…") : null,
+    current ? h("p", {}, h("strong", {}, environmentLine(current))) : null,
+    ...options.map((option) =>
+      h(
+        "div",
+        { class: "provider-choice" },
+        h(
+          "label",
+          { class: "choice" },
+          h("input", {
+            type: "radio",
+            name: "verifactu-environment",
+            value: option.value,
+            "data-focus-key": `verifactu:environment:${option.value}`,
+            checked: current === option.value,
+            disabled: !option.selectable || v.busy || current === null,
+            onchange: () => void changeVerifactuEnvironment(option.value),
+          }),
+          h("span", {}, h("strong", {}, option.label), option.note ? ` — ${option.note}` : ""),
+        ),
+      ),
+    ),
+    h("p", { class: "meta" }, ENVIRONMENT_SIMULATOR_NOTE),
   );
 }
 

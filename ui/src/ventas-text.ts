@@ -61,6 +61,27 @@ const SEND_ERROR: Record<string, { text: string; withDetail?: boolean }> = {
   unavailable: { text: "El servicio de correo no está disponible ahora mismo." },
 };
 
+/**
+ * Errores de la remisión de Verifactu (E5, D247-D259). Los de transporte (`invalid_response`,
+ * `rate_limited`, `unauthorized`) llegan en el resultado de una pasada, no como error de un
+ * comando; `unavailable` también, pero su código lo comparte el correo y se trata aparte
+ * (`transportText`, en `ventas-verifactu-text.ts`).
+ */
+const VERIFACTU_ERROR: Record<string, string> = {
+  environment_unavailable: "Ese entorno todavía no está disponible: la remisión real a la AEAT llegará con el certificado y la declaración responsable. Hoy solo funciona el simulador.",
+  verifactu_environment_busy: "No se puede cambiar de entorno mientras haya registros pendientes, en envío o rechazados sin subsanar. Remítalos o subsánelos primero.",
+  verifactu_batch_open: "Ya hay un lote en envío: espere a que termine o a que se reintente.",
+  verifactu_batch_rejected: "La AEAT rechazó el envío por un error de esquema varias veces seguidas y la remisión automática está parada. «Remitir ahora» lo reintenta.",
+  verifactu_environment_changed: "El entorno cambió mientras se hacía la operación: no se generó ni se remitió nada. Vuelva a leer el estado y repita.",
+  verifactu_fault: "La AEAT devolvió un error de esquema (Fault): el lote se cerró y sus registros vuelven a estar pendientes.",
+  invalid_response: "La respuesta de la AEAT no se entiende: el lote sigue abierto y se reenviará igual.",
+  rate_limited: "El servicio pide esperar antes de otro envío: se reintentará pasada la espera.",
+  unauthorized: "El servicio no autoriza el envío: el lote sigue abierto y no se pierde nada.",
+};
+
+/** Códigos de error propios de la remisión de Verifactu. */
+export const VERIFACTU_ERROR_CODES: string[] = Object.keys(VERIFACTU_ERROR);
+
 /** Códigos de error propios del envío por correo. */
 export const SEND_ERROR_CODES: string[] = Object.keys(SEND_ERROR);
 
@@ -75,6 +96,8 @@ function cleanInvalidInput(detail: string): string {
 /** Texto para el usuario: el encabezado del código y, detrás, el detalle del backend sin tocar. */
 export function salesErrorText(error: unknown): string {
   const { code, detail } = parseSalesError(error);
+  const verifactu = code ? VERIFACTU_ERROR[code] : undefined;
+  if (verifactu) return verifactu;
   const send = code ? SEND_ERROR[code] : undefined;
   if (send) return send.withDetail && detail ? `${send.text}: ${detail}` : send.text;
   const headline = code ? ERROR_HEADLINE[code] : undefined;
@@ -578,7 +601,7 @@ export function exemptionText(exemption: { qualification: SalesQualification; de
 
 export const EMPTY_LIST = "Todavía no hay documentos. Cree un borrador con «Nuevo documento».";
 export const NO_TOTALS = "Los totales aparecerán cuando el borrador tenga al menos una línea válida y se guarde.";
-export const VERIFACTU_READONLY = "Vista de solo lectura: los registros no se pueden editar ni borrar. Se crean al emitir o anular una factura.";
+export const VERIFACTU_READONLY = "Los registros no se pueden editar ni borrar. Se crean al emitir o anular una factura y se remiten solos a la AEAT; aquí se ve cómo va cada uno.";
 
 // ---- Membrete PDF de fondo (D222, D223) ----
 

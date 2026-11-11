@@ -29,6 +29,8 @@ import type {
   SalesSend,
   Task,
   VerifactuRecord,
+  VerifactuRecordView,
+  VerifactuStatusView,
 } from "./types";
 import {
   ACTION_LABEL,
@@ -91,6 +93,23 @@ import {
   parseMargins,
   type MarginsText,
 } from "./ventas-text";
+
+import {
+  NO_STATUS_FOR_RECORD,
+  REMIT_NOW_BUTTON,
+  SUBSANATE_BUTTON,
+  batchText,
+  canSubsanate,
+  environmentLine,
+  haltedText,
+  nextSendText,
+  pendingText,
+  pumpReportText,
+  recordStatusText,
+  subsanateConfirmText,
+  subsanateResultText,
+  type PumpText,
+} from "./ventas-verifactu-text";
 
 import { SEND_BUTTON, SEND_CHECK_BUTTON, SEND_HISTORY_EMPTY, SEND_HISTORY_TITLE, canSendByMail, openSendStatus, sendHistoryRows } from "./ventas-envio-text";
 
@@ -170,6 +189,11 @@ export function createSalesView(ctx: Context) {
     receivedForm: null as null | { supplier_name: string; supplier_tax_id: string; supplier_number: string; date: string },
     review: null as null | { id: number; document: string; invoice: string },
     records: [] as VerifactuRecord[],
+    /** Estado de la remisión a la AEAT (E5); `null` si no se pudo leer (con `verifactuError`). */
+    verifactu: null as VerifactuStatusView | null,
+    verifactuError: null as string | null,
+    pump: null as PumpText | null,
+    remitting: false,
   };
 
   const blocksInvoices = () => setupNotices(s.setup).some((n) => n.blocksInvoices);
@@ -230,10 +254,21 @@ export function createSalesView(ctx: Context) {
   async function loadTab() {
     if (s.tab === "recurring") s.templates = await api.salesRecurringTemplates();
     else if (s.tab === "received") s.received = await api.salesReceivedNotes();
-    else if (s.tab === "records") {
-      s.records = await api.verifactuRecords();
-      s.setup = await api.salesSetupStatus();
-    } else if (s.tab === "company") await loadLogo();
+    else if (s.tab === "records") await loadRecords();
+    else if (s.tab === "company") await loadLogo();
+  }
+
+  /** Registros, aviso de la cadena y estado de la remisión; si este último falla se dice, no se oculta. */
+  async function loadRecords() {
+    s.records = await api.verifactuRecords();
+    s.setup = await api.salesSetupStatus();
+    try {
+      s.verifactu = await api.verifactuStatus();
+      s.verifactuError = null;
+    } catch (error) {
+      s.verifactu = null;
+      s.verifactuError = salesErrorText(error);
+    }
   }
 
   async function loadLogo() {
@@ -1532,26 +1567,114 @@ export function createSalesView(ctx: Context) {
     );
   }
 
-  // ---- Registros Verifactu (solo lectura) ----
+  // ---- Registros Verifactu y su remisión a la AEAT (E5) ----
+
+  const noticeClass = (tone: PumpText["tone"]) => (tone === "neutral" ? "info" : tone);
+
+  async function remitNow() {
+    if (s.remitting) return;
+    s.remitting = true;
+    s.pump = null;
+    ctx.render();
+    try {
+      s.pump = pumpReportText(await api.verifactuSubmitNow());
+    } catch (error) {
+      s.pump = { tone: "error", text: salesErrorText(error) };
+    }
+    s.remitting = false;
+    try {
+      await loadRecords();
+    } catch (error) {
+      s.message = { kind: "error", text: salesErrorText(error) };
+    }
+    ctx.render();
+  }
+
+  async function refreshRecords() {
+    try {
+      await loadRecords();
+    } catch (error) {
+      s.message = { kind: "error", text: salesErrorText(error) };
+    }
+    ctx.render();
+  }
+
+  async function subsanate(r: VerifactuRecordView) {
+    if (!(await ctx.ask(subsanateConfirmText(r)))) return;
+    const done = await run(() => api.verifactuSubsanate(r.record_id));
+    if (done) s.message = { kind: "ok", text: subsanateResultText(done) };
+    try {
+      await loadRecords();
+    } catch (error) {
+      s.message = { kind: "error", text: salesErrorText(error) };
+    }
+    ctx.render();
+  }
+
+  /** Cabecera de la remisión: entorno, último lote, espera, paro, pendientes y «Remitir ahora». */
+  function remissionHeader(): HTMLElement {
+    const v = s.verifactu;
+    if (!v) {
+      return h("div", { class: "notice warn", role: "alert" }, h("span", {}, `No se pudo leer el estado de la remisión${s.verifactuError ? `: ${s.verifactuError}` : "."}`), h("button", { onclick: () => void refreshRecords() }, "Reintentar"));
+    }
+    const halted = haltedText(v);
+    const batch = v.last_batch ? batchText(v.last_batch) : null;
+    return h(
+      "div",
+      { class: "verifactu-head" },
+      h("div", { class: "notice info", role: "status" }, h("span", {}, h("strong", {}, environmentLine(v.environment)), v.environment_notice ? ` — ${v.environment_notice}` : "")),
+      halted ? h("div", { class: "notice error", role: "alert" }, h("span", {}, halted)) : null,
+      h(
+        "ul",
+        { class: "meta" },
+        h("li", {}, "Último lote: ", batch ? `${batch.when}. ${batch.result}${batch.csv ? ` ${batch.csv}.` : ""}` : "todavía no se ha enviado ninguno."),
+        h("li", {}, "Siguiente envío: ", nextSendText(v)),
+        h("li", {}, "Pendientes: ", pendingText(v)),
+      ),
+      h(
+        "div",
+        { class: "actions" },
+        h("button", { class: "primary", "data-focus-key": "verifactu:remit", disabled: s.remitting, onclick: () => void remitNow() }, s.remitting ? "Remitiendo…" : REMIT_NOW_BUTTON),
+        h("button", { "data-focus-key": "verifactu:refresh", disabled: s.remitting, onclick: () => void refreshRecords() }, "Actualizar estado"),
+      ),
+      s.pump ? h("div", { class: `notice ${noticeClass(s.pump.tone)}`, role: s.pump.tone === "error" || s.pump.tone === "warn" ? "alert" : "status" }, h("span", {}, s.pump.text)) : null,
+    );
+  }
+
+  /** Celda «Estado AEAT»: chip, explicación y, en un rechazado sin subsanar, «Subsanar». */
+  function aeatCell(view: VerifactuRecordView | undefined): HTMLElement {
+    if (!view) return h("span", { class: "meta" }, NO_STATUS_FOR_RECORD);
+    const text = recordStatusText(view);
+    return h(
+      "div",
+      { class: "verifactu-state" },
+      statusChip(text.label, text.tone),
+      text.detail ? h("p", { class: "meta" }, text.detail) : null,
+      canSubsanate(view) ? h("button", { "data-focus-key": `verifactu:subsanate:${view.record_id}`, onclick: () => void subsanate(view) }, SUBSANATE_BUTTON) : null,
+    );
+  }
 
   function recordsTab(): HTMLElement {
     const chain = s.setup?.chain ?? null;
+    const byRecord = new Map((s.verifactu?.records ?? []).map((r) => [r.record_id, r]));
     return h(
       "div",
       {},
       sectionHeader("Registros Verifactu"),
       h("p", { class: "meta" }, VERIFACTU_READONLY),
       h("div", { class: chain?.state === "broken" ? "notice error" : "notice info", role: chain?.state === "broken" ? "alert" : "status" }, h("span", {}, chainText(chain))),
+      remissionHeader(),
       s.records.length === 0
         ? emptyState("Todavía no hay registros.", "Se crean al emitir o anular una factura.")
         : dataTable(
-            [{ label: "N.º" }, { label: "Tipo" }, { label: "Factura" }, { label: "Fecha" }, { label: "Total", numeric: true }, { label: "Huella" }, { label: "Detalle" }],
+            [{ label: "N.º" }, { label: "Tipo" }, { label: "Factura" }, { label: "Fecha" }, { label: "Total", numeric: true }, { label: "Estado AEAT" }, { label: "Huella" }, { label: "Detalle" }],
             s.records.map((r) => [
               r.id,
               r.kind === "alta" ? "Alta" : "Anulación",
               r.invoice_number,
               r.issue_date,
               r.total ? formatMoney(r.total) : "—",
+              aeatCell(byRecord.get(r.id)),
               h("code", {}, `${r.hash.slice(0, 16)}…`),
               h("details", {}, h("summary", {}, `Ver registro ${r.id}`), h("pre", { class: "sales-json" }, JSON.stringify({ ...(r.record as object), huella_completa: r.hash, huella_anterior: r.previous_hash, generado: r.generated_at }, null, 2))),
             ]),

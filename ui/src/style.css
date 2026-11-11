@@ -2636,3 +2636,26 @@ tr.is-located > td {
 .sales-panel .row {
   flex-wrap: wrap;
 }
+
+/* Remisión de Verifactu (E5) */
+.verifactu-head {
+  display: grid;
+  gap: var(--s2);
+  margin-bottom: var(--s3);
+}
+
+.verifactu-head ul {
+  margin: 0;
+  padding-left: var(--s4);
+}
+
+.verifactu-state {
+  display: grid;
+  gap: var(--s1);
+  max-width: 340px;
+  justify-items: start;
+}
+
+.verifactu-state p {
+  margin: 0;
+}

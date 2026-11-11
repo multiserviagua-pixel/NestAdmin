@@ -28,11 +28,13 @@ use std::str::FromStr;
 use std::sync::MutexGuard;
 
 use nestadmin_app::accounts::AccountView;
+use nestadmin_app::remission::{PumpReport, PumpStart, VerifactuStatusView};
 use nestadmin_app::{App, AppError, AppResult};
 use nestadmin_core::sales::{
     ChainStatus, Company, Customer, CustomerData, DraftInput, DraftLine, IssuerSnapshot,
     LetterheadMargins, ReceivedDeliveryNote, RectificationDraft, RecurringRecord, RecurringRun,
-    SalesDocument, SalesFilter, SalesLineRecord, SalesSend, VerifactuKind, VerifactuRecordRow,
+    SalesDocument, SalesFilter, SalesLineRecord, SalesSend, VerifactuEnvironment, VerifactuKind,
+    VerifactuRecordRow,
 };
 use nestadmin_core::Task;
 use nestadmin_documents::IsoDate;
@@ -1354,6 +1356,90 @@ fn verifactu_records(shared: State<'_, SharedState>) -> CmdResult<Vec<RecordOut>
         .collect())
 }
 
+/// Estado de la remisión (E5, D249-D252, D256): entorno, estado de cada registro, último lote,
+/// espera, paro por `Fault` y pendientes. Las marcas de tiempo van en milisegundos Unix.
+#[tauri::command]
+fn verifactu_status(shared: State<'_, SharedState>) -> CmdResult<VerifactuStatusView> {
+    sale(lock(&shared)?.verifactu_status())
+}
+
+/// «Remitir ahora»: una pasada manual de la remisión (D250). La llamada de red se hace sin el
+/// cerrojo de la aplicación y fuera del hilo de la ventana, igual que el tick (`resume_verifactu`).
+#[tauri::command]
+async fn verifactu_submit_now(shared: State<'_, SharedState>) -> CmdResult<PumpReport> {
+    let worker = std::sync::Arc::clone(shared.inner());
+    tauri::async_runtime::spawn_blocking(move || {
+        let start = worker
+            .app()
+            .map_err(|e| coded("storage", e))
+            .and_then(|mut app| sale(app.verifactu_pump_begin(true)))?;
+        match start {
+            PumpStart::Idle(report) => Ok(report),
+            PumpStart::Job(job) => {
+                let sent = job.run();
+                let mut app = worker.app().map_err(|e| coded("storage", e))?;
+                sale(app.verifactu_pump_finish(sent))
+            }
+        }
+    })
+    .await
+    .map_err(|e| coded("storage", e))?
+}
+
+#[derive(Debug, Serialize)]
+pub struct SubsanationOut {
+    pub rejected_record_id: i64,
+    /// Registro nuevo de subsanación.
+    pub record_id: i64,
+    /// `false` si ya existía (doble clic = un solo registro).
+    pub created: bool,
+}
+
+/// Subsana un registro rechazado: crea un registro nuevo vinculado y pendiente de remitir (D253).
+#[tauri::command]
+fn verifactu_subsanate(
+    shared: State<'_, SharedState>,
+    record_id: i64,
+) -> CmdResult<SubsanationOut> {
+    let done = sale(lock(&shared)?.verifactu_subsanate(record_id))?;
+    Ok(SubsanationOut {
+        rejected_record_id: done.rejected_record_id,
+        record_id: done.record_id,
+        created: done.created,
+    })
+}
+
+/// Entorno de remisión vigente: `simulador`, `preproduccion` o `produccion`.
+#[tauri::command]
+fn verifactu_environment(shared: State<'_, SharedState>) -> CmdResult<String> {
+    Ok(sale(lock(&shared)?.verifactu_environment())?
+        .as_str()
+        .to_owned())
+}
+
+#[derive(Debug, Serialize)]
+pub struct EnvironmentChangeOut {
+    pub environment: String,
+    /// `false` si ya era el vigente.
+    pub changed: bool,
+}
+
+/// Cambia el entorno de remisión. Hoy solo `simulador` se puede elegir (D247): los demás dan
+/// `[environment_unavailable]` (o `[verifactu_environment_busy]` si hay registros por remitir).
+#[tauri::command]
+fn verifactu_set_environment(
+    shared: State<'_, SharedState>,
+    environment: String,
+) -> CmdResult<EnvironmentChangeOut> {
+    let target = VerifactuEnvironment::parse(environment.trim())
+        .ok_or_else(|| bad("environment", "entorno no admitido"))?;
+    let changed = sale(lock(&shared)?.set_verifactu_environment(target, "usuario_configuracion"))?;
+    Ok(EnvironmentChangeOut {
+        environment: target.as_str().to_owned(),
+        changed,
+    })
+}
+
 /// `configure` reparte los comandos por este criterio (prefijo o nombre) entre la lista
 /// principal y la de venta. Así la lista principal, que contrasta `ui/src/api.ts` uno a uno, no
 /// incluye los de venta hasta que la ventana de venta los llame.
@@ -1430,5 +1516,10 @@ pub fn handler<R: Runtime>() -> impl Fn(Invoke<R>) -> bool + Send + Sync + 'stat
         sales_set_recurring_active,
         sales_generate_recurring,
         verifactu_records,
+        verifactu_status,
+        verifactu_submit_now,
+        verifactu_subsanate,
+        verifactu_environment,
+        verifactu_set_environment,
     ]
 }

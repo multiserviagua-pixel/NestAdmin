@@ -4,7 +4,10 @@
 // real no decida: los cálculos son una aproximación para ver la interfaz.
 //
 // Parámetros de la URL para ver los avisos: `?sin-productor` (productor sin configurar hasta
-// pulsar «Volver a leer» una vez), `?cadena-rota` (cadena de registros rota).
+// pulsar «Volver a leer» una vez), `?cadena-rota` (cadena de registros rota). Para la remisión de
+// Verifactu (E5): `?verifactu-rechazo` (el siguiente envío rechaza el primer registro),
+// `?verifactu-sin-red` (el siguiente envío no obtiene respuesta) y `?verifactu-fault` (el
+// siguiente envío recibe un `Fault` de esquema).
 
 import type {
   LetterheadMargins,
@@ -24,7 +27,13 @@ import type {
   SalesRecurring,
   SalesStatus,
   SalesTotals,
+  VerifactuBatchView,
+  VerifactuEnvironment,
+  VerifactuPumpReport,
   VerifactuRecord,
+  VerifactuRecordView,
+  VerifactuStatus,
+  VerifactuStatusView,
 } from "./types";
 
 import { parseMargins } from "./ventas-text";
@@ -622,7 +631,120 @@ export const salesHandlers: Record<string, (a: any, options?: any) => unknown> =
     return run;
   },
   verifactu_records: () => records,
+  verifactu_status: () => verifactuStatus(),
+  verifactu_submit_now: () => verifactuPump(),
+  verifactu_subsanate: ({ recordId }) => verifactuSubsanate(recordId),
+  verifactu_environment: () => verifactuEnvironment,
+  verifactu_set_environment: ({ environment }) => verifactuSetEnvironment(environment),
 };
+
+// ---- Remisión de Verifactu (E5): estado derivado de cada registro, último lote, espera y entorno.
+// Aproxima el backend con datos sintéticos; las marcas de tiempo son milisegundos, como las reales.
+
+interface MockRecordState {
+  status: VerifactuStatus;
+  code: number | null;
+  description: string | null;
+  duplicate: boolean;
+  batch: number | null;
+  subsanation: number | null;
+}
+
+const recordStates = new Map<number, MockRecordState>();
+let verifactuEnvironment: VerifactuEnvironment = "simulador";
+let lastBatch: VerifactuBatchView | null = null;
+let nextBatch = 1;
+let nextSendAt: number | null = null;
+let consecutiveFaults = 0;
+let forceReject = params.has("verifactu-rechazo");
+let forceNoNetwork = params.has("verifactu-sin-red");
+let forceFault = params.has("verifactu-fault");
+const WAIT_SECONDS = 60;
+
+const stateOf = (recordId: number): MockRecordState => recordStates.get(recordId) ?? { status: "pending", code: null, description: null, duplicate: false, batch: null, subsanation: null };
+const countStatus = (status: VerifactuStatus) => records.filter((r) => stateOf(r.id).status === status).length;
+
+function verifactuStatus(): VerifactuStatusView {
+  const views: VerifactuRecordView[] = records.map((r) => {
+    const st = stateOf(r.id);
+    return { record_id: r.id, document_id: r.document_id, kind: r.kind, invoice_number: r.invoice_number, issue_date: r.issue_date, status: st.status, aeat_code: st.code, aeat_description: st.description, duplicate: st.duplicate, batch_id: st.batch, subsanation_record_id: st.subsanation, environment: "simulador" };
+  });
+  const remaining = nextSendAt === null ? null : Math.max(0, Math.ceil((nextSendAt - Date.now()) / 1000));
+  return {
+    environment: verifactuEnvironment,
+    selectable_environments: ["simulador"],
+    environment_notice: verifactuEnvironment === "simulador" ? "Entorno de pruebas: nada de esto llega a la AEAT y las facturas emitidas aquí llevan para siempre el QR de pruebas." : null,
+    records: views,
+    last_batch: lastBatch,
+    next_send_at: nextSendAt,
+    wait_remaining_seconds: remaining,
+    halted: consecutiveFaults >= 3,
+    consecutive_faults: consecutiveFaults,
+    pending: countStatus("pending"),
+    sending: countStatus("sending"),
+    rejected: countStatus("rejected"),
+    unexpected_duplicates: countStatus("unexpected_duplicate"),
+  };
+}
+
+function verifactuPump(): VerifactuPumpReport {
+  const open = records.filter((r) => ["pending", "sending"].includes(stateOf(r.id).status));
+  if (open.length === 0) return { state: "idle" };
+  const now = Date.now();
+  if (nextSendAt !== null && now < nextSendAt) return { state: "waiting", seconds: Math.ceil((nextSendAt - now) / 1000), until: nextSendAt };
+  const batch = nextBatch++;
+  nextSendAt = now + WAIT_SECONDS * 1000;
+  const base = { id: batch, environment: "simulador", record_count: open.length, started_at: now, attempts: 1 };
+  if (forceNoNetwork) {
+    forceNoNetwork = false;
+    for (const r of open) recordStates.set(r.id, { ...stateOf(r.id), status: "sending", batch });
+    lastBatch = { ...base, outcome: null, send_state: null, error_code: null, error_description: null, wait_seconds: null, csv: null, finished_at: null };
+    return { state: "no_response", batch_id: batch, code: "unavailable", message: "sin conexión (simulado)" };
+  }
+  if (forceFault) {
+    forceFault = false;
+    consecutiveFaults += 1;
+    const description = "Codigo[4104].Error en la cabecera del envío (simulado)";
+    lastBatch = { ...base, outcome: "fault", send_state: null, error_code: 4104, error_description: description, wait_seconds: WAIT_SECONDS, csv: null, finished_at: now };
+    return { state: "fault", batch_id: batch, code: 4104, description };
+  }
+  consecutiveFaults = 0;
+  let rejected = 0;
+  open.forEach((r, i) => {
+    if (forceReject && i === 0) {
+      rejected += 1;
+      recordStates.set(r.id, { status: "rejected", code: 1100, description: "Rechazo simulado: valor o tipo incorrecto en un campo", duplicate: false, batch, subsanation: null });
+    } else recordStates.set(r.id, { status: "accepted", code: null, description: null, duplicate: false, batch, subsanation: null });
+  });
+  forceReject = false;
+  lastBatch = { ...base, outcome: "responded", send_state: rejected ? "ParcialmenteCorrecto" : "Correcto", error_code: null, error_description: null, wait_seconds: WAIT_SECONDS, csv: `CSV-DEMO-${String(batch).padStart(4, "0")}`, finished_at: now };
+  return { state: "sent", batch_id: batch, accepted: open.length - rejected, accepted_with_errors: 0, rejected, unexpected_duplicates: 0, missing: 0, wait_seconds: WAIT_SECONDS };
+}
+
+function verifactuSubsanate(recordId: number) {
+  const rejected = byId(records, recordId, "registro Verifactu");
+  const st = stateOf(recordId);
+  if (st.subsanation !== null) return { rejected_record_id: recordId, record_id: st.subsanation, created: false };
+  if (st.status !== "rejected") fail("conflict", `el registro ${recordId} está «${st.status}»: solo se subsana uno rechazado`);
+  const previous = records[records.length - 1] ?? null;
+  const hash = (0x7f4a7c15 * (records.length + 3)).toString(16).toUpperCase().padStart(8, "0").repeat(8).slice(0, 64);
+  const fresh: VerifactuRecord = { ...rejected, id: records.length + 1, previous_id: previous?.id ?? null, previous_hash: previous?.hash ?? null, hash, created_at: Date.now() };
+  records.push(fresh);
+  recordStates.set(recordId, { ...st, status: "subsanated", subsanation: fresh.id });
+  return { rejected_record_id: recordId, record_id: fresh.id, created: true };
+}
+
+function verifactuSetEnvironment(environment: string) {
+  if (!["simulador", "preproduccion", "produccion"].includes(environment)) fail("invalid_input", "datos no válidos: environment: entorno no admitido");
+  if (environment === verifactuEnvironment) return { environment, changed: false };
+  if (environment !== "simulador") {
+    const busy = countStatus("pending") + countStatus("sending") + countStatus("rejected");
+    if (busy > 0) fail("verifactu_environment_busy", `no se cambia de entorno con registros por remitir (${busy})`);
+    fail("environment_unavailable", `el entorno «${environment}» no está disponible todavía`);
+  }
+  verifactuEnvironment = "simulador";
+  return { environment, changed: true };
+}
 
 /** Comandos que cambian datos de venta (para el aviso de cambios del simulado). */
 export const salesMutating = new Set<string>();
@@ -635,5 +757,25 @@ export const salesMutating = new Set<string>();
   if (producerOk && !chainBroken) {
     const invoice = newDraft({ kind: "invoice", customer_id: 2, due_date: "2026-11-30", lines: [lineFrom({ description: "Soporte mensual", quantity: "1", unit_price: "120", tax_percent: "21" })] });
     issue(invoice, "2026-11-02");
+    // Registros de remisión de todos los estados, para ver la pestaña llena (datos inventados).
+    const now = Date.now();
+    const more = (customer: number, description: string, price: string, date: string) => issue(newDraft({ kind: "invoice", customer_id: customer, lines: [lineFrom({ description, quantity: "1", unit_price: price, tax_percent: "21" })] }), date);
+    more(1, "Revisión de instalación", "80", "2026-11-03");
+    more(2, "Cambio de piezas", "210", "2026-11-04");
+    more(1, "Soporte urgente", "95", "2026-11-05");
+    more(2, "Soporte urgente (subsanación)", "95", "2026-11-05");
+    more(1, "Formación básica", "150", "2026-11-06");
+    more(2, "Mantenimiento trimestral", "300", "2026-11-09");
+    const at = (recordId: number, state: Partial<MockRecordState> & { status: VerifactuStatus }) => recordStates.set(recordId, { code: null, description: null, duplicate: false, batch: 1, subsanation: null, ...state });
+    at(1, { status: "accepted" });
+    at(2, { status: "accepted_with_errors", code: 2000, description: "Aceptado con errores (simulado): falta un dato opcional" });
+    at(3, { status: "rejected", code: 1100, description: "El NIF del destinatario no consta en el censo (simulado)" });
+    at(4, { status: "subsanated", code: 1100, description: "Valor incorrecto en el importe total (simulado)", subsanation: 5 });
+    at(5, { status: "pending", batch: null });
+    at(6, { status: "unexpected_duplicate", code: 3000, description: "Registro duplicado" });
+    at(7, { status: "sending", batch: 2 });
+    nextBatch = 3;
+    lastBatch = { id: 1, environment: "simulador", record_count: 4, started_at: now - 120_000, attempts: 1, outcome: "responded", send_state: "ParcialmenteCorrecto", error_code: null, error_description: null, wait_seconds: WAIT_SECONDS, csv: "CSV-DEMO-0001", finished_at: now - 118_000 };
+    nextSendAt = now + 45_000;
   }
 }

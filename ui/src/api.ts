@@ -86,7 +86,12 @@ import type {
   SalesSetupStatus,
   SalesKind,
   SalesStatus,
+  VerifactuEnvironment,
+  VerifactuEnvironmentChange,
+  VerifactuPumpReport,
   VerifactuRecord,
+  VerifactuStatusView,
+  VerifactuSubsanation,
 } from "./types";
 
 type InvokeOptions = { headers: Record<string, string> };
@@ -437,4 +442,13 @@ export const api = {
   /** Solo crea borradores para revisar (D87); nunca emite. */
   salesGenerateRecurring: () => invoke<SalesRecurringRun>("sales_generate_recurring"),
   verifactuRecords: () => invoke<VerifactuRecord[]>("verifactu_records"),
+  /** Remisión a la AEAT (E5): estado de cada registro, último lote, espera y pendientes. */
+  verifactuStatus: () => invoke<VerifactuStatusView>("verifactu_status"),
+  /** «Remitir ahora»: una pasada manual; respeta la espera entre lotes. */
+  verifactuSubmitNow: () => invoke<VerifactuPumpReport>("verifactu_submit_now"),
+  /** Crea un registro nuevo de subsanación de uno rechazado (D253); repetirlo no crea otro. */
+  verifactuSubsanate: (recordId: number) => invoke<VerifactuSubsanation>("verifactu_subsanate", { recordId }),
+  verifactuEnvironment: () => invoke<VerifactuEnvironment>("verifactu_environment"),
+  /** Solo `simulador` se puede elegir (D247); los demás dan `environment_unavailable`. */
+  verifactuSetEnvironment: (environment: VerifactuEnvironment) => invoke<VerifactuEnvironmentChange>("verifactu_set_environment", { environment }),
 };

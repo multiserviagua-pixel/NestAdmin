@@ -2970,4 +2970,6 @@ mod recorrido_envio;
 #[cfg(test)]
 mod recorrido_pdf;
 #[cfg(test)]
+mod recorrido_remision;
+#[cfg(test)]
 mod recorrido_venta;

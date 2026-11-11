@@ -1509,7 +1509,91 @@ export interface VerifactuRecord {
   created_at: number;
 }
 
-export type SalesChain = { state: "empty" } | { state: "ok"; records: number } | { state: "broken"; at_id: number; reason: string };
+/** Entorno de remisión (E5, D247): hoy solo `simulador` se puede elegir. */
+export type VerifactuEnvironment = "simulador" | "preproduccion" | "produccion";
+
+/** Estado derivado de un registro respecto a la AEAT (D249, ajuste 6). */
+export type VerifactuStatus = "pending" | "sending" | "accepted" | "accepted_with_errors" | "rejected" | "subsanated" | "unexpected_duplicate";
+
+export interface VerifactuRecordView {
+  record_id: number;
+  document_id: number;
+  kind: "alta" | "anulacion";
+  invoice_number: string;
+  /** `DD-MM-AAAA`. */
+  issue_date: string;
+  status: VerifactuStatus;
+  aeat_code: number | null;
+  aeat_description: string | null;
+  /** Aceptado porque la AEAT ya lo tenía de un intento anterior de nuestro lote. */
+  duplicate: boolean;
+  batch_id: number | null;
+  /** Registro que lo subsana (`subsanated`). */
+  subsanation_record_id: number | null;
+  /** `simulador`, `preproduccion`, `produccion` o `produccion_heredado`. */
+  environment: string;
+}
+
+export interface VerifactuBatchView {
+  id: number;
+  environment: string;
+  record_count: number;
+  /** Milisegundos Unix. */
+  started_at: number;
+  attempts: number;
+  /** `null` mientras el lote está abierto (sin respuesta). */
+  outcome: "responded" | "fault" | null;
+  send_state: string | null;
+  error_code: number | null;
+  error_description: string | null;
+  wait_seconds: number | null;
+  csv: string | null;
+  /** Milisegundos Unix. */
+  finished_at: number | null;
+}
+
+export interface VerifactuStatusView {
+  environment: VerifactuEnvironment;
+  selectable_environments: VerifactuEnvironment[];
+  environment_notice: string | null;
+  records: VerifactuRecordView[];
+  last_batch: VerifactuBatchView | null;
+  /** Milisegundos Unix a partir de los cuales se puede enviar el siguiente lote. */
+  next_send_at: number | null;
+  /** Segundos que faltan según el reloj de la aplicación (0 si ya pasó). */
+  wait_remaining_seconds: number | null;
+  halted: boolean;
+  consecutive_faults: number;
+  pending: number;
+  sending: number;
+  rejected: number;
+  unexpected_duplicates: number;
+}
+
+/** Resultado de una pasada de remisión («Remitir ahora»). */
+export type VerifactuPumpReport =
+  | { state: "idle" }
+  | { state: "busy" }
+  | { state: "waiting"; seconds: number; until: number }
+  | { state: "halted" }
+  | { state: "environment_unavailable"; environment: string }
+  | { state: "sent"; batch_id: number; accepted: number; accepted_with_errors: number; rejected: number; unexpected_duplicates: number; missing: number; wait_seconds: number }
+  | { state: "fault"; batch_id: number; code: number | null; description: string }
+  | { state: "no_response"; batch_id: number; code: string; message: string };
+
+export interface VerifactuSubsanation {
+  rejected_record_id: number;
+  record_id: number;
+  /** `false` si ya existía (doble clic = un solo registro). */
+  created: boolean;
+}
+
+export interface VerifactuEnvironmentChange {
+  environment: VerifactuEnvironment;
+  changed: boolean;
+}
+
+export type SalesChain ={ state: "empty" } | { state: "ok"; records: number } | { state: "broken"; at_id: number; reason: string };
 
 export interface SalesSetupStatus {
   producer_configured: boolean;

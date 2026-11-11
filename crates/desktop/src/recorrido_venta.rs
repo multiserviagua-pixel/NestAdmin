@@ -189,6 +189,11 @@ impl Session {
         self.ok("sales_setup_status", json!({}))
     }
 
+    /// Adelanta el reloj de la venta (el de la remisión, D251) estos segundos.
+    pub(super) fn advance_clock(&self, seconds: i64) {
+        self.clock.advance(seconds);
+    }
+
     pub(super) fn write_producer(&self, text: &str) {
         std::fs::write(self.data_dir.join(productor::FILE), text).unwrap();
     }
