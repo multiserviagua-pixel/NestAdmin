@@ -999,3 +999,250 @@ fn normal_margins_and_amounts_keep_the_proportional_columns() {
     let total_left = boxes.iter().find(|b| b.0 == "TOTAL").unwrap().1;
     assert!((total_left - (x1 - w * 0.38)).abs() < 1.5);
 }
+
+// ---------------------------------------------------------------------------------------------
+// Membrete demasiado oscuro en la zona del texto (D228)
+// ---------------------------------------------------------------------------------------------
+
+/// Rectángulo de color de un membrete sintético, en mm desde el borde superior izquierdo.
+struct Shade {
+    top: f32,
+    bottom: f32,
+    left: f32,
+    right: f32,
+    rgb: (u8, u8, u8),
+}
+
+/// Página completa de un solo color.
+fn full(rgb: (u8, u8, u8)) -> Shade {
+    Shade {
+        top: 0.0,
+        bottom: 297.0,
+        left: 0.0,
+        right: 210.0,
+        rgb,
+    }
+}
+
+/// Banda horizontal de lado a lado entre dos alturas.
+fn band(top: f32, bottom: f32, rgb: (u8, u8, u8)) -> Shade {
+    Shade {
+        top,
+        bottom,
+        left: 0.0,
+        right: 210.0,
+        rgb,
+    }
+}
+
+const BLACK: (u8, u8, u8) = (20, 20, 20);
+
+/// PDF sintético A4 con una página por cada lista de rectángulos, pintados en ese orden.
+fn shaded_letterhead(pages: &[Vec<Shade>]) -> Vec<u8> {
+    let pdfium = extractor().pdfium().unwrap();
+    let mut document = pdfium.create_new_pdf().unwrap();
+    for shades in pages {
+        let mut page = document
+            .pages_mut()
+            .create_page_at_end(PdfPagePaperSize::a4())
+            .unwrap();
+        let ph = page.height().value;
+        for s in shades {
+            let (r, g, b) = s.rgb;
+            page.objects_mut()
+                .create_path_object_rect(
+                    PdfRect::new(
+                        PdfPoints::new(ph - s.bottom * MM),
+                        PdfPoints::new(s.left * MM),
+                        PdfPoints::new(ph - s.top * MM),
+                        PdfPoints::new(s.right * MM),
+                    ),
+                    None,
+                    None,
+                    Some(PdfColor::new(r, g, b, 255)),
+                )
+                .unwrap();
+        }
+    }
+    document.save_to_bytes().unwrap()
+}
+
+fn too_dark(app: &mut App, bytes: &[u8], page: u16) {
+    let err = app.set_sales_letterhead(bytes).unwrap_err();
+    assert_eq!(err.code(), "invalid_input", "{err}");
+    let text = err.to_string();
+    assert!(
+        text.contains(&format!(
+            "la zona donde va el texto de la página {page} es demasiado oscura y el texto no se \
+             leería; use un membrete con fondo claro en esa zona o ajuste antes los márgenes"
+        )),
+        "«{text}»"
+    );
+}
+
+#[test]
+fn a_full_page_dark_background_is_rejected() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = app(&dir);
+    too_dark(&mut app, &shaded_letterhead(&[vec![full((10, 20, 60))]]), 1);
+    assert!(app.sales_letterhead().unwrap().is_none());
+}
+
+#[test]
+fn a_dark_band_inside_the_text_area_is_rejected_unless_the_margins_leave_it_out() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = app(&dir);
+    // Márgenes por defecto: el área útil acaba a 272 mm; la banda de 240 a 297 mm entra 32 mm.
+    let pdf = shaded_letterhead(&[vec![band(240.0, 297.0, BLACK)]]);
+    too_dark(&mut app, &pdf, 1);
+    assert!(app.sales_letterhead().unwrap().is_none());
+
+    // Fijando antes un margen inferior que la deja fuera (área hasta 237 mm), se acepta.
+    app.set_sales_letterhead_margins(LetterheadMargins {
+        top_mm: 35,
+        right_mm: 20,
+        bottom_mm: 60,
+        left_mm: 20,
+    })
+    .unwrap();
+    app.set_sales_letterhead(&pdf).unwrap();
+    assert_eq!(app.sales_letterhead().unwrap().unwrap().data, pdf);
+}
+
+#[test]
+fn dark_bands_only_in_the_margins_are_accepted() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = app(&dir);
+    // Márgenes por defecto: 35 arriba, 20 a los lados y 25 abajo.
+    let pdf = shaded_letterhead(&[vec![
+        band(0.0, 30.0, BLACK),
+        band(275.0, 297.0, BLACK),
+        Shade {
+            top: 0.0,
+            bottom: 297.0,
+            left: 0.0,
+            right: 15.0,
+            rgb: BLACK,
+        },
+        Shade {
+            top: 0.0,
+            bottom: 297.0,
+            left: 195.0,
+            right: 210.0,
+            rgb: BLACK,
+        },
+    ]]);
+    app.set_sales_letterhead(&pdf).unwrap();
+}
+
+#[test]
+fn light_backgrounds_and_pale_watermarks_are_accepted() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = app(&dir);
+    app.set_sales_letterhead(&shaded_letterhead(&[vec![full((245, 240, 225))]]))
+        .unwrap();
+    // Marca de agua pálida enorme sobre papel blanco.
+    app.set_sales_letterhead(&shaded_letterhead(&[vec![
+        full((255, 255, 255)),
+        Shade {
+            top: 80.0,
+            bottom: 220.0,
+            left: 30.0,
+            right: 180.0,
+            rgb: (225, 225, 235),
+        },
+    ]]))
+    .unwrap();
+    // Un logotipo oscuro pequeño dentro del área útil no llega al 5 %.
+    app.set_sales_letterhead(&shaded_letterhead(&[vec![Shade {
+        top: 40.0,
+        bottom: 55.0,
+        left: 25.0,
+        right: 60.0,
+        rgb: BLACK,
+    }]]))
+    .unwrap();
+}
+
+#[test]
+fn a_dark_second_page_is_rejected_naming_that_page() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = app(&dir);
+    let pdf = shaded_letterhead(&[vec![full((250, 250, 250))], vec![full(BLACK)]]);
+    too_dark(&mut app, &pdf, 2);
+    assert!(app.sales_letterhead().unwrap().is_none());
+}
+
+#[test]
+fn saturated_colours_are_classified_by_their_luminance() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = app(&dir);
+    // Rojo puro (luminancia 0,21) y verde (0,72): el texto negro se lee, se aceptan.
+    app.set_sales_letterhead(&shaded_letterhead(&[vec![full((255, 0, 0))]]))
+        .unwrap();
+    app.set_sales_letterhead(&shaded_letterhead(&[vec![full((0, 200, 0))]]))
+        .unwrap();
+    // Azul puro (0,07) y rojo oscuro (0,10): no alcanzan contraste 4,5:1, se rechazan.
+    too_dark(&mut app, &shaded_letterhead(&[vec![full((0, 0, 255))]]), 1);
+    too_dark(&mut app, &shaded_letterhead(&[vec![full((180, 0, 0))]]), 1);
+}
+
+#[test]
+fn margins_that_bring_a_dark_band_into_the_text_area_are_rejected_and_not_saved() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = app(&dir);
+    // Con los márgenes por defecto la banda de 270 a 297 mm solo roza el área útil (hasta 272).
+    let pdf = shaded_letterhead(&[vec![band(270.0, 297.0, BLACK)]]);
+    app.set_sales_letterhead(&pdf).unwrap();
+    let before = app.sales_letterhead_margins().unwrap();
+
+    let wider = LetterheadMargins {
+        bottom_mm: 10,
+        ..before
+    };
+    let err = app.set_sales_letterhead_margins(wider).unwrap_err();
+    assert_eq!(err.code(), "invalid_input", "{err}");
+    assert!(
+        err.to_string()
+            .contains("la zona donde va el texto de la página 1 es demasiado oscura"),
+        "{err}"
+    );
+    assert_eq!(app.sales_letterhead_margins().unwrap(), before);
+    assert_eq!(app.sales_letterhead().unwrap().unwrap().margins, before);
+
+    // Un cambio que mantiene la banda fuera del área útil sigue funcionando.
+    let narrower = LetterheadMargins {
+        bottom_mm: 40,
+        ..before
+    };
+    app.set_sales_letterhead_margins(narrower).unwrap();
+    assert_eq!(app.sales_letterhead_margins().unwrap(), narrower);
+}
+
+#[test]
+fn a_rejected_upload_keeps_the_previous_letterhead() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = app(&dir);
+    let good = make_letterhead(1, false);
+    app.set_sales_letterhead(&good).unwrap();
+    let margins = app.sales_letterhead_margins().unwrap();
+    too_dark(&mut app, &shaded_letterhead(&[vec![full(BLACK)]]), 1);
+    let kept = app.sales_letterhead().unwrap().unwrap();
+    assert_eq!(kept.data, good);
+    assert_eq!(kept.margins, margins);
+}
+
+#[test]
+fn margins_can_be_set_before_any_letterhead_exists() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = app(&dir);
+    let margins = LetterheadMargins {
+        top_mm: 50,
+        right_mm: 30,
+        bottom_mm: 40,
+        left_mm: 30,
+    };
+    app.set_sales_letterhead_margins(margins).unwrap();
+    assert!(app.sales_letterhead().unwrap().is_none());
+    assert_eq!(app.sales_letterhead_margins().unwrap(), margins);
+}

@@ -70,6 +70,7 @@ test("«Ver PDF» solo existe para un documento emitido", () => {
 test("la explicación del membrete dice lo que no hace y a quién afecta", () => {
   assert.match(LETTERHEAD_HELP, /una o dos páginas A4 verticales, sin contraseña y de hasta 5 MB/);
   assert.match(LETTERHEAD_HELP, /no se dibuja el logotipo/);
+  assert.match(LETTERHEAD_HELP, /debe ser clara/);
   assert.match(LETTERHEAD_WARNING, /no oculta ni sustituye ningún dato obligatorio/);
   assert.match(LETTERHEAD_WARNING, /VERI\*FACTU/);
   assert.match(LETTERHEAD_MARGINS_HELP, /área útil/);

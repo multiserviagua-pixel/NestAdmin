@@ -11,6 +11,10 @@ test("el código estable se separa del mensaje", () => {
 });
 
 test("el texto para el usuario añade el encabezado del código y conserva el detalle", () => {
+  const dark = "la zona donde va el texto de la página 2 es demasiado oscura y el texto no se leería; use un membrete con fondo claro en esa zona o ajuste antes los márgenes";
+  for (const field of ["letterhead", "letterhead.margins"]) {
+    assert.equal(salesErrorText(`[invalid_input] datos no válidos: ${field}: ${dark}`), `Datos no válidos: ${dark}`);
+  }
   assert.equal(salesErrorText("[invalid_input] falta el cliente"), "Datos no válidos: falta el cliente");
   assert.equal(
     salesErrorText("[invalid_input] datos no válidos: letterhead: el PDF está protegido con contraseña"),

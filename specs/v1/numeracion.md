@@ -35,5 +35,6 @@ Cada decisión (`D<n>`) tiene un número definitivo desde que se escribe, para q
 | D220–D221 | Correcciones tras el recorrido de la venta en `tauri dev`, 2026-11-10 | Asignado |
 | D222–D222 | Membrete PDF de fondo en los documentos de venta (cambio de alcance), 2026-11-10 | Asignado |
 | D223–D227 | PDF de los documentos de venta y membrete (etapa E4a), 2026-11-10 | Asignado |
+| D228–D228 | Membrete con la zona del texto demasiado oscura, rechazado (concreta D222), 2026-11-10 | Asignado |
 
-Siguiente número libre: **D228**.
+Siguiente número libre: **D229**.

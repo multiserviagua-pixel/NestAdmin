@@ -221,6 +221,8 @@ impl App {
         sales_pdf::check_letterhead(pdfium, bytes)
             .map_err(|why| SalesStoreError::invalid("letterhead", why))?;
         let margins = self.store.sales_letterhead_margins()?;
+        sales_pdf::check_letterhead_text_area(pdfium, bytes, &margins)
+            .map_err(|why| SalesStoreError::invalid("letterhead", why))?;
         self.store.set_sales_letterhead(bytes, margins)?;
         Ok(())
     }
@@ -231,7 +233,16 @@ impl App {
     }
 
     /// Cambia los márgenes del área útil; solo afecta a los documentos que se emitan después.
+    /// Con membrete guardado se comprueba que la nueva área útil sigue siendo clara (D228,
+    /// `invalid_input` en `letterhead.margins`; sin PDFium, `pdf_unavailable`); sin membrete no
+    /// hace falta PDFium. Si se rechaza no se guarda nada.
     pub fn set_sales_letterhead_margins(&mut self, margins: LetterheadMargins) -> AppResult<()> {
+        margins.validate()?;
+        if let Some(letterhead) = self.store.sales_letterhead()? {
+            let pdfium = self.extractor.pdfium().map_err(pdf_unavailable)?;
+            sales_pdf::check_letterhead_text_area(pdfium, &letterhead.data, &margins)
+                .map_err(|why| SalesStoreError::invalid("letterhead.margins", why))?;
+        }
         Ok(self.store.set_sales_letterhead_margins(margins)?)
     }
 

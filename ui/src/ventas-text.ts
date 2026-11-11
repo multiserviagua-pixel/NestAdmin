@@ -557,7 +557,7 @@ export const VERIFACTU_READONLY = "Vista de solo lectura: los registros no se pu
 export const LETTERHEAD_MAX_BYTES = 5 * 1024 * 1024;
 
 export const LETTERHEAD_HELP =
-  "El membrete es un PDF propio (su papel de carta o diseño) de una o dos páginas A4 verticales, sin contraseña y de hasta 5 MB. La primera página es el fondo de la primera hoja de cada presupuesto, albarán y factura; la segunda, si existe, el de las siguientes, y si no, se repite la primera. Con membrete no se dibuja el logotipo.";
+  "El membrete es un PDF propio (su papel de carta o diseño) de una o dos páginas A4 verticales, sin contraseña y de hasta 5 MB. La primera página es el fondo de la primera hoja de cada presupuesto, albarán y factura; la segunda, si existe, el de las siguientes, y si no, se repite la primera. Con membrete no se dibuja el logotipo. La zona donde va el texto (la que dejan los márgenes) debe ser clara: un membrete con fondo oscuro ahí se rechaza, porque el texto negro no se leería.";
 
 export const LETTERHEAD_MARGINS_HELP =
   "Los márgenes marcan el área útil, en milímetros: NestAdmin escribe los datos, las líneas y los totales dentro de ella para no pisar el diseño. Elija márgenes que dejen libre lo que su membrete ya imprime.";

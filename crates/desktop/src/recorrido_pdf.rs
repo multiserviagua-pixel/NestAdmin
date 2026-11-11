@@ -56,6 +56,32 @@ fn letterhead(pages: usize) -> Vec<u8> {
     document.save_to_bytes().unwrap()
 }
 
+/// PDF sintético de una página A4 con un fondo azul oscuro a página completa.
+fn dark_letterhead() -> Vec<u8> {
+    let extractor = Extractor::new(pdfium_dir(), Box::new(NoOcr));
+    let pdfium = extractor.pdfium().unwrap();
+    let mut document = pdfium.create_new_pdf().unwrap();
+    let mut page = document
+        .pages_mut()
+        .create_page_at_end(PdfPagePaperSize::a4())
+        .unwrap();
+    let (w, h) = (page.width().value, page.height().value);
+    page.objects_mut()
+        .create_path_object_rect(
+            PdfRect::new(
+                PdfPoints::new(0.0),
+                PdfPoints::new(0.0),
+                PdfPoints::new(h),
+                PdfPoints::new(w),
+            ),
+            None,
+            None,
+            Some(PdfColor::new(10, 20, 60, 255)),
+        )
+        .unwrap();
+    document.save_to_bytes().unwrap()
+}
+
 struct NoOcr;
 
 impl nestadmin_extract::Ocr for NoOcr {
@@ -125,6 +151,14 @@ fn el_membrete_y_el_pdf_de_un_documento_emitido_desde_la_ventana() {
         assert!(error.starts_with("[invalid_input] "), "{error}");
         assert!(error.contains(reason), "{error}");
     }
+    assert_eq!(s.ok("sales_company", json!({}))["has_letterhead"], false);
+    // Un fondo oscuro a página completa se rechaza (D228) y no se guarda.
+    let error = error_text(set_letterhead(&s, dark_letterhead()).unwrap_err());
+    assert!(error.starts_with("[invalid_input] "), "{error}");
+    assert!(
+        error.contains("la zona donde va el texto de la página 1 es demasiado oscura"),
+        "{error}"
+    );
     assert_eq!(s.ok("sales_company", json!({}))["has_letterhead"], false);
     // El membrete debe llegar como datos binarios.
     s.fails(

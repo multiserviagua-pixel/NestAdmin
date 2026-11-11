@@ -114,6 +114,82 @@ pub fn check_letterhead(pdfium: &Pdfium, bytes: &[u8]) -> Result<u16, String> {
     Ok(pages as u16)
 }
 
+/// Anchura en píxeles a la que se renderiza cada página del membrete para medir su oscuridad:
+/// basta para ver zonas de color, no para leer nada.
+const DARK_CHECK_WIDTH_PX: i32 = 300;
+/// Luminancia relativa WCAG por debajo de la cual el texto negro de los documentos (luminancia 0)
+/// no alcanza contraste 4,5:1: (L + 0,05) / 0,05 < 4,5 equivale a L < 0,175; se redondea a 0,18.
+const DARK_LUMINANCE: f32 = 0.18;
+/// Fracción máxima de píxeles oscuros del área útil de una página. El texto de un membrete claro
+/// (un logotipo, una marca de agua, algo de ruido de antialiasing) no debe provocar el rechazo,
+/// pero una banda o un fondo oscuro sí: la factura emitida no se puede cambiar después.
+const DARK_MAX_FRACTION: f32 = 0.05;
+
+/// Luminancia relativa WCAG de un color sRGB de 8 bits: linealiza los tres canales y los pondera.
+fn relative_luminance(r: u8, g: u8, b: u8) -> f32 {
+    fn linear(c: u8) -> f32 {
+        let c = f32::from(c) / 255.0;
+        if c <= 0.04045 {
+            c / 12.92
+        } else {
+            ((c + 0.055) / 1.055).powf(2.4)
+        }
+    }
+    0.2126 * linear(r) + 0.7152 * linear(g) + 0.0722 * linear(b)
+}
+
+/// Comprueba que el área útil definida por los márgenes es lo bastante clara para que el texto
+/// negro del documento se lea (D228). Renderiza cada página a baja resolución sobre blanco y
+/// cuenta los píxeles con luminancia relativa inferior a [`DARK_LUMINANCE`]; si en alguna página
+/// pasan de [`DARK_MAX_FRACTION`] del área útil, devuelve el motivo, en español y listo para
+/// mostrar. Se supone ya comprobado con [`check_letterhead`].
+pub fn check_letterhead_text_area(
+    pdfium: &Pdfium,
+    bytes: &[u8],
+    margins: &LetterheadMargins,
+) -> Result<(), String> {
+    let unreadable = || "el archivo no es un PDF válido o está dañado".to_owned();
+    let document = pdfium
+        .load_pdf_from_byte_slice(bytes, None)
+        .map_err(|_| unreadable())?;
+    let m = margins_of(Some(margins));
+    let config = PdfRenderConfig::new()
+        .set_target_width(DARK_CHECK_WIDTH_PX)
+        .set_clear_color(PdfColor::new(255, 255, 255, 255));
+    for (index, page) in document.pages().iter().enumerate() {
+        let (pw, ph) = (page.width().value, page.height().value);
+        let image = page
+            .render_with_config(&config)
+            .and_then(|bitmap| bitmap.as_image())
+            .map_err(|_| unreadable())?
+            .to_rgb8();
+        let (iw, ih) = (image.width() as f32, image.height() as f32);
+        let (sx, sy) = (iw / pw, ih / ph);
+        let x0 = (m.left * sx).round() as u32;
+        let x1 = ((pw - m.right) * sx).round().min(iw) as u32;
+        let y0 = (m.top * sy).round() as u32;
+        let y1 = ((ph - m.bottom) * sy).round().min(ih) as u32;
+        let (mut total, mut dark) = (0u64, 0u64);
+        for y in y0..y1 {
+            for x in x0..x1 {
+                let [r, g, b] = image.get_pixel(x, y).0;
+                total += 1;
+                if relative_luminance(r, g, b) < DARK_LUMINANCE {
+                    dark += 1;
+                }
+            }
+        }
+        if total > 0 && dark as f32 / total as f32 > DARK_MAX_FRACTION {
+            return Err(format!(
+                "la zona donde va el texto de la página {} es demasiado oscura y el texto no se \
+                 leería; use un membrete con fondo claro en esa zona o ajuste antes los márgenes",
+                index + 1
+            ));
+        }
+    }
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------------------------
 // Formato
 // ---------------------------------------------------------------------------------------------
