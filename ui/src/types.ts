@@ -1203,18 +1203,23 @@ export type ProposalKind =
   | "fetch_mail"
   | "mail_limit"
   | "rename_account"
-  | "sender_preference";
+  | "sender_preference"
+  | "accept_suggestion"
+  | "discard_suggestion"
+  | "create_rule"
+  | "edit_rule"
+  | "import";
 
 export type ProposalStatus = "pending" | "executing" | "confirmed" | "rejected" | "expired" | "stale" | "failed";
 
 /** Si confirmar la propuesta envía un correo, registra una factura o no tiene efecto externo. `may_trigger_rules`: no actúa por sí misma, pero el correo nuevo o la tarea reintentada pasan por las reglas activas, que pueden enviar o registrar sin revisión. */
-export type ProposalEffect = "send_mail" | "register_invoice" | "may_trigger_rules" | "none";
+export type ProposalEffect = "send_mail" | "register_invoice" | "may_trigger_rules" | "rule_inactive" | "rule_edited" | "import" | "none";
 
 /** Resultado real de la acción: `done` solo si la acción con efecto consta realizada. */
 export type ProposalOutcome = "done" | "not_done";
 
-/** Motivo cerrado cuando la acción no se hizo: la tarea quedó fallida, volvió a revisión o no se completó. */
-export type ProposalReason = "action_failed" | "returned_to_review" | "not_completed";
+/** Motivo cerrado cuando la acción no se hizo: la tarea quedó fallida, volvió a revisión, no se completó o no se importó ningún archivo. */
+export type ProposalReason = "action_failed" | "returned_to_review" | "not_completed" | "nothing_imported";
 
 /** Tarjeta de una propuesta: la compone la aplicación con los datos reales del equipo. `summary` lleva `type` y, según él, lo mismo que la pantalla de revisión antes de aprobar. */
 export interface ProposalCard {
@@ -1246,6 +1251,9 @@ export interface ProposalReceipt {
   reason: ProposalReason | null;
   /** Tras un corte se comprobó que la acción ya estaba hecha y no se repitió. */
   reconciled: boolean;
+  /** La regla creada o editada (aceptar, crear o editar): con ella se abre en el panel de reglas. */
+  rule_id?: string | null;
+  /** Hechos de la acción; al importar, `imported` y `errors`. */
   result: Record<string, any>;
 }
 

@@ -32,6 +32,8 @@ const SNIPPET_CHARS: usize = 200;
 const MAX_EVENTS: usize = 20;
 /// Reglas como mucho.
 const MAX_RULES: usize = 20;
+/// Sugerencias como mucho en `list_suggestions` (D191).
+pub const MAX_SUGGESTIONS: usize = 8;
 /// Nombre del grupo de `aggregate` cuyos documentos no indican moneda: el modelo debe explicarlo
 /// así a la persona, sin suponer una.
 pub const NO_CURRENCY: &str = "moneda no indicada en el documento";
@@ -372,9 +374,19 @@ pub(crate) fn strip_fragments(value: &mut Value) {
 
 /// Frase de una regla, sin direcciones ni dominios (la ventana tiene su propia frase completa).
 fn rule_phrase(rule: &nestadmin_core::Rule, any_sender: bool, text: &Text) -> String {
-    let c = &rule.conditions;
+    phrase_of(&rule.action_kind, &rule.conditions, any_sender, text)
+}
+
+/// La misma frase a partir del tipo de acción y las condiciones (también las de una sugerencia).
+pub(crate) fn phrase_of(
+    action_kind: &str,
+    conditions: &Value,
+    any_sender: bool,
+    text: &Text,
+) -> String {
+    let c = conditions;
     let field = |key: &str| c[key].as_str().map(str::trim).filter(|s| !s.is_empty());
-    match rule.action_kind.as_str() {
+    match action_kind {
         "register_invoice" => {
             let who = field("supplier")
                 .map(|s| format!("de {}", text.field(s)))
@@ -403,7 +415,7 @@ fn rule_phrase(rule: &nestadmin_core::Rule, any_sender: bool, text: &Text) -> St
     }
 }
 
-fn action_text(kind: &str) -> &str {
+pub(crate) fn action_text(kind: &str) -> &str {
     match kind {
         "register_invoice" => "registrar_factura",
         "send_draft" => "enviar_respuesta",
@@ -437,6 +449,7 @@ impl App {
             "aggregate" => self.tool_aggregate(&call.args),
             "list_tasks" => self.tool_list_tasks(&call.args, &text),
             "list_rules" => self.tool_list_rules(&text),
+            "list_suggestions" => self.tool_list_suggestions(&text),
             "history" => self.tool_history(&call.args),
             "mail_accounts" => Ok(self.tool_mail_accounts()),
             "ai_status" => self.tool_ai_status(),
@@ -640,22 +653,116 @@ impl App {
         ))
     }
 
+    /// Referencia `prefix` + N de lo que el modelo puede nombrar después en una propuesta. Con un
+    /// turno en curso se guarda (para que valga en la conversación y sea la misma cada vez); sin
+    /// turno se numera por orden y no se puede proponer nada con ella.
+    fn target_ref(
+        &self,
+        prefix: &str,
+        key_field: &str,
+        key: &str,
+        data: Value,
+        position: usize,
+    ) -> String {
+        if let Ok(mut ctx) = self.assistant.turn.lock() {
+            if ctx.active {
+                return ctx.target_ref(prefix, key_field, key, data);
+            }
+        }
+        format!("{prefix}{position}")
+    }
+
     fn tool_list_rules(&self, text: &Text) -> AppResult<ToolOutput> {
         let views = self.rule_views()?;
+        let mut refs = Vec::new();
         let rules: Vec<Value> = views
             .iter()
             .filter(|v| v.archived_at.is_none())
             .take(MAX_RULES)
-            .map(|v| {
+            .enumerate()
+            .map(|(i, v)| {
+                let reference = self.target_ref(
+                    "rule:",
+                    "rule_id",
+                    &v.rule.id,
+                    json!({ "rule_id": v.rule.id }),
+                    i + 1,
+                );
+                refs.push(reference.clone());
+                let learned = v
+                    .origin
+                    .as_ref()
+                    .is_some_and(nestadmin_core::is_learned_origin);
                 json!({
+                    "ref": reference,
                     "name": text.field(&v.name),
                     "action": action_text(&v.rule.action_kind),
                     "active": v.rule.active,
                     "phrase": rule_phrase(&v.rule, v.any_sender_ack_at.is_some(), text),
+                    // Una regla aprendida o con «cualquier remitente» no se edita desde el chat.
+                    "editable": !learned && v.any_sender_ack_at.is_none(),
                 })
             })
             .collect();
-        Ok(output(json!({ "rules": rules }), Vec::new(), text))
+        Ok(output(json!({ "rules": rules }), refs, text))
+    }
+
+    /// Sugerencias de reglas (D189, D191): hasta `MAX_SUGGESTIONS`, de `rule_suggestions()`. Solo
+    /// lee. Cada una lleva una referencia `sug:N` cuyo destino (huella y `shown`) se guarda en el
+    /// contexto de la conversación y nunca sale hacia el modelo.
+    fn tool_list_suggestions(&self, text: &Text) -> AppResult<ToolOutput> {
+        let all = self.rule_suggestions()?;
+        let mut refs = Vec::new();
+        let items: Vec<Value> = all
+            .candidates
+            .iter()
+            .take(MAX_SUGGESTIONS)
+            .enumerate()
+            .map(|(i, c)| {
+                let reference = self.target_ref(
+                    "sug:",
+                    "fp",
+                    &c.fingerprint,
+                    json!({ "fp": c.fingerprint, "shown": c.shown }),
+                    i + 1,
+                );
+                refs.push(reference.clone());
+                json!({
+                    "ref": reference,
+                    "action": action_text(&c.action_kind),
+                    "phrase": phrase_of(&c.action_kind, &c.conditions, false, text),
+                    "name": text.field(&c.name),
+                    "evidence": {
+                        "count": c.evidence.count,
+                        "threshold": c.evidence.threshold,
+                        "approved": c.evidence.approved,
+                        "seen": c.evidence.seen,
+                        "learned": c.evidence.learned,
+                        "origin": c.evidence.origin,
+                    },
+                    // Solo vistas: la persona debe escribir el límite en el panel (D133).
+                    "needs_limit": c.evidence.needs_limit,
+                    "overlaps": c.overlaps.len(),
+                })
+            })
+            .collect();
+        Ok(output(
+            json!({
+                "total": all.candidates.len(),
+                "shown": items.len(),
+                "suggestions": items,
+                "hidden": {
+                    "covered": all.hidden.covered,
+                    "discarded": all.hidden.discarded,
+                    "accepted": all.hidden.accepted,
+                    "invalid": all.hidden.invalid,
+                    "not_suggested": all.hidden.not_suggested,
+                    "seen_invalidated": all.hidden.seen_invalidated,
+                },
+            }),
+            refs,
+            text,
+        ))
     }
 
     fn tool_history(&self, args: &Map<String, Value>) -> AppResult<ToolOutput> {

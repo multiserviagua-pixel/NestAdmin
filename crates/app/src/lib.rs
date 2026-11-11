@@ -964,6 +964,8 @@ impl App {
         app.store.reconcile_actions(REGISTER_INVOICE, &app.admin)?;
         app.complete_confirmed_reviews()?;
         app.rebuild_registry()?;
+        // Una importación del asistente que quedó a medias no se repite sola (D191).
+        app.fail_interrupted_imports()?;
         Ok(app)
     }
 

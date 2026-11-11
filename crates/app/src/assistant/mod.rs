@@ -78,6 +78,9 @@ pub(crate) struct AssistantRuntime {
     /// Contexto del turno en curso para crear propuestas (D185): conversación, referencias que
     /// las herramientas devolvieron y propuestas ya creadas en el turno.
     pub(crate) turn: Mutex<proposals::TurnCtx>,
+    /// Propuestas de importar con el diálogo del sistema abierto o importando en esta sesión: una
+    /// `executing` que no está aquí quedó a medias tras un corte y no se repite (D191).
+    pub(crate) importing: Arc<Mutex<HashSet<i64>>>,
 }
 
 /// El turno exclusivo: se libera al soltarlo, también si el trabajo entra en pánico.
@@ -317,6 +320,10 @@ pub struct TurnMeta {
     /// Referencias (`doc:N`, `acct:N`) que las herramientas devolvieron en este turno: las únicas
     /// sobre las que el asistente puede proponer una acción en esta conversación.
     pub returned_refs: Vec<String>,
+    /// A qué apunta cada referencia `sug:N` (huella y `shown`) y `rule:N` (identificador de regla)
+    /// de la conversación: así valen entre turnos como `doc:N` (D191). Solo local: no sale hacia el
+    /// modelo ni hacia la ventana.
+    pub ref_targets: std::collections::BTreeMap<String, Value>,
     /// El texto del turno lo compuso la aplicación, no el modelo.
     pub composed: bool,
 }
@@ -834,11 +841,19 @@ impl App {
         // Propuestas de un turno que nunca se guardó (se cortó): sin turno no hay tarjeta, se borran.
         self.store.proposals_discard_unattached(None)?;
         let mut known: HashSet<String> = HashSet::new();
+        let mut targets: std::collections::BTreeMap<String, Value> =
+            std::collections::BTreeMap::new();
         if let Some(id) = conversation_id {
             if let Some(conversation) = self.store.assistant_conversation(id)? {
                 for turn in &conversation.turns {
                     if let Some(refs) = turn.meta["returned_refs"].as_array() {
                         known.extend(refs.iter().filter_map(|r| r.as_str().map(str::to_owned)));
+                    }
+                    // Los turnos van de más antiguo a más reciente: el último destino manda.
+                    if let Some(map) = turn.meta["ref_targets"].as_object() {
+                        for (reference, target) in map {
+                            targets.insert(reference.clone(), target.clone());
+                        }
                     }
                 }
             }
@@ -848,6 +863,7 @@ impl App {
                 active: true,
                 conversation_id,
                 known,
+                targets,
                 created: Vec::new(),
             };
         }
@@ -1022,7 +1038,7 @@ impl App {
         };
         // Propuestas del turno: solo una respuesta las deja en pie. Un turno con error o cancelado no
         // enseña tarjetas, así que sus propuestas se descartan antes de que nadie las vea.
-        let mut proposal_ids = self.take_turn_proposals();
+        let (mut proposal_ids, ref_targets) = self.take_turn_proposals();
         if turn.outcome != Outcome::Answered && !proposal_ids.is_empty() {
             self.discard_turn_proposals(&proposal_ids);
             proposal_ids.clear();
@@ -1065,6 +1081,7 @@ impl App {
                 error_detail: turn.error_detail.clone(),
                 proposal_ids: proposal_ids.clone(),
                 returned_refs,
+                ref_targets,
                 composed: turn.composed,
             };
             let saved = self.store.assistant_save_exchange(
@@ -1118,7 +1135,9 @@ impl App {
         };
         let mut turns = Vec::new();
         for turn in stored.turns {
-            let meta: TurnMeta = serde_json::from_value(turn.meta).unwrap_or_default();
+            let mut meta: TurnMeta = serde_json::from_value(turn.meta).unwrap_or_default();
+            // Las huellas de las sugerencias no salen hacia la ventana.
+            meta.ref_targets.clear();
             let ids: Vec<i64> = meta
                 .citation_refs
                 .iter()
@@ -1144,15 +1163,17 @@ impl App {
         }))
     }
 
-    /// Vacía el contexto del turno y devuelve las propuestas que preparó.
-    fn take_turn_proposals(&self) -> Vec<i64> {
+    /// Vacía el contexto del turno y devuelve las propuestas que preparó y los destinos de las
+    /// referencias `sug:N` y `rule:N` de la conversación.
+    fn take_turn_proposals(&self) -> (Vec<i64>, std::collections::BTreeMap<String, Value>) {
         self.assistant
             .turn
             .lock()
             .map(|mut ctx| {
                 let created = std::mem::take(&mut ctx.created);
+                let targets = std::mem::take(&mut ctx.targets);
                 *ctx = proposals::TurnCtx::default();
-                created
+                (created, targets)
             })
             .unwrap_or_default()
     }
@@ -1186,6 +1207,25 @@ impl App {
 
     /// Borra una conversación (con sus turnos y llamadas) o todas. Devuelve cuántas.
     pub fn assistant_clear(&mut self, id: Option<i64>) -> AppResult<usize> {
+        // Con el diálogo de importar abierto, la propuesta no debe desaparecer bajo sus pies.
+        let busy = match self.assistant.importing.lock() {
+            Ok(set) if set.is_empty() => false,
+            Ok(set) => match id {
+                None => true,
+                Some(conversation) => self
+                    .store
+                    .proposals_of(conversation)?
+                    .iter()
+                    .any(|p| set.contains(&p.id)),
+            },
+            Err(_) => true,
+        };
+        if busy {
+            return Err(AppError::Proposal {
+                code: "import_in_progress",
+                message: "hay una importación del asistente en curso: termínela o ciérrela antes de borrar la conversación".into(),
+            });
+        }
         let removed = match id {
             Some(id) => usize::from(self.store.assistant_delete(id)?),
             None => self.store.assistant_delete_all()?,

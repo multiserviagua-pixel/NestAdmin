@@ -86,6 +86,8 @@ CREATE TABLE rules (
     include_str!("migrations/011_assistant.sql"),
     // Propuestas del asistente y origen de los eventos del historial (D185); ver proposals.rs.
     include_str!("migrations/012_proposals.sql"),
+    // Cinco tipos más de propuesta: sugerencias, reglas e importación (D191); reconstruye la tabla.
+    include_str!("migrations/013_proposal_kinds.sql"),
 ];
 
 /// Base de datos local. Cada operación pública se confirma en una transacción,

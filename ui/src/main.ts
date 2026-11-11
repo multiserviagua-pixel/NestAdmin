@@ -333,6 +333,17 @@ import {
   PROPOSAL_LIVE_LABEL,
   PROPOSAL_NOTHING_DONE,
   PROPOSAL_OPEN_TASK,
+  PROPOSAL_OPEN_RULE,
+  IMPORT_CANCELLED_NOTE,
+  INACTIVE_NOTICE,
+  CONDITIONS_LABEL,
+  isImportCancelled,
+  ruleActionText,
+  ruleConditionLines,
+  proposalCoverageText,
+  proposalOverlapLines,
+  editedRuleStateText,
+  suggestionEvidenceText,
   PROPOSAL_STUCK_TEXT,
   emailIssueText,
   isFromChat,
@@ -7292,6 +7303,7 @@ async function confirmProposal(card: ProposalCard) {
   renderChat({ focus: propKey(card.id, "live") });
   let failure: unknown = null;
   let confirmed = false;
+  let cancelled = false;
   try {
     const receipt = await api.proposalConfirm(card.id, ack ? ui.checked : undefined);
     // Con el resultado real: si la acción no se hizo, la tarjeta queda `failed` con su motivo.
@@ -7299,11 +7311,14 @@ async function confirmProposal(card: ProposalCard) {
     card.receipt = receipt;
     confirmed = true;
   } catch (error) {
-    failure = error;
+    // Cerrar el diálogo de importar sin elegir nada no es un fallo: la tarjeta sigue pendiente.
+    if (card.kind === "import" && isImportCancelled(error)) cancelled = true;
+    else failure = error;
   }
   const refreshed = await refreshProposals();
   ui.busy = false;
-  if (!confirmed) ui.note = proposalErrorText(failure, refreshed ? (proposalById(card.id)?.status ?? null) : null);
+  if (cancelled) ui.note = IMPORT_CANCELLED_NOTE;
+  else if (!confirmed) ui.note = proposalErrorText(failure, refreshed ? (proposalById(card.id)?.status ?? null) : null);
   renderChat({ focus: propKey(card.id, "live") });
   // La tarea ha cambiado: se refrescan las listas, como tras aprobar en la pantalla de revisión.
   if (confirmed) await refresh(true);
@@ -7439,6 +7454,26 @@ function proposalInvoice(card: ProposalCard, s: Record<string, any>, ui: { check
   ];
 }
 
+/** Detalle de una tarjeta de regla o sugerencia: acción, condiciones exactas (antes y después al editar), casos cubiertos y solapamientos. */
+function proposalRuleDetail(s: Record<string, any>, editing: boolean): Child[] {
+  const category = (code: string) => CATEGORY_LABEL[code] ?? code;
+  const lines = (title: string, conditions: Record<string, any> | null | undefined) =>
+    h("dl", { class: "origin", "aria-label": title }, ...ruleConditionLines(conditions, category).flatMap(([label, value]) => proposalRow(label, value)));
+  const coverage = proposalCoverageText(s.coverage);
+  const overlaps = proposalOverlapLines(s.overlaps);
+  const evidence = suggestionEvidenceText(s.evidence);
+  return [
+    h("dl", { class: "origin" }, ...proposalRow("Acción", ruleActionText(s.action)), ...proposalRow("Regla", s.name ?? null)),
+    editing
+      ? [h("h5", {}, "Condiciones antes"), lines("Condiciones antes", s.before), h("h5", {}, "Condiciones después"), lines("Condiciones después", s.after)]
+      : [h("h5", {}, CONDITIONS_LABEL), lines(CONDITIONS_LABEL, s.conditions)],
+    evidence ? h("p", { class: "meta" }, evidence) : null,
+    coverage ? h("p", { class: "proposal-coverage" }, coverage) : null,
+    ...overlaps.map((text) => h("p", { class: "notice warn proposal-notice" }, text)),
+    editing ? h("p", { class: "proposal-effect" }, editedRuleStateText(s)) : s.stays_inactive ? h("p", { class: "notice proposal-notice" }, INACTIVE_NOTICE) : null,
+  ].flat() as Child[];
+}
+
 function proposalDetail(card: ProposalCard, ui: { checked: boolean; busy: boolean }): Child[] {
   const s = card.summary ?? {};
   switch (s.type) {
@@ -7494,6 +7529,17 @@ function proposalDetail(card: ProposalCard, ui: { checked: boolean; busy: boolea
         ),
       ];
     }
+    case "accept_suggestion":
+    case "discard_suggestion":
+    case "create_rule":
+      return proposalRuleDetail(s, false);
+    case "edit_rule":
+      return proposalRuleDetail(s, true);
+    case "import":
+      return [
+        h("p", {}, "NestAdmin abrirá el selector de archivos del sistema. Solo se importa lo que usted elija: ni el asistente ni la tarjeta dan rutas ni nombres."),
+        Number(s.active_register_rules) > 0 ? h("p", { class: "notice warn proposal-notice" }, proposalRulesText("import", "import", s)) : null,
+      ];
     default:
       return [h("p", { class: "missing" }, "Esta propuesta no se puede mostrar con detalle; no la confirme.")];
   }
@@ -7555,8 +7601,32 @@ function proposalCard(card: ProposalCard): HTMLElement {
     card.status === "confirmed" && card.task_id !== null
       ? h("div", { class: "buttons" }, h("button", { type: "button", "data-focus-key": propKey(card.id, "open"), "aria-label": `${PROPOSAL_OPEN_TASK}: ${proposalTaskTitleOf(card)}`, onclick: () => void openTask(card.task_id!, propKey(card.id, "open")) }, PROPOSAL_OPEN_TASK))
       : null,
+    card.status === "confirmed" && card.receipt?.outcome === "done" && card.receipt.rule_id
+      ? h(
+          "div",
+          { class: "buttons" },
+          h(
+            "button",
+            {
+              type: "button",
+              "data-focus-key": `${propKey(card.id, "open")}:rule`,
+              "aria-label": `${PROPOSAL_OPEN_RULE}: ${String(card.summary?.name ?? card.receipt.rule_id)}`,
+              onclick: () => void openRuleFromChat(card.receipt!.rule_id!),
+            },
+            PROPOSAL_OPEN_RULE,
+          ),
+        )
+      : null,
     openNote ? h("p", { class: "chat-card-error", role: "status" }, openNote) : null,
   );
+}
+
+/** Lleva a «Mis reglas» con esa regla buscada. Deja el chat abierto a un lado: se cierra para que se vea el panel. */
+async function openRuleFromChat(ruleId: string) {
+  // La regla es nueva: la lista del panel puede no tenerla todavía.
+  if (!state.rules.some((r) => r.id === ruleId)) await refresh(true);
+  closeChat(false);
+  showRule(ruleId);
 }
 
 function proposalTaskTitleOf(card: ProposalCard): string {

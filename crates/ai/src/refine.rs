@@ -259,12 +259,15 @@ fn plain_amount(text: &str) -> bool {
 }
 
 /// Caracteres de formato invisibles o que cambian el sentido de lectura (U+200B…U+200F,
-/// U+202A…U+202E, U+2060…U+206F, U+FEFF, U+00AD, U+061C, U+180E y las etiquetas U+E0000…): no
-/// son «control» para `char::is_control`, pero un comentario no los necesita.
+/// U+202A…U+202E, U+2060…U+206F, U+FEFF, U+00AD, U+061C, U+180E y las etiquetas U+E0000…) y los
+/// que se dibujan como un hueco o no se ven: U+034F, los rellenos de hangul U+115F, U+1160, U+3164
+/// y U+FFA0, los selectores de variación U+FE00…U+FE0F y el braille en blanco U+2800. No son
+/// «control» para `char::is_control`, pero un comentario no los necesita.
 pub fn is_format_char(c: char) -> bool {
     matches!(c,
-        '\u{00AD}' | '\u{061C}' | '\u{180E}' | '\u{200B}'..='\u{200F}'
-        | '\u{202A}'..='\u{202E}' | '\u{2060}'..='\u{206F}' | '\u{FEFF}'
+        '\u{00AD}' | '\u{034F}' | '\u{061C}' | '\u{115F}' | '\u{1160}' | '\u{180E}'
+        | '\u{200B}'..='\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2060}'..='\u{206F}'
+        | '\u{2800}' | '\u{3164}' | '\u{FE00}'..='\u{FE0F}' | '\u{FEFF}' | '\u{FFA0}'
         | '\u{E0000}'..='\u{E007F}')
 }
 

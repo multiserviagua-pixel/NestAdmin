@@ -518,6 +518,7 @@ const TOOL_LABEL: Record<string, string> = {
   aggregate: "sumas y recuentos",
   list_tasks: "listar tareas",
   list_rules: "listar reglas",
+  list_suggestions: "listar sugerencias",
   history: "historial de una tarea",
   mail_accounts: "cuentas de correo",
   ai_status: "estado de la IA",
@@ -584,12 +585,23 @@ export const PROPOSAL_KINDS = [
   "mail_limit",
   "rename_account",
   "sender_preference",
+  "accept_suggestion",
+  "discard_suggestion",
+  "create_rule",
+  "edit_rule",
+  "import",
 ] as const;
 
 export const PROPOSAL_NOTHING_DONE = "Nada se ha hecho todavía. Solo se ejecuta si usted pulsa el botón.";
 export const CARD_DISMISS = "No hacerlo";
 export const PROPOSAL_EXECUTING = "Ejecutando…";
 export const PROPOSAL_OPEN_TASK = "Abrir la tarea";
+export const PROPOSAL_OPEN_RULE = "Abrir en Reglas";
+/** Código cerrado con el que la ventana dice que la persona cerró el diálogo sin elegir archivos. */
+export const IMPORT_CANCELLED_CODE = "import_cancelled";
+export const IMPORT_CANCELLED_NOTE = "No se eligió ningún archivo: la propuesta sigue pendiente y no se ha hecho nada.";
+export const INACTIVE_NOTICE = "La regla quedará inactiva: no actuará hasta que usted la active en Reglas.";
+export const CONDITIONS_LABEL = "Condiciones";
 export const PROPOSAL_LIVE_LABEL = "Estado de la propuesta";
 export const AMOUNTS_CHECKED_LABEL = "He comprobado los importes con el documento";
 export const AMOUNTS_REQUIRED_HINT = "Para registrar la factura, marque antes que ha comprobado los importes con el documento.";
@@ -622,6 +634,16 @@ export function proposalHeading(kind: string, effect?: string): string {
       return "Propuesta: cambiar el nombre de una cuenta";
     case "sender_preference":
       return "Propuesta: guardar una preferencia de remitente";
+    case "accept_suggestion":
+      return "Propuesta: aceptar una sugerencia (la regla quedará inactiva)";
+    case "discard_suggestion":
+      return "Propuesta: no volver a proponer una sugerencia";
+    case "create_rule":
+      return "Propuesta: crear una regla (quedará inactiva)";
+    case "edit_rule":
+      return "Propuesta: cambiar las condiciones de una regla";
+    case "import":
+      return "Propuesta: importar documentos";
     default:
       return "Propuesta del asistente";
   }
@@ -650,6 +672,16 @@ export function proposalVerb(kind: string, effect?: string): string {
       return "Cambiar nombre";
     case "sender_preference":
       return "Guardar preferencia";
+    case "accept_suggestion":
+      return "Aceptar sugerencia";
+    case "discard_suggestion":
+      return "No volver a proponer";
+    case "create_rule":
+      return "Crear regla";
+    case "edit_rule":
+      return "Guardar cambios";
+    case "import":
+      return "Elegir archivos…";
     default:
       return "Confirmar";
   }
@@ -687,6 +719,20 @@ export function proposalEffectText(kind: string, effect?: string, summary: Recor
       return `Al confirmar, la cuenta pasará a llamarse «${String(summary.new_label ?? "")}»${summary.current_label ? ` en lugar de «${String(summary.current_label)}»` : ""}.`;
     case "sender_preference":
       return "Al confirmar, NestAdmin guardará esta preferencia para los correos nuevos de ese remitente. No cambia los que ya están en la lista.";
+    case "accept_suggestion":
+      return "Al confirmar, NestAdmin creará esta regla INACTIVA, con el origen de la sugerencia. No actuará hasta que usted la active en Reglas.";
+    case "discard_suggestion":
+      return "Al confirmar, NestAdmin no volverá a proponer esta sugerencia salvo que aparezca evidencia nueva. No se crea ninguna regla.";
+    case "create_rule":
+      return "Al confirmar, NestAdmin creará esta regla INACTIVA. No actuará hasta que usted la active en Reglas.";
+    case "edit_rule":
+      return summary.stays_active
+        ? "Al confirmar, NestAdmin guardará las condiciones nuevas. La regla sigue activa porque el cambio la estrecha."
+        : summary.was_active
+          ? "Al confirmar, NestAdmin guardará las condiciones nuevas y la regla quedará INACTIVA: el cambio no la estrecha. La activa usted de nuevo en Reglas."
+          : "Al confirmar, NestAdmin guardará las condiciones nuevas. La regla sigue inactiva: solo la activa usted en Reglas.";
+    case "import":
+      return "Al confirmar, se abrirá el selector de archivos del sistema para que usted elija qué importar. Si lo cierra sin elegir, no se hace nada.";
     default:
       return "Al confirmar, NestAdmin hará lo que indica esta tarjeta.";
   }
@@ -731,6 +777,16 @@ export function proposalButtonName(card: ProposalLike): string {
       return `Cambiar nombre de la cuenta ${quoted(s.current_label)} a ${quoted(s.new_label)}`;
     case "sender_preference":
       return `Guardar preferencia del remitente ${String(s.key ?? "")}`;
+    case "accept_suggestion":
+      return `Aceptar sugerencia ${quoted(s.name)} y crear la regla inactiva`;
+    case "discard_suggestion":
+      return `No volver a proponer la sugerencia ${quoted(s.name)}`;
+    case "create_rule":
+      return `Crear regla inactiva ${quoted(s.name)}`;
+    case "edit_rule":
+      return `Guardar cambios en la regla ${quoted(s.name)}`;
+    case "import":
+      return "Elegir archivos… para importar documentos";
     default:
       return proposalVerb(card.kind, card.effect);
   }
@@ -746,6 +802,8 @@ export function proposalIsOpen(status: string): boolean {
   return status === "pending" || status === "executing";
 }
 
+const RULE_KINDS = new Set(["accept_suggestion", "discard_suggestion", "create_rule", "edit_rule"]);
+
 /** Texto de los estados finales que no son un recibo; `null` si no aplica. */
 export function proposalFinalText(card: ProposalLike): string | null {
   switch (card.status) {
@@ -754,7 +812,9 @@ export function proposalFinalText(card: ProposalLike): string | null {
     case "expired":
       return "Caducó sin confirmarse. Pídala de nuevo si la necesita.";
     case "stale":
-      return "La tarea cambió después de preparar esta propuesta. Pídala de nuevo para ver los datos actuales.";
+      return RULE_KINDS.has(card.kind)
+        ? "La regla o la sugerencia cambió después de preparar esta propuesta. Pídala de nuevo para ver los datos actuales."
+        : "La tarea cambió después de preparar esta propuesta. Pídala de nuevo para ver los datos actuales.";
     case "failed":
       return notDoneText(card) ?? "No se hizo nada: la acción ya no era posible con el estado actual de la tarea. Pídala de nuevo si la necesita.";
     default:
@@ -765,6 +825,7 @@ export function proposalFinalText(card: ProposalLike): string | null {
 /** Lo que pasó cuando se pulsó el botón y la acción no llegó a hacerse (recibo `not_done`); `null` si no hay ese recibo. */
 function notDoneText(card: ProposalLike): string | null {
   if (card.receipt?.outcome !== "not_done") return null;
+  if (card.kind === "import") return "No se importó ningún archivo: revise los avisos en Tareas y vuelva a pedirlo si hace falta.";
   const what = card.effect === "register_invoice" ? "registrar la factura" : "enviar";
   switch (card.receipt.reason) {
     case "action_failed":
@@ -778,6 +839,10 @@ function notDoneText(card: ProposalLike): string | null {
 
 /** Aviso de que confirmar puede activar reglas que envían o registran sin revisión; `null` si no es el caso. */
 export function proposalRulesText(kind: string, effect: string, summary: Record<string, any> = {}): string | null {
+  if (effect === "import") {
+    const n = Number(summary.active_register_rules) || 0;
+    return n > 0 ? `Tiene ${n} ${plural(n, "regla activa que puede", "reglas activas que pueden")} registrar facturas sin revisión con lo que importe.` : null;
+  }
   if (effect !== "may_trigger_rules") return null;
   const n = (Number(summary.active_send_rules) || 0) + (Number(summary.active_register_rules) || 0);
   const what = `${n} ${plural(n, "regla activa que puede", "reglas activas que pueden")} enviar respuestas o registrar facturas sin revisión`;
@@ -829,9 +894,25 @@ function receiptHeadline(card: ProposalLike): string {
       return result.label ? `Cuenta renombrada a «${String(result.label)}»` : "Cuenta renombrada";
     case "sender_preference":
       return result.changed === false ? "La preferencia ya estaba así" : "Preferencia guardada";
+    case "accept_suggestion":
+    case "create_rule":
+      return "Regla creada (inactiva)";
+    case "discard_suggestion":
+      return "Sugerencia descartada";
+    case "edit_rule":
+      return result.deactivated_by_edit ? "Regla editada: ha quedado inactiva" : "Regla editada";
+    case "import":
+      return importCountsText(result);
     default:
       return "Hecho";
   }
+}
+
+/** «N importados, M con error», a partir del recibo de una importación. */
+export function importCountsText(result: Record<string, any> = {}): string {
+  const imported = Number(result.imported) || 0;
+  const errors = Number(result.errors) || 0;
+  return `${imported} ${plural(imported, "importado", "importados")}, ${errors} con error`;
 }
 
 /** Qué se hizo y cuándo, tomado del recibo; vacío si la propuesta no está confirmada. */
@@ -841,8 +922,97 @@ export function proposalReceiptLines(card: ProposalLike): string[] {
   const lines = [`${receiptHeadline(card)}${when ? ` el ${when}` : ""}.`];
   if (card.kind === "approve" && card.effect === "send_mail") lines.push("La entrega al destinatario no se comprueba.");
   if (card.kind === "edit_draft") lines.push("No se ha enviado nada: enviar es otro paso.");
+  if (card.kind === "accept_suggestion" || card.kind === "create_rule") lines.push("Está inactiva: actívela en Reglas cuando quiera que actúe.");
+  if (card.kind === "edit_rule" && !card.receipt.result?.active) lines.push("La regla no está activa: solo se activa en Reglas.");
+  if (card.kind === "import" && Number(card.receipt.result?.imported) > 0) lines.push("Lo importado se procesa como cualquier documento y pasa por sus reglas.");
   if (card.receipt.reconciled) lines.push("La acción ya constaba como hecha y no se repitió.");
   return lines;
+}
+
+// ---- Reglas y sugerencias (E4, D191) ----
+
+/** ¿Es el error de la ventana por cerrar el diálogo de importar sin elegir nada? Entonces la tarjeta sigue pendiente. */
+export function isImportCancelled(error: unknown): boolean {
+  return String(error ?? "").trim() === IMPORT_CANCELLED_CODE;
+}
+
+const RULE_ACTION_TEXT: Record<string, string> = {
+  register_invoice: "Registrar facturas sin revisión",
+  send_draft: "Enviar la respuesta redactada por la IA sin revisión",
+};
+
+/** Tipo de acción de una regla, dicho con claridad. */
+export function ruleActionText(action: unknown): string {
+  return RULE_ACTION_TEXT[String(action ?? "")] ?? "Acción desconocida";
+}
+
+const EXTRA_CONDITION_LABEL: Record<string, string> = { currency: "Moneda" };
+
+const CONDITION_LABEL: Record<string, string> = {
+  supplier: "Proveedor",
+  max_total: "Importe máximo (EUR)",
+  category: "Categoría",
+  sender: "Remitente",
+  sender_domain: "Dominio del remitente",
+};
+
+/** Texto de un valor de condición cualquiera: nunca se omite uno que la regla lleve. */
+function conditionValueText(value: unknown): string {
+  if (typeof value === "string") return value;
+  if (typeof value === "number" || typeof value === "boolean") return String(value);
+  return JSON.stringify(value) ?? "";
+}
+
+/**
+ * Las condiciones exactas de una regla como pares «rótulo, valor»; la categoría se traduce con `categoryLabel`.
+ * Primero las cinco conocidas, en su orden, y después, de forma genérica y por orden alfabético, cualquier otra
+ * clave que la regla lleve (p. ej. `currency`): la tarjeta no esconde ninguna condición.
+ */
+export function ruleConditionLines(conditions: Record<string, any> | null | undefined, categoryLabel: (code: string) => string = (c) => c): Array<[string, string]> {
+  const out: Array<[string, string]> = [];
+  const known = ["supplier", "max_total", "category", "sender", "sender_domain"];
+  for (const key of known) {
+    const value = conditions?.[key];
+    if (typeof value === "string" && value.trim()) out.push([CONDITION_LABEL[key]!, key === "category" ? categoryLabel(value) : value]);
+    else if (value !== undefined && value !== null && typeof value !== "string") out.push([CONDITION_LABEL[key]!, conditionValueText(value)]);
+  }
+  for (const key of Object.keys(conditions ?? {}).filter((k) => !known.includes(k)).sort()) {
+    const value = conditions![key];
+    if (value === undefined || value === null) continue;
+    out.push([EXTRA_CONDITION_LABEL[key] ?? key, conditionValueText(value)]);
+  }
+  return out;
+}
+
+/** Cuántos casos anteriores habría cubierto la regla, de la simulación; `null` si la tarjeta no lo trae. */
+export function proposalCoverageText(coverage: Record<string, any> | null | undefined): string | null {
+  if (!coverage || typeof coverage.covered !== "number") return null;
+  const n = coverage.covered;
+  const base = n === 0 ? "No habría cubierto ningún caso anterior" : `Habría cubierto ${n} ${plural(n, "caso anterior", "casos anteriores")}`;
+  const auto = typeof coverage.would_automate === "number" && n > 0 ? ` (${coverage.would_automate} ${plural(coverage.would_automate, "se habría automatizado", "se habrían automatizado")})` : "";
+  return `${base}${auto}.`;
+}
+
+/** De cuántas observaciones sale una sugerencia; `null` si la tarjeta no lo trae (reglas creadas a petición). */
+export function suggestionEvidenceText(evidence: Record<string, any> | null | undefined): string | null {
+  if (!evidence || typeof evidence.count !== "number") return null;
+  return `Sale de ${evidence.count} ${plural(evidence.count, "observación", "observaciones")} (umbral ${numberText(evidence.threshold)}).`;
+}
+
+/** Una frase por solapamiento de la regla con otras; vacío si no hay. */
+export function proposalOverlapLines(overlaps: unknown): string[] {
+  if (!Array.isArray(overlaps)) return [];
+  return overlaps.flatMap((o: any) => {
+    const names = Array.isArray(o?.rules) ? o.rules.map((r: any) => `«${String(r?.name ?? r?.id ?? "")}»`).filter((n: string) => n !== "«»") : [];
+    if (!names.length) return [];
+    return [`Se solapa con ${names.join(", ")}: al activarla, los casos que cubran las dos irían a revisión.`];
+  });
+}
+
+/** Qué pasa con la regla editada: antes y después de su estado de activación. */
+export function editedRuleStateText(summary: Record<string, any> = {}): string {
+  if (!summary.was_active) return "La regla está inactiva y seguirá así: solo la activa usted en Reglas.";
+  return summary.stays_active ? "La regla está activa y seguirá activa: el cambio la estrecha." : "La regla está activa y quedará inactiva: el cambio no la estrecha.";
 }
 
 const trimmedReason = (error: unknown): string => String(error ?? "").trim().replace(/[.\s]+$/, "");
@@ -891,13 +1061,15 @@ export function emailIssueText(code: string, version?: unknown): string | null {
 const AUDIT_REASONS: Record<string, string> = {
   action_failed: "la tarea quedó fallida",
   returned_to_review: "la tarea volvió a revisión",
+  nothing_imported: "no se importó ningún archivo",
+  import_interrupted: "la importación quedó a medias y no se repite sola",
   not_completed: "la tarea no se completó",
 };
 
 /** Detalle del Historial de un evento `assistant_proposal`, en palabras; sin texto de correos ni de documentos. */
 export function proposalAuditText(d: Record<string, unknown>): string {
   const what = typeof d.kind === "string" ? proposalHeading(d.kind, typeof d.effect === "string" ? d.effect : undefined).replace(/^Propuesta: /, "") : "propuesta";
-  const effect = d.effect === "send_mail" ? "envía un correo" : d.effect === "register_invoice" ? "registra una factura" : d.effect === "may_trigger_rules" ? "puede activar reglas" : "sin envío ni registro";
+  const effect = d.effect === "send_mail" ? "envía un correo" : d.effect === "register_invoice" ? "registra una factura" : d.effect === "may_trigger_rules" ? "puede activar reglas" : d.effect === "rule_inactive" ? "crea una regla inactiva" : d.effect === "rule_edited" ? "cambia las condiciones de una regla" : d.effect === "import" ? "importa documentos" : "sin envío ni registro";
   const code = typeof d.code === "string" && d.code ? (d.code === "reconciled" ? " · ya constaba hecha y no se repitió" : d.code in AUDIT_REASONS ? ` · no se hizo: ${AUDIT_REASONS[String(d.code)]}` : ` · motivo: ${d.code}`) : "";
   return `${what.charAt(0).toUpperCase()}${what.slice(1)} · ${effect}${code}`;
 }

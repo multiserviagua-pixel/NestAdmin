@@ -2381,19 +2381,3 @@ fn fetch_mail_and_retry_say_when_active_rules_may_act_without_review() {
     assert_eq!(card.effect, Effect::MayTriggerRules);
     assert_eq!(card.summary["active_send_rules"], 1);
 }
-
-#[test]
-fn the_ten_kinds_are_exactly_the_ten_propose_tools() {
-    let names: Vec<&str> = TOOLS
-        .iter()
-        .filter(|t| t.level == Level::Propose)
-        .map(|t| t.name)
-        .collect();
-    assert_eq!(names.len(), 10);
-    for kind in nestadmin_core::PROPOSAL_KINDS {
-        assert!(
-            names.contains(&format!("propose_{kind}").as_str()),
-            "{kind}"
-        );
-    }
-}

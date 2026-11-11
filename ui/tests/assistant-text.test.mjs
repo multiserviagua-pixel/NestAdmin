@@ -394,6 +394,11 @@ const CARDS = [
   card("mail_limit", { summary: { type: "mail_limit", current: 50, new: 100 } }),
   card("rename_account", { summary: { type: "rename_account", current_label: "Cuenta A", new_label: "Cuenta B" } }),
   card("sender_preference", { summary: { type: "sender_preference", key: "ventas@ejemplo.test" } }),
+  card("accept_suggestion", { effect: "rule_inactive", summary: { type: "accept_suggestion", name: "Facturas de Alfa SL" } }),
+  card("discard_suggestion", { summary: { type: "discard_suggestion", name: "Facturas de Alfa SL" } }),
+  card("create_rule", { effect: "rule_inactive", summary: { type: "create_rule", name: "Facturas de Beta SL" } }),
+  card("edit_rule", { effect: "rule_edited", summary: { type: "edit_rule", name: "Facturas de Alfa SL", was_active: true, stays_active: true } }),
+  card("import", { effect: "import", summary: { type: "import", active_register_rules: 0 } }),
 ];
 
 test("cada tipo de propuesta tiene encabezado, efecto, verbo y nombre de botón propios", () => {
@@ -586,4 +591,118 @@ test("los textos de las propuestas no contienen HTML", () => {
     T.emailIssueText("unconfirmed_attempt", 1),
   ];
   for (const text of texts) assert.ok(!/[<>]|&\w+;/.test(text), text);
+});
+
+
+// ---- Reglas, sugerencias e importación (E4, D191) ----
+
+test("los textos de las cinco propuestas nuevas son los acordados y nunca prometen activar la regla", () => {
+  assert.equal(T.proposalHeading("create_rule", "rule_inactive"), "Propuesta: crear una regla (quedará inactiva)");
+  assert.equal(T.proposalVerb("create_rule", "rule_inactive"), "Crear regla");
+  assert.equal(T.proposalVerb("accept_suggestion", "rule_inactive"), "Aceptar sugerencia");
+  assert.equal(T.proposalVerb("discard_suggestion", "none"), "No volver a proponer");
+  assert.equal(T.proposalVerb("edit_rule", "rule_edited"), "Guardar cambios");
+  assert.equal(T.proposalVerb("import", "import"), "Elegir archivos…");
+  for (const kind of ["accept_suggestion", "create_rule"]) {
+    const text = T.proposalEffectText(kind, "rule_inactive", {});
+    assert.ok(text.includes("INACTIVA") && text.includes("Reglas"), text);
+  }
+  assert.ok(T.proposalEffectText("discard_suggestion", "none", {}).includes("No se crea ninguna regla"));
+  for (const c of CARDS.filter((c) => ["accept_suggestion", "create_rule", "edit_rule"].includes(c.kind))) {
+    assert.ok(!/activará|activa la regla/i.test(T.proposalEffectText(c.kind, c.effect, c.summary)));
+  }
+  assert.equal(T.proposalTone("create_rule"), "plain");
+  assert.equal(T.INACTIVE_NOTICE, "La regla quedará inactiva: no actuará hasta que usted la active en Reglas.");
+});
+
+test("editar dice si la regla sigue activa solo cuando el cambio la estrecha", () => {
+  assert.ok(T.proposalEffectText("edit_rule", "rule_edited", { was_active: true, stays_active: true }).includes("sigue activa porque el cambio la estrecha"));
+  assert.ok(T.proposalEffectText("edit_rule", "rule_edited", { was_active: true, stays_active: false }).includes("quedará INACTIVA"));
+  assert.ok(T.proposalEffectText("edit_rule", "rule_edited", { was_active: false, stays_active: false }).includes("sigue inactiva"));
+  assert.ok(T.editedRuleStateText({ was_active: true, stays_active: false }).includes("quedará inactiva"));
+  assert.ok(T.editedRuleStateText({ was_active: true, stays_active: true }).includes("seguirá activa"));
+  assert.ok(T.editedRuleStateText({ was_active: false }).includes("seguirá así"));
+});
+
+test("las condiciones exactas, los casos cubiertos y los solapamientos se dicen con las cifras de la tarjeta", () => {
+  assert.deepEqual(T.ruleConditionLines({ supplier: "Alfa SL", max_total: "500.00" }), [
+    ["Proveedor", "Alfa SL"],
+    ["Importe máximo (EUR)", "500.00"],
+  ]);
+  assert.deepEqual(T.ruleConditionLines({ category: "pedido", sender_domain: "gamma.test" }, (c) => c.toUpperCase()), [
+    ["Categoría", "PEDIDO"],
+    ["Dominio del remitente", "gamma.test"],
+  ]);
+  assert.deepEqual(T.ruleConditionLines(null), []);
+  assert.equal(T.proposalCoverageText({ covered: 4, would_automate: 3 }), "Habría cubierto 4 casos anteriores (3 se habrían automatizado).");
+  assert.equal(T.proposalCoverageText({ covered: 1, would_automate: 1 }), "Habría cubierto 1 caso anterior (1 se habría automatizado).");
+  assert.equal(T.proposalCoverageText({ covered: 0, would_automate: 0 }), "No habría cubierto ningún caso anterior.");
+  assert.equal(T.proposalCoverageText(undefined), null);
+  assert.deepEqual(T.proposalOverlapLines([{ kind: "overlap", rules: [{ id: "a", name: "Pedidos de Ana" }] }]), ["Se solapa con «Pedidos de Ana»: al activarla, los casos que cubran las dos irían a revisión."]);
+  assert.deepEqual(T.proposalOverlapLines([]), []);
+  assert.deepEqual(T.proposalOverlapLines(null), []);
+  assert.equal(T.suggestionEvidenceText({ count: 3, threshold: 3 }), "Sale de 3 observaciones (umbral 3).");
+  assert.equal(T.suggestionEvidenceText(undefined), null);
+  assert.equal(T.ruleActionText("register_invoice"), "Registrar facturas sin revisión");
+  assert.ok(T.ruleActionText("send_draft").startsWith("Enviar"));
+});
+
+test("tras confirmar, el recibo dice que la regla está inactiva y la importación da sus recuentos", () => {
+  const done = (kind, effect, result, over = {}) => ({
+    ...card(kind, { effect, status: "confirmed" }),
+    receipt: { confirmed_at: 1_760_000_000_000, reconciled: false, result, outcome: "done", reason: null, rule_id: "chat-7", ...over },
+  });
+  const created = T.proposalReceiptLines(done("create_rule", "rule_inactive", { rule_id: "chat-7", active: false }));
+  assert.ok(created[0].startsWith("Regla creada (inactiva) el "), created[0]);
+  assert.ok(created.some((l) => l.includes("Está inactiva")));
+  assert.ok(T.proposalReceiptLines(done("accept_suggestion", "rule_inactive", { active: false }))[0].startsWith("Regla creada (inactiva)"));
+  assert.ok(T.proposalReceiptLines(done("discard_suggestion", "none", {}))[0].startsWith("Sugerencia descartada"));
+  assert.ok(T.proposalReceiptLines(done("edit_rule", "rule_edited", { deactivated_by_edit: true, active: false }))[0].startsWith("Regla editada: ha quedado inactiva"));
+  assert.ok(T.proposalReceiptLines(done("edit_rule", "rule_edited", { active: true }))[0].startsWith("Regla editada el "));
+  const imported = T.proposalReceiptLines(done("import", "import", { imported: 2, errors: 1 }));
+  assert.ok(imported[0].startsWith("2 importados, 1 con error el "), imported[0]);
+  assert.equal(T.importCountsText({ imported: 1, errors: 0 }), "1 importado, 0 con error");
+  assert.equal(T.PROPOSAL_OPEN_RULE, "Abrir en Reglas");
+});
+
+test("cerrar el diálogo de importar es un aviso discreto y la tarjeta sigue pendiente", () => {
+  assert.equal(T.IMPORT_CANCELLED_CODE, "import_cancelled");
+  assert.equal(T.isImportCancelled("import_cancelled"), true);
+  assert.equal(T.isImportCancelled(" import_cancelled "), true);
+  assert.equal(T.isImportCancelled("la propuesta caducó; pídala de nuevo"), false);
+  assert.equal(T.isImportCancelled(null), false);
+  assert.ok(T.IMPORT_CANCELLED_NOTE.includes("sigue pendiente"));
+  assert.ok(T.proposalFinalText(card("import", { status: "failed", effect: "import", receipt: { outcome: "not_done", reason: "nothing_imported" } })).startsWith("No se importó ningún archivo"));
+  assert.ok(T.proposalFinalText(card("create_rule", { status: "stale" })).includes("regla o la sugerencia cambió"));
+  assert.ok(T.proposalFinalText(card("approve", { status: "stale" })).includes("La tarea cambió"));
+});
+
+test("importar avisa de las reglas activas que registran y el historial describe las propuestas nuevas", () => {
+  assert.equal(T.proposalRulesText("import", "import", { active_register_rules: 0 }), null);
+  assert.ok(T.proposalRulesText("import", "import", { active_register_rules: 2 }).includes("2 reglas activas que pueden registrar facturas sin revisión"));
+  assert.ok(T.proposalRulesText("import", "import", { active_register_rules: 1 }).includes("1 regla activa que puede registrar"));
+  const audit = (kind, effect) => T.assistantAuditText("assistant_proposal", JSON.stringify({ kind, task_id: null, effect, code: null }), "created");
+  assert.ok(audit("create_rule", "rule_inactive").includes("crea una regla inactiva"));
+  assert.ok(audit("edit_rule", "rule_edited").includes("cambia las condiciones de una regla"));
+  assert.ok(audit("import", "import").includes("importa documentos"));
+  assert.ok(T.assistantAuditText("assistant_proposal", JSON.stringify({ kind: "import", effect: "import", code: "import_interrupted" }), "failed").includes("no se repite sola"));
+  assert.equal(T.PROPOSAL_KINDS.length, 15);
+});
+
+test("la tarjeta de una regla muestra también las condiciones que no son de las cinco conocidas", () => {
+  // `currency` (y cualquier otra clave) no se esconde: ni al crear, ni al aceptar, ni en el antes y el después.
+  const lines = T.ruleConditionLines({ supplier: "Alfa SL", max_total: "500.00", currency: "EUR", zeta: 3, alfa: { a: 1 } });
+  assert.deepEqual(lines, [
+    ["Proveedor", "Alfa SL"],
+    ["Importe máximo (EUR)", "500.00"],
+    ["alfa", '{"a":1}'],
+    ["Moneda", "EUR"],
+    ["zeta", "3"],
+  ]);
+  const before = T.ruleConditionLines({ supplier: "Alfa SL", currency: "EUR" });
+  const after = T.ruleConditionLines({ supplier: "Alfa SL", currency: "USD" });
+  assert.deepEqual(before.map((l) => l[0]), after.map((l) => l[0]));
+  assert.notDeepEqual(before, after);
+  assert.deepEqual(T.ruleConditionLines({ supplier: "Alfa SL", currency: null }), [["Proveedor", "Alfa SL"]]);
+  assert.deepEqual(T.ruleConditionLines({ max_total: 5 }), [["Importe máximo (EUR)", "5"]]);
 });

@@ -127,7 +127,7 @@ fn migrating_from_schema_2_adds_sales_tables_and_keeps_a_copy() {
 
     let store = Store::open(&path).unwrap();
     assert_eq!(store.schema_version().unwrap(), SCHEMA_VERSION);
-    assert_eq!(SCHEMA_VERSION, 12);
+    assert_eq!(SCHEMA_VERSION, 13);
     assert_eq!(
         store.audit_log().unwrap().len(),
         1,
@@ -636,7 +636,7 @@ fn a_new_database_has_proposals_and_a_null_origin_for_ordinary_events() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("nestadmin.db");
     let mut store = Store::open(&path).unwrap();
-    assert_eq!(SCHEMA_VERSION, 12);
+    assert_eq!(SCHEMA_VERSION, 13);
     store
         .record_note("evento", "ok", &serde_json::json!({}))
         .unwrap();
@@ -712,4 +712,130 @@ fn the_audit_origin_stamps_events_only_while_it_is_set_and_never_persists() {
         .find(|e| e.action == "tras_el_corte")
         .unwrap();
     assert_eq!(last.origin, None);
+}
+
+/// Quita lo que añadió la migración 13 (la tabla de propuestas con el CHECK ampliado) y la vuelve a
+/// dejar como la creó la 12: con diez tipos de propuesta.
+const TABLE_OF_SCHEMA_12: &str = "DROP TABLE assistant_proposals;
+CREATE TABLE assistant_proposals (
+    id INTEGER PRIMARY KEY,
+    conversation_id INTEGER REFERENCES assistant_conversations (id) ON DELETE CASCADE,
+    turn_id INTEGER,
+    kind TEXT NOT NULL CHECK (kind IN (
+        'approve', 'reject', 'retry', 'archive', 'confirm_not_sent', 'edit_draft',
+        'fetch_mail', 'mail_limit', 'rename_account', 'sender_preference'
+    )),
+    task_id INTEGER, seen_version INTEGER, seen_fp TEXT,
+    args_json TEXT NOT NULL, card_json TEXT NOT NULL, idem_key TEXT NOT NULL UNIQUE,
+    status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN (
+        'pending', 'executing', 'confirmed', 'rejected', 'expired', 'stale', 'failed'
+    )),
+    receipt_json TEXT, created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL, resolved_at INTEGER
+);
+CREATE INDEX assistant_proposals_conversation ON assistant_proposals (conversation_id, status);
+CREATE INDEX assistant_proposals_task ON assistant_proposals (task_id, status);";
+
+/// La migración 13 (D191) reconstruye `assistant_proposals` para admitir los cinco tipos nuevos: una
+/// propuesta anterior (aquí una confirmada, con su recibo, y una pendiente) sobrevive intacta, la
+/// tabla admite los tipos nuevos y sigue rechazando uno desconocido, y conserva índices y unicidad.
+#[test]
+fn migrating_from_schema_12_keeps_the_proposals_and_admits_the_new_kinds() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("nestadmin.db");
+    drop(Store::open(&path).unwrap());
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    conn.execute_batch(&format!("{TABLE_OF_SCHEMA_12} PRAGMA user_version = 12;"))
+        .unwrap();
+    conn.execute_batch(
+        "INSERT INTO assistant_conversations (id, created_at, updated_at) VALUES (1, 1, 1);
+         INSERT INTO assistant_proposals
+            (id, conversation_id, turn_id, kind, task_id, seen_version, seen_fp, args_json,
+             card_json, idem_key, status, receipt_json, created_at, expires_at, resolved_at)
+         VALUES
+            (4, 1, 2, 'mail_limit', NULL, NULL, 'fp-a', '{\"limit\":50}', '{\"effect\":\"none\"}',
+             'prop/mail_limit/0/1-0', 'confirmed', '{\"outcome\":\"done\"}', 10, 99, 20),
+            (9, 1, 2, 'fetch_mail', NULL, NULL, 'fp-b', '{}', '{\"effect\":\"none\"}',
+             'prop/fetch_mail/0/2-1', 'pending', NULL, 11, 99, NULL);",
+    )
+    .unwrap();
+    drop(conn);
+
+    let store = Store::open(&path).unwrap();
+    assert_eq!(store.schema_version().unwrap(), SCHEMA_VERSION);
+    drop(store);
+    let backup = backup_path(&path, 12);
+    assert_eq!(user_version(&backup), 12);
+
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    type Row = (i64, String, String, Option<String>, Option<String>);
+    let rows: Vec<Row> = conn
+        .prepare(
+            "SELECT id, kind, status, receipt_json, seen_fp FROM assistant_proposals ORDER BY id",
+        )
+        .unwrap()
+        .query_map([], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+        })
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(
+        rows,
+        vec![
+            (
+                4,
+                "mail_limit".to_owned(),
+                "confirmed".to_owned(),
+                Some("{\"outcome\":\"done\"}".to_owned()),
+                Some("fp-a".to_owned())
+            ),
+            (
+                9,
+                "fetch_mail".to_owned(),
+                "pending".to_owned(),
+                None,
+                Some("fp-b".to_owned())
+            ),
+        ],
+        "las propuestas anteriores se conservan tal cual"
+    );
+    let insert = |kind: &str, key: &str| {
+        conn.execute(
+            "INSERT INTO assistant_proposals
+                (conversation_id, kind, args_json, card_json, idem_key, created_at, expires_at)
+             VALUES (1, ?1, '{}', '{}', ?2, 1, 2)",
+            [kind, key],
+        )
+    };
+    for (n, kind) in nestadmin_core::PROPOSAL_KINDS.iter().enumerate() {
+        assert!(insert(kind, &format!("k{n}")).is_ok(), "{kind}");
+    }
+    assert!(
+        insert("activate_rule", "k-x").is_err(),
+        "un tipo desconocido se rechaza"
+    );
+    assert!(
+        insert("import", "k0").is_err(),
+        "la clave de idempotencia sigue siendo única"
+    );
+    let indexes: i64 = conn
+        .query_row(
+            "SELECT count(*) FROM sqlite_master WHERE type = 'index' AND tbl_name = 'assistant_proposals'
+             AND name IN ('assistant_proposals_conversation', 'assistant_proposals_task')",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(indexes, 2);
+    // `AUTOINCREMENT`: el identificador de una propuesta no se reutiliza ni tras borrarlas todas.
+    let before = conn.last_insert_rowid();
+    assert!(
+        before > 9,
+        "sigue a los identificadores anteriores: {before}"
+    );
+    conn.execute("DELETE FROM assistant_proposals", []).unwrap();
+    assert!(insert("import", "otra-vez").is_ok());
+    assert!(conn.last_insert_rowid() > before, "no se reutiliza");
+    // La tabla vieja no queda.
+    assert!(!has_table(&path, "assistant_proposals_new"));
 }

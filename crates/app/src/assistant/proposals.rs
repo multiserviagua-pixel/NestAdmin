@@ -10,22 +10,28 @@
 //!   figuran entre las herramientas. Confirmar ejecuta EL MISMO método de `App` que la pantalla,
 //!   con el origen `chat` en el historial; repetirlo devuelve el recibo original.
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 
-use nestadmin_ai::assistant::{account_index, doc_id};
+use nestadmin_ai::assistant::{account_index, doc_id, rule_index, suggestion_index};
 use nestadmin_ai::refine::is_format_char;
 use nestadmin_ai::tasks::{draft_flags_allowing, draft_leaks_internals};
 use nestadmin_core::actions::idempotency_key;
-use nestadmin_core::{CoreError, NewProposal, ProposalRow, Task, TaskState, CHAT_ORIGIN};
+use nestadmin_core::{
+    is_learned_origin, CoreError, NewProposal, ProposalRow, Task, TaskState, CHAT_ORIGIN,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
 
 use super::tools::ToolOutput;
+use crate::panel::{edit_keeps_active, NewRule, Simulation, SIMULATED};
 use crate::refine::now_ms;
 use crate::rules::{REGISTER_INVOICE, SEND_DRAFT};
-use crate::{action_kind, task_is_initial_read, App, AppError, AppResult, EMAIL, INVOICE};
+use crate::{
+    action_kind, check_rule, task_is_initial_read, App, AppError, AppResult, EMAIL, INVOICE,
+};
 
 /// Propuestas nuevas como mucho por turno.
 pub const MAX_PER_TURN: usize = 3;
@@ -42,8 +48,42 @@ pub(crate) struct TurnCtx {
     pub(crate) conversation_id: Option<i64>,
     /// Referencias (`doc:N`, `acct:N`) que las herramientas devolvieron en esta conversación.
     pub(crate) known: HashSet<String>,
+    /// A qué apunta cada `sug:N` (`{"fp", "shown"}`) y `rule:N` (`{"rule_id"}`) de la conversación.
+    /// Se guarda con el turno (como `known`) para que valga entre turnos; nunca sale hacia el
+    /// modelo.
+    pub(crate) targets: BTreeMap<String, Value>,
     /// Propuestas de este turno (nuevas o reutilizadas), sin repetir.
     pub(crate) created: Vec<i64>,
+}
+
+impl TurnCtx {
+    /// La referencia `prefix` + N de lo identificado por `key` en `data[key_field]`: la misma de
+    /// siempre si ya se dio en la conversación (con el destino puesto al día) o la siguiente libre.
+    pub(crate) fn target_ref(
+        &mut self,
+        prefix: &str,
+        key_field: &str,
+        key: &str,
+        data: Value,
+    ) -> String {
+        let existing = self
+            .targets
+            .iter()
+            .find(|(r, v)| r.starts_with(prefix) && v[key_field].as_str() == Some(key))
+            .map(|(r, _)| r.clone());
+        let reference = existing.unwrap_or_else(|| {
+            let next = self
+                .targets
+                .keys()
+                .filter_map(|r| r.strip_prefix(prefix)?.parse::<usize>().ok())
+                .max()
+                .unwrap_or(0)
+                + 1;
+            format!("{prefix}{next}")
+        });
+        self.targets.insert(reference.clone(), data);
+        reference
+    }
 }
 
 /// Si confirmar la propuesta envía un correo, registra una factura o no tiene efecto externo.
@@ -57,6 +97,13 @@ pub enum Effect {
     /// No actúa por sí misma, pero el correo nuevo o la tarea reintentada pasan por las reglas
     /// activas, que pueden enviar o registrar sin revisión (R07).
     MayTriggerRules,
+    /// Crea una regla INACTIVA: no actúa hasta que la persona la active en el panel (D191).
+    RuleInactive,
+    /// Cambia las condiciones de una regla; nunca la activa y solo sigue activa si se estrecha.
+    RuleEdited,
+    /// Importa los archivos que la persona elija en el diálogo del sistema; lo importado pasa por
+    /// las reglas activas.
+    Import,
 }
 
 impl Effect {
@@ -66,6 +113,9 @@ impl Effect {
             Self::RegisterInvoice => "register_invoice",
             Self::NoEffect => "none",
             Self::MayTriggerRules => "may_trigger_rules",
+            Self::RuleInactive => "rule_inactive",
+            Self::RuleEdited => "rule_edited",
+            Self::Import => "import",
         }
     }
 
@@ -74,12 +124,15 @@ impl Effect {
             "send_mail" => Self::SendMail,
             "register_invoice" => Self::RegisterInvoice,
             "may_trigger_rules" => Self::MayTriggerRules,
+            "rule_inactive" => Self::RuleInactive,
+            "rule_edited" => Self::RuleEdited,
+            "import" => Self::Import,
             _ => Self::NoEffect,
         }
     }
 }
 
-/// Los diez tipos de propuesta.
+/// Los quince tipos de propuesta.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Kind {
     Approve,
@@ -92,6 +145,11 @@ pub(crate) enum Kind {
     MailLimit,
     RenameAccount,
     SenderPreference,
+    AcceptSuggestion,
+    DiscardSuggestion,
+    CreateRule,
+    EditRule,
+    Import,
 }
 
 impl Kind {
@@ -111,6 +169,11 @@ impl Kind {
             "mail_limit" => Self::MailLimit,
             "rename_account" => Self::RenameAccount,
             "sender_preference" => Self::SenderPreference,
+            "accept_suggestion" => Self::AcceptSuggestion,
+            "discard_suggestion" => Self::DiscardSuggestion,
+            "create_rule" => Self::CreateRule,
+            "edit_rule" => Self::EditRule,
+            "import" => Self::Import,
             _ => return None,
         })
     }
@@ -127,7 +190,21 @@ impl Kind {
             Self::MailLimit => "mail_limit",
             Self::RenameAccount => "rename_account",
             Self::SenderPreference => "sender_preference",
+            Self::AcceptSuggestion => "accept_suggestion",
+            Self::DiscardSuggestion => "discard_suggestion",
+            Self::CreateRule => "create_rule",
+            Self::EditRule => "edit_rule",
+            Self::Import => "import",
         }
+    }
+
+    /// Las de reglas y sugerencias: su huella sale de `summary.basis`, no de todo el resumen (los
+    /// casos que habría cubierto cambian con cada tarea y no hacen obsoleta la propuesta).
+    fn on_rules(self) -> bool {
+        matches!(
+            self,
+            Self::AcceptSuggestion | Self::DiscardSuggestion | Self::CreateRule | Self::EditRule
+        )
     }
 
     /// Las que actúan sobre una tarea (llevan versión vista).
@@ -192,6 +269,9 @@ pub struct ProposalReceipt {
     pub reason: Option<String>,
     /// `true` si tras un corte se comprobó que la acción ya estaba hecha y no se ejecutó de nuevo.
     pub reconciled: bool,
+    /// La regla creada o editada (aceptar, crear o editar), para abrirla en el panel de reglas.
+    #[serde(default)]
+    pub rule_id: Option<String>,
     /// Hechos de la acción según el tipo (versión, límite, nombre, recuento…); sin secretos.
     pub result: Value,
 }
@@ -234,11 +314,16 @@ fn fingerprint(kind: Kind, task: Option<&Task>, effect: Effect, summary: &Value)
             "updated_at": t.updated_at,
         })
     });
+    // Reglas y sugerencias: solo lo que las identifica (`basis`, un resumen criptográfico).
+    let shown = match summary.get("basis") {
+        Some(basis) if kind.on_rules() => basis.clone(),
+        _ => summary.clone(),
+    };
     let canonical = json!({
         "kind": kind.as_str(),
         "task": task,
         "effect": effect.as_str(),
-        "summary": summary,
+        "summary": shown,
     })
     .to_string();
     Sha256::digest(canonical.as_bytes())
@@ -486,16 +571,21 @@ impl App {
         let Some(kind) = Kind::from_tool(name) else {
             return failure("unknown_tool");
         };
-        let (conversation_id, known, created) = {
+        let (conversation_id, known, targets, created) = {
             let Ok(ctx) = self.assistant.turn.lock() else {
                 return failure("unavailable");
             };
             if !ctx.active {
                 return failure("no_turn");
             }
-            (ctx.conversation_id, ctx.known.clone(), ctx.created.clone())
+            (
+                ctx.conversation_id,
+                ctx.known.clone(),
+                ctx.targets.clone(),
+                ctx.created.clone(),
+            )
         };
-        let built = match self.build_proposal(kind, args, &known) {
+        let built = match self.build_proposal(kind, args, &known, &targets) {
             Ok(built) => built,
             Err(code) => return failure(code),
         };
@@ -729,8 +819,219 @@ impl App {
                     }),
                 ))
             }
+            Kind::AcceptSuggestion | Kind::DiscardSuggestion => self.compose_suggestion(kind, args),
+            Kind::CreateRule => self.compose_create_rule(args),
+            Kind::EditRule => self.compose_edit_rule(args),
+            Kind::Import => {
+                let (_, register) = self.active_rule_counts()?;
+                Ok((
+                    Effect::Import,
+                    json!({ "type": "import", "active_register_rules": register }),
+                ))
+            }
             _ => Err("unknown_tool"),
         }
+    }
+
+    /// Cuántos casos anteriores habría cubierto una regla y los solapamientos que crearía, a partir
+    /// de la simulación (solo lectura).
+    fn coverage_of(sim: &Simulation) -> Value {
+        let review: usize = sim.would_review.values().sum();
+        json!({
+            "considered": sim.considered,
+            "covered": sim.would_automate + sim.overlaps + review,
+            "would_automate": sim.would_automate,
+        })
+    }
+
+    fn overlaps_of(&self, sim: &Simulation, own: Option<&str>) -> Result<Value, &'static str> {
+        let names: HashMap<String, String> = self
+            .rule_views()
+            .map_err(|_| "unavailable")?
+            .into_iter()
+            .map(|v| (v.rule.id.clone(), v.name.clone()))
+            .collect();
+        let items: Vec<Value> = sim
+            .findings
+            .iter()
+            .filter_map(|f| {
+                let others: Vec<Value> = f
+                    .rules
+                    .iter()
+                    .filter(|r| r.id != SIMULATED && Some(r.id.as_str()) != own)
+                    .map(|r| {
+                        json!({
+                            "id": r.id,
+                            "name": names.get(&r.id).cloned().unwrap_or_else(|| r.id.clone()),
+                            "active": r.active,
+                        })
+                    })
+                    .collect();
+                (!others.is_empty()).then(|| {
+                    json!({
+                        "kind": serde_json::to_value(f.kind).unwrap_or(Value::Null),
+                        "rules": others,
+                    })
+                })
+            })
+            .collect();
+        Ok(Value::Array(items))
+    }
+
+    fn simulate_for_card(
+        &self,
+        action_kind: &str,
+        conditions: &Value,
+        exclude: Option<&str>,
+    ) -> Result<Simulation, &'static str> {
+        self.simulate_rule(action_kind, conditions, None, false, exclude)
+            .map_err(|e| match e {
+                AppError::Invalid(_) => "invalid_conditions",
+                _ => "unavailable",
+            })
+    }
+
+    /// Aceptar o descartar una sugerencia: la sugerencia tiene que seguir vigente y ser la que se
+    /// mostró (misma huella y mismo `shown`).
+    fn compose_suggestion(
+        &self,
+        kind: Kind,
+        args: &Value,
+    ) -> Result<(Effect, Value), &'static str> {
+        let fp = args["fingerprint"].as_str().unwrap_or_default();
+        let shown = args["shown"].as_str().unwrap_or_default();
+        let all = self.rule_suggestions().map_err(|_| "unavailable")?;
+        let Some(c) = all.candidates.iter().find(|c| c.fingerprint == fp) else {
+            let rows = self
+                .store
+                .rule_suggestion_rows()
+                .map_err(|_| "unavailable")?;
+            return Err(
+                match rows
+                    .iter()
+                    .find(|r| r.fingerprint == fp)
+                    .map(|r| r.status.as_str())
+                {
+                    Some("accepted") => "already_accepted",
+                    Some("discarded") => "already_discarded",
+                    _ => "suggestion_gone",
+                },
+            );
+        };
+        if c.shown != shown {
+            return Err("suggestion_changed");
+        }
+        let accept = kind == Kind::AcceptSuggestion;
+        if accept && c.evidence.needs_limit {
+            return Err("needs_limit");
+        }
+        let sim = self.simulate_for_card(&c.action_kind, &c.conditions, None)?;
+        let basis = basis_of(&json!([kind.as_str(), fp, shown]));
+        Ok((
+            if accept {
+                Effect::RuleInactive
+            } else {
+                Effect::NoEffect
+            },
+            json!({
+                "type": kind.as_str(),
+                "action": c.action_kind,
+                "name": c.name,
+                "conditions": c.conditions,
+                "evidence": {
+                    "count": c.evidence.count,
+                    "threshold": c.evidence.threshold,
+                    "approved": c.evidence.approved,
+                    "seen": c.evidence.seen,
+                    "learned": c.evidence.learned,
+                    "origin": c.evidence.origin,
+                },
+                "coverage": Self::coverage_of(&sim),
+                "overlaps": self.overlaps_of(&sim, None)?,
+                "stays_inactive": accept,
+                "basis": basis,
+            }),
+        ))
+    }
+
+    fn compose_create_rule(&self, args: &Value) -> Result<(Effect, Value), &'static str> {
+        let action = args["action"].as_str().unwrap_or_default();
+        let conditions = &args["conditions"];
+        check_rule(action, conditions, false).map_err(|_| "invalid_conditions")?;
+        let sim = self.simulate_for_card(action, conditions, None)?;
+        let basis = basis_of(&json!(["create_rule", action, conditions, args["name"]]));
+        Ok((
+            Effect::RuleInactive,
+            json!({
+                "type": "create_rule",
+                "action": action,
+                "name": args["name"],
+                "conditions": conditions,
+                "coverage": Self::coverage_of(&sim),
+                "overlaps": self.overlaps_of(&sim, None)?,
+                "stays_inactive": true,
+                "basis": basis,
+            }),
+        ))
+    }
+
+    fn compose_edit_rule(&self, args: &Value) -> Result<(Effect, Value), &'static str> {
+        let id = args["rule_id"].as_str().unwrap_or_default();
+        let conditions = &args["conditions"];
+        let rule = self
+            .store
+            .rule(id)
+            .map_err(|_| "unavailable")?
+            .ok_or("rule_not_found")?;
+        let meta = self.store.rule_meta(id).map_err(|_| "unavailable")?;
+        if meta.as_ref().is_some_and(|m| m.archived_at.is_some()) {
+            return Err("rule_archived");
+        }
+        if meta
+            .as_ref()
+            .is_some_and(|m| m.allow_any_sender_ack_at.is_some())
+        {
+            return Err("advanced_validation");
+        }
+        if meta
+            .as_ref()
+            .and_then(|m| m.origin.as_ref())
+            .is_some_and(is_learned_origin)
+        {
+            return Err("learned_rule");
+        }
+        check_rule(&rule.action_kind, conditions, false).map_err(|_| "invalid_conditions")?;
+        if rule.conditions == *conditions {
+            return Err("no_change");
+        }
+        let stays_active = rule.active && edit_keeps_active(&rule, false, conditions, false);
+        let sim = self.simulate_for_card(&rule.action_kind, conditions, Some(id))?;
+        let name = meta.and_then(|m| m.name).unwrap_or_else(|| rule.id.clone());
+        let basis = basis_of(&json!([
+            "edit_rule",
+            rule.id,
+            rule.version,
+            rule.conditions,
+            rule.active,
+            conditions
+        ]));
+        Ok((
+            Effect::RuleEdited,
+            json!({
+                "type": "edit_rule",
+                "rule_id": rule.id,
+                "rule_version": rule.version,
+                "name": name,
+                "action": rule.action_kind,
+                "before": rule.conditions,
+                "after": conditions,
+                "was_active": rule.active,
+                "stays_active": stays_active,
+                "coverage": Self::coverage_of(&sim),
+                "overlaps": self.overlaps_of(&sim, Some(id))?,
+                "basis": basis,
+            }),
+        ))
     }
 
     /// Efecto y resumen de las seis propuestas que actúan sobre una tarea.
@@ -806,19 +1107,28 @@ impl App {
         kind: Kind,
         args: &Map<String, Value>,
         known: &HashSet<String>,
+        targets: &BTreeMap<String, Value>,
     ) -> Result<Built, &'static str> {
         let (task, args_json) = if kind.on_task() {
             let task = self.task_of(args, known)?;
             let args_json = self.validate_task_proposal(kind, args, &task)?;
             (Some(task), args_json)
         } else {
-            (None, self.validate_other_proposal(kind, args, known)?)
+            (
+                None,
+                self.validate_other_proposal(kind, args, known, targets)?,
+            )
         };
         let (effect, summary) = self.compose(kind, &args_json, task.as_ref())?;
         let fp = fingerprint(kind, task.as_ref(), effect, &summary);
+        // Editar una regla guarda su versión vista (la lee la aplicación, nunca el modelo).
+        let seen_version = match kind {
+            Kind::EditRule => summary["rule_version"].as_i64(),
+            _ => task.as_ref().map(version_of),
+        };
         Ok(Built {
             task_id: task.as_ref().map(|t| t.id),
-            seen_version: task.as_ref().map(version_of),
+            seen_version,
             args: args_json,
             effect,
             summary,
@@ -832,9 +1142,72 @@ impl App {
         kind: Kind,
         args: &Map<String, Value>,
         known: &HashSet<String>,
+        targets: &BTreeMap<String, Value>,
     ) -> Result<Value, &'static str> {
         match kind {
-            Kind::FetchMail => Ok(json!({})),
+            Kind::FetchMail | Kind::Import => Ok(json!({})),
+            Kind::AcceptSuggestion | Kind::DiscardSuggestion => {
+                let reference = args
+                    .get("suggestion")
+                    .and_then(Value::as_str)
+                    .filter(|r| suggestion_index(r).is_some())
+                    .ok_or("bad_ref")?;
+                // Solo vale una referencia que `list_suggestions` devolvió en esta conversación.
+                if !known.contains(reference) {
+                    return Err("ref_not_returned");
+                }
+                let target = targets.get(reference).ok_or("ref_not_returned")?;
+                Ok(json!({
+                    "suggestion": reference,
+                    "fingerprint": target["fp"],
+                    "shown": target["shown"],
+                }))
+            }
+            Kind::CreateRule => {
+                let action = args
+                    .get("action")
+                    .and_then(Value::as_str)
+                    .ok_or("bad_value")?;
+                let conditions = rule_conditions(action, args)?;
+                let name = match args.get("name").and_then(Value::as_str) {
+                    Some(raw) => {
+                        if has_invisible(raw) {
+                            return Err("invisible_chars");
+                        }
+                        Some(raw.trim())
+                            .filter(|n| {
+                                !n.is_empty()
+                                    && n.chars().count() <= 80
+                                    && !n.chars().any(char::is_control)
+                            })
+                            .ok_or("bad_value")?
+                            .to_owned()
+                    }
+                    None => default_rule_name(action, &conditions),
+                };
+                Ok(json!({ "action": action, "name": name, "conditions": conditions }))
+            }
+            Kind::EditRule => {
+                let reference = args
+                    .get("rule")
+                    .and_then(Value::as_str)
+                    .filter(|r| rule_index(r).is_some())
+                    .ok_or("bad_ref")?;
+                if !known.contains(reference) {
+                    return Err("ref_not_returned");
+                }
+                let id = targets
+                    .get(reference)
+                    .and_then(|t| t["rule_id"].as_str())
+                    .ok_or("ref_not_returned")?;
+                let rule = self
+                    .store
+                    .rule(id)
+                    .map_err(|_| "unavailable")?
+                    .ok_or("rule_not_found")?;
+                let conditions = rule_conditions(&rule.action_kind, args)?;
+                Ok(json!({ "rule_id": id, "rule_ref": reference, "conditions": conditions }))
+            }
             Kind::MailLimit => {
                 let limit = args
                     .get("limit")
@@ -1156,6 +1529,19 @@ impl App {
     /// resuelve antes: si la acción consta como hecha pasa a `confirmed` (y se devuelve así, sin
     /// repetir nada); si no, queda `rejected`.
     pub fn proposal_dismiss(&mut self, id: i64) -> AppResult<ProposalCard> {
+        // Con el diálogo de importar abierto no se descarta: el resultado de lo que se importe tiene
+        // que constar en esta propuesta.
+        if self
+            .assistant
+            .importing
+            .lock()
+            .map_or(true, |set| set.contains(&id))
+        {
+            return Err(AppError::Proposal {
+                code: "busy",
+                message: "la propuesta se está confirmando: espere a que termine".into(),
+            });
+        }
         let row = self.store.proposal(id)?.ok_or_else(not_found)?;
         match row.status.as_str() {
             "rejected" => {}
@@ -1262,6 +1648,17 @@ impl App {
             "stale" => return Err(self.stale_error(&row)?),
             _ => {}
         }
+        // Importar necesita el diálogo del sistema, que solo abre la ventana: el flujo es
+        // `proposal_import_begin` / `proposal_import_finish`. Una `executing` no se repite sola.
+        if row.kind == Kind::Import.as_str() {
+            if row.status == "executing" {
+                return Err(self.import_interrupted(&row));
+            }
+            return Err(AppError::Proposal {
+                code: "import_needs_dialog",
+                message: "importar exige elegir los archivos en el diálogo del sistema".into(),
+            });
+        }
         let executing = row.status == "executing";
         if executing {
             // Un corte entre ejecutar y anotar: no se vuelve a ejecutar a ciegas.
@@ -1271,6 +1668,16 @@ impl App {
             if now_ms() >= row.expires_at {
                 self.settle_status(&row, &["executing"], "expired", None);
                 return Err(expired());
+            }
+            // Una regla o sugerencia cambiada desde entonces (por el panel) ya no es esta.
+            if Kind::parse(&row.kind).is_some_and(Kind::on_rules) {
+                let same = self
+                    .current_view(&row)?
+                    .is_some_and(|(_, _, fp)| row.seen_fp.as_deref() == Some(&fp));
+                if !same {
+                    self.settle_status(&row, &["executing"], "stale", None);
+                    return Err(self.stale_error(&row)?);
+                }
             }
             // La acción no consta hecha: si la tarea cambió de versión, ya no es esta.
             if let Some(task_id) = row.task_id {
@@ -1354,6 +1761,7 @@ impl App {
             outcome: run.outcome,
             reason: run.reason.map(str::to_owned),
             reconciled,
+            rule_id: run.result["rule_id"].as_str().map(str::to_owned),
             result: run.result,
         };
         let stored = serde_json::to_value(&receipt).unwrap_or(Value::Null);
@@ -1453,6 +1861,51 @@ impl App {
                     "warnings": change.warnings.len(),
                 })))
             }
+            Kind::AcceptSuggestion => {
+                let view = self.accept_suggestion(&arg("fingerprint"), &arg("shown"), None)?;
+                Ok(Run::done(rule_facts(&view)))
+            }
+            Kind::DiscardSuggestion => {
+                self.discard_suggestion(&arg("fingerprint"))?;
+                Ok(Run::done(json!({})))
+            }
+            Kind::CreateRule => {
+                let id = chat_rule_id(&row.idem_key);
+                let action = arg("action");
+                let conditions = row.args["conditions"].clone();
+                // Recuperarse de un corte: la regla de esta propuesta ya existe, no se crea otra.
+                // Solo cuenta si es la que esta propuesta escribió; otra regla con ese
+                // identificador (aunque sea igual) no se da por hecha.
+                if self.store.rule(&id)?.is_some() {
+                    if let Some(facts) = self.created_by_proposal(row)? {
+                        return Ok(Run::done(facts));
+                    }
+                    return Err(AppError::Invalid(
+                        "el identificador de la regla de esta propuesta ya lo usa otra regla"
+                            .into(),
+                    ));
+                }
+                let view = self.create_rule_full(NewRule {
+                    id: Some(&id),
+                    name: row.args["name"].as_str(),
+                    action_kind: &action,
+                    conditions: &conditions,
+                    allow_any_sender: false,
+                })?;
+                Ok(Run::done(rule_facts(&view)))
+            }
+            Kind::EditRule => {
+                let view = self.update_rule(&arg("rule_id"), &row.args["conditions"])?;
+                let mut facts = rule_facts(&view);
+                facts["new_version"] = json!(view.rule.version);
+                facts["deactivated_by_edit"] = json!(view.deactivated_by_edit);
+                Ok(Run::done(facts))
+            }
+            // Lo hace `proposal_import_finish` tras el diálogo; aquí no se llega nunca.
+            Kind::Import => Err(AppError::Proposal {
+                code: "import_needs_dialog",
+                message: "importar exige elegir los archivos en el diálogo del sistema".into(),
+            }),
         }
     }
 
@@ -1526,8 +1979,433 @@ impl App {
             }
             // Consultar el correo no deja un estado que comprobar: es idempotente por mensaje.
             Kind::FetchMail => None,
+            // Importar no es idempotente por contenido y no deja una marca de esta propuesta.
+            Kind::Import => None,
+            // Aceptada, y con el origen `chat` en el historial: una sugerencia aceptada por el panel
+            // no se atribuye al chat.
+            Kind::AcceptSuggestion => {
+                let fp = row.args["fingerprint"].as_str().unwrap_or_default();
+                if !self.chat_audited("rule_suggestion", "accepted", fp)? {
+                    return Ok(None);
+                }
+                self.store
+                    .rule_suggestion_rows()?
+                    .into_iter()
+                    .find(|r| r.fingerprint == fp && r.status == "accepted")
+                    .and_then(|r| r.evidence["rule_id"].as_str().map(str::to_owned))
+                    .and_then(|id| self.store.rule(&id).ok().flatten())
+                    .map(|rule| json!({ "rule_id": rule.id, "active": rule.active }))
+            }
+            Kind::DiscardSuggestion => {
+                let fp = row.args["fingerprint"].as_str().unwrap_or_default();
+                if !self.chat_audited("rule_suggestion", "discarded", fp)? {
+                    return Ok(None);
+                }
+                self.store
+                    .rule_suggestion_rows()?
+                    .into_iter()
+                    .any(|r| r.fingerprint == fp && r.status == "discarded")
+                    .then(|| json!({}))
+            }
+            Kind::CreateRule => self.created_by_proposal(row)?,
+            // La regla está en la versión siguiente a la vista, con las condiciones propuestas, y
+            // esa versión la escribió el chat: una igual hecha por el panel no cuenta.
+            Kind::EditRule => {
+                let id = row.args["rule_id"].as_str().unwrap_or_default();
+                match self.store.rule(id)? {
+                    Some(rule)
+                        if rule.version == seen + 1
+                            && rule.conditions == row.args["conditions"]
+                            && self.chat_audited(
+                                "rule",
+                                "",
+                                &format!("{id} v{} (", rule.version),
+                            )? =>
+                    {
+                        Some(json!({
+                            "rule_id": rule.id,
+                            "active": rule.active,
+                            "new_version": rule.version,
+                        }))
+                    }
+                    _ => None,
+                }
+            }
         })
     }
+}
+
+impl App {
+    // ---- Importar (el diálogo lo abre la ventana, no este crate) ----
+
+    /// Tipo de una propuesta, para que la ventana sepa si confirmarla exige el diálogo del sistema.
+    pub fn proposal_kind(&self, id: i64) -> AppResult<Option<String>> {
+        Ok(self.store.proposal(id)?.map(|row| row.kind))
+    }
+
+    /// Una propuesta de importar encontrada en `executing` y que no está en curso en esta sesión:
+    /// no se repite sola (repetirla exige elegir de nuevo los archivos) y pasa a `failed`.
+    fn import_interrupted(&self, row: &ProposalRow) -> AppError {
+        if self
+            .assistant
+            .importing
+            .lock()
+            .map_or(true, |set| set.contains(&row.id))
+        {
+            return AppError::Proposal {
+                code: "busy",
+                message: "la propuesta ya se está confirmando".into(),
+            };
+        }
+        self.settle_status(row, &["executing"], "failed", Some("import_interrupted"));
+        AppError::Proposal {
+            code: "failed",
+            message: "la importación quedó a medias y no se repite sola: revise las tareas y, si falta algo, pida la propuesta de nuevo".into(),
+        }
+    }
+
+    /// Al arrancar: una importación que quedó `executing` tras un corte pasa a `failed`.
+    pub(crate) fn fail_interrupted_imports(&self) -> AppResult<usize> {
+        let rows = self
+            .store
+            .proposals_of_kind_in(Kind::Import.as_str(), "executing")?;
+        let mut failed = 0;
+        for row in rows {
+            if self.settle_status(&row, &["executing"], "failed", Some("import_interrupted")) {
+                failed += 1;
+            }
+        }
+        Ok(failed)
+    }
+
+    /// ¿Hay un evento del historial con origen `chat`, de esta acción y (si no es vacío) este
+    /// estado, cuyo detalle empieza o contiene `needle`? Es lo que atribuye al chat una acción
+    /// que se encuentra ya hecha tras un corte.
+    fn chat_audited(&self, action: &str, status: &str, needle: &str) -> AppResult<bool> {
+        Ok(self.store.audit_log()?.iter().any(|e| {
+            e.action == action
+                && e.origin.as_deref() == Some(CHAT_ORIGIN)
+                && (status.is_empty() || e.status == status)
+                && e.detail.as_deref().is_some_and(|d| d.contains(needle))
+        }))
+    }
+
+    /// Los hechos de la regla que ESTA propuesta creó, si consta: tiene el identificador derivado
+    /// de la propuesta, la misma acción, condiciones y nombre, y su creación está en el historial
+    /// con origen `chat`.
+    fn created_by_proposal(&self, row: &ProposalRow) -> AppResult<Option<Value>> {
+        let id = chat_rule_id(&row.idem_key);
+        let Some(rule) = self.store.rule(&id)? else {
+            return Ok(None);
+        };
+        let name = self.store.rule_meta(&id)?.and_then(|m| m.name);
+        let same = rule.version == 1
+            && rule.action_kind == row.args["action"].as_str().unwrap_or_default()
+            && rule.conditions == row.args["conditions"]
+            && name.as_deref() == row.args["name"].as_str();
+        if same && self.chat_audited("rule", "", &format!("{id} v1 ("))? {
+            return Ok(Some(json!({ "rule_id": id, "active": rule.active })));
+        }
+        Ok(None)
+    }
+
+    /// Primer paso de confirmar una importación: valida que siga pendiente y la pasa a
+    /// `executing`. Devuelve el recibo si ya estaba confirmada (no se abre nada) o el guardián de la
+    /// importación en curso, que la ventana conserva mientras el diálogo está abierto y se importa:
+    /// al soltarse, pase lo que pase, la propuesta deja de constar en curso. Nada se importa aquí.
+    pub fn proposal_import_begin(&mut self, id: i64) -> AppResult<ImportStart> {
+        let row = self.store.proposal(id)?.ok_or_else(not_found)?;
+        if row.kind != Kind::Import.as_str() {
+            return Err(AppError::Proposal {
+                code: "not_import",
+                message: "la propuesta no es de importar".into(),
+            });
+        }
+        match row.status.as_str() {
+            "confirmed" => {
+                return row
+                    .receipt
+                    .clone()
+                    .and_then(|r| serde_json::from_value(r).ok())
+                    .map(|receipt| ImportStart::Done(Box::new(receipt)))
+                    .ok_or_else(|| AppError::Proposal {
+                        code: "failed",
+                        message: "la propuesta consta confirmada pero falta su recibo".into(),
+                    })
+            }
+            "rejected" => {
+                return Err(AppError::Proposal {
+                    code: "rejected",
+                    message: "la propuesta se descartó y ya no se puede confirmar".into(),
+                })
+            }
+            "expired" => return Err(expired()),
+            "failed" => {
+                return Err(AppError::Proposal {
+                    code: "failed",
+                    message: "la propuesta falló y no se puede confirmar; pídala de nuevo".into(),
+                })
+            }
+            "stale" => return Err(self.stale_error(&row)?),
+            "executing" => return Err(self.import_interrupted(&row)),
+            _ => {}
+        }
+        if now_ms() >= row.expires_at {
+            self.settle_status(&row, &["pending"], "expired", None);
+            return Err(expired());
+        }
+        let same = self
+            .current_view(&row)?
+            .is_some_and(|(_, _, fp)| row.seen_fp.as_deref() == Some(&fp));
+        if !same {
+            self.settle_status(&row, &["pending"], "stale", None);
+            return Err(self.stale_error(&row)?);
+        }
+        if !self
+            .store
+            .proposal_transition(row.id, &["pending"], "executing", None)?
+        {
+            return Err(AppError::Proposal {
+                code: "busy",
+                message: "la propuesta ya se está confirmando".into(),
+            });
+        }
+        let guard = ImportGuard::new(&self.assistant.importing, row.id);
+        Ok(ImportStart::Started(guard))
+    }
+
+    /// La persona cerró el diálogo sin elegir nada: la propuesta vuelve a `pending`, sin efectos.
+    pub fn proposal_import_cancel(&mut self, guard: &ImportGuard) -> AppResult<()> {
+        self.proposal_import_abandon(guard.id, 0, 0)
+    }
+
+    /// La importación no llegó a su recibo (cierre del diálogo, error o pánico del hilo): sin nada
+    /// importado, la propuesta vuelve a `pending`; con algo importado no se puede repetir, así que
+    /// pasa a `failed` y el resultado consta en el historial. Solo actúa sobre una `executing`.
+    pub fn proposal_import_abandon(
+        &mut self,
+        id: i64,
+        imported: usize,
+        errors: usize,
+    ) -> AppResult<()> {
+        let Some(row) = self.store.proposal(id)? else {
+            return Ok(());
+        };
+        if row.kind != Kind::Import.as_str() || row.status != "executing" {
+            return Ok(());
+        }
+        if imported == 0 {
+            self.store
+                .proposal_transition(id, &["executing"], "pending", None)?;
+        } else {
+            self.record_orphan_import(id, imported, errors, "interrupted");
+            self.settle_status(&row, &["executing"], "failed", Some("import_interrupted"));
+        }
+        Ok(())
+    }
+
+    /// Deja en el historial (origen `chat`) lo que se importó cuando la propuesta ya no está en
+    /// condiciones de recibirlo: los archivos importados no deben quedar sin constar.
+    fn record_orphan_import(&self, id: i64, imported: usize, errors: usize, why: &str) {
+        let _ = self.store.proposal_audit(
+            None,
+            "import_unattached",
+            &json!({
+                "kind": "import",
+                "proposal": id,
+                "imported": imported,
+                "errors": errors,
+                "code": why,
+            }),
+        );
+    }
+
+    /// Último paso: anota lo que el camino de la pantalla importó (`imported` tareas, `errors`
+    /// archivos rechazados) como recibo. Sin ninguna importada es `not_done` y la propuesta queda
+    /// `failed`.
+    pub fn proposal_import_finish(
+        &mut self,
+        guard: &ImportGuard,
+        imported: usize,
+        errors: usize,
+    ) -> AppResult<ProposalReceipt> {
+        let id = guard.id;
+        let row = self.store.proposal(id)?;
+        let Some(row) = row.filter(|r| r.kind == Kind::Import.as_str() && r.status == "executing")
+        else {
+            // La propuesta ya no está en condiciones de recibir el resultado: lo importado consta
+            // igualmente en el historial.
+            self.record_orphan_import(id, imported, errors, "proposal_not_executing");
+            return Err(AppError::Proposal {
+                code: "not_started",
+                message: "la importación de esta propuesta ya no está en curso; lo importado consta en el historial".into(),
+            });
+        };
+        let result = json!({ "imported": imported, "errors": errors });
+        let run = if imported > 0 {
+            Run::done(result)
+        } else {
+            Run {
+                result,
+                outcome: Outcome::NotDone,
+                reason: Some("nothing_imported"),
+            }
+        };
+        Ok(self.record_outcome(&row, run, false))
+    }
+}
+
+/// Identificador de la regla que crea una propuesta, derivado de su clave de idempotencia (única y
+/// no reutilizable): `chat-` y 12 cifras hexadecimales. No depende del número de la propuesta, que
+/// una persona puede imaginar, y no choca con el nombre que una regla del panel tenga.
+pub fn chat_rule_id(idem_key: &str) -> String {
+    let digest = Sha256::digest(idem_key.as_bytes());
+    let hex: String = digest.iter().take(6).map(|b| format!("{b:02x}")).collect();
+    format!("chat-{hex}")
+}
+
+/// El resultado de `proposal_import_begin`.
+pub enum ImportStart {
+    /// Ya estaba confirmada: su recibo original, sin abrir nada.
+    Done(Box<ProposalReceipt>),
+    /// Puede abrirse el diálogo; el guardián conserva «en curso» hasta soltarse.
+    Started(ImportGuard),
+}
+
+/// Marca una propuesta de importar como en curso en esta sesión y la quita al soltarse, pase lo que
+/// pase (retorno, error o pánico del hilo): un id nunca se queda atascado.
+pub struct ImportGuard {
+    set: Arc<Mutex<HashSet<i64>>>,
+    id: i64,
+}
+
+impl ImportGuard {
+    fn new(set: &Arc<Mutex<HashSet<i64>>>, id: i64) -> Self {
+        set.lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(id);
+        Self {
+            set: Arc::clone(set),
+            id,
+        }
+    }
+
+    pub fn id(&self) -> i64 {
+        self.id
+    }
+}
+
+impl Drop for ImportGuard {
+    fn drop(&mut self) {
+        self.set
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&self.id);
+    }
+}
+
+/// Resumen criptográfico de lo que identifica una propuesta de reglas (nunca la huella en claro).
+fn basis_of(parts: &Value) -> String {
+    Sha256::digest(parts.to_string().as_bytes())
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
+/// Hechos de una regla creada o editada para el recibo.
+fn rule_facts(view: &crate::panel::RuleView) -> Value {
+    json!({ "rule_id": view.rule.id, "active": view.rule.active })
+}
+
+/// Condiciones de una regla a partir de los argumentos de la herramienta, con códigos cerrados.
+/// Solo las claves de D123 de la acción; nunca «cualquier remitente» (D191).
+fn rule_conditions(action: &str, args: &Map<String, Value>) -> Result<Value, &'static str> {
+    const KEYS: [&str; 5] = [
+        "supplier",
+        "max_total",
+        "category",
+        "sender",
+        "sender_domain",
+    ];
+    let get = |key: &str| args.get(key).and_then(Value::as_str);
+    for key in KEYS {
+        if let Some(value) = get(key) {
+            if has_invisible(value) {
+                return Err("invisible_chars");
+            }
+            if value.chars().any(char::is_control) {
+                return Err("bad_value");
+            }
+        }
+    }
+    // Una dirección o un dominio con letras de otros alfabetos puede leerse igual que otro y no ser
+    // el mismo («е» cirílica): desde el chat solo ASCII; una dirección internacional se hace en el
+    // panel de reglas.
+    if ["sender", "sender_domain"]
+        .iter()
+        .any(|k| get(k).is_some_and(|v| !v.is_ascii()))
+    {
+        return Err("non_ascii_sender");
+    }
+    let present = |keys: &[&str]| keys.iter().any(|k| get(k).is_some());
+    let conditions = match action {
+        crate::rules::REGISTER_INVOICE => {
+            if present(&["category", "sender", "sender_domain"]) {
+                return Err("unknown_condition");
+            }
+            let supplier = get("supplier").ok_or("missing_condition")?;
+            let mut map = Map::new();
+            map.insert("supplier".into(), json!(supplier.trim()));
+            if let Some(limit) = get("max_total") {
+                // Un límite de cero no cubriría ninguna factura.
+                if nestadmin_ai::assistant::amount_minor(limit) == Some(0) {
+                    return Err("bad_value");
+                }
+                map.insert("max_total".into(), json!(limit));
+            }
+            Value::Object(map)
+        }
+        crate::rules::SEND_DRAFT => {
+            if present(&["supplier", "max_total"]) {
+                return Err("unknown_condition");
+            }
+            let category = get("category").ok_or("missing_condition")?;
+            if nestadmin_ai::tasks::REVIEW_ONLY_CATEGORIES.contains(&category) {
+                return Err("review_only_category");
+            }
+            if !present(&["sender", "sender_domain"]) {
+                // «Cualquier remitente» solo existe en el panel (D126).
+                return Err("sender_required");
+            }
+            let mut map = Map::new();
+            map.insert("category".into(), json!(category));
+            for key in ["sender", "sender_domain"] {
+                if let Some(value) = get(key) {
+                    map.insert(key.into(), json!(value.trim()));
+                }
+            }
+            Value::Object(map)
+        }
+        _ => return Err("bad_value"),
+    };
+    check_rule(action, &conditions, false).map_err(|_| "invalid_conditions")?;
+    Ok(conditions)
+}
+
+/// Nombre que lleva la regla si el modelo no da uno: de sus condiciones, sin texto libre extra.
+fn default_rule_name(action: &str, conditions: &Value) -> String {
+    let text = |key: &str| conditions[key].as_str().unwrap_or_default();
+    let name = if action == crate::rules::REGISTER_INVOICE {
+        format!("Facturas de {}", text("supplier"))
+    } else {
+        let who = if text("sender").is_empty() {
+            text("sender_domain")
+        } else {
+            text("sender")
+        };
+        format!("Respuestas ({}) a {who}", text("category"))
+    };
+    name.chars().take(80).collect()
 }
 
 /// Guardián del origen `chat`: al salir del ámbito (retorno, error o pánico) lo restablece.

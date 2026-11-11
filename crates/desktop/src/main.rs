@@ -20,7 +20,9 @@ use nestadmin_app::accounts::{
     AccountView, FetchReport, MailAccountsView, MailEnv, MailProviderKind,
 };
 use nestadmin_app::assistant::consent::{AssistantConsentView, AssistantPreview};
-use nestadmin_app::assistant::proposals::{ProposalCard, ProposalReceipt};
+use nestadmin_app::assistant::proposals::{
+    ImportGuard, ImportStart, ProposalCard, ProposalReceipt,
+};
 use nestadmin_app::assistant::tools::ToolOutput;
 use nestadmin_app::assistant::{AssistantConversation, AssistantTurn, Progress};
 use nestadmin_app::initial_read::{
@@ -256,6 +258,12 @@ async fn proposal_confirm<R: Runtime>(
     amounts_checked: Option<bool>,
 ) -> CmdResult<ProposalReceipt> {
     let shared = Arc::clone(shared.inner());
+    // Importar abre el diálogo del sistema: se hace aquí, con el cerrojo de la aplicación suelto
+    // mientras el diálogo está abierto (D191).
+    let is_import = shared.app()?.proposal_kind(id).map_err(text)?.as_deref() == Some("import");
+    if is_import {
+        return confirm_import(shared, handle, id).await;
+    }
     let worker = Arc::clone(&shared);
     let receipt = tauri::async_runtime::spawn_blocking(move || {
         worker
@@ -286,6 +294,95 @@ async fn proposal_confirm<R: Runtime>(
     shared.wake();
     changed(&handle);
     receipt
+}
+
+/// Código cerrado del error de confirmar una importación cuando la persona cierra el diálogo sin
+/// elegir nada: la propuesta sigue pendiente y no se hizo nada.
+const IMPORT_CANCELLED: &str = "import_cancelled";
+
+/// Una importación del asistente en curso. Si el hilo termina sin dar el recibo (error al tomar la
+/// aplicación, pánico, cierre sin elegir), al soltarse deja la propuesta como corresponde: sin nada
+/// importado vuelve a pendiente; con algo importado queda fallida y el resultado consta en el
+/// historial. El guardián de dentro saca el identificador del conjunto «en curso» pase lo que pase.
+struct ImportRun {
+    shared: SharedState,
+    guard: ImportGuard,
+    report: ImportReport,
+    done: bool,
+}
+
+impl Drop for ImportRun {
+    fn drop(&mut self) {
+        if self.done {
+            return;
+        }
+        // Un pánico del hilo deja el cerrojo envenenado: se recupera para no dejar la propuesta
+        // atascada en «ejecutándose».
+        let mut app = self
+            .shared
+            .app
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _ = app.proposal_import_abandon(
+            self.guard.id(),
+            self.report.imported.len(),
+            self.report.errors.len(),
+        );
+    }
+}
+
+/// Confirma una propuesta de importar (D191): `begin` con el cerrojo, el diálogo SIN él (modal sobre
+/// la ventana principal), lo elegido importado por el camino de la pantalla con origen `chat` y, al
+/// final, `finish` con los recuentos. Si se cancela el diálogo o no se elige nada, la propuesta
+/// vuelve a pendiente.
+async fn confirm_import<R: Runtime>(
+    shared: SharedState,
+    handle: AppHandle<R>,
+    id: i64,
+) -> CmdResult<ProposalReceipt> {
+    let started = shared
+        .app()?
+        .proposal_import_begin(id)
+        .map_err(self::text)?;
+    let guard = match started {
+        ImportStart::Done(receipt) => return Ok(*receipt),
+        ImportStart::Started(guard) => guard,
+    };
+    let worker = Arc::clone(&shared);
+    let dialog = handle.clone();
+    let receipt = tauri::async_runtime::spawn_blocking(move || {
+        let mut run = ImportRun {
+            shared: Arc::clone(&worker),
+            guard,
+            report: ImportReport {
+                imported: Vec::new(),
+                errors: Vec::new(),
+            },
+            done: false,
+        };
+        let picked = pick_chat_import_files(&dialog);
+        if picked.is_empty() {
+            worker
+                .app()?
+                .proposal_import_cancel(&run.guard)
+                .map_err(self::text)?;
+            run.done = true;
+            return Ok(None);
+        }
+        import_picked(&worker, picked, &mut run.report);
+        let receipt = worker.app()?.proposal_import_finish(
+            &run.guard,
+            run.report.imported.len(),
+            run.report.errors.len(),
+        );
+        run.done = true;
+        receipt.map(Some).map_err(self::text)
+    })
+    .await
+    .map_err(text)??;
+    shared.wake();
+    changed(&handle);
+    receipt.ok_or_else(|| IMPORT_CANCELLED.to_owned())
 }
 
 /// La persona descarta la tarjeta de una propuesta: ya no se puede confirmar (D185).
@@ -438,6 +535,57 @@ async fn import_dialog<R: Runtime>(
         changed(&handle);
     }
     Ok(report)
+}
+
+/// Selector de archivos de la importación del asistente: modal sobre la ventana principal, así la
+/// persona no puede tocar la tarjeta (ni borrar la conversación) mientras está abierto. Vacío si se
+/// cancela. No toma el cerrojo de la aplicación.
+fn pick_chat_import_files<R: Runtime>(handle: &AppHandle<R>) -> Vec<tauri_plugin_dialog::FilePath> {
+    let mut dialog = handle
+        .dialog()
+        .file()
+        .set_title("Importar documentos")
+        .add_filter(
+            "Facturas (PDF, imagen o texto)",
+            &[
+                "pdf", "jpg", "jpeg", "png", "tif", "tiff", "bmp", "webp", "txt",
+            ],
+        );
+    let parent = handle.get_webview_window("main");
+    if let Some(parent) = &parent {
+        dialog = dialog.set_parent(parent);
+    }
+    dialog.blocking_pick_files().unwrap_or_default()
+}
+
+/// Importa lo elegido en el diálogo del asistente, un archivo por vez (el cerrojo solo mientras se
+/// importa cada uno) y con el origen `chat` en el historial (D185, D191). Cada resultado se anota en
+/// `report` al momento, para que un corte a medias sepa lo que ya se importó.
+fn import_picked(
+    shared: &SharedState,
+    picked: Vec<tauri_plugin_dialog::FilePath>,
+    report: &mut ImportReport,
+) {
+    for file in picked {
+        let path = match file.into_path() {
+            Ok(path) => path,
+            Err(e) => {
+                report.errors.push(format!("ruta no válida: {e}"));
+                continue;
+            }
+        };
+        let imported = match shared.app() {
+            Ok(mut app) => app.with_chat_origin(|app| app.import_path(&path)),
+            Err(e) => {
+                report.errors.push(e);
+                continue;
+            }
+        };
+        match imported {
+            Ok(task) => report.imported.push(task),
+            Err(e) => report.errors.push(e.to_string()),
+        }
+    }
 }
 
 /// Abre con el visor del sistema la copia guardada del documento de una tarea. Solo se abren

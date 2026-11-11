@@ -2414,6 +2414,91 @@ function newMockProposals(kinds: ReadonlySet<string>): ProposalCard[] {
   return cards;
 }
 
+/** Importaciones cuyo diálogo ya se «cerró sin elegir»: la primera confirmación de cada una lo simula (D191); la siguiente elige archivos. */
+const importCancelledOnce = new Set<number>();
+
+/**
+ * Propuestas de reglas, sugerencias e importación (E4, D191), todo inventado. `kinds` elige cuáles: `accept`, `discard`,
+ * `create`, `edit` e `import`. Ninguna regla existe hasta confirmar, y toda regla que se crea nace inactiva.
+ */
+function newMockRuleProposals(kinds: ReadonlySet<string>): ProposalCard[] {
+  const created = now();
+  const base = { status: "pending" as const, created_at: created, expires_at: created + 24 * 3600 * 1000, receipt: null, task_id: null, seen_version: null };
+  const coverage = { considered: 12, covered: 4, would_automate: 3 };
+  const cards: ProposalCard[] = [];
+  if (kinds.has("accept")) {
+    cards.push({
+      ...base, id: nextProposal++, kind: "accept_suggestion", effect: "rule_inactive",
+      summary: {
+        type: "accept_suggestion", action: "register_invoice", name: "Facturas de Alfa SL", conditions: { supplier: "Alfa SL", max_total: "1210.00" },
+        evidence: { count: 3, threshold: 3, approved: 3, seen: 0, learned: 0, origin: "approved" }, coverage, overlaps: [], stays_inactive: true,
+      },
+    });
+  }
+  if (kinds.has("discard")) {
+    cards.push({
+      ...base, id: nextProposal++, kind: "discard_suggestion", effect: "none",
+      summary: {
+        type: "discard_suggestion", action: "send_draft", name: "Respuestas (solicitud_factura) a ana@gamma.test", conditions: { category: "solicitud_factura", sender: "ana@gamma.test" },
+        evidence: { count: 5, threshold: 5, approved: 5, seen: 0, learned: 0, origin: "approved" }, coverage: { considered: 9, covered: 5, would_automate: 5 }, overlaps: [], stays_inactive: false,
+      },
+    });
+  }
+  if (kinds.has("create")) {
+    cards.push({
+      ...base, id: nextProposal++, kind: "create_rule", effect: "rule_inactive",
+      summary: {
+        type: "create_rule", action: "send_draft", name: "Respuestas (pedido) a gamma.test", conditions: { category: "pedido", sender_domain: "gamma.test" },
+        coverage, overlaps: [{ kind: "overlap", rules: [{ id: "pedidos-ana", name: "Pedidos de Ana", active: true }] }], stays_inactive: true,
+      },
+    });
+  }
+  if (kinds.has("edit")) {
+    if (!latest().some((r) => r.id === "alfa-mock")) {
+      handlers.create_rule({ id: "alfa-mock", name: "Facturas de Alfa SL", actionKind: "register_invoice", conditions: { supplier: "Alfa SL", max_total: "500.00" }, acknowledgeAnySender: false });
+      handlers.set_rule_active({ id: "alfa-mock", active: true });
+    }
+    const rule = latest().find((r) => r.id === "alfa-mock")!;
+    const after = { supplier: "Alfa SL", max_total: "300.00" };
+    cards.push({
+      ...base, id: nextProposal++, kind: "edit_rule", effect: "rule_edited", seen_version: rule.version,
+      summary: {
+        type: "edit_rule", rule_id: rule.id, rule_version: rule.version, name: "Facturas de Alfa SL", action: "register_invoice", before: rule.conditions, after,
+        was_active: rule.active, stays_active: rule.active && mockKeepsActive(rule, after, false), coverage, overlaps: [],
+      },
+    });
+  }
+  if (kinds.has("import")) cards.push({ ...base, id: nextProposal++, kind: "import", effect: "import", summary: { type: "import", active_register_rules: latest().filter((r) => r.active && r.action_kind === "register_invoice").length } });
+  for (const card of cards) proposalCards.set(card.id, card);
+  return cards;
+}
+
+/** Confirma una propuesta de regla, sugerencia o importación en la vista previa (como el fondo: la regla nace inactiva). */
+function confirmMockRuleProposal(card: ProposalCard): ProposalReceipt {
+  let result: Record<string, any> = {};
+  if (card.kind === "import") {
+    if (!importCancelledOnce.has(card.id)) {
+      importCancelledOnce.add(card.id);
+      throw "import_cancelled";
+    }
+    result = { imported: 2, errors: 1 };
+  } else if (card.kind === "accept_suggestion" || card.kind === "create_rule") {
+    const rule = handlers.create_rule({ id: `chat-${card.id}`, name: card.summary.name, actionKind: card.summary.action, conditions: card.summary.conditions, acknowledgeAnySender: false }) as RuleView;
+    result = { rule_id: rule.id, active: false };
+  } else if (card.kind === "edit_rule") {
+    const rule = handlers.update_rule({ id: card.summary.rule_id, conditions: card.summary.after }) as RuleView;
+    result = { rule_id: rule.id, active: rule.active, new_version: rule.version, deactivated_by_edit: rule.deactivated_by_edit };
+  }
+  const receipt: ProposalReceipt = {
+    proposal_id: card.id, kind: card.kind, task_id: null, task_state: null, effect: card.effect, confirmed_at: now(), outcome: "done", reason: null, reconciled: false,
+    rule_id: typeof result.rule_id === "string" ? result.rule_id : null, result,
+  };
+  card.status = "confirmed";
+  card.receipt = receipt;
+  audit.push({ task_id: null, action: "assistant_proposal", status: "confirmed", authorization: null, detail: JSON.stringify({ kind: card.kind, task_id: null, effect: card.effect }), origin: "chat" });
+  return structuredClone(receipt);
+}
+
 /** Una tarjeta en cada estado final, sobre una tarea ya completada (pregunta «estados»). */
 function mockFinalStateCards(): ProposalCard[] {
   const t = task("email", { message_id: `simulador:M-fin-${nextProposal}`, account: "simulador" }, "completed", {
@@ -2709,6 +2794,21 @@ const handlers: Record<string, (a: any, options?: any) => unknown> = {
     // «estados»: una tarjeta en cada estado final (hecha, ya constaba, descartada, caducada, obsoleta, fallida).
     if (flat.includes("estados"))
       return finish({ ...base, answer: "Estas son propuestas de ejemplo ya resueltas.", steps: 1, tools: ["list_tasks"], proposals: mockFinalStateCards() }, [sentFor(1, false)], true);
+    // Reglas, sugerencias e importación (E4): «prepara una regla / acepta la sugerencia / importar…».
+    if (/regla|sugerencia|importar|archivos/.test(flat) && /propon|prepara/.test(flat)) {
+      const kinds = new Set<string>();
+      if (/acept/.test(flat)) kinds.add("accept");
+      if (/no volver|descart/.test(flat)) kinds.add("discard");
+      if (/cre/.test(flat)) kinds.add("create");
+      if (/edit|cambi/.test(flat)) kinds.add("edit");
+      if (/importar|archivos/.test(flat)) kinds.add("import");
+      if (!kinds.size) ["accept", "discard", "create", "edit", "import"].forEach((k) => kinds.add(k));
+      return finish(
+        { ...base, answer: "He preparado las propuestas. Ninguna regla se activa desde aquí: se activan en Reglas.", steps: 3, tools: ["list_suggestions", "list_rules", "propose_create_rule"], proposals: newMockRuleProposals(kinds) },
+        [sentFor(1, false), sentFor(2, false)],
+        true,
+      );
+    }
     // «propón…» o «prepara…»: tarjetas de ejemplo. No se ha ejecutado nada hasta pulsar el botón.
     if (/propon|prepara/.test(flat)) {
       const kinds = new Set<string>();
@@ -2765,6 +2865,7 @@ const handlers: Record<string, (a: any, options?: any) => unknown> = {
     if (card.status === "expired") throw "la propuesta caducó; pídala de nuevo";
     if (card.status === "stale") throw "lo que mostraba la tarjeta ya no es lo que hay; pídala de nuevo";
     if (card.status === "failed") throw "la propuesta falló y no se puede confirmar; pídala de nuevo";
+    if (card.kind === "import" || card.kind === "accept_suggestion" || card.kind === "discard_suggestion" || card.kind === "create_rule" || card.kind === "edit_rule") return confirmMockRuleProposal(card);
     // Como el fondo (D186): sin la casilla de importes, una factura dudosa no se registra y la propuesta sigue pendiente.
     if (card.kind === "approve" && card.summary.amount_review && !amountsChecked)
       throw "hay importes que no se leen sin duda: confirme antes los importes con el documento";

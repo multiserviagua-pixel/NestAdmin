@@ -10,8 +10,8 @@ use serde_json::Value;
 use crate::error::Result;
 use crate::store::{now_ms, Store};
 
-/// Los diez tipos de propuesta de la etapa E3.
-pub const PROPOSAL_KINDS: [&str; 10] = [
+/// Los quince tipos de propuesta: diez de la etapa E3 y cinco de la E4 (D191).
+pub const PROPOSAL_KINDS: [&str; 15] = [
     "approve",
     "reject",
     "retry",
@@ -22,6 +22,11 @@ pub const PROPOSAL_KINDS: [&str; 10] = [
     "mail_limit",
     "rename_account",
     "sender_preference",
+    "accept_suggestion",
+    "discard_suggestion",
+    "create_rule",
+    "edit_rule",
+    "import",
 ];
 
 /// Origen que llevan en el historial los eventos de una propuesta.
@@ -255,6 +260,17 @@ impl Store {
             params![id, to, receipt.map(Value::to_string), resolved, now_ms()],
         )?;
         Ok(changed == 1)
+    }
+
+    /// Las propuestas de un tipo en un estado (todas las conversaciones), de la más antigua a la más
+    /// reciente.
+    pub fn proposals_of_kind_in(&self, kind: &str, status: &str) -> Result<Vec<ProposalRow>> {
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT {COLUMNS} FROM assistant_proposals
+             WHERE kind = ?1 AND status = ?2 ORDER BY id"
+        ))?;
+        let rows = stmt.query_map([kind, status], from_row)?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
     /// Las propuestas `pending` de una tarea, con su turno ya guardado.

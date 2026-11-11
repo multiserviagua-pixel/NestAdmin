@@ -25,7 +25,7 @@ pub const DEFAULT_SIMULATION_LIMIT: usize = 200;
 /// Máximo que admite la simulación.
 pub const MAX_SIMULATION_LIMIT: usize = 1000;
 /// Identificador de la regla hipotética: no puede coincidir con uno real (`check_rule_id`).
-const SIMULATED: &str = "(simulada)";
+pub(crate) const SIMULATED: &str = "(simulada)";
 const MAX_NAME_CHARS: usize = 80;
 const MAX_SLUG_CHARS: usize = 40;
 

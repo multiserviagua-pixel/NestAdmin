@@ -649,6 +649,11 @@ fn every_free_tool_reads_and_none_changes_the_tasks_rules_or_consent() {
     let mut w = world(ProviderKind::OllamaCloud);
     let id = seed(&mut w.app, "a.txt", "Alfa SL", "F-1", 100, "uno");
     let before = (w.app.tasks().unwrap(), w.app.rule_views().unwrap().len());
+    let suggestions = w.app.rule_suggestions().unwrap();
+    // `list_suggestions` es de nivel libre y entra en este recorrido (D191).
+    assert!(TOOLS
+        .iter()
+        .any(|t| t.name == "list_suggestions" && t.level == Level::Free));
     let consent = w.app.assistant_consent().unwrap();
     let args = |name: &str| -> Map<String, Value> {
         let value = match name {
@@ -680,6 +685,7 @@ fn every_free_tool_reads_and_none_changes_the_tasks_rules_or_consent() {
         (w.app.tasks().unwrap(), w.app.rule_views().unwrap().len()),
         before
     );
+    assert_eq!(w.app.rule_suggestions().unwrap(), suggestions);
     assert_eq!(w.app.assistant_consent().unwrap(), consent);
     // Una herramienta que no existe no hace nada.
     let out = w.app.assistant_tool(&ToolCall {
@@ -1829,4 +1835,69 @@ fn a_destination_change_between_begin_and_run_sends_nothing_to_the_old_or_the_ne
         let turn = w.app.finish_assistant_turn(run).unwrap();
         assert_eq!(turn.outcome, Outcome::ConsentRequired, "{what}");
     }
+}
+
+#[test]
+fn a_suggestion_name_with_an_address_goes_masked_to_an_external_provider_and_local_keeps_it() {
+    let mut w = world(ProviderKind::OllamaCloud);
+    grant(&mut w.app);
+    // Tres facturas aprobadas de un proveedor cuyo nombre lleva una dirección de correo.
+    let supplier = format!("Alfa SL {DOC_EMAIL}");
+    for n in 1..=3 {
+        let id = seed(
+            &mut w.app,
+            &format!("s{n}.txt"),
+            &supplier,
+            &format!("F-{n}"),
+            100 + n,
+            &format!("nota {n}"),
+        );
+        w.app.approve(id, 1).unwrap();
+    }
+    let expected = w.app.rule_suggestions().unwrap();
+    assert_eq!(expected.candidates.len(), 1, "{expected:?}");
+    assert!(
+        expected.candidates[0].name.contains(DOC_EMAIL),
+        "el nombre propuesto lleva la dirección: {}",
+        expected.candidates[0].name
+    );
+
+    // Con destino externo: la dirección sale enmascarada en lo que recibe el proveedor.
+    w.ext.steps(vec![
+        tool("list_suggestions", json!({})),
+        answer("Hay una sugerencia."),
+    ]);
+    let turn = ask(&mut w.app, None, "¿qué puedo automatizar?", "rules");
+    assert_eq!(turn.outcome, Outcome::Answered, "{turn:?}");
+    assert!(!turn.local && turn.provider == ProviderKind::OllamaCloud);
+    let requests = w.ext.requests();
+    assert_eq!(requests.len(), 2);
+    for request in &requests {
+        let sent = format!("{}\n{}", request.instructions, request.content);
+        assert!(!sent.contains(DOC_EMAIL), "salió la dirección: {sent}");
+    }
+    assert!(
+        requests[1].content.contains("[CORREO]"),
+        "{}",
+        requests[1].content
+    );
+    assert!(requests[1].content.contains("\"ref\":\"sug:1\""));
+    // Lo guardado para «Ver lo enviado» es lo que salió: también enmascarado.
+    let sent = w.app.assistant_sent(turn.turn_id.unwrap()).unwrap();
+    assert!(sent.iter().all(|c| !c.sent_text.contains(DOC_EMAIL)));
+    assert!(sent.iter().any(|c| c.sent_text.contains("[CORREO]")));
+
+    // Con la IA local (destino no externo) el texto no se toca.
+    let local = w.app.assistant_tool(&ToolCall {
+        name: "list_suggestions".into(),
+        args: Map::new(),
+        external: false,
+    });
+    assert!(local.value.to_string().contains(DOC_EMAIL));
+    let masked = w.app.assistant_tool(&ToolCall {
+        name: "list_suggestions".into(),
+        args: Map::new(),
+        external: true,
+    });
+    assert!(!masked.value.to_string().contains(DOC_EMAIL));
 }

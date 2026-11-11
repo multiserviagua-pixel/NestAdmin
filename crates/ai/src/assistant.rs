@@ -91,10 +91,10 @@ impl Skill {
 
     fn text(self) -> &'static str {
         match self {
-            Self::Documents => "Buscar documentos: para encontrar una factura, un correo o un dato, use search con las palabras clave (proveedor, número, asunto) y los filtros que la pregunta permita; use get_document para leer una tarea concreta y aggregate para sumas y recuentos.",
-            Self::Pending => "Revisar pendientes: list_tasks dice cuántas tareas hay por estado y cuáles son las más recientes; history muestra los eventos de una tarea. Si la persona pide aprobar, rechazar, reintentar, archivar, confirmar que no se envió o cambiar el borrador de una tarea, prepare la propuesta con la herramienta propose_* correspondiente sobre una referencia doc:N que una herramienta haya devuelto; la persona la decide en la tarjeta. Para revisarlas con calma usa la pantalla de revisión (open_view).",
+            Self::Documents => "Buscar documentos: para encontrar una factura, un correo o un dato, use search con las palabras clave (proveedor, número, asunto) y los filtros que la pregunta permita; use get_document para leer una tarea concreta y aggregate para sumas y recuentos. Si la persona pide importar o subir un archivo, prepare propose_import (sin argumentos): la persona elige los archivos en el diálogo del sistema al pulsar el botón de la tarjeta; usted nunca da rutas ni nombres de archivo.",
+            Self::Pending => "Revisar pendientes: list_tasks dice cuántas tareas hay por estado y cuáles son las más recientes; history muestra los eventos de una tarea. Si la persona pide aprobar, rechazar, reintentar, archivar, confirmar que no se envió o cambiar el borrador de una tarea, prepare la propuesta con la herramienta propose_* correspondiente sobre una referencia doc:N que una herramienta haya devuelto; la persona la decide en la tarjeta. Para revisarlas con calma usa la pantalla de revisión (open_view). list_suggestions dice si la aplicación ha detectado decisiones repetidas que podrían automatizarse.",
             Self::Mail => "Correo: mail_accounts dice qué cuentas hay (por referencia opaca acct:N, sin direcciones) y en qué estado están; los correos recibidos se encuentran con search (kind=email). Si la persona lo pide, puede preparar la consulta del correo, el límite de lectura, el nombre de una cuenta o una preferencia de remitente con propose_fetch_mail, propose_mail_limit, propose_rename_account y propose_sender_preference.",
-            Self::Rules => "Reglas: list_rules enumera las reglas con su nombre, acción, si están activas y su frase. Activar, editar o archivar una regla se hace en la pantalla de reglas (open_view); usted no puede hacerlo.",
+            Self::Rules => "Reglas y automatización: list_rules enumera las reglas (referencia rule:N, nombre, acción, si están activas y su frase). list_suggestions devuelve las sugerencias que la aplicación calcula con lo que la persona ya decidió (referencia sug:N, hasta 8, con sus recuentos y cuántas ocultó): úsela cuando la persona pida automatizar algo, pregunte qué se puede automatizar o repita una decisión; si no hay ninguna, dígalo. Puede PREPARAR propuestas: propose_accept_suggestion (con una sug:N devuelta por list_suggestions), propose_discard_suggestion («no volver a proponer» esa sugerencia), propose_create_rule (action register_invoice con supplier y, si se pide, max_total; o action send_draft con category y con sender o sender_domain; el nombre es opcional) y propose_edit_rule (con una rule:N devuelta por list_rules y TODAS las condiciones nuevas, que sustituyen a las actuales). Toda regla nace INACTIVA: la persona la activa en la pantalla de reglas (open_view), nunca usted; una regla activa que se edita solo sigue activa si se estrecha. Una regla de envío exige remitente (sender) o dominio (sender_domain); no existe «cualquier remitente» desde aquí. No se proponen reglas para categorías de solo revisión (otros, reclamacion) ni se editan las aprendidas o con validación avanzada: explique que eso se hace en la pantalla de reglas. Si una sugerencia indica needs_limit, la persona debe escribir el límite en la pantalla de reglas: dígaselo. Ejemplos con datos inventados: {\"tool\": \"propose_accept_suggestion\", \"args\": {\"suggestion\": \"sug:1\"}}; {\"tool\": \"propose_discard_suggestion\", \"args\": {\"suggestion\": \"sug:2\"}}; {\"tool\": \"propose_create_rule\", \"args\": {\"action\": \"register_invoice\", \"supplier\": \"Suministros Ficticios SL\", \"max_total\": \"500.00\"}}; {\"tool\": \"propose_create_rule\", \"args\": {\"action\": \"send_draft\", \"category\": \"solicitud_factura\", \"sender\": \"pedidos@proveedor.example\"}}; {\"tool\": \"propose_edit_rule\", \"args\": {\"rule\": \"rule:2\", \"supplier\": \"Suministros Ficticios SL\", \"max_total\": \"300.00\"}}.",
             Self::Summary => "Resumen del día: combine list_tasks y aggregate para decir qué hay pendiente y cuánto suma lo reciente; diga siempre de dónde sale cada cifra.",
             Self::Help => "Ayuda de la aplicación: ai_status dice qué IA contesta y si la opción del asistente está activa; open_view lleva a una pantalla (review, tasks, rules, history, mail, settings) sin hacer nada más. Las claves, los consentimientos y el inicio de sesión se manejan solo en Configuración.",
         }
@@ -103,9 +103,10 @@ impl Skill {
     /// Herramientas de este bloque.
     pub fn tools(self) -> &'static [&'static str] {
         match self {
-            Self::Documents => &["search", "get_document", "aggregate"],
+            Self::Documents => &["search", "get_document", "aggregate", "propose_import"],
             Self::Pending => &[
                 "list_tasks",
+                "list_suggestions",
                 "history",
                 "open_view",
                 "propose_approve",
@@ -124,7 +125,15 @@ impl Skill {
                 "propose_rename_account",
                 "propose_sender_preference",
             ],
-            Self::Rules => &["list_rules", "open_view"],
+            Self::Rules => &[
+                "list_rules",
+                "list_suggestions",
+                "open_view",
+                "propose_accept_suggestion",
+                "propose_discard_suggestion",
+                "propose_create_rule",
+                "propose_edit_rule",
+            ],
             Self::Summary => &["list_tasks", "aggregate"],
             Self::Help => &["ai_status", "open_view"],
         }
@@ -229,6 +238,10 @@ pub enum ArgKind {
     Ref,
     /// Referencia de cuenta `acct:N`.
     Account,
+    /// Referencia de sugerencia `sug:N`, devuelta por `list_suggestions`.
+    Suggestion,
+    /// Referencia de regla `rule:N`, devuelta por `list_rules`.
+    RuleRef,
     /// Entero entre dos valores, ambos incluidos.
     Int(i64, i64),
     /// Texto largo con saltos de línea (un borrador) de como mucho tantos caracteres.
@@ -287,6 +300,24 @@ const PREF_ROUTES: &[&str] = &["review", "informative"];
 /// Caracteres máximos del borrador propuesto (D185) y del nombre de una cuenta.
 pub const MAX_DRAFT_CHARS: usize = 4_000;
 pub const MAX_LABEL_CHARS: usize = 60;
+/// Caracteres máximos del nombre de una regla (el del panel).
+pub const MAX_RULE_NAME_CHARS: usize = 80;
+
+/// Acciones que puede tener una regla creada desde el asistente (D191).
+const RULE_ACTIONS: &[&str] = &["register_invoice", "send_draft"];
+/// Categorías que admite una regla de envío: las de `tasks::CATEGORIES` menos las de solo revisión
+/// (D177). Una prueba comprueba que son exactamente esas.
+pub const RULE_CATEGORIES: &[&str] = &[
+    "solicitud_factura",
+    "consulta_pago",
+    "incidencia_factura",
+    "documentacion",
+    "presupuesto",
+    "pedido",
+    "cita",
+    "informacion",
+    "acuse",
+];
 
 /// La lista cerrada de herramientas (D184). Las de nivel `Propose` solo guardan una propuesta que
 /// la persona confirma con el botón de su tarjeta; no hay ninguna que confirme, ejecute, active una
@@ -332,7 +363,13 @@ pub const TOOLS: &[ToolSpec] = &[
     },
     ToolSpec {
         name: "list_rules",
-        summary: "reglas de automatización: nombre, acción, si está activa y su frase",
+        summary: "reglas de automatización: referencia rule:N, nombre, acción, si está activa y su frase",
+        args: &[],
+        level: Level::Free,
+    },
+    ToolSpec {
+        name: "list_suggestions",
+        summary: "sugerencias de reglas que la aplicación calcula con lo que la persona ya decidió: hasta 8, cada una con su referencia sug:N, acción, frase y recuentos; más cuántas hay ocultas",
         args: &[],
         level: Level::Free,
     },
@@ -430,6 +467,51 @@ pub const TOOLS: &[ToolSpec] = &[
         ],
         level: Level::Propose,
     },
+    ToolSpec {
+        name: "propose_accept_suggestion",
+        summary: "prepara aceptar una sugerencia (sug:N devuelta por list_suggestions): crea una regla INACTIVA; no se ejecuta hasta que la persona lo confirme, y la activa ella en el panel de reglas",
+        args: &[arg("suggestion", ArgKind::Suggestion, true)],
+        level: Level::Propose,
+    },
+    ToolSpec {
+        name: "propose_discard_suggestion",
+        summary: "prepara «no volver a proponer» una sugerencia (sug:N devuelta por list_suggestions); no se ejecuta hasta que la persona lo confirme",
+        args: &[arg("suggestion", ArgKind::Suggestion, true)],
+        level: Level::Propose,
+    },
+    ToolSpec {
+        name: "propose_create_rule",
+        summary: "prepara una regla nueva, que nace INACTIVA (la persona la activa en el panel de reglas): action register_invoice con supplier y, si se pide, max_total; o action send_draft con category y con sender o sender_domain. No admite «cualquier remitente»",
+        args: &[
+            arg("action", ArgKind::Enum(RULE_ACTIONS), true),
+            arg("name", ArgKind::Text(MAX_RULE_NAME_CHARS), false),
+            arg("supplier", ArgKind::Text(120), false),
+            arg("max_total", ArgKind::Amount, false),
+            arg("category", ArgKind::Enum(RULE_CATEGORIES), false),
+            arg("sender", ArgKind::Text(120), false),
+            arg("sender_domain", ArgKind::Text(120), false),
+        ],
+        level: Level::Propose,
+    },
+    ToolSpec {
+        name: "propose_edit_rule",
+        summary: "prepara cambiar las condiciones de una regla (rule:N devuelta por list_rules): las nuevas SUSTITUYEN a las actuales, así que indique todas; la regla solo sigue activa si se estrecha. No edita reglas aprendidas ni con «cualquier remitente»",
+        args: &[
+            arg("rule", ArgKind::RuleRef, true),
+            arg("supplier", ArgKind::Text(120), false),
+            arg("max_total", ArgKind::Amount, false),
+            arg("category", ArgKind::Enum(RULE_CATEGORIES), false),
+            arg("sender", ArgKind::Text(120), false),
+            arg("sender_domain", ArgKind::Text(120), false),
+        ],
+        level: Level::Propose,
+    },
+    ToolSpec {
+        name: "propose_import",
+        summary: "prepara importar documentos: al pulsar el botón de la tarjeta, la persona elige los archivos en el diálogo del sistema; usted no da rutas ni nombres",
+        args: &[],
+        level: Level::Propose,
+    },
 ];
 
 pub fn tool_spec(name: &str) -> Option<&'static ToolSpec> {
@@ -452,6 +534,8 @@ fn kind_text(kind: ArgKind) -> String {
         ArgKind::Amount => "importe, por ejemplo 1200.50".to_owned(),
         ArgKind::Ref => "referencia doc:N".to_owned(),
         ArgKind::Account => "referencia acct:N".to_owned(),
+        ArgKind::Suggestion => "referencia sug:N".to_owned(),
+        ArgKind::RuleRef => "referencia rule:N".to_owned(),
         ArgKind::Int(min, max) => format!("entero entre {min} y {max}"),
         ArgKind::LongText(max) => format!("texto de hasta {max} caracteres"),
     }
@@ -867,6 +951,24 @@ pub fn account_index(reference: &str) -> Option<usize> {
     n.parse().ok().filter(|n| *n >= 1)
 }
 
+fn numbered(reference: &str, prefix: &str) -> Option<usize> {
+    let n = reference.strip_prefix(prefix)?;
+    if n.is_empty() || n.len() > 4 || !n.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    n.parse().ok().filter(|n| *n >= 1)
+}
+
+/// Número de una referencia de sugerencia `sug:N` (a partir de 1).
+pub fn suggestion_index(reference: &str) -> Option<usize> {
+    numbered(reference, "sug:")
+}
+
+/// Número de una referencia de regla `rule:N` (a partir de 1).
+pub fn rule_index(reference: &str) -> Option<usize> {
+    numbered(reference, "rule:")
+}
+
 fn check_arg(tool: &ToolSpec, spec: &ArgSpec, value: &Value) -> Result<Value, Rejection> {
     let bad = |code: &'static str| Rejection::for_arg(code, tool.name, spec.name);
     match spec.kind {
@@ -917,6 +1019,22 @@ fn check_arg(tool: &ToolSpec, spec: &ArgSpec, value: &Value) -> Result<Value, Re
         ArgKind::Account => {
             let text = value.as_str().ok_or_else(|| bad("bad_arg_type"))?;
             if account_index(text).is_some() {
+                Ok(Value::String(text.to_owned()))
+            } else {
+                Err(bad("bad_arg_value"))
+            }
+        }
+        ArgKind::Suggestion => {
+            let text = value.as_str().ok_or_else(|| bad("bad_arg_type"))?;
+            if suggestion_index(text).is_some() {
+                Ok(Value::String(text.to_owned()))
+            } else {
+                Err(bad("bad_arg_value"))
+            }
+        }
+        ArgKind::RuleRef => {
+            let text = value.as_str().ok_or_else(|| bad("bad_arg_type"))?;
+            if rule_index(text).is_some() {
                 Ok(Value::String(text.to_owned()))
             } else {
                 Err(bad("bad_arg_value"))
@@ -1480,6 +1598,11 @@ mod tests {
     fn the_catalog_has_no_tool_that_confirms_activates_or_touches_credentials() {
         // El catálogo cerrado: nivel libre, navegación y propuestas; nada más (D184, D185).
         let proposals = [
+            "propose_accept_suggestion",
+            "propose_discard_suggestion",
+            "propose_create_rule",
+            "propose_edit_rule",
+            "propose_import",
             "propose_approve",
             "propose_reject",
             "propose_retry",
@@ -1501,7 +1624,9 @@ mod tests {
         for name in proposals {
             assert_eq!(tool_spec(name).map(|t| t.level), Some(Level::Propose));
         }
-        assert_eq!(TOOLS.len(), 9 + proposals.len());
+        // Nueve de nivel libre o de navegación más list_suggestions, más las quince propuestas.
+        assert_eq!(TOOLS.len(), 10 + proposals.len());
+        assert_eq!(proposals.len(), 15);
         // Por nombre: ninguna herramienta confirma, aprueba, envía, activa ni toca claves, el
         // proveedor o los consentimientos.
         for forbidden in [
@@ -1533,7 +1658,12 @@ mod tests {
                 "rule",
                 "sign",
             ] {
-                if tool.name != "list_rules" {
+                // Solo las herramientas de reglas del asistente nombran una regla: leerlas o
+                // PREPARAR su creación o edición (nunca activarlas).
+                if !matches!(
+                    tool.name,
+                    "list_rules" | "propose_create_rule" | "propose_edit_rule"
+                ) {
                     assert!(!tool.name.contains(word), "{}", tool.name);
                 }
             }
@@ -1646,6 +1776,117 @@ Gracias"
         assert_eq!(account_index("acct:3"), Some(3));
         assert_eq!(account_index("acct:"), None);
         assert_eq!(account_index("doc:3"), None);
+    }
+
+    #[test]
+    fn deceptive_invisible_characters_are_format_characters_and_never_reach_the_model() {
+        for c in [
+            '\u{034F}', '\u{115F}', '\u{1160}', '\u{3164}', '\u{FFA0}', '\u{FE00}', '\u{FE07}',
+            '\u{FE0F}', '\u{2800}', '\u{200B}', '\u{202E}',
+        ] {
+            assert!(is_format_char(c), "{c:?}");
+            assert!(!delimited(&format!("a{c}b")).contains(c), "{c:?}");
+        }
+        // Las letras de otros alfabetos no son de formato: de ellas se defiende la regla de ASCII.
+        for c in [
+            'a', '\u{0435}', '\u{00F1}', ' ', '\n', '\u{FE10}', '\u{27FF}', '\u{2801}',
+        ] {
+            assert!(!is_format_char(c), "{c:?}");
+        }
+    }
+
+    #[test]
+    fn the_rule_categories_are_the_allowed_ones() {
+        let allowed: Vec<&str> = crate::tasks::CATEGORIES
+            .iter()
+            .copied()
+            .filter(|c| !crate::tasks::REVIEW_ONLY_CATEGORIES.contains(c))
+            .collect();
+        assert_eq!(RULE_CATEGORIES, allowed.as_slice());
+    }
+
+    #[test]
+    fn the_new_references_and_rule_arguments_are_closed_and_validated() {
+        assert_eq!(suggestion_index("sug:3"), Some(3));
+        assert_eq!(suggestion_index("sug:0"), None);
+        assert_eq!(suggestion_index("doc:3"), None);
+        assert_eq!(rule_index("rule:12"), Some(12));
+        assert_eq!(rule_index("rule:"), None);
+        assert_eq!(rule_index("sug:1"), None);
+        let ok = |value: Value| parse_step(&value).unwrap();
+        let Step::Tool { args, .. } = ok(json!({
+            "tool": "propose_create_rule",
+            "args": { "action": "register_invoice", "supplier": " Alfa SL ", "max_total": "99,5" }
+        })) else {
+            panic!()
+        };
+        assert_eq!(args["supplier"], "Alfa SL");
+        assert_eq!(args["max_total"], "99.50");
+        assert!(matches!(
+            ok(json!({ "tool": "propose_import" })),
+            Step::Tool { .. }
+        ));
+        let cases = [
+            (
+                json!({ "tool": "propose_accept_suggestion", "args": { "suggestion": "doc:1" } }),
+                "bad_arg_value",
+            ),
+            (
+                json!({ "tool": "propose_discard_suggestion", "args": {} }),
+                "missing_arg",
+            ),
+            (
+                json!({ "tool": "propose_edit_rule", "args": { "rule": "sug:1" } }),
+                "bad_arg_value",
+            ),
+            (
+                json!({ "tool": "propose_create_rule", "args": { "action": "approve" } }),
+                "bad_arg_value",
+            ),
+            (
+                json!({ "tool": "propose_create_rule", "args": { "action": "send_draft", "category": "otros" } }),
+                "bad_arg_value",
+            ),
+            (
+                json!({ "tool": "propose_create_rule", "args": { "action": "send_draft", "active": true } }),
+                "unknown_arg",
+            ),
+            (
+                json!({ "tool": "propose_import", "args": { "path": "C:/x.pdf" } }),
+                "unknown_arg",
+            ),
+            (
+                json!({ "tool": "propose_create_rule", "args": { "action": "send_draft", "any_sender": true } }),
+                "unknown_arg",
+            ),
+        ];
+        for (value, expected) in cases {
+            assert_eq!(code(parse_step(&value)), expected, "{value}");
+        }
+    }
+
+    #[test]
+    fn the_rules_block_explains_suggestions_inactive_rules_and_each_new_tool() {
+        let text = instructions(View::Rules, "");
+        for needle in [
+            "- list_suggestions:",
+            "- propose_accept_suggestion:",
+            "- propose_discard_suggestion:",
+            "- propose_create_rule:",
+            "- propose_edit_rule:",
+            "Toda regla nace INACTIVA",
+            r#"{"tool": "propose_accept_suggestion", "args": {"suggestion": "sug:1"}}"#,
+            r#"{"tool": "propose_discard_suggestion", "args": {"suggestion": "sug:2"}}"#,
+            r#""action": "register_invoice""#,
+            r#""action": "send_draft""#,
+            r#"{"tool": "propose_edit_rule", "args": {"rule": "rule:2""#,
+        ] {
+            assert!(text.contains(needle), "{needle}");
+        }
+        // La importación va en el bloque que siempre se incluye.
+        assert!(instructions(View::Settings, "hola").contains("- propose_import:"));
+        // Ninguna vista que no sea la de reglas ofrece crear reglas sin hablar de ellas.
+        assert!(!instructions(View::Settings, "hola").contains("- propose_create_rule:"));
     }
 
     #[test]
