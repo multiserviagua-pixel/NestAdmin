@@ -613,6 +613,10 @@ pub fn says_no_data(answer: &str) -> bool {
         "no he encontrado",
         "no se encuentra",
         "no se han encontrado",
+        // Visto en la medición con la IA local: «No se encontraron facturas…».
+        "no se encontro",
+        "no se encontraron",
+        "no encontre",
         "no tengo ninguna",
         "no figura",
         "ninguna factura",
