@@ -286,6 +286,63 @@ fn reply_mime(draft: &NewDraft, original: &Value, own_id: &str) -> String {
     lines.join("\r\n")
 }
 
+/// Frontera MIME nueva: `=_NestAdmin_` y 96 bits aleatorios en hexadecimal. Ni `=_` ni `_`
+/// pueden aparecer en el base64 del contenido, así que no choca con las partes.
+fn new_boundary() -> MailResult<String> {
+    let mut bytes = [0u8; 12];
+    getrandom::fill(&mut bytes)
+        .map_err(|_| error(codes::UNAVAILABLE, "no hay fuente de aleatoriedad"))?;
+    let hex: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
+    Ok(format!("=_NestAdmin_{hex}"))
+}
+
+/// Mensaje RFC 5322 nuevo (sin `In-Reply-To`): texto en base64 y, si hay adjuntos,
+/// `multipart/mixed` con una parte `application/pdf` en base64 y disposición `attachment`.
+/// El contenido ya está validado (nombre del adjunto y asunto sin caracteres de control).
+fn new_message_mime(draft: &NewDraft, own_id: &str, boundary: &str) -> String {
+    let subject = draft.subject.as_deref().unwrap_or("");
+    let mut lines = vec![
+        format!("To: {}", header_value(&draft.to.join(", "))),
+        format!("Subject: {}", encode_header(subject)),
+        format!("Message-ID: {}", header_value(own_id)),
+        format!("{OWN_ID_HEADER}: {}", header_value(own_id)),
+        "MIME-Version: 1.0".to_owned(),
+    ];
+    let text = mime_base64(draft.body.as_bytes());
+    if draft.attachments.is_empty() {
+        lines.extend([
+            "Content-Type: text/plain; charset=UTF-8".to_owned(),
+            "Content-Transfer-Encoding: base64".to_owned(),
+            String::new(),
+            text,
+        ]);
+        return lines.join("\r\n");
+    }
+    lines.extend([
+        format!("Content-Type: multipart/mixed; boundary=\"{boundary}\""),
+        String::new(),
+        format!("--{boundary}"),
+        "Content-Type: text/plain; charset=UTF-8".to_owned(),
+        "Content-Transfer-Encoding: base64".to_owned(),
+        String::new(),
+        text,
+    ]);
+    for attachment in &draft.attachments {
+        let name = header_value(&attachment.name);
+        lines.extend([
+            format!("--{boundary}"),
+            format!("Content-Type: application/pdf; name=\"{name}\""),
+            "Content-Transfer-Encoding: base64".to_owned(),
+            format!("Content-Disposition: attachment; filename=\"{name}\""),
+            String::new(),
+            mime_base64(&attachment.content),
+        ]);
+    }
+    lines.push(format!("--{boundary}--"));
+    lines.push(String::new());
+    lines.join("\r\n")
+}
+
 fn labels(message: &Value) -> Vec<&str> {
     message
         .get("labelIds")
@@ -671,6 +728,32 @@ impl MailProvider for Gmail {
         })
     }
 
+    /// `drafts.create` con subida `uploadType=media` y el mensaje como `message/rfc822`: los
+    /// bytes del PDF viajan una sola vez en base64 (dentro del MIME), sin el JSON intermedio.
+    /// Sin verificar contra un buzón real.
+    fn create_message(&self, draft: &NewDraft) -> MailResult<CreatedDraft> {
+        let own_id = new_message_id()?;
+        let mime = new_message_mime(draft, &own_id, &new_boundary()?);
+        let url = self.api.upload_url(&["drafts"], &[("uploadType", "media")]);
+        let created = self.api.post_raw(&url, "message/rfc822", mime.as_bytes())?;
+        let draft_id = created
+            .get("id")
+            .and_then(Value::as_str)
+            .ok_or_else(|| error(codes::UNAVAILABLE, "Gmail no devolvió el ID del borrador"))?;
+        Ok(CreatedDraft {
+            draft_id: draft_id.to_owned(),
+            message_id: created
+                .pointer("/message/id")
+                .and_then(Value::as_str)
+                .map(str::to_owned),
+            rfc822_id: Some(own_id),
+            thread_id: created
+                .pointer("/message/threadId")
+                .and_then(Value::as_str)
+                .map(str::to_owned),
+        })
+    }
+
     fn send(&self, draft_id: &str) -> MailResult<String> {
         let url = self.api.url(&["drafts", "send"], &[]);
         let sent = self
@@ -743,6 +826,7 @@ mod tests {
             to: vec!["ana@cliente.test".into()],
             subject: None,
             body: "Gracias, la revisamos mañana.".into(),
+            attachments: Vec::new(),
         };
         let mime = reply_mime(&draft, &original, "<propio@nestadmin.invalid>");
         assert!(mime.contains("To: ana@cliente.test\r\n"));
@@ -764,6 +848,7 @@ mod tests {
             to: vec!["ana@cliente.test".into()],
             subject: Some("Hola".into()),
             body: "x".into(),
+            attachments: Vec::new(),
         };
         let mime = reply_mime(&draft, &json!({}), "<a@b.test>\r\nBcc: x@evil.test");
         let head = mime.split("\r\n\r\n").next().unwrap();

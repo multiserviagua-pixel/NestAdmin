@@ -11,6 +11,10 @@ use crate::mail::{MessagePage, NewDraft, OwnReply, OwnReplyMeta, ReceivedExtra, 
 /// Tamaño máximo de un adjunto que se descarga (igual que el de un documento importado).
 pub const MAX_ATTACHMENT_BYTES: u64 = 50_000_000;
 
+/// Tamaño máximo del adjunto de un mensaje nuevo (D229). Con el base64 queda por debajo de los
+/// 4 MiB que Graph admite en una sola petición.
+pub const MAX_OUTGOING_ATTACHMENT_BYTES: u64 = 3_000_000;
+
 /// Contrato de correo. Los errores usan los códigos de [`crate::codes`].
 pub trait MailConnector: Connector {
     /// Página de mensajes en orden estable; `cursor` es el devuelto por la página anterior.
@@ -24,6 +28,22 @@ pub trait MailConnector: Connector {
         draft: &NewDraft,
         idempotency_key: &str,
     ) -> Result<String, ConnectorError>;
+
+    /// Crea un borrador de mensaje nuevo, fuera de hilo, con su adjunto PDF si lo hay (D229,
+    /// D230); devuelve el ID del borrador. Repetir la clave con el mismo contenido (incluidos los
+    /// metadatos del adjunto) devuelve el mismo ID; con otro, `conflict`. Todo contenido no válido
+    /// es `invalid_input` sin tocar al proveedor. Por defecto, `unavailable`: un conector que no
+    /// lo implementa no finge crear el borrador (fallo cerrado).
+    fn create_new_draft(
+        &self,
+        _draft: &NewDraft,
+        _idempotency_key: &str,
+    ) -> Result<String, ConnectorError> {
+        Err(ConnectorError {
+            code: crate::codes::UNAVAILABLE.to_owned(),
+            message: "este conector no sabe crear mensajes nuevos".to_owned(),
+        })
+    }
 
     /// Contenido de un adjunto de [`Message::attachments`](crate::Message). `not_found` si
     /// el mensaje o el adjunto ya no existen; `invalid_input` si supera

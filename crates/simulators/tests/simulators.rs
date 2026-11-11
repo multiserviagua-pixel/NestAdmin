@@ -16,6 +16,7 @@ fn draft(body: &str) -> NewDraft {
         to: vec!["cliente.beta@ejemplo.test".into()],
         subject: Some("Re: Consulta sobre el pedido 2231".into()),
         body: body.into(),
+        attachments: Vec::new(),
     }
 }
 

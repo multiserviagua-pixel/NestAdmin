@@ -310,6 +310,13 @@ impl MailConnector for SharedSimulator {
     ) -> Result<String, ConnectorError> {
         self.0.create_draft(message_id, draft, idempotency_key)
     }
+    fn create_new_draft(
+        &self,
+        draft: &NewDraft,
+        idempotency_key: &str,
+    ) -> Result<String, ConnectorError> {
+        self.0.create_new_draft(draft, idempotency_key)
+    }
     fn send_draft(
         &self,
         draft_id: &str,
@@ -877,6 +884,60 @@ impl Accounts {
     }
 }
 
+impl Accounts {
+    /// Crea un mensaje nuevo (fuera de hilo, con su adjunto si lo hay) como borrador de la
+    /// cuenta indicada y devuelve `<cuenta>:<borrador>` (D230). La clave se pasa a la cuenta como
+    /// `<cuenta>/<clave>`. Un conector sin soporte da `unavailable`; una cuenta desconocida,
+    /// `not_found`.
+    #[allow(dead_code)] // lo usa el envío de documentos de venta (E4b, encargo B)
+    pub(crate) fn create_new_draft(
+        &self,
+        account: &str,
+        draft: &NewDraft,
+        key: &str,
+    ) -> Result<String, ConnectorError> {
+        let draft_id = self
+            .connector(account)?
+            .create_new_draft(draft, &scoped_key(account, key))?;
+        Ok(join_id(account, &draft_id))
+    }
+
+    /// Como `Connector::lookup`, pero solo en la cuenta indicada (D240): el recibo de un envío
+    /// solo puede constar en la cuenta que lo hizo. Si esa cuenta no está conectada o su
+    /// conector no está disponible, el resultado es `unavailable`, nunca `Ok(None)`: «no
+    /// enviado» solo se afirma tras preguntar a la cuenta que pudo enviarlo. Las demás cuentas no
+    /// se consultan.
+    #[allow(dead_code)] // lo usa la recuperación del envío de documentos de venta (E4b, encargo B)
+    pub(crate) fn lookup_in(
+        &self,
+        account: &str,
+        key: &str,
+    ) -> Result<Option<Value>, ConnectorError> {
+        let Some(entry) = self.list.iter().find(|a| a.record.id == account) else {
+            return Err(issue(
+                codes::UNAVAILABLE,
+                format!(
+                    "la cuenta {account} no está conectada; no se puede saber si el correo salió"
+                ),
+            ));
+        };
+        let connector = entry.connector.as_ref().map_err(|e| {
+            issue(
+                codes::UNAVAILABLE,
+                format!(
+                    "la cuenta {account} no está disponible ({}); no se puede saber si el correo salió",
+                    e.message
+                ),
+            )
+        })?;
+        let mut found = connector.lookup(&scoped_key(account, key));
+        if account == SIMULATOR && matches!(found, Ok(None)) {
+            found = connector.lookup(key);
+        }
+        Ok(found?.map(|receipt| scoped_receipt(account, receipt)))
+    }
+}
+
 /// Nombre de una cuenta: el que da el usuario (como mucho 60 caracteres) o, si está vacío,
 /// el predeterminado («Google 1», «Microsoft 2», «Correo simulado»).
 fn account_label(kind: MailProviderKind, id: &str, label: &str) -> String {
@@ -977,6 +1038,143 @@ mod tests {
             scoped_key("google-1", "task-3/send_draft/v1"),
             "google-1/task-3/send_draft/v1"
         );
+    }
+
+    fn pdf_draft() -> NewDraft {
+        NewDraft {
+            to: vec!["cliente@ejemplo.test".into()],
+            subject: Some("Factura F-2026-0001".into()),
+            body: "Le adjuntamos la factura.".into(),
+            attachments: vec![nestadmin_simulators::OutgoingAttachment::pdf(
+                "F-2026-0001.pdf",
+                b"%PDF-1.4\n%sintetico\n".to_vec(),
+            )],
+        }
+    }
+
+    #[test]
+    fn a_new_message_goes_through_its_account_and_is_found_only_there() {
+        let dir = tempfile::tempdir().unwrap();
+        let accounts = Accounts::open(
+            dir.path(),
+            MailSimulator::in_memory(),
+            MailEnv::simulator_only(),
+        )
+        .unwrap();
+        let draft = pdf_draft();
+        let id = accounts
+            .create_new_draft(SIMULATOR, &draft, "task-1/create_sales_draft/v1")
+            .unwrap();
+        assert_eq!(id, format!("{SIMULATOR}:D-0001"));
+        // Misma clave y mismo contenido: el mismo borrador, no otro.
+        assert_eq!(
+            accounts
+                .create_new_draft(SIMULATOR, &draft, "task-1/create_sales_draft/v1")
+                .unwrap(),
+            id
+        );
+        assert_eq!(accounts.simulator().drafts().unwrap().len(), 1);
+        // Sin envío todavía: la cuenta contesta «no enviado».
+        assert_eq!(
+            accounts
+                .lookup_in(SIMULATOR, "task-1/send_sales_document/v1")
+                .unwrap(),
+            None
+        );
+        let receipt = Connector::execute(
+            &accounts,
+            "task-1/send_sales_document/v1",
+            &serde_json::json!({ "draft_id": id }),
+        )
+        .unwrap();
+        let found = accounts
+            .lookup_in(SIMULATOR, "task-1/send_sales_document/v1")
+            .unwrap()
+            .expect("el envío consta");
+        assert_eq!(found, receipt);
+        assert_eq!(found["account"], SIMULATOR);
+    }
+
+    #[test]
+    fn a_disconnected_account_is_unavailable_never_not_sent() {
+        let dir = tempfile::tempdir().unwrap();
+        // Una cuenta de Google en la lista sin cliente OAuth: su conector no existe.
+        let records = vec![
+            simulator_record(),
+            AccountRecord {
+                id: "google-1".into(),
+                provider: MailProviderKind::Google,
+                label: "Google 1".into(),
+                address: None,
+            },
+        ];
+        fs::write(
+            dir.path().join(ACCOUNTS_FILE),
+            serde_json::to_string(&records).unwrap(),
+        )
+        .unwrap();
+        let accounts = Accounts::open(
+            dir.path(),
+            MailSimulator::in_memory(),
+            MailEnv::simulator_only(),
+        )
+        .unwrap();
+        for account in ["google-1", "no-existe"] {
+            let e = accounts
+                .lookup_in(account, "task-1/send_sales_document/v1")
+                .unwrap_err();
+            assert_eq!(e.code, codes::UNAVAILABLE, "{account}");
+        }
+        let e = accounts
+            .create_new_draft("google-1", &pdf_draft(), "k")
+            .unwrap_err();
+        assert_eq!(e.code, codes::UNAVAILABLE);
+        // El comportamiento anterior de `lookup` (saltarse las cuentas caídas) no cambia.
+        assert_eq!(Connector::lookup(&accounts, "task-1/otra").unwrap(), None);
+    }
+
+    #[test]
+    fn a_connector_without_new_message_support_fails_closed() {
+        struct Plain;
+        impl Connector for Plain {
+            fn lookup(&self, _: &str) -> Result<Option<Value>, ConnectorError> {
+                Ok(None)
+            }
+            fn execute(&self, _: &str, _: &Value) -> Result<Value, ConnectorError> {
+                unreachable!()
+            }
+        }
+        impl MailConnector for Plain {
+            fn list_messages(&self, _: Option<&str>) -> Result<MessagePage, ConnectorError> {
+                unreachable!()
+            }
+            fn create_draft(
+                &self,
+                _: &str,
+                _: &NewDraft,
+                _: &str,
+            ) -> Result<String, ConnectorError> {
+                unreachable!()
+            }
+            fn fetch_attachment(&self, _: &str, _: &str) -> Result<Vec<u8>, ConnectorError> {
+                unreachable!()
+            }
+            fn send_draft(&self, _: &str, _: &str) -> Result<SendReceipt, ConnectorError> {
+                unreachable!()
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let mut accounts = Accounts::open(
+            dir.path(),
+            MailSimulator::in_memory(),
+            MailEnv::simulator_only(),
+        )
+        .unwrap();
+        accounts.insert_test_connector("plano", Box::new(Plain));
+        let e = accounts
+            .create_new_draft("plano", &pdf_draft(), "k")
+            .unwrap_err();
+        assert_eq!(e.code, codes::UNAVAILABLE);
     }
 
     #[test]

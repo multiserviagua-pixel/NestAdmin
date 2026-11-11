@@ -652,6 +652,7 @@ fn mail_tokens_stay_in_the_store_through_sign_in_refresh_and_errors() {
         to: vec!["compras@beta.test".into()],
         subject: None,
         body: "Se la enviamos hoy.".into(),
+        attachments: Vec::new(),
     };
     let draft_id = account.create_draft("g-1", &draft, "t09-borrador").unwrap();
     let receipt = account.send_draft(&draft_id, "t09-envio").unwrap();

@@ -59,6 +59,7 @@ fn prepare_send(p: &Paths) -> ActionRequest {
         to: vec!["cliente.beta@ejemplo.test".into()],
         subject: Some("Re: Consulta sobre el pedido 2231".into()),
         body: "La entrega está prevista para el día 10.".into(),
+        attachments: Vec::new(),
     };
     let draft_id = mail
         .create_draft("M-0002", &draft, &format!("task-{task_id}/create_draft/v1"))

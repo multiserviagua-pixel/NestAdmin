@@ -43,6 +43,15 @@ pub trait MailProvider {
     fn list(&self, cursor: Option<&str>) -> MailResult<MessagePage>;
     /// Crea en el proveedor una respuesta en el hilo del mensaje original.
     fn create_reply(&self, message_id: &str, draft: &NewDraft) -> MailResult<CreatedDraft>;
+    /// Crea en el proveedor un mensaje nuevo, fuera de hilo, con su adjunto si lo hay (D230). El
+    /// contenido ya está validado. Por defecto, `unavailable`: un proveedor que no lo implementa
+    /// no finge crear el borrador.
+    fn create_message(&self, _draft: &NewDraft) -> MailResult<CreatedDraft> {
+        Err(error(
+            codes::UNAVAILABLE,
+            "este proveedor no sabe crear mensajes nuevos",
+        ))
+    }
     /// Envía el borrador y devuelve el ID del mensaje enviado.
     fn send(&self, draft_id: &str) -> MailResult<String>;
     /// Si el borrador ya no existe ni consta como enviado, `not_found`: no se reenvía.
@@ -179,6 +188,12 @@ fn check_key(key: &str) -> MailResult<()> {
 }
 
 fn validate_draft(draft: &NewDraft) -> MailResult<()> {
+    if !draft.attachments.is_empty() {
+        return Err(error(
+            codes::INVALID_INPUT,
+            "una respuesta en el hilo no admite adjuntos",
+        ));
+    }
     if draft.to.is_empty() {
         return Err(error(
             codes::INVALID_INPUT,
@@ -215,7 +230,7 @@ impl<P: MailProvider> MailConnector for Mailbox<P> {
             .state
             .read(|d| d.drafts.iter().find(|r| r.key == idempotency_key).cloned())?;
         if let Some(record) = existing {
-            if record.message_id == message_id && record.content == *draft {
+            if !record.standalone && record.message_id == message_id && record.content == *draft {
                 return Ok(record.draft_id);
             }
             return Err(error(
@@ -232,6 +247,49 @@ impl<P: MailProvider> MailConnector for Mailbox<P> {
             provider_message_id: created.message_id,
             rfc822_id: created.rfc822_id,
             thread_id: created.thread_id,
+            standalone: false,
+        };
+        self.state.mutate(|d| d.drafts.push(record))?;
+        Ok(created.draft_id)
+    }
+
+    /// Mensaje nuevo (D229, D230). Valida todo antes de llamar al proveedor (`invalid_input`);
+    /// repetir la clave con el mismo destinatario, asunto, cuerpo y metadatos del adjunto
+    /// devuelve el mismo borrador sin crear otro, y con otro contenido, `conflict`. El registro
+    /// local guarda solo los metadatos del adjunto, nunca sus bytes.
+    fn create_new_draft(
+        &self,
+        draft: &NewDraft,
+        idempotency_key: &str,
+    ) -> Result<String, ConnectorError> {
+        check_key(idempotency_key)?;
+        nestadmin_simulators::validate_new_message(draft)?;
+        let existing = self
+            .state
+            .read(|d| d.drafts.iter().find(|r| r.key == idempotency_key).cloned())?;
+        if let Some(record) = existing {
+            if record.standalone && record.content == *draft {
+                return Ok(record.draft_id);
+            }
+            return Err(error(
+                codes::CONFLICT,
+                format!("la clave {idempotency_key} ya se usó con otro contenido"),
+            ));
+        }
+        let created = self.provider.create_message(draft)?;
+        let mut content = draft.clone();
+        for attachment in &mut content.attachments {
+            attachment.content.clear();
+        }
+        let record = DraftRecord {
+            key: idempotency_key.to_owned(),
+            message_id: String::new(),
+            content,
+            draft_id: created.draft_id.clone(),
+            provider_message_id: created.message_id,
+            rfc822_id: created.rfc822_id,
+            thread_id: created.thread_id,
+            standalone: true,
         };
         self.state.mutate(|d| d.drafts.push(record))?;
         Ok(created.draft_id)

@@ -18,6 +18,16 @@ pub(crate) enum Method {
     Post,
 }
 
+/// Cuerpo de una petición.
+enum Payload<'a> {
+    Json(Option<&'a Value>),
+    /// Bytes tal cual con su tipo de contenido (subida `uploadType=media` de Gmail).
+    Raw {
+        content_type: &'a str,
+        bytes: &'a [u8],
+    },
+}
+
 pub(crate) struct Api {
     base: Url,
     agent: Agent,
@@ -74,6 +84,15 @@ impl Api {
         url
     }
 
+    /// Como [`Api::url`], bajo el punto de subida del proveedor: la ruta base con el prefijo
+    /// `/upload` (Gmail: `/upload/gmail/v1/users/me/...`).
+    pub(crate) fn upload_url(&self, segments: &[&str], query: &[(&str, &str)]) -> Url {
+        let mut url = self.url(segments, query);
+        let path = format!("/upload{}", url.path());
+        url.set_path(&path);
+        url
+    }
+
     /// Un cursor del proveedor (por ejemplo `@odata.nextLink`) solo se sigue si apunta al
     /// mismo origen y bajo la misma ruta base: el token nunca viaja a otro servidor (D32).
     pub(crate) fn same_origin(&self, link: &str) -> MailResult<Url> {
@@ -106,9 +125,38 @@ impl Api {
         body: Option<&Value>,
         limit: u64,
     ) -> MailResult<Value> {
-        match self.attempt(&method, url, body, false, limit) {
+        self.send(&method, url, &Payload::Json(body), limit)
+    }
+
+    /// POST con un cuerpo binario (`content_type` y bytes tal cual); misma renovación del
+    /// token y misma traducción de errores que [`Api::call`].
+    pub(crate) fn post_raw(
+        &self,
+        url: &Url,
+        content_type: &str,
+        bytes: &[u8],
+    ) -> MailResult<Value> {
+        self.send(
+            &Method::Post,
+            url,
+            &Payload::Raw {
+                content_type,
+                bytes,
+            },
+            DEFAULT_LIMIT,
+        )
+    }
+
+    fn send(
+        &self,
+        method: &Method,
+        url: &Url,
+        payload: &Payload<'_>,
+        limit: u64,
+    ) -> MailResult<Value> {
+        match self.attempt(method, url, payload, false, limit) {
             Err(e) if e.code == "retry_unauthorized" => {
-                self.attempt(&method, url, body, true, limit)
+                self.attempt(method, url, payload, true, limit)
             }
             other => other,
         }
@@ -118,7 +166,7 @@ impl Api {
         &self,
         method: &Method,
         url: &Url,
-        body: Option<&Value>,
+        payload: &Payload<'_>,
         refreshed: bool,
         limit: u64,
     ) -> MailResult<Value> {
@@ -143,9 +191,13 @@ impl Api {
                 if let Some(prefer) = &self.prefer {
                     request = request.header("Prefer", prefer);
                 }
-                match body {
-                    Some(body) => request.send_json(body),
-                    None => request.header("Content-Length", "0").send_empty(),
+                match payload {
+                    Payload::Json(Some(body)) => request.send_json(body),
+                    Payload::Json(None) => request.header("Content-Length", "0").send_empty(),
+                    Payload::Raw {
+                        content_type,
+                        bytes,
+                    } => request.header("Content-Type", *content_type).send(*bytes),
                 }
             }
         };

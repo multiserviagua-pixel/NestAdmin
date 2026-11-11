@@ -36,5 +36,6 @@ Cada decisión (`D<n>`) tiene un número definitivo desde que se escribe, para q
 | D222–D222 | Membrete PDF de fondo en los documentos de venta (cambio de alcance), 2026-11-10 | Asignado |
 | D223–D227 | PDF de los documentos de venta y membrete (etapa E4a), 2026-11-10 | Asignado |
 | D228–D228 | Membrete con la zona del texto demasiado oscura, rechazado (concreta D222), 2026-11-10 | Asignado |
+| D229–D241 | Envío de documentos de venta por correo con revisión (etapa E4b): contrato de adjuntos de salida y mensaje nuevo D229–D231, recuperación en una cuenta D240; el resto, reserva de la misma etapa, 2026-11-11 | Asignado |
 
-Siguiente número libre: **D229**.
+Siguiente número libre: **D242**.

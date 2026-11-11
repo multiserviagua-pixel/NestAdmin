@@ -280,6 +280,7 @@ fn draft() -> NewDraft {
         to: vec!["compras@beta.test".into()],
         subject: None,
         body: "Se la enviamos hoy. Un saludo.".into(),
+        attachments: Vec::new(),
     }
 }
 

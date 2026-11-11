@@ -155,6 +155,7 @@ fn draft(body: &str) -> NewDraft {
         to: vec!["ana@cliente.test".into()],
         subject: None,
         body: body.into(),
+        attachments: Vec::new(),
     }
 }
 

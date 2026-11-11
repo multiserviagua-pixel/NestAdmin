@@ -25,6 +25,10 @@ pub(crate) struct DraftRecord {
     /// Hilo del borrador (Gmail). Falta en registros anteriores a esta reconciliación.
     #[serde(default)]
     pub thread_id: Option<String>,
+    /// Mensaje nuevo fuera de hilo (D230): `message_id` vacío. Falta en registros anteriores,
+    /// que son todos respuestas.
+    #[serde(default)]
+    pub standalone: bool,
 }
 
 impl DraftRecord {

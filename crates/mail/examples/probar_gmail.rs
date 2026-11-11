@@ -340,6 +340,7 @@ fn draft(message_id: &str, to: &str) -> Result<()> {
         subject: Some("Prueba de NestAdmin".into()),
         body: "Borrador de prueba creado por el conector de Gmail de NestAdmin. Puede borrarlo."
             .into(),
+        attachments: Vec::new(),
     };
     let key = format!("prueba-borrador-{message_id}");
     let first = mailbox

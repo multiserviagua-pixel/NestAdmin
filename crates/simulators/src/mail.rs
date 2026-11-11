@@ -164,6 +164,82 @@ pub struct NewDraft {
     pub to: Vec<String>,
     pub subject: Option<String>,
     pub body: String,
+    /// Adjuntos de salida (D229): como mucho uno, un PDF. Solo los admite un mensaje nuevo
+    /// ([`MailConnector::create_new_draft`]); una respuesta en hilo los rechaza.
+    #[serde(default)]
+    pub attachments: Vec<OutgoingAttachment>,
+}
+
+/// Adjunto de un mensaje nuevo (D229). Lo que se serializa son solo los metadatos: los bytes
+/// (`content`) no se guardan en ningún registro ni en el estado del simulador.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct OutgoingAttachment {
+    /// `^[A-Za-z0-9_-]{1,80}\.pdf$`.
+    pub name: String,
+    /// Exactamente `application/pdf`.
+    pub mime: String,
+    /// Tamaño declarado en bytes; debe coincidir con `content` y no pasar de
+    /// [`MAX_OUTGOING_ATTACHMENT_BYTES`](crate::MAX_OUTGOING_ATTACHMENT_BYTES).
+    pub size: u64,
+    /// SHA-256 en hexadecimal minúscula; se recalcula al validar.
+    pub sha256: String,
+    #[serde(skip)]
+    pub content: Vec<u8>,
+}
+
+impl OutgoingAttachment {
+    /// PDF con tamaño y SHA-256 calculados a partir de los bytes.
+    pub fn pdf(name: &str, content: Vec<u8>) -> Self {
+        Self {
+            name: name.to_owned(),
+            mime: "application/pdf".to_owned(),
+            size: content.len() as u64,
+            sha256: sha256_hex(&content),
+            content,
+        }
+    }
+
+    /// Copia sin los bytes, para guardarla en un registro.
+    pub fn without_content(&self) -> Self {
+        Self {
+            content: Vec::new(),
+            ..self.clone()
+        }
+    }
+}
+
+/// Igualdad por metadatos; los bytes no cuentan (no se guardan).
+impl PartialEq for OutgoingAttachment {
+    fn eq(&self, other: &Self) -> bool {
+        self.name == other.name
+            && self.mime == other.mime
+            && self.size == other.size
+            && self.sha256 == other.sha256
+    }
+}
+
+impl Eq for OutgoingAttachment {}
+
+/// `Debug` sin contenido: solo la longitud de los bytes.
+impl std::fmt::Debug for OutgoingAttachment {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OutgoingAttachment")
+            .field("name", &self.name)
+            .field("mime", &self.mime)
+            .field("size", &self.size)
+            .field("sha256", &self.sha256)
+            .field("content_bytes", &self.content.len())
+            .finish()
+    }
+}
+
+/// SHA-256 en hexadecimal minúscula.
+pub fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    Sha256::digest(bytes)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -176,6 +252,9 @@ pub struct Draft {
     pub idempotency_key: String,
     /// Recibo del envío, si ya se envió.
     pub sent_receipt: Option<String>,
+    /// Mensaje nuevo, fuera de hilo (`message_id` vacío).
+    #[serde(default)]
+    pub standalone: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -448,7 +527,10 @@ impl MailConnector for MailSimulator {
                 .iter()
                 .find(|d| d.idempotency_key == idempotency_key)
             {
-                if existing.message_id == message_id && existing.content == *draft {
+                if !existing.standalone
+                    && existing.message_id == message_id
+                    && existing.content == *draft
+                {
                     return Ok((existing.id.clone(), false));
                 }
                 return Err(conflict(idempotency_key));
@@ -467,6 +549,42 @@ impl MailConnector for MailSimulator {
                 date: utc_now(),
                 idempotency_key: idempotency_key.to_owned(),
                 sent_receipt: None,
+                standalone: false,
+            });
+            Ok((id, true))
+        })
+    }
+
+    /// Crea un borrador de mensaje nuevo (D230), con su adjunto PDF si lo hay. Guarda nombre,
+    /// tamaño y SHA-256 del adjunto, nunca sus bytes. Misma clave y mismo contenido (incluidos
+    /// los metadatos del adjunto), el mismo ID; otro contenido, `conflict`.
+    fn create_new_draft(&self, draft: &NewDraft, idempotency_key: &str) -> SimResult<String> {
+        check_key(idempotency_key)?;
+        validate_new_message(draft)?;
+        self.state.mutate(|s| {
+            if let Some(existing) = s
+                .drafts
+                .iter()
+                .find(|d| d.idempotency_key == idempotency_key)
+            {
+                if existing.standalone && existing.content == *draft {
+                    return Ok((existing.id.clone(), false));
+                }
+                return Err(conflict(idempotency_key));
+            }
+            let id = format!("D-{:04}", s.drafts.len() + 1);
+            let mut content = draft.clone();
+            for attachment in &mut content.attachments {
+                attachment.content.clear();
+            }
+            s.drafts.push(Draft {
+                id: id.clone(),
+                message_id: String::new(),
+                content,
+                date: utc_now(),
+                idempotency_key: idempotency_key.to_owned(),
+                sent_receipt: None,
+                standalone: true,
             });
             Ok((id, true))
         })
@@ -797,6 +915,12 @@ IVA 21%: 25.20 EUR\n\
 Total: 145.20 EUR\n";
 
 fn validate_draft(draft: &NewDraft) -> SimResult<()> {
+    if !draft.attachments.is_empty() {
+        return Err(error(
+            codes::INVALID_INPUT,
+            "una respuesta en el hilo no admite adjuntos",
+        ));
+    }
     if draft.to.is_empty() {
         return Err(error(
             codes::INVALID_INPUT,
@@ -811,6 +935,96 @@ fn validate_draft(draft: &NewDraft) -> SimResult<()> {
     }
     if draft.body.trim().is_empty() {
         return Err(error(codes::INVALID_INPUT, "el borrador está vacío"));
+    }
+    Ok(())
+}
+
+/// Dirección simple `usuario@dominio.tld`, sin espacios, controles ni `< > , ; : "`, con una
+/// sola `@`; como mucho 254 caracteres.
+fn is_simple_address(address: &str) -> bool {
+    address.chars().count() <= 254
+        && match address.split_once('@') {
+            Some((user, domain)) => {
+                !user.is_empty()
+                    && domain.contains('.')
+                    && !domain.contains('@')
+                    && !address.contains(|c: char| {
+                        c.is_whitespace()
+                            || c.is_control()
+                            || matches!(c, '<' | '>' | ',' | ';' | ':' | '"')
+                    })
+            }
+            None => false,
+        }
+}
+
+fn valid_attachment_name(name: &str) -> bool {
+    match name.strip_suffix(".pdf") {
+        Some(stem) => {
+            (1..=80).contains(&stem.len())
+                && stem
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+        }
+        None => false,
+    }
+}
+
+/// Validación común de un mensaje nuevo (D229), usada por el simulador y por los conectores
+/// reales antes de llamar a ningún proveedor; todo fallo es `invalid_input` y no se limpia nada:
+/// un asunto o un nombre con caracteres peligrosos se rechaza. Exactamente un destinatario con
+/// dirección simple; asunto no vacío de hasta 200 caracteres y sin caracteres de control;
+/// cuerpo no vacío; como mucho un adjunto PDF de hasta 3 000 000 bytes cuyo SHA-256 y tamaño
+/// declarados coinciden con los bytes.
+pub fn validate_new_message(draft: &NewDraft) -> SimResult<()> {
+    let invalid = |message: &str| error(codes::INVALID_INPUT, message.to_owned());
+    let [to] = draft.to.as_slice() else {
+        return Err(invalid("el mensaje debe tener exactamente un destinatario"));
+    };
+    if !is_simple_address(to) {
+        return Err(invalid("el destinatario no es una dirección simple"));
+    }
+    let subject = draft.subject.as_deref().unwrap_or("");
+    if subject.trim().is_empty() {
+        return Err(invalid("falta el asunto"));
+    }
+    if subject.chars().count() > 200 {
+        return Err(invalid("el asunto supera los 200 caracteres"));
+    }
+    if subject.chars().any(char::is_control) {
+        return Err(invalid("el asunto contiene caracteres de control"));
+    }
+    if draft.body.trim().is_empty() {
+        return Err(invalid("el mensaje está vacío"));
+    }
+    if draft.attachments.len() > 1 {
+        return Err(invalid("solo se admite un adjunto"));
+    }
+    for attachment in &draft.attachments {
+        let limit = crate::MAX_OUTGOING_ATTACHMENT_BYTES;
+        if attachment.size > limit || attachment.content.len() as u64 > limit {
+            return Err(error(
+                codes::INVALID_INPUT,
+                format!("el adjunto supera el máximo de {limit} bytes"),
+            ));
+        }
+        if attachment.size != attachment.content.len() as u64 {
+            return Err(invalid("el tamaño declarado del adjunto no coincide"));
+        }
+        if attachment.mime != "application/pdf" {
+            return Err(invalid("el adjunto debe ser application/pdf"));
+        }
+        if !attachment.content.starts_with(b"%PDF-") {
+            return Err(invalid("el adjunto no es un PDF"));
+        }
+        if !valid_attachment_name(&attachment.name) {
+            return Err(invalid("el nombre del adjunto no es válido"));
+        }
+        if attachment.sha256 != sha256_hex(&attachment.content) {
+            return Err(invalid(
+                "el SHA-256 del adjunto no coincide con su contenido",
+            ));
+        }
     }
     Ok(())
 }

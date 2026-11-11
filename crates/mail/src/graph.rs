@@ -446,6 +446,50 @@ impl MailProvider for Graph {
         })
     }
 
+    /// Un único `POST /me/messages` con el adjunto en `attachments` (`fileAttachment`): el
+    /// borrador nace con su adjunto o no nace (atómico). Con 3 000 000 bytes de PDF el cuerpo
+    /// ronda los 4,0 MB, por debajo de los 4 MiB que Graph admite sin sesión de subida. Sin
+    /// verificar contra un buzón real.
+    fn create_message(&self, draft: &NewDraft) -> MailResult<CreatedDraft> {
+        let mut message = json!({
+            "subject": draft.subject.as_deref().unwrap_or(""),
+            "body": { "contentType": "Text", "content": draft.body },
+            "toRecipients": draft
+                .to
+                .iter()
+                .map(|a| json!({ "emailAddress": { "address": a } }))
+                .collect::<Vec<_>>(),
+        });
+        if !draft.attachments.is_empty() {
+            message["attachments"] = Value::Array(
+                draft
+                    .attachments
+                    .iter()
+                    .map(|a| {
+                        json!({
+                            "@odata.type": FILE_ATTACHMENT,
+                            "name": a.name,
+                            "contentType": a.mime,
+                            "contentBytes": STANDARD.encode(&a.content),
+                        })
+                    })
+                    .collect(),
+            );
+        }
+        let url = self.api.url(&["me", "messages"], &[]);
+        let body = self.api.call(Method::Post, &url, Some(&message))?;
+        let draft_id = body
+            .get("id")
+            .and_then(Value::as_str)
+            .ok_or_else(|| error(codes::UNAVAILABLE, "Graph no devolvió el ID del borrador"))?;
+        Ok(CreatedDraft {
+            draft_id: draft_id.to_owned(),
+            message_id: None,
+            rfc822_id: None,
+            thread_id: None,
+        })
+    }
+
     /// Con IDs inmutables, el mensaje enviado conserva el ID del borrador.
     fn send(&self, draft_id: &str) -> MailResult<String> {
         let url = self.api.url(&["me", "messages", draft_id, "send"], &[]);
