@@ -1193,7 +1193,7 @@ function salesSendRow(task: Task): Child[] {
   const to = sendRecipient(r);
   const flags = salesSendFlags(r);
   return [
-    h("span", { class: "item-line" }, h("span", { class: "item-title" }, sendDocumentLabel(r)), h("span", { class: "item-side" }, shortDate(task.created_at))),
+    h("span", { class: "item-line" }, h("span", { class: "item-title" }, sendDocumentLabel(r)), h("span", { class: "item-side" }, shortDate(task.created_at / 1000))), // created_at va en milisegundos; shortDate espera segundos
     h("span", { class: "item-sub" }, to ? `Para: ${to}` : h("span", { class: "missing" }, "Sin destinatario")),
     h("span", { class: "item-sub" }, `Cuenta: ${r.account?.id ? accountShort(taskMailOrigin(task), originKey(task)) : "sin elegir"}`),
     flags.length ? h("span", { class: "item-flags" }, ...flagChips(flags)) : null,

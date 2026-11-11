@@ -187,9 +187,9 @@ export function authorizationText(authorization: string): string {
   return rule ? `Regla automática «${rule[1]}» (versión ${rule[2]})` : `Autorización: ${authorization}`;
 }
 
-/** Fecha y hora de un envío (segundos Unix). */
-export function sentAtText(seconds: number, timeZone?: string): string {
-  const date = new Date(seconds * 1000);
+/** Fecha y hora de un envío (milisegundos Unix, como el resto de marcas de tiempo del núcleo). */
+export function sentAtText(millis: number, timeZone?: string): string {
+  const date = new Date(millis);
   if (Number.isNaN(date.getTime())) return "Sin fecha";
   return new Intl.DateTimeFormat("es-ES", { dateStyle: "short", timeStyle: "short", ...(timeZone ? { timeZone } : {}) }).format(date);
 }

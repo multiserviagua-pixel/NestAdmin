@@ -1,0 +1,279 @@
+{
+  "fecha": "2026-11-11T17:27:54.453Z",
+  "empresa": null,
+  "clientes": {
+    "conCorreo": 1,
+    "sinCorreo": 2
+  },
+  "cuentas": [
+    {
+      "id": "simulador",
+      "provider": "simulator",
+      "label": "Correo simulado",
+      "address": "administracion@nestadmin.test",
+      "status": "connected",
+      "last_fetch": null
+    }
+  ],
+  "factura": {
+    "id": 1,
+    "numero": "F-2026-0001",
+    "pdf": "F-2026-0001.pdf"
+  },
+  "facturaSinCorreo": {
+    "id": 2,
+    "numero": "F-2026-0002"
+  },
+  "abrirDetalle": true,
+  "historialAntes": "Envíos por correo\n\nTodavía no se ha enviado por correo.\n\nMarcar como enviado…\nAnular…\nVer PDF\nEnviar por correo",
+  "enviar": true,
+  "tarjetaInicial": {
+    "para": "compras@alfa.test",
+    "cuenta": "Correo simulado · administracion@nestadmin.test",
+    "asunto": "Factura F-2026-0001 — Taller Sintético de Pruebas, S.L.",
+    "cuerpo": "Hola, Alfa Suministros S.A.:\n\nLe adjuntamos la factura F-2026-0001 del 11/11/2026.\n\nUn saludo,\nTaller Sintético de Pruebas, S.L.",
+    "titulo": "Factura F-2026-0001",
+    "texto": "Factura F-2026-0001\nEnvío por correo\n\nMotivo de la revisión: todo envío por correo requiere su aprobación\n\nPara\nCuenta\nElija una cuenta\nCorreo simulado · administracion@nestadmin.test\nAsunto\nCuerpo\nAdjunto\nF-2026-0001.pdf · 25 KB · PDF\nVersión\n1\n\nNo se envía nada hasta que lo apruebe. Si cambia algo, se guarda como versión nueva y hay que aprobarla. La entrega al destinatario no se comprueba."
+  },
+  "tareaInicial": {
+    "id": 1,
+    "kind": "send_sales_document",
+    "input_ref": "sales_document:1",
+    "state": "awaiting_review",
+    "attempts": 0,
+    "result": {
+      "account": {
+        "address": "administracion@nestadmin.test",
+        "id": "simulador",
+        "label": "Correo simulado",
+        "provider": "simulator"
+      },
+      "action": {
+        "kind": "send_sales_document"
+      },
+      "checks": {
+        "account": "ok",
+        "pdf": "ok",
+        "recipient": "ok",
+        "sendable": true
+      },
+      "customer_email_at_prepare": "compras@alfa.test",
+      "customer_id": 1,
+      "document": {
+        "id": 1,
+        "kind": "invoice",
+        "number": "F-2026-0001",
+        "revision": 1,
+        "status": "issued"
+      },
+      "draft": {
+        "attachments": [
+          {
+            "mime": "application/pdf",
+            "name": "F-2026-0001.pdf",
+            "sha256": "15ced1e912ad0dce60bf01b2a8772de03bf09ce9fb1be2b91d96a5aef97498ff",
+            "size": 25108
+          }
+        ],
+        "body": "Hola, Alfa Suministros S.A.:\n\nLe adjuntamos la factura F-2026-0001 del 11/11/2026.\n\nUn saludo,\nTaller Sintético de Pruebas, S.L.",
+        "subject": "Factura F-2026-0001 — Taller Sintético de Pruebas, S.L.",
+        "to": [
+          "compras@alfa.test"
+        ]
+      },
+      "type": "send_sales_document",
+      "version": 1,
+      "warnings": {
+        "recipient_differs": false
+      }
+    },
+    "error": null,
+    "created_at": 1794418079900,
+    "updated_at": 1794418079900
+  },
+  "enviadosAntes": 0,
+  "guardar": true,
+  "avisosGuardar": [
+    "Cambios guardados como versión nueva; apruébela para enviar"
+  ],
+  "tareaTrasGuardar": {
+    "id": 1,
+    "kind": "send_sales_document",
+    "input_ref": "sales_document:1",
+    "state": "awaiting_review",
+    "attempts": 0,
+    "result": {
+      "account": {
+        "address": "administracion@nestadmin.test",
+        "id": "simulador",
+        "label": "Correo simulado",
+        "provider": "simulator"
+      },
+      "action": {
+        "kind": "send_sales_document"
+      },
+      "checks": {
+        "account": "ok",
+        "pdf": "ok",
+        "recipient": "ok",
+        "sendable": true
+      },
+      "customer_email_at_prepare": "compras@alfa.test",
+      "customer_id": 1,
+      "document": {
+        "id": 1,
+        "kind": "invoice",
+        "number": "F-2026-0001",
+        "revision": 1,
+        "status": "issued"
+      },
+      "draft": {
+        "attachments": [
+          {
+            "mime": "application/pdf",
+            "name": "F-2026-0001.pdf",
+            "sha256": "15ced1e912ad0dce60bf01b2a8772de03bf09ce9fb1be2b91d96a5aef97498ff",
+            "size": 25108
+          }
+        ],
+        "body": "Hola, Alfa Suministros S.A.:\n\nLe adjuntamos la factura F-2026-0001 del 11/11/2026.\n\nUn saludo,\nTaller Sintético de Pruebas, S.L.",
+        "subject": "Factura F-2026-0001 - revisada",
+        "to": [
+          "compras@alfa.test"
+        ]
+      },
+      "edited": true,
+      "type": "send_sales_document",
+      "version": 2,
+      "warnings": {
+        "recipient_differs": false
+      }
+    },
+    "error": null,
+    "created_at": 1794418079900,
+    "updated_at": 1794418081535
+  },
+  "enviadosTrasGuardar": 0,
+  "aprobar": true,
+  "confirmaciones": [
+    "Se enviará Factura F-2026-0001 con su PDF adjunto a compras@alfa.test, desde Correo simulado · administracion@nestadmin.test. Un correo enviado no se puede retirar.\n\n¿Enviar ahora?"
+  ],
+  "avisosAprobar": [
+    "Enviado a compras@alfa.test. La entrega al destinatario no se comprueba."
+  ],
+  "tareaTrasAprobar": null,
+  "envios": [
+    {
+      "id": 1,
+      "document_id": 1,
+      "task_id": 1,
+      "version": 2,
+      "idempotency_key": "task-1/send_sales_document/v2",
+      "account": "simulador",
+      "account_address": "administracion@nestadmin.test",
+      "recipient": "compras@alfa.test",
+      "subject": "Factura F-2026-0001 - revisada",
+      "attachment_name": "F-2026-0001.pdf",
+      "attachment_size": 25108,
+      "attachment_sha256": "15ced1e912ad0dce60bf01b2a8772de03bf09ce9fb1be2b91d96a5aef97498ff",
+      "authorization": "aprobación",
+      "sent_message_id": "S-0001",
+      "sent_at": 1794418083538
+    }
+  ],
+  "simulador": {
+    "enviados": 1,
+    "mensajes": [
+      {
+        "to": [
+          "compras@alfa.test"
+        ],
+        "subject": "Factura F-2026-0001 - revisada",
+        "adjuntos": [
+          {
+            "name": "F-2026-0001.pdf",
+            "mime": "application/pdf",
+            "size": 25108,
+            "sha256": "15ced1e912ad0dce60bf01b2a8772de03bf09ce9fb1be2b91d96a5aef97498ff"
+          }
+        ],
+        "recibo": "S-0001",
+        "clave": "simulador/task-1/create_sales_draft/v2"
+      }
+    ],
+    "borradores": 1,
+    "shaPdfEmitido": "15ced1e912ad0dce60bf01b2a8772de03bf09ce9fb1be2b91d96a5aef97498ff",
+    "claves": [
+      "messages",
+      "drafts",
+      "sent",
+      "files",
+      "own_replies"
+    ]
+  },
+  "historialDespues": "Envíos por correo\nFecha\tDestinatario\tCuenta\tAutorizado por\tAdjunto\n11/11/26, 18:28\tcompras@alfa.test\tadministracion@nestadmin.test\tAprobado por usted\tF-2026-0001.pdf (25 KB)\nVer PDF\nEnviar por correo",
+  "segundo": {
+    "boton": true,
+    "tarjeta": {
+      "para": "compras@alfa.test",
+      "cuenta": "Correo simulado · administracion@nestadmin.test",
+      "asunto": "Factura F-2026-0001 — Taller Sintético de Pruebas, S.L.",
+      "cuerpo": "Hola, Alfa Suministros S.A.:\n\nLe adjuntamos la factura F-2026-0001 del 11/11/2026.\n\nUn saludo,\nTaller Sintético de Pruebas, S.L.",
+      "titulo": "Factura F-2026-0001",
+      "texto": "Factura F-2026-0001\nEnvío por correo\n\nMotivo de la revisión: todo envío por correo requiere su aprobación\n\nPara\nCuenta\nElija una cuenta\nCorreo simulado · administracion@nestadmin.test\nAsunto\nCuerpo\nAdjunto\nF-2026-0001.pdf · 25 KB · PDF\nVersión\n1\n\nNo se envía nada hasta que lo apruebe. Si cambia algo, se guarda como versión nueva y hay que aprobarla. La entrega al destinatario no se comprueba."
+    },
+    "descartar": true,
+    "avisos": [
+      "Envío descartado"
+    ],
+    "envios": [
+      {
+        "id": 1,
+        "document_id": 1,
+        "task_id": 1,
+        "version": 2,
+        "idempotency_key": "task-1/send_sales_document/v2",
+        "account": "simulador",
+        "account_address": "administracion@nestadmin.test",
+        "recipient": "compras@alfa.test",
+        "subject": "Factura F-2026-0001 - revisada",
+        "attachment_name": "F-2026-0001.pdf",
+        "attachment_size": 25108,
+        "attachment_sha256": "15ced1e912ad0dce60bf01b2a8772de03bf09ce9fb1be2b91d96a5aef97498ff",
+        "authorization": "aprobación",
+        "sent_message_id": "S-0001",
+        "sent_at": 1794418083538
+      }
+    ],
+    "enviadosSimulador": 1
+  },
+  "sinCorreo": {
+    "boton": true,
+    "tarjeta": {
+      "para": "",
+      "cuenta": "Correo simulado · administracion@nestadmin.test",
+      "asunto": "Factura F-2026-0002 — Taller Sintético de Pruebas, S.L.",
+      "cuerpo": "Hola, Beta Sin Correo S.L.:\n\nLe adjuntamos la factura F-2026-0002 del 11/11/2026.\n\nUn saludo,\nTaller Sintético de Pruebas, S.L.",
+      "titulo": "Factura F-2026-0002",
+      "texto": "Factura F-2026-0002\nEnvío por correo\n\nMotivo de la revisión: todo envío por correo requiere su aprobación\n\nEl cliente no tiene correo: escriba el destinatario para poder enviarlo.\nPara\nCuenta\nElija una cuenta\nCorreo simulado · administracion@nestadmin.test\nAsunto\nCuerpo\nAdjunto\nF-2026-0002.pdf · 23 KB · PDF\nVersión\n1\n\nNo se envía nada hasta que lo apruebe. Si cambia algo, se guarda como versión nueva y hay que aprobarla. La entrega al destinatario no se comprueba."
+    },
+    "avisos": [
+      "Envío preparado: revise el destinatario, la cuenta, el asunto y el cuerpo, y apruébelo para enviar. No se envía nada hasta que lo apruebe.",
+      "El cliente no tiene correo: escriba el destinatario para poder enviarlo."
+    ],
+    "aprobar": true,
+    "avisosAprobar": [
+      "Sin destinatario: escríbalo para poder enviar.",
+      "El cliente no tiene correo: escriba el destinatario para poder enviarlo."
+    ],
+    "confirmacionPedida": false,
+    "enviadosSimulador": 1,
+    "invalido": {
+      "guardar": true,
+      "avisos": [
+        "El destinatario no es una dirección de correo válida: escriba una sola dirección.",
+        "El cliente no tiene correo: escriba el destinatario para poder enviarlo."
+      ]
+    }
+  }
+}

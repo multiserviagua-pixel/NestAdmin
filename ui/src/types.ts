@@ -1542,6 +1542,6 @@ export interface SalesSend {
   /** `aprobación` o la regla que lo autorizó (`regla <id> v<n>`). */
   authorization: string;
   sent_message_id: string | null;
-  /** Segundos Unix. */
+  /** Milisegundos Unix (`now_ms` del núcleo). */
   sent_at: number;
 }

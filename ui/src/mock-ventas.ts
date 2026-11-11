@@ -359,7 +359,7 @@ function approveSend(id: number, version: number): Task {
     attachment_sha256: r.draft.attachments[0].sha256,
     authorization: "aprobación",
     sent_message_id: `simulado-${nextSend}`,
-    sent_at: Math.floor(Date.now() / 1000),
+    sent_at: Date.now(),
   });
   if (d.status === "issued") d.status = "sent";
   Object.assign(t, { state: "completed", error: null });

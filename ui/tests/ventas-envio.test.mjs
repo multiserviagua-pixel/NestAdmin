@@ -189,10 +189,11 @@ test("el historial muestra fecha, destinatario, cuenta y quién lo autorizó, lo
     recipient: "compras@cliente.test", subject: "Factura", attachment_name: "F-2026-0001.pdf", attachment_size: 48213, attachment_sha256: "a".repeat(64),
     authorization: "aprobación", sent_message_id: null, sent_at: at, ...over,
   });
-  // 2026-03-01 10:00:00 UTC y 2026-03-02 09:30:00 UTC.
-  const rows = sendHistoryRows([send(1, 1772359200), send(2, 1772443800, { account_address: null, authorization: "regla cliente-1 v1" })], "UTC");
+  // 2026-03-01 10:00:00 UTC y 2026-03-02 09:30:00 UTC, en milisegundos como los da el núcleo (now_ms).
+  const rows = sendHistoryRows([send(1, 1772359200000), send(2, 1772443800000, { account_address: null, authorization: "regla cliente-1 v1" })], "UTC");
   assert.equal(rows.length, 2);
-  assert.match(rows[0].when, /^2\/3\/26/);
+  assert.equal(rows[0].when, "2/3/26, 9:30");
+  assert.equal(rows[1].when, "1/3/26, 10:00");
   assert.equal(rows[0].account, "simulador");
   assert.equal(rows[0].authorization, "Regla automática «cliente-1» (versión 1)");
   assert.equal(rows[1].recipient, "compras@cliente.test");
