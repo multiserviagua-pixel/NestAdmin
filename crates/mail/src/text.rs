@@ -209,14 +209,31 @@ pub fn header_value(text: &str) -> String {
     text.chars().filter(|c| !c.is_control()).collect()
 }
 
-/// Codifica una cabecera con caracteres no ASCII (RFC 2047, base64 en UTF-8).
+/// Bytes de texto por palabra codificada: `=?UTF-8?B?` y `?=` suman 12 caracteres y el límite de
+/// RFC 2047 es 75, así que caben 63 de base64, es decir, 45 bytes (60 caracteres) por palabra.
+const ENCODED_WORD_BYTES: usize = 45;
+
+/// Codifica una cabecera con caracteres no ASCII (RFC 2047, base64 en UTF-8). Cada palabra
+/// codificada mide como mucho 75 caracteres y no parte un carácter UTF-8; si hacen falta varias
+/// se separan con un pliegue de línea (CRLF y un espacio), que el lector descarta al unirlas.
 pub fn encode_header(text: &str) -> String {
     let clean = header_value(text);
     if clean.is_ascii() {
-        clean
-    } else {
-        format!("=?UTF-8?B?{}?=", STANDARD.encode(clean.as_bytes()))
+        return clean;
     }
+    let mut words: Vec<String> = Vec::new();
+    let mut chunk = String::new();
+    for c in clean.chars() {
+        if chunk.len() + c.len_utf8() > ENCODED_WORD_BYTES {
+            words.push(format!("=?UTF-8?B?{}?=", STANDARD.encode(chunk.as_bytes())));
+            chunk.clear();
+        }
+        chunk.push(c);
+    }
+    if !chunk.is_empty() {
+        words.push(format!("=?UTF-8?B?{}?=", STANDARD.encode(chunk.as_bytes())));
+    }
+    words.join("\r\n ")
 }
 
 /// Base64 en líneas de 76 caracteres, como exige MIME.
@@ -338,6 +355,33 @@ mod tests {
         );
         assert_eq!(encode_header("Re: factura"), "Re: factura");
         assert_eq!(encode_header("Re: año"), "=?UTF-8?B?UmU6IGHDsW8=?=");
+    }
+
+    #[test]
+    fn a_long_subject_is_split_in_encoded_words_of_at_most_75_characters() {
+        let subject = "Presupuesto P-2026-0042 — Instalación eléctrica de la nave número 7 ñandú (revisión 3) — Empresa Ejemplo, S. L. — ¡Gracias!";
+        let encoded = encode_header(subject);
+        let words: Vec<&str> = encoded.split("\r\n ").collect();
+        assert!(words.len() > 1, "{encoded}");
+        let mut joined = Vec::new();
+        for word in &words {
+            assert!(word.len() <= 75, "{} caracteres: {word}", word.len());
+            let inner = word
+                .strip_prefix("=?UTF-8?B?")
+                .and_then(|w| w.strip_suffix("?="))
+                .expect("palabra codificada");
+            // Cada palabra decodifica sola a UTF-8 válido: no se parte un carácter.
+            let bytes = STANDARD.decode(inner).unwrap();
+            joined.push(String::from_utf8(bytes).expect("UTF-8 completo en cada palabra"));
+        }
+        assert_eq!(joined.concat(), subject);
+        // Un carácter de varios bytes justo en el límite tampoco se parte.
+        let edge = format!("{}€€€€€€€€€€", "a".repeat(43));
+        for word in encode_header(&edge).split("\r\n ") {
+            assert!(word.len() <= 75);
+            let inner = &word[10..word.len() - 2];
+            assert!(String::from_utf8(STANDARD.decode(inner).unwrap()).is_ok());
+        }
     }
 
     #[test]

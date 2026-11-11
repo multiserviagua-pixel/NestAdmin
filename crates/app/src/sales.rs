@@ -907,7 +907,82 @@ fn attempt_account(result: &Value, version: i64) -> Option<String> {
                 })
                 .flatten()
         })
-        .or_else(|| result["account"]["id"].as_str().map(str::to_owned))
+}
+
+/// Cómo era la cuenta cuando se hizo un intento (D242): la dirección del buzón y las veces que se
+/// había vuelto a iniciar sesión. Se escribe una sola vez por versión, antes de llamar a ningún
+/// conector.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AttemptMark {
+    address: Option<String>,
+    epoch: u32,
+}
+
+fn attempt_mark(result: &Value, version: i64) -> Option<AttemptMark> {
+    let mark = result["attempt_marks"][version.to_string()]
+        .as_object()
+        .filter(|m| m.contains_key("address"))?;
+    Some(AttemptMark {
+        address: mark["address"].as_str().map(str::to_owned),
+        epoch: mark
+            .get("epoch")
+            .and_then(Value::as_u64)
+            .and_then(|e| u32::try_from(e).ok())
+            .unwrap_or(0),
+    })
+}
+
+/// Dos direcciones de buzón son la misma si ambas faltan o si coinciden sin distinguir
+/// mayúsculas (D242).
+fn same_mailbox(a: Option<&str>, b: Option<&str>) -> bool {
+    match (a, b) {
+        (None, None) => true,
+        (Some(a), Some(b)) => a.trim().eq_ignore_ascii_case(b.trim()),
+        _ => false,
+    }
+}
+
+fn unavailable(message: impl Into<String>) -> ConnectorError {
+    ConnectorError {
+        code: "unavailable".to_owned(),
+        message: message.into(),
+    }
+}
+
+/// Consulta a la cuenta que hizo un intento (D240, D242). Sin la marca del intento, o si la
+/// cuenta ya no es el mismo buzón, `unavailable`. Si la cuenta se reconectó después del intento y
+/// su registro local no conoce la clave, no se puede afirmar «no enviado»: devuelve `not_found`,
+/// que solo cierra la persona con «Confirmo que no se envió».
+fn lookup_marked(
+    accounts: &Accounts,
+    account: &str,
+    mark: Option<&AttemptMark>,
+    key: &str,
+) -> Result<Option<Value>, ConnectorError> {
+    let Some(mark) = mark else {
+        return Err(unavailable(
+            "no consta la dirección de la cuenta que hizo el envío; no se puede saber si salió",
+        ));
+    };
+    if let Some((_, current)) = accounts.identity(account) {
+        if !same_mailbox(mark.address.as_deref(), current.as_deref()) {
+            return Err(unavailable(format!(
+                "la cuenta {account} ya no es el buzón desde el que se hizo el envío; no se \
+                 puede saber si salió"
+            )));
+        }
+    }
+    let found = accounts.lookup_in(account, key)?;
+    if found.is_none() && accounts.epoch_of(account) != Some(mark.epoch) {
+        return Err(ConnectorError {
+            code: nestadmin_simulators::codes::NOT_FOUND.to_owned(),
+            message: format!(
+                "la cuenta {account} se reconectó después del intento y no consta el envío; \
+                 confirme que no se envió"
+            ),
+        });
+    }
+    Ok(found)
 }
 
 /// Un conector que consulta y ejecuta solo en la cuenta indicada (D240). `perform_action` pregunta
@@ -915,11 +990,12 @@ fn attempt_account(result: &Value, version: i64) -> Option<String> {
 struct SingleAccount<'a> {
     accounts: &'a Accounts,
     account: &'a str,
+    mark: Option<AttemptMark>,
 }
 
 impl Connector for SingleAccount<'_> {
     fn lookup(&self, key: &str) -> Result<Option<Value>, ConnectorError> {
-        self.accounts.lookup_in(self.account, key)
+        lookup_marked(self.accounts, self.account, self.mark.as_ref(), key)
     }
     fn execute(&self, key: &str, payload: &Value) -> Result<Value, ConnectorError> {
         self.accounts.execute(key, payload)
@@ -929,13 +1005,13 @@ impl Connector for SingleAccount<'_> {
 /// Cada clave pendiente con la cuenta que la inició, para reconciliar al abrir (D240).
 struct KeyedAccounts<'a> {
     accounts: &'a Accounts,
-    by_key: HashMap<String, String>,
+    by_key: HashMap<String, (String, Option<AttemptMark>)>,
 }
 
 impl Connector for KeyedAccounts<'_> {
     fn lookup(&self, key: &str) -> Result<Option<Value>, ConnectorError> {
         match self.by_key.get(key) {
-            Some(account) => self.accounts.lookup_in(account, key),
+            Some((account, mark)) => lookup_marked(self.accounts, account, mark.as_ref(), key),
             None => Err(ConnectorError {
                 code: "unavailable".to_owned(),
                 message: "no consta la cuenta que inició este envío".to_owned(),
@@ -979,6 +1055,32 @@ impl App {
     pub fn sales_send_accounts(&self) -> Vec<AccountView> {
         let view = self.mail.view();
         send_pool(&view.accounts).into_iter().cloned().collect()
+    }
+
+    /// Una regla de envío de documentos fija, al crearse o cambiar, la dirección actual de su
+    /// cuenta (`account_address`, D242), que el cliente de la interfaz no tiene que enviar. Si la
+    /// cuenta no consta o no tiene dirección, la condición se quita y la regla no automatiza.
+    pub(crate) fn bound_rule_conditions(&self, action_kind: &str, conditions: &Value) -> Value {
+        let mut conditions = conditions.clone();
+        if action_kind != SEND_SALES_DOCUMENT {
+            return conditions;
+        }
+        let address = conditions["account"]
+            .as_str()
+            .and_then(|id| self.mail.identity(id.trim()))
+            .and_then(|(_, address)| address)
+            .filter(|a| !a.trim().is_empty());
+        if let Some(fields) = conditions.as_object_mut() {
+            match address {
+                Some(address) => {
+                    fields.insert("account_address".into(), json!(address.trim()));
+                }
+                None => {
+                    fields.remove("account_address");
+                }
+            }
+        }
+        conditions
     }
 
     // --- Preparar y editar ---
@@ -1036,7 +1138,10 @@ impl App {
         }
         let view = self.mail.view();
         let account = account.trim();
-        let Some(chosen) = view.accounts.iter().find(|a| a.id == account) else {
+        let Some(chosen) = send_pool(&view.accounts)
+            .into_iter()
+            .find(|a| a.id == account)
+        else {
             return Err(send_error(
                 if account.is_empty() {
                     send_codes::ACCOUNT_REQUIRED
@@ -1046,12 +1151,6 @@ impl App {
                 "elija una cuenta de correo conectada",
             ));
         };
-        if chosen.status != AccountStatus::Connected {
-            return Err(send_error(
-                send_codes::ACCOUNT_UNAVAILABLE,
-                "la cuenta elegida no está conectada",
-            ));
-        }
         result["draft"]["to"] = json!([to]);
         result["draft"]["subject"] = json!(subject);
         result["draft"]["body"] = json!(body);
@@ -1213,15 +1312,25 @@ impl App {
                 "elija la cuenta de correo desde la que se envía",
             ));
         };
+        // La misma lista que al editar (D237) y el mismo buzón que al preparar (D242).
         let view = self.mail.view();
-        let available = view
-            .accounts
-            .iter()
-            .any(|a| a.id == account && a.status == AccountStatus::Connected);
-        if !available {
+        let Some(current) = send_pool(&view.accounts)
+            .into_iter()
+            .find(|a| a.id == account)
+        else {
             return Err(send_error(
                 send_codes::ACCOUNT_UNAVAILABLE,
-                "la cuenta de correo elegida no está conectada",
+                "la cuenta de correo elegida no está conectada o no se puede elegir",
+            ));
+        };
+        if !same_mailbox(
+            result["account"]["address"].as_str(),
+            current.address.as_deref(),
+        ) {
+            return Err(send_error(
+                send_codes::ACCOUNT_UNAVAILABLE,
+                "la cuenta de correo elegida ya no es el mismo buzón que al preparar el envío: \
+                 elíjala otra vez",
             ));
         }
         Ok(())
@@ -1347,9 +1456,29 @@ impl App {
             }
             return self.back_to_review(&task, &result, None);
         }
+        // Lo que sale es del buzón que se vio al preparar, también con una regla (D242).
+        let account = result["account"]["id"].as_str().unwrap_or("").to_owned();
+        let Some((_, current_address)) = self.mail.identity(&account) else {
+            return self.fail_send(
+                &task,
+                send_codes::ACCOUNT_UNAVAILABLE,
+                "la cuenta de correo elegida no está conectada",
+                true,
+            );
+        };
+        if !same_mailbox(
+            result["account"]["address"].as_str(),
+            current_address.as_deref(),
+        ) {
+            return self.fail_send(
+                &task,
+                send_codes::ACCOUNT_UNAVAILABLE,
+                "la cuenta de correo ya no es el mismo buzón que al preparar el envío",
+                true,
+            );
+        }
         // Se guarda lo que se va a ejecutar, y con qué cuenta, antes de llamar a ningún conector
         // (D50, D240).
-        let account = result["account"]["id"].as_str().unwrap_or("").to_owned();
         result["attempt"] = json!({
             "version": version,
             "draft": result["draft"],
@@ -1357,6 +1486,14 @@ impl App {
             "account": result["account"],
         });
         result["attempt_accounts"][version.to_string()] = json!(account);
+        // La marca no se reescribe al repetir la misma versión: si la cuenta se reconectó entre
+        // medias, tiene que seguir constando cómo era al primer intento (D242).
+        if attempt_mark(&result, version).is_none() {
+            result["attempt_marks"][version.to_string()] = json!({
+                "address": result["account"]["address"],
+                "epoch": self.mail.epoch_of(&account).unwrap_or(0),
+            });
+        }
         if let Some(fields) = result.as_object_mut() {
             fields.remove("recovery");
         }
@@ -1418,6 +1555,7 @@ impl App {
         let connector = SingleAccount {
             accounts: &self.mail,
             account,
+            mark: attempt_mark(result, version),
         };
         self.store.perform_action(&request, &connector)
     }
@@ -1445,10 +1583,19 @@ impl App {
         fresh["version"] = json!(version + 1);
         fresh["review_reason"] = json!(DOCUMENT_REVISED_REASON);
         fresh["revised"] = json!({ "from_document": result["document"]["id"] });
-        for key in ["attempt", "attempt_accounts", "edited"] {
+        for key in ["attempt", "attempt_accounts", "attempt_marks", "edited"] {
             if !result[key].is_null() {
                 fresh[key] = result[key].clone();
             }
+        }
+        // La tarea pasa a ser la de la revisión vigente. Si esa revisión ya tiene otra abierta o un
+        // envío registrado, esta se cancela: nunca dos tareas abiertas para el mismo documento
+        // (D244).
+        if !self.store.repoint_sales_send(task.id, latest.id)? {
+            return Ok(self.store.cancel_with_reason(
+                task.id,
+                "document_revised: la revisión vigente ya tiene su propio envío",
+            )?);
         }
         self.back_to_review(&task, &fresh, None)
     }
@@ -1528,12 +1675,15 @@ impl App {
     ) -> Result<Option<Value>, ConnectorError> {
         let result = task.result.clone().unwrap_or(Value::Null);
         match attempt_account(&result, action.version) {
-            Some(account) => self.mail.lookup_in(&account, &action.idempotency_key),
-            None => Err(ConnectorError {
-                code: "unavailable".to_owned(),
-                message: "no consta la cuenta que inició el envío; no se puede saber si salió"
-                    .to_owned(),
-            }),
+            Some(account) => lookup_marked(
+                &self.mail,
+                &account,
+                attempt_mark(&result, action.version).as_ref(),
+                &action.idempotency_key,
+            ),
+            None => Err(unavailable(
+                "no consta la cuenta que inició el envío; no se puede saber si salió",
+            )),
         }
     }
 
@@ -1550,7 +1700,10 @@ impl App {
             for action in self.store.task_actions(task.id)? {
                 if action.kind == SEND_SALES_DOCUMENT && action.status == "pending" {
                     if let Some(account) = attempt_account(&result, action.version) {
-                        by_key.insert(action.idempotency_key.clone(), account);
+                        by_key.insert(
+                            action.idempotency_key.clone(),
+                            (account, attempt_mark(&result, action.version)),
+                        );
                     }
                 }
             }

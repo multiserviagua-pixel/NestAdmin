@@ -278,11 +278,12 @@ impl App {
                 "la validación avanzada solo se aplica a reglas de envío sin remitente".into(),
             ));
         }
-        check_rule(new.action_kind, new.conditions, new.allow_any_sender)?;
+        let conditions = self.bound_rule_conditions(new.action_kind, new.conditions);
+        check_rule(new.action_kind, &conditions, new.allow_any_sender)?;
         let rule = self.store.create_rule_named(
             &id,
             new.action_kind,
-            new.conditions,
+            &conditions,
             name.as_deref(),
             new.allow_any_sender,
         )?;
@@ -347,6 +348,7 @@ impl App {
                 "la validación avanzada solo se aplica a reglas de envío sin remitente".into(),
             ));
         }
+        let conditions = &self.bound_rule_conditions(&current.action_kind, conditions);
         check_rule(&current.action_kind, conditions, acknowledge_any_sender)?;
         let name_change = match name {
             None => None,
@@ -487,6 +489,7 @@ impl App {
         // Se valida como una regla real; el remitente ausente se simula tal cual (sin la
         // validación avanzada), no se rechaza. Una regla antigua con una categoría de solo
         // revisión (D177) tampoco: se simula y todo lo que cubre va a revisión.
+        let conditions = &self.bound_rule_conditions(action_kind, conditions);
         check_rule_inner(action_kind, conditions, true, true)?;
         let task_kind = match action_kind {
             REGISTER_INVOICE => INVOICE,

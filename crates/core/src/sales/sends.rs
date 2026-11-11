@@ -123,9 +123,10 @@ fn open_task_ids(tx: &Transaction<'_>, input_ref: &str) -> SalesResult<Vec<i64>>
     Ok(rows.collect::<rusqlite::Result<_>>()?)
 }
 
-/// Anulación (D82, D235), dentro de la transacción de `void_sales_invoice_with`. Una acción de
-/// envío sin cerrar (`pending` o `failed`: pudo salir o no) o confirmada cuya tarea aún no se ha
-/// cerrado bloquea con `send_in_progress`. Si no, las tareas de envío que solo esperan revisión
+/// Anulación (D82, D235, D243), dentro de la transacción de `void_sales_invoice_with`. Una acción
+/// de envío sin cerrar (`pending` o `failed`: pudo salir o no), o confirmada cuya tarea aún no se
+/// ha cerrado o que no tiene su fila en `sales_document_sends` (el correo salió y falta el
+/// historial, también si la tarea se canceló), bloquea con `send_in_progress`. Si no, las tareas de envío que solo esperan revisión
 /// se cancelan: la factura anulada ya no se envía.
 pub(crate) fn guard_void(tx: &Transaction<'_>, document_id: i64) -> SalesResult<()> {
     let input_ref = send_input_ref(document_id);
@@ -133,7 +134,10 @@ pub(crate) fn guard_void(tx: &Transaction<'_>, document_id: i64) -> SalesResult<
         "SELECT count(*) FROM actions a JOIN tasks t ON t.id = a.task_id \
          WHERE t.kind = ?1 AND t.input_ref = ?2 AND a.kind = ?1 AND \
                (a.status IN ('pending', 'failed') \
-                OR (a.status = 'confirmed' AND t.state NOT IN ('completed', 'cancelled')))",
+                OR (a.status = 'confirmed' AND t.state NOT IN ('completed', 'cancelled')) \
+                OR (a.status = 'confirmed' AND NOT EXISTS ( \
+                    SELECT 1 FROM sales_document_sends s \
+                    WHERE s.idempotency_key = a.idempotency_key)))",
         params![SEND_SALES_DOCUMENT, input_ref],
         |r| r.get(0),
     )?;
@@ -207,6 +211,35 @@ impl Store {
         }
         tx.commit()?;
         Ok(Some(task))
+    }
+
+    /// Reapunta la tarea de envío abierta `task_id` a la revisión `new_document_id` (D244). Si esa
+    /// revisión ya tiene otra tarea de envío abierta o un envío registrado, no cambia nada y
+    /// devuelve `false`: quien llama cancela la tarea en lugar de dejar dos abiertas. Una sola
+    /// transacción.
+    pub fn repoint_sales_send(&mut self, task_id: i64, new_document_id: i64) -> SalesResult<bool> {
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        load_document(&tx, new_document_id)?;
+        let new_ref = send_input_ref(new_document_id);
+        let others = open_task_ids(&tx, &new_ref)?
+            .into_iter()
+            .any(|id| id != task_id);
+        let sent: i64 = tx.query_row(
+            "SELECT count(*) FROM sales_document_sends WHERE document_id = ?1",
+            [new_document_id],
+            |r| r.get(0),
+        )?;
+        if others || sent > 0 {
+            return Ok(false);
+        }
+        tx.execute(
+            "UPDATE tasks SET input_ref = ?2 WHERE id = ?1 AND kind = ?3",
+            params![task_id, new_ref, SEND_SALES_DOCUMENT],
+        )?;
+        tx.commit()?;
+        Ok(true)
     }
 
     /// La tarea de envío abierta de un documento, si la hay.
@@ -304,6 +337,31 @@ impl Store {
         }
         if let Some(why) = &status_error {
             result["status_error"] = json!(why);
+        }
+        // Una tarea fallida o en cola con el correo ya confirmado (se perdió la respuesta y al
+        // reabrir consta el recibo) pasa por reintento y ejecución para poder completarse (D243).
+        let mut task = task;
+        if matches!(task.state, TaskState::Failed) {
+            task = queue::transition(
+                &tx,
+                task_id,
+                TaskState::Queued,
+                "el envío consta confirmado: se cierra",
+                None,
+                None,
+            )
+            .map_err(core)?;
+        }
+        if matches!(task.state, TaskState::Queued) {
+            task = queue::transition(
+                &tx,
+                task_id,
+                TaskState::Running,
+                "el envío consta confirmado: se cierra",
+                None,
+                None,
+            )
+            .map_err(core)?;
         }
         let task = if task.state.can_move_to(TaskState::Completed) {
             queue::transition(

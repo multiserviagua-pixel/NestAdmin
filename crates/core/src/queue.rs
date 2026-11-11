@@ -509,6 +509,11 @@ impl Store {
         )
     }
 
+    /// Cancela con un motivo propio (por ejemplo, un envío que una revisión nueva deja sin objeto).
+    pub fn cancel_with_reason(&mut self, id: i64, reason: &str) -> Result<Task> {
+        self.apply(id, TaskState::Cancelled, reason, None, None)
+    }
+
     /// Sustituye el resultado de una tarea pendiente de revisión (por ejemplo, un borrador
     /// editado) sin cambiar su estado, y deja constancia en el historial. Quien llama es
     /// responsable de cambiar la versión del contenido para que exija nueva aprobación.

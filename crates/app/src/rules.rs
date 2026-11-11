@@ -727,8 +727,13 @@ fn mismatch(rule: &Rule, any_sender_ack: bool, result: &Value) -> Option<Mismatc
 
 /// Condiciones de una regla de envío de un documento de venta (D238): `customer_id`, `recipient` y
 /// `account` son obligatorias; `document_kinds` es opcional.
-pub const SALES_SEND_CONDITIONS: &[&str] =
-    &["customer_id", "recipient", "account", "document_kinds"];
+pub const SALES_SEND_CONDITIONS: &[&str] = &[
+    "customer_id",
+    "recipient",
+    "account",
+    "account_address",
+    "document_kinds",
+];
 
 /// Coincidencia de una regla de envío de un documento (D238) con los datos de `result`
 /// (`customer_id`, `document.kind`, `account.id`, `draft.to` y `customer_email_at_prepare`). Una
@@ -798,6 +803,22 @@ fn sales_send_mismatch(
     }
     if result["account"]["id"].as_str() != Some(account) {
         return no("la cuenta de envío no es la de la regla");
+    }
+    // Además del identificador, el buzón: la regla fija la dirección de la cuenta al guardarse
+    // (D242) y solo envía desde esa dirección.
+    let Some(bound) = conditions
+        .get("account_address")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|a| !a.is_empty())
+    else {
+        return no("la regla no fija la dirección de la cuenta de envío; guárdela otra vez");
+    };
+    let same_address = result["account"]["address"]
+        .as_str()
+        .is_some_and(|a| a.trim().eq_ignore_ascii_case(bound));
+    if !same_address {
+        return no("la cuenta de envío ya no tiene la dirección que fijó la regla");
     }
     None
 }

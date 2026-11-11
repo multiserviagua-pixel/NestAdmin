@@ -1103,3 +1103,376 @@ fn rules_of_this_kind_are_simulated_read_only_and_never_open_the_default() {
     // Una acción desconocida no se evalúa ni se crea.
     assert!(app.create_rule("x", "send_everything", &json!({})).is_err());
 }
+
+// ---- Correcciones de la revisión de seguridad (D242–D245) ----
+
+/// App cuya única cuenta es «lossy» sobre un simulador guardado en `sim_path`, para poder
+/// reabrirla con el mismo estado.
+fn lossy_app_persistent(dir: &Path, sim_path: &Path) -> (App, i64, Arc<Flags>) {
+    let mut app = open(dir);
+    let customer = setup(&mut app);
+    let sim = Arc::new(MailSimulator::open(sim_path).unwrap());
+    let flags = Arc::new(Flags::default());
+    app.insert_mail_connector_for_tests(
+        "lossy",
+        Box::new(Lossy {
+            sim,
+            flags: Arc::clone(&flags),
+        }),
+    );
+    app.remove_mail_account("simulador").unwrap();
+    (app, customer, flags)
+}
+
+/// Cambia directamente en la base el estado de las acciones y de la tarea de envío, para
+/// reproducir lo que dejaría un corte entre la confirmación del recibo y el cierre de la tarea.
+fn force_state(dir: &Path, task: i64, action_status: &str, task_state: &str) {
+    let conn = rusqlite::Connection::open(dir.join("nestadmin.db")).unwrap();
+    conn.execute(
+        "UPDATE actions SET status = ?2, receipt = ?3 WHERE task_id = ?1 AND kind = ?4",
+        rusqlite::params![
+            task,
+            action_status,
+            r#"{"message_id":"lossy:enviado-1"}"#,
+            SEND_SALES_DOCUMENT
+        ],
+    )
+    .unwrap();
+    conn.execute(
+        "UPDATE tasks SET state = ?2 WHERE id = ?1",
+        rusqlite::params![task, task_state],
+    )
+    .unwrap();
+}
+
+#[test]
+fn reopening_with_the_account_available_closes_the_failed_task_with_one_history_row() {
+    let dir = tempfile::tempdir().unwrap();
+    let sim_path = dir.path().join("lossy-sim.json");
+    let (id, task_id);
+    {
+        let (mut app, customer, flags) = lossy_app_persistent(dir.path(), &sim_path);
+        id = issue(&mut app, DocumentKind::Invoice, customer);
+        let task = app.prepare_sales_send(id).unwrap();
+        task_id = task.id;
+        flags.drop_send.store(true, Ordering::SeqCst);
+        assert_eq!(app.approve(task.id, 1).unwrap().state, TaskState::Failed);
+        assert_eq!(status(&app, id), Status::Issued);
+    }
+    // Un corte del proceso (no un error devuelto) deja la acción pendiente: al reabrir se
+    // reconcilia sin que nadie reintente.
+    let conn = rusqlite::Connection::open(dir.path().join("nestadmin.db")).unwrap();
+    conn.execute(
+        "UPDATE actions SET status = 'pending' WHERE task_id = ?1 AND kind = ?2",
+        rusqlite::params![task_id, SEND_SALES_DOCUMENT],
+    )
+    .unwrap();
+    drop(conn);
+    // El estado del simulador de la cuenta de prueba pasa a ser el de la aplicación: al reabrir,
+    // la cuenta «lossy» (guardada en la lista como cuenta simulada) responde con él.
+    std::fs::copy(&sim_path, dir.path().join("simulador-correo.json")).unwrap();
+    let app = open(dir.path());
+    // Se encontró el recibo al reconciliar y la tarea fallida se cerró sola, sin enviar otra vez.
+    assert_eq!(task_of(&app, task_id).state, TaskState::Completed);
+    assert_eq!(status(&app, id), Status::Sent);
+    let rows = app.sales_document_sends(id).unwrap();
+    assert_eq!(rows.len(), 1, "una sola fila de historial");
+    assert_eq!(rows[0].account, "lossy");
+    assert_eq!(sent(&app).len(), 1, "un solo correo en el simulador");
+    assert!(app.sales_send_task(id).unwrap().is_none());
+    // Reabrir otra vez no cambia nada.
+    drop(app);
+    let app = open(dir.path());
+    assert_eq!(app.sales_document_sends(id).unwrap().len(), 1);
+    assert_eq!(sent(&app).len(), 1);
+}
+
+#[test]
+fn discarding_a_task_whose_send_is_confirmed_closes_it_and_never_cancels() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut app, customer, flags, sim) = lossy_app(dir.path());
+    let id = issue(&mut app, DocumentKind::Invoice, customer);
+    let task = app.prepare_sales_send(id).unwrap();
+    flags.drop_send.store(true, Ordering::SeqCst);
+    assert_eq!(app.approve(task.id, 1).unwrap().state, TaskState::Failed);
+    // La acción consta confirmada, pero la tarea sigue fallida y sin fila de historial.
+    force_state(dir.path(), task.id, "confirmed", "failed");
+    assert!(app.sales_document_sends(id).unwrap().is_empty());
+    assert_eq!(status(&app, id), Status::Issued);
+
+    // Anular se bloquea: el correo salió.
+    assert_eq!(
+        code(&app.void_sales_invoice(id).unwrap_err()),
+        "send_in_progress"
+    );
+    // «Descartar» no cancela: cierra la tarea con su recibo y deja el historial y el estado.
+    let closed = app.reject(task.id).unwrap();
+    assert_eq!(closed.state, TaskState::Completed);
+    assert_eq!(status(&app, id), Status::Sent);
+    assert_eq!(app.sales_document_sends(id).unwrap().len(), 1);
+    assert_eq!(sim.sent().unwrap().len(), 1, "no se envió otra vez");
+    // Ya no hay tarea abierta y la factura enviada no se anula.
+    assert!(app.sales_send_task(id).unwrap().is_none());
+    assert!(app.void_sales_invoice(id).is_err());
+}
+
+#[test]
+fn a_confirmed_send_without_its_history_row_blocks_voiding_even_if_the_task_was_cancelled() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut app, customer, flags, _sim) = lossy_app(dir.path());
+    let id = issue(&mut app, DocumentKind::Invoice, customer);
+    let task = app.prepare_sales_send(id).unwrap();
+    flags.drop_send.store(true, Ordering::SeqCst);
+    assert_eq!(app.approve(task.id, 1).unwrap().state, TaskState::Failed);
+    // El daño que antes hacía «Descartar»: tarea cancelada con una acción confirmada y sin fila.
+    force_state(dir.path(), task.id, "confirmed", "cancelled");
+    assert!(app.sales_document_sends(id).unwrap().is_empty());
+    let error = app.void_sales_invoice(id).unwrap_err();
+    assert_eq!(code(&error), "send_in_progress");
+    assert_eq!(status(&app, id), Status::Issued);
+}
+
+#[test]
+fn a_new_revision_never_leaves_two_open_send_tasks_for_the_same_document() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = open(dir.path());
+    let customer = setup(&mut app);
+
+    // Caso 1: la revisión no tiene envío propio: la tarea pasa a ser la suya y se ve al consultar
+    // por la revisión; no se puede abrir otra.
+    let quote = issue(&mut app, DocumentKind::Quote, customer);
+    let task = app.prepare_sales_send(quote).unwrap();
+    let revision = app.revise_sales_document(quote).unwrap();
+    app.issue_sales_document(revision, None).unwrap();
+    let back = app.approve(task.id, 1).unwrap();
+    assert_eq!(back.state, TaskState::AwaitingReview);
+    assert_eq!(
+        app.sales_send_task(revision).unwrap().map(|t| t.id),
+        Some(task.id),
+        "la tarea se encuentra por la revisión"
+    );
+    assert!(app.sales_send_task(quote).unwrap().is_none());
+    assert_eq!(
+        code(&app.prepare_sales_send(revision).unwrap_err()),
+        "send_in_progress"
+    );
+    assert!(sent(&app).is_empty());
+
+    // Caso 2: la revisión ya tiene su propia tarea abierta: la antigua se cancela, sin reapuntar.
+    let note = issue(&mut app, DocumentKind::DeliveryNote, customer);
+    let old = app.prepare_sales_send(note).unwrap();
+    let newer = app.revise_sales_document(note).unwrap();
+    app.issue_sales_document(newer, None).unwrap();
+    let own = app.prepare_sales_send(newer).unwrap();
+    let cancelled = app.approve(old.id, 1).unwrap();
+    assert_eq!(cancelled.state, TaskState::Cancelled);
+    assert_eq!(task_of(&app, own.id).state, TaskState::AwaitingReview);
+    assert_eq!(
+        app.sales_send_task(newer).unwrap().map(|t| t.id),
+        Some(own.id)
+    );
+    let conn = rusqlite::Connection::open(dir.path().join("nestadmin.db")).unwrap();
+    let reason: String = conn
+        .query_row(
+            "SELECT reason FROM task_transitions WHERE task_id = ?1 AND to_state = 'cancelled'",
+            [old.id],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert!(reason.contains("document_revised"), "{reason}");
+    drop(conn);
+    assert!(sent(&app).is_empty());
+
+    // Caso 3: la revisión ya tiene un envío registrado: la antigua se cancela.
+    let quote2 = issue(&mut app, DocumentKind::Quote, customer);
+    let stale = app.prepare_sales_send(quote2).unwrap();
+    let revision2 = app.revise_sales_document(quote2).unwrap();
+    app.issue_sales_document(revision2, None).unwrap();
+    let fresh = app.prepare_sales_send(revision2).unwrap();
+    assert_eq!(
+        app.approve(fresh.id, 1).unwrap().state,
+        TaskState::Completed
+    );
+    assert_eq!(
+        app.approve(stale.id, 1).unwrap().state,
+        TaskState::Cancelled
+    );
+    assert_eq!(app.sales_document_sends(revision2).unwrap().len(), 1);
+    assert_eq!(sent(&app).len(), 1, "solo el envío de la revisión");
+}
+
+#[test]
+fn a_missing_attempt_account_is_unavailable_and_never_falls_back_to_the_current_one() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut app, customer, flags, sim) = lossy_app(dir.path());
+    let id = issue(&mut app, DocumentKind::Quote, customer);
+    let task = app.prepare_sales_send(id).unwrap();
+    flags.drop_send.store(true, Ordering::SeqCst);
+    assert_eq!(app.approve(task.id, 1).unwrap().state, TaskState::Failed);
+    assert_eq!(sim.sent().unwrap().len(), 1);
+
+    // La tarea pierde la cuenta del intento (y su copia en `attempt`): la cuenta de la tarea,
+    // que sí está conectada y tiene el recibo, no se usa como último recurso.
+    flags.drop_send.store(false, Ordering::SeqCst);
+    let conn = rusqlite::Connection::open(dir.path().join("nestadmin.db")).unwrap();
+    conn.execute(
+        "UPDATE tasks SET result = json_remove(result, '$.attempt_accounts', '$.attempt') \
+         WHERE id = ?1",
+        [task.id],
+    )
+    .unwrap();
+    drop(conn);
+    app.retry(task.id).unwrap();
+    process_all(&mut app);
+    let review = task_of(&app, task.id);
+    assert_eq!(review.state, TaskState::AwaitingReview);
+    assert_eq!(review.result.unwrap()["recovery"]["error"], "unavailable");
+    assert!(app.sales_document_sends(id).unwrap().is_empty());
+    assert_eq!(status(&app, id), Status::Issued);
+    assert_eq!(sim.sent().unwrap().len(), 1, "nada se envió otra vez");
+    assert_eq!(
+        code(&app.confirm_not_sent(task.id).unwrap_err()),
+        "unavailable"
+    );
+}
+
+#[test]
+fn an_account_disconnected_after_the_attempt_is_unavailable_never_not_sent() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut app, customer, flags, sim) = lossy_app(dir.path());
+    let id = issue(&mut app, DocumentKind::Quote, customer);
+    let task = app.prepare_sales_send(id).unwrap();
+    flags.drop_send.store(true, Ordering::SeqCst);
+    assert_eq!(app.approve(task.id, 1).unwrap().state, TaskState::Failed);
+    assert_eq!(sim.sent().unwrap().len(), 1);
+
+    // La cuenta se desconecta después del intento: no se sabe si salió.
+    app.remove_mail_account("lossy").unwrap();
+    app.retry(task.id).unwrap();
+    process_all(&mut app);
+    let review = task_of(&app, task.id);
+    assert_eq!(review.state, TaskState::AwaitingReview);
+    let result = review.result.unwrap();
+    assert_eq!(result["recovery"]["error"], "unavailable");
+    assert_eq!(result["recovery"]["needs_confirmation"], false);
+    // Ni aprobar ni «Confirmo que no se envió» lo cierran, y no hay otro envío.
+    let error = app.approve(task.id, 1).unwrap_err();
+    assert_eq!(code(&error), "account_unavailable");
+    assert_eq!(
+        code(&app.confirm_not_sent(task.id).unwrap_err()),
+        "unavailable"
+    );
+    assert_eq!(code(&app.reject(task.id).unwrap_err()), "send_in_progress");
+    assert_eq!(sim.sent().unwrap().len(), 1);
+    assert!(sent(&app).is_empty());
+    assert!(app.sales_document_sends(id).unwrap().is_empty());
+}
+
+#[test]
+fn a_rule_whose_account_is_disconnected_does_not_send_from_another_account() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = open(dir.path());
+    let customer = setup(&mut app);
+    let other_sim = Arc::new(MailSimulator::in_memory());
+    app.insert_mail_connector_for_tests(
+        "otra",
+        Box::new(Lossy {
+            sim: Arc::clone(&other_sim),
+            flags: Arc::new(Flags::default()),
+        }),
+    );
+    let mut conditions = rule_conditions(customer, CLIENT_EMAIL);
+    conditions["account"] = json!("otra");
+    activate(&mut app, "envio-otra", &conditions);
+    // La cuenta de la regla se desconecta; queda el simulador, que no es la de la regla.
+    app.remove_mail_account("otra").unwrap();
+
+    let id = issue(&mut app, DocumentKind::Quote, customer);
+    assert!(sent(&app).is_empty(), "no sale desde otra cuenta");
+    assert!(other_sim.sent().unwrap().is_empty());
+    assert_eq!(status(&app, id), Status::Issued);
+    let task = app.sales_send_task(id).unwrap().expect("queda en revisión");
+    assert_eq!(task.state, TaskState::AwaitingReview);
+    let result = task.result.unwrap();
+    assert_eq!(result["account"]["id"], "simulador");
+    assert!(app.sales_document_sends(id).unwrap().is_empty());
+}
+
+#[test]
+fn a_pdf_that_is_too_large_or_cannot_be_rendered_at_issue_time_stays_in_review_without_sending() {
+    // PDF de más de 3 MB.
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = open(dir.path());
+    let customer = setup(&mut app);
+    app.set_sales_letterhead(&heavy_letterhead()).unwrap();
+    activate(
+        &mut app,
+        "envio-cliente",
+        &rule_conditions(customer, CLIENT_EMAIL),
+    );
+    let id = issue(&mut app, DocumentKind::Quote, customer);
+    assert!(sent(&app).is_empty());
+    assert_eq!(status(&app, id), Status::Issued, "la emisión no se impide");
+    let task = app.sales_send_task(id).unwrap().expect("tarea en revisión");
+    assert_eq!(task.state, TaskState::AwaitingReview);
+    let result = task.result.clone().unwrap();
+    assert_eq!(result["checks"]["pdf"], "too_large");
+    assert!(result["review_reason"].is_string(), "{result}");
+    // Aprobarlo tal cual tampoco envía: falla con el código y nada sale.
+    let failed = app.approve(task.id, 1).unwrap();
+    assert_eq!(failed.state, TaskState::Failed);
+    assert_eq!(failed.error.unwrap().code, "attachment_too_large");
+    assert!(sent(&app).is_empty());
+    assert!(app.sales_document_sends(id).unwrap().is_empty());
+
+    // PDF que no se puede generar: el membrete que cita el documento está dañado en la base
+    // (se quita el disparador de solo inserción solo en esta copia de prueba). PDFium se enlaza
+    // una vez por proceso, así que no se prueba quitándolo.
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = open(dir.path());
+    let customer = setup(&mut app);
+    app.set_sales_letterhead(&light_letterhead()).unwrap();
+    let conn = rusqlite::Connection::open(dir.path().join("nestadmin.db")).unwrap();
+    conn.execute_batch(
+        "DROP TRIGGER company_letterheads_no_update;          UPDATE company_letterheads SET data = x'0102030405';",
+    )
+    .unwrap();
+    drop(conn);
+    activate(
+        &mut app,
+        "envio-cliente",
+        &rule_conditions(customer, CLIENT_EMAIL),
+    );
+    let id = issue(&mut app, DocumentKind::Quote, customer);
+    assert!(sent(&app).is_empty());
+    assert_eq!(status(&app, id), Status::Issued);
+    let task = app.sales_send_task(id).unwrap().expect("tarea en revisión");
+    assert_eq!(task.state, TaskState::AwaitingReview);
+    assert_eq!(task.result.unwrap()["checks"]["pdf"], "failed");
+    assert!(app.sales_document_sends(id).unwrap().is_empty());
+}
+
+/// Membrete ligero de una página: una banda clara en el margen superior.
+fn light_letterhead() -> Vec<u8> {
+    let pdfium = extractor().pdfium().unwrap();
+    let mut document = pdfium.create_new_pdf().unwrap();
+    let mut page = document
+        .pages_mut()
+        .create_page_at_end(PdfPagePaperSize::a4())
+        .unwrap();
+    let (pw, ph) = (page.width().value, page.height().value);
+    page.objects_mut()
+        .create_path_object_rect(
+            PdfRect::new(
+                PdfPoints::new(ph - 20.0),
+                PdfPoints::new(0.0),
+                PdfPoints::new(ph),
+                PdfPoints::new(pw),
+            ),
+            None,
+            None,
+            Some(PdfColor::new(200, 220, 255, 255)),
+        )
+        .unwrap();
+    document.save_to_bytes().unwrap()
+}

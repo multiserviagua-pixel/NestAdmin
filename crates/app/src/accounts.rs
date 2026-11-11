@@ -5,6 +5,7 @@
 //! choquen entre cuentas. La lista de cuentas no contiene secretos: los tokens viven en el
 //! almacén de credenciales con el nombre `mail/<cuenta>` (D31).
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -69,6 +70,14 @@ pub struct AccountRecord {
     /// Dirección del buzón; `None` si el proveedor no la dio o la cuenta es anterior a D48.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub address: Option<String>,
+    /// Veces que se ha vuelto a iniciar sesión (D242). El envío de documentos lo anota en cada
+    /// intento: si cambió, su registro local pudo no ser el que hizo el envío.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub epoch: u32,
+}
+
+fn is_zero(n: &u32) -> bool {
+    *n == 0
 }
 
 /// Cuenta de la que vino un correo, copiada en la tarea al encolarlo para que siga constando
@@ -247,6 +256,34 @@ pub(crate) struct Accounts {
     limit: usize,
     simulator: Arc<MailSimulator>,
     list: Vec<Account>,
+    /// Último número usado por prefijo de proveedor (D242). Solo crece: quitar una cuenta no
+    /// libera su identificador.
+    counters: BTreeMap<String, u32>,
+}
+
+/// Formato de `cuentas.json` desde D242. Las listas anteriores son un vector simple.
+#[derive(Serialize)]
+struct AccountsFileRef<'a> {
+    counters: &'a BTreeMap<String, u32>,
+    accounts: Vec<&'a AccountRecord>,
+}
+
+#[derive(Deserialize)]
+struct AccountsFileOwned {
+    #[serde(default)]
+    counters: BTreeMap<String, u32>,
+    accounts: Vec<AccountRecord>,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum AccountsFileAny {
+    Legacy(Vec<AccountRecord>),
+    Current(AccountsFileOwned),
+}
+
+fn serial_of(id: &str, prefix: &str) -> Option<u32> {
+    id.strip_prefix(prefix)?.strip_prefix('-')?.parse().ok()
 }
 
 fn issue(code: &str, message: impl Into<String>) -> ConnectorError {
@@ -364,10 +401,18 @@ impl Accounts {
     /// comportamiento anterior a las cuentas reales.
     pub(crate) fn open(dir: &Path, simulator: MailSimulator, env: MailEnv) -> io::Result<Self> {
         fs::create_dir_all(dir)?;
+        let mut counters: BTreeMap<String, u32> = BTreeMap::new();
         let records: Vec<AccountRecord> = match fs::read_to_string(dir.join(ACCOUNTS_FILE)) {
             Ok(text) => {
-                let mut records: Vec<AccountRecord> =
+                let file: AccountsFileAny =
                     serde_json::from_str(&text).map_err(io::Error::other)?;
+                let mut records = match file {
+                    AccountsFileAny::Legacy(records) => records,
+                    AccountsFileAny::Current(file) => {
+                        counters = file.counters;
+                        file.accounts
+                    }
+                };
                 // El simulador siempre tiene su dirección sintética, también en listas antiguas.
                 for record in &mut records {
                     if record.provider == MailProviderKind::Simulator {
@@ -385,7 +430,20 @@ impl Accounts {
             limit: DEFAULT_MAIL_LIMIT,
             simulator: Arc::new(simulator),
             list: Vec::new(),
+            counters,
         };
+        // Una lista sin contador (anterior a D242) lo inicia con el máximo actual.
+        for record in &records {
+            for kind in [MailProviderKind::Google, MailProviderKind::Microsoft] {
+                if let Some(n) = serial_of(&record.id, kind.prefix()) {
+                    let entry = accounts
+                        .counters
+                        .entry(kind.prefix().to_owned())
+                        .or_insert(0);
+                    *entry = (*entry).max(n);
+                }
+            }
+        }
         accounts.list = records.into_iter().map(|r| accounts.build(r)).collect();
         Ok(accounts)
     }
@@ -402,6 +460,7 @@ impl Accounts {
                 provider: MailProviderKind::Simulator,
                 label: id.into(),
                 address: Some(SIMULATOR_ADDRESS.into()),
+                epoch: 0,
             },
             connector: Ok(connector),
             last_fetch: None,
@@ -452,8 +511,11 @@ impl Accounts {
     }
 
     fn save(&self) -> io::Result<()> {
-        let records: Vec<&AccountRecord> = self.list.iter().map(|a| &a.record).collect();
-        let text = serde_json::to_string_pretty(&records).map_err(io::Error::other)?;
+        let file = AccountsFileRef {
+            counters: &self.counters,
+            accounts: self.list.iter().map(|a| &a.record).collect(),
+        };
+        let text = serde_json::to_string_pretty(&file).map_err(io::Error::other)?;
         let path = self.dir.join(ACCOUNTS_FILE);
         let temporary = path.with_extension("json.tmp");
         fs::write(&temporary, text)?;
@@ -567,16 +629,19 @@ impl Accounts {
             })
     }
 
-    fn next_id(&self, kind: MailProviderKind) -> String {
+    /// Identificador nuevo (D242): nunca se reutiliza uno ya dado, aunque su cuenta se quitara,
+    /// porque el id está en las tareas, las acciones y las reglas guardadas.
+    fn next_id(&mut self, kind: MailProviderKind) -> String {
         let prefix = kind.prefix();
         let used = self
             .list
             .iter()
-            .filter_map(|a| a.record.id.strip_prefix(prefix)?.strip_prefix('-'))
-            .filter_map(|n| n.parse::<u32>().ok())
+            .filter_map(|a| serial_of(&a.record.id, prefix))
             .max()
             .unwrap_or(0);
-        format!("{prefix}-{}", used + 1)
+        let counter = self.counters.entry(prefix.to_owned()).or_insert(0);
+        *counter = (*counter).max(used) + 1;
+        format!("{prefix}-{counter}")
     }
 
     /// Añade una cuenta tras iniciar sesión: guarda los tokens en el almacén y la cuenta en la
@@ -597,6 +662,7 @@ impl Accounts {
             provider: kind,
             label,
             address: None,
+            epoch: 0,
         };
         let source = self
             .token_source(&record)
@@ -655,6 +721,7 @@ impl Accounts {
         if let Some(address) = self.lookup_address(&record) {
             record.address = Some(address);
         }
+        record.epoch = record.epoch.saturating_add(1);
         let changed = record != self.list[index].record;
         // Conector nuevo: el anterior pudo guardar en caché tokens ya inválidos.
         let mut account = self.build(record);
@@ -771,6 +838,11 @@ impl Accounts {
     pub(crate) fn identity(&self, id: &str) -> Option<(MailProviderKind, Option<String>)> {
         let account = self.list.iter().find(|a| a.record.id == id)?;
         Some((account.record.provider, account.record.address.clone()))
+    }
+
+    /// Número de inicios de sesión repetidos de una cuenta (D242).
+    pub(crate) fn epoch_of(&self, id: &str) -> Option<u32> {
+        Some(self.list.iter().find(|a| a.record.id == id)?.record.epoch)
     }
 
     /// Lee cada cuenta por separado; el error de una no impide leer las demás.
@@ -951,6 +1023,7 @@ fn simulator_record() -> AccountRecord {
         provider: MailProviderKind::Simulator,
         label: "Correo simulado".into(),
         address: Some(SIMULATOR_ADDRESS.into()),
+        epoch: 0,
     }
 }
 
@@ -1103,6 +1176,7 @@ mod tests {
                 provider: MailProviderKind::Google,
                 label: "Google 1".into(),
                 address: None,
+                epoch: 0,
             },
         ];
         fs::write(

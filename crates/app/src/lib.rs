@@ -989,7 +989,18 @@ impl App {
     /// confirmada (por ejemplo, al reconciliar al abrir) se completa: no se vuelve a pedir
     /// aprobación de algo que ya ocurrió.
     fn complete_confirmed_reviews(&mut self) -> AppResult<()> {
-        for task in self.store.tasks_in(TaskState::AwaitingReview)? {
+        let mut tasks = self.store.tasks_in(TaskState::AwaitingReview)?;
+        // Un envío de documento cuya respuesta se perdió queda fallido o en cola, pero su acción
+        // puede constar ya confirmada al reconciliar: también se cierra (D243).
+        for state in [TaskState::Failed, TaskState::Queued] {
+            tasks.extend(
+                self.store
+                    .tasks_in(state)?
+                    .into_iter()
+                    .filter(|t| t.kind == SEND_SALES_DOCUMENT),
+            );
+        }
+        for task in tasks {
             let kind = action_kind(&task);
             let done = self
                 .store
@@ -2861,6 +2872,18 @@ impl App {
         // Un envío de documento de venta con un intento sin cerrar no se descarta: pudo salir
         // (D235). Sin intento se cancela, sin señales de aprendizaje.
         if before.kind == SEND_SALES_DOCUMENT {
+            // Si el correo ya salió (acción confirmada), descartar no lo deshace: la tarea se
+            // cierra con su recibo y el documento pasa a enviado (D243).
+            let confirmed = self
+                .store
+                .task_actions(task_id)?
+                .into_iter()
+                .rfind(|a| a.kind == SEND_SALES_DOCUMENT && a.status == "confirmed");
+            if let Some(done) = confirmed {
+                let result = before.result.clone().unwrap_or(Value::Null);
+                let receipt = done.receipt.unwrap_or(Value::Null);
+                return self.complete_with(task_id, result, done.version, receipt, None);
+            }
             self.ensure_send_discardable(&before)?;
             return Ok(self.store.cancel(task_id)?);
         }
@@ -2940,6 +2963,7 @@ impl App {
             return Err(CoreError::RuleArchived(id.to_owned()).into());
         }
         let validated = meta.is_some_and(|m| m.allow_any_sender_ack_at.is_some());
+        let conditions = &self.bound_rule_conditions(&current.action_kind, conditions);
         check_rule(&current.action_kind, conditions, validated)?;
         Ok(self.store.update_rule(id, conditions)?)
     }
@@ -3228,6 +3252,14 @@ fn check_sales_send_rule(map: &serde_json::Map<String, Value>) -> AppResult<()> 
                 "la regla de envío de documentos necesita la cuenta de correo desde la que se                  envía (account)",
             ))
         }
+    }
+    if map.get("account_address").is_some_and(|a| {
+        a.as_str()
+            .is_none_or(|a| a.trim().is_empty() || a.len() > 254)
+    }) {
+        return Err(invalid(
+            "la dirección de la cuenta de la regla (account_address) no es válida",
+        ));
     }
     if let Some(kinds) = map.get("document_kinds") {
         let valid = kinds.as_array().is_some_and(|list| {
