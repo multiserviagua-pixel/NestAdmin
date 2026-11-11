@@ -56,6 +56,8 @@ const SEND_ERROR: Record<string, { text: string; withDetail?: boolean }> = {
   pdf_changed: { text: "El PDF del documento ya no es el que revisó: compruébelo de nuevo antes de enviarlo." },
   send_in_progress: { text: "Ya hay un envío en curso para este documento." },
   stale_version: { text: "El envío cambió mientras lo revisaba: vuelva a leerlo y apruébelo de nuevo." },
+  account_has_pending_sends: { text: "Hay envíos de documentos de venta sin confirmar desde esta cuenta; resuélvalos antes de quitarla." },
+  attempt_unverifiable: { text: "No se puede comprobar si el envío salió porque la cuenta que lo hizo ya no es la misma: use «No se puede comprobar si salió; confirmo que no se envió»." },
   unavailable: { text: "El servicio de correo no está disponible ahora mismo." },
 };
 

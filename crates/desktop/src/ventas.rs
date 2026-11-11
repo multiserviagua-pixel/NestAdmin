@@ -19,7 +19,7 @@
 //! resto como texto, sin interpretarlo.
 //!
 //! Envío de documentos por correo (E4b, D232–D241): `sales_prepare_send`, `sales_edit_send`,
-//! `sales_approve_send`, `sales_confirm_send_not_sent`, `sales_reject_send`, `sales_send_task`,
+//! `sales_approve_send`, `sales_confirm_send_not_sent`, `sales_confirm_send_not_sent_unverified`, `sales_reject_send`, `sales_send_task`,
 //! `sales_document_sends` y `sales_send_accounts`. Aprobar, confirmar y descartar tienen comando
 //! propio (y no los de las tareas de correo) para que sus errores lleguen con código
 //! (`recipient_missing`, `stale_version`, `send_in_progress`...); hacen lo mismo que ellos.
@@ -972,6 +972,19 @@ fn sales_confirm_send_not_sent<R: Runtime>(
     task
 }
 
+/// Salida explícita cuando no se puede comprobar si salió (D246): la cuenta del intento ya no
+/// existe, es otro buzón o falta la marca del intento. Lo pide la persona; queda en el registro.
+#[tauri::command]
+fn sales_confirm_send_not_sent_unverified<R: Runtime>(
+    shared: State<'_, SharedState>,
+    handle: AppHandle<R>,
+    id: i64,
+) -> CmdResult<Task> {
+    let task = sale(lock(&shared)?.confirm_not_sent_unverified(id));
+    crate::changed(&handle);
+    task
+}
+
 /// Descarta un envío sin intento sin cerrar; con uno pendiente da `[send_in_progress]` (D235).
 #[tauri::command]
 fn sales_reject_send<R: Runtime>(
@@ -1374,6 +1387,7 @@ pub fn handler<R: Runtime>() -> impl Fn(Invoke<R>) -> bool + Send + Sync + 'stat
         sales_edit_send,
         sales_approve_send,
         sales_confirm_send_not_sent,
+        sales_confirm_send_not_sent_unverified,
         sales_reject_send,
         sales_send_task,
         sales_document_sends,

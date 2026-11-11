@@ -398,6 +398,7 @@ export const salesHandlers: Record<string, (a: any, options?: any) => unknown> =
   sales_edit_send: ({ id: t, to, subject, body, account }) => editSend(t, to, subject, body, account),
   sales_approve_send: ({ id: t, version }) => approveSend(t, version),
   sales_confirm_send_not_sent: ({ id: t }) => confirmSendNotSent(t),
+  sales_confirm_send_not_sent_unverified: ({ id: t }) => confirmSendNotSent(t),
   sales_reject_send: ({ id: t }) => rejectSend(t),
   sales_send_task: ({ id: d }) => openSend(d) ?? null,
   sales_document_sends: ({ id: d }) => sends.filter((s) => s.document_id === d),

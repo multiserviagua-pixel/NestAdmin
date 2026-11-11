@@ -4,7 +4,9 @@ import { flagsOf, isKnownKind, salesSendFlags, sortForReview, tabOf } from "../s
 import { taskTitle } from "../src/tasks-text.ts";
 import { SEND_ERROR_CODES, parseSalesError, salesErrorText } from "../src/ventas-text.ts";
 import {
+  SEND_CONFIRM_UNVERIFIED_BUTTON,
   SEND_KIND,
+  SEND_UNVERIFIED_TEXT,
   authorizationText,
   canSendByMail,
   formatSize,
@@ -14,6 +16,7 @@ import {
   sendConfirmText,
   sendDocumentLabel,
   sendHistoryRows,
+  sendIsUnverifiable,
   sendNotices,
   sendOutcome,
   sendRecipient,
@@ -64,7 +67,7 @@ test("los códigos del envío tienen texto claro y no dejan pasar el detalle del
   // Todos los códigos del diseño están cubiertos y ninguno cae en «Error desconocido».
   const expected = [
     "no_mail_account", "account_required", "account_unavailable", "recipient_missing", "recipient_invalid", "subject_invalid", "body_empty",
-    "attachment_too_large", "status_not_sendable", "document_revised", "document_voided", "pdf_changed", "send_in_progress", "stale_version", "unavailable",
+    "attachment_too_large", "status_not_sendable", "document_revised", "document_voided", "pdf_changed", "send_in_progress", "stale_version", "unavailable", "account_has_pending_sends", "attempt_unverifiable",
   ];
   assert.deepEqual([...SEND_ERROR_CODES].sort(), [...expected].sort());
   for (const code of expected) assert.notEqual(salesErrorText(`[${code}] detalle`), "detalle");
@@ -197,4 +200,16 @@ test("el historial muestra fecha, destinatario, cuenta y quién lo autorizó, lo
   assert.equal(rows[1].authorization, "Aprobado por usted");
   assert.equal(rows[1].attachment, "F-2026-0001.pdf (48 KB)");
   assert.deepEqual(sendHistoryRows([]), []);
+});
+
+test("sin poder comprobar si salió, la tarjeta ofrece la confirmación explícita y no deja aprobar", () => {
+  const unverifiable = result({ recovery: { version: 1, error: "attempt_unverifiable", needs_confirmation: false } });
+  assert.equal(sendIsUnverifiable(unverifiable), true);
+  assert.equal(sendIsUnverifiable(result({ recovery: { version: 1, error: "unavailable", needs_confirmation: false } })), false);
+  assert.equal(sendIsUnverifiable(result()), false);
+  assert.match(sendApproveBlock(unverifiable) ?? "", /No se puede comprobar si el intento anterior salió/);
+  assert.equal(SEND_CONFIRM_UNVERIFIED_BUTTON, "No se puede comprobar si salió; confirmo que no se envió");
+  assert.match(SEND_UNVERIFIED_TEXT, /Enviados/);
+  assert.match(salesErrorText("[attempt_unverifiable] x"), /No se puede comprobar si el envío salió/);
+  assert.match(salesErrorText("[account_has_pending_sends] x"), /resuélvalos antes de quitarla/);
 });

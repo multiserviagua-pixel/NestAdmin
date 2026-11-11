@@ -3503,6 +3503,7 @@ const mutating = new Set([
   "sales_edit_send",
   "sales_approve_send",
   "sales_confirm_send_not_sent",
+  "sales_confirm_send_not_sent_unverified",
   "sales_reject_send",
 ]);
 

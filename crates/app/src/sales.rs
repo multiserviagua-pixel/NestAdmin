@@ -620,6 +620,12 @@ pub mod send_codes {
     pub const DOCUMENT_VOIDED: &str = "document_voided";
     pub const PDF_CHANGED: &str = "pdf_changed";
     pub const SEND_IN_PROGRESS: &str = "send_in_progress";
+    /// No se puede quitar una cuenta con envíos de documentos sin confirmar (D246).
+    pub const ACCOUNT_HAS_PENDING_SENDS: &str = "account_has_pending_sends";
+    /// No se puede comprobar si un intento salió porque la cuenta que lo hizo ya no existe, ya no
+    /// es el mismo buzón o falta la marca del intento (D246): solo la persona lo cierra, con
+    /// «No se puede comprobar si salió; confirmo que no se envió».
+    pub const ATTEMPT_UNVERIFIABLE: &str = "attempt_unverifiable";
 }
 
 /// Longitud máxima del asunto y de una dirección (D229).
@@ -633,7 +639,7 @@ pub const PDF_CHANGED_REASON: &str =
 pub const DOCUMENT_REVISED_REASON: &str =
     "el documento tiene una revisión nueva; revise el envío con la revisión vigente";
 
-fn send_error(code: &str, message: impl Into<String>) -> AppError {
+pub(crate) fn send_error(code: &str, message: impl Into<String>) -> AppError {
     AppError::Sales(SalesStoreError::External {
         code: code.to_owned(),
         message: message.into(),
@@ -932,25 +938,29 @@ fn attempt_mark(result: &Value, version: i64) -> Option<AttemptMark> {
     })
 }
 
-/// Dos direcciones de buzón son la misma si ambas faltan o si coinciden sin distinguir
-/// mayúsculas (D242).
+/// Dos direcciones de buzón son la misma si coinciden sin distinguir mayúsculas ni espacios en los
+/// extremos (D242). Si falta alguna, no: sin dirección no se puede afirmar que sea el mismo buzón
+/// y el resultado es fallo cerrado (D246).
 fn same_mailbox(a: Option<&str>, b: Option<&str>) -> bool {
     match (a, b) {
-        (None, None) => true,
-        (Some(a), Some(b)) => a.trim().eq_ignore_ascii_case(b.trim()),
+        (Some(a), Some(b)) => {
+            let (a, b) = (a.trim(), b.trim());
+            !a.is_empty() && a.eq_ignore_ascii_case(b)
+        }
         _ => false,
     }
 }
 
-fn unavailable(message: impl Into<String>) -> ConnectorError {
+fn unverifiable(message: impl Into<String>) -> ConnectorError {
     ConnectorError {
-        code: "unavailable".to_owned(),
+        code: send_codes::ATTEMPT_UNVERIFIABLE.to_owned(),
         message: message.into(),
     }
 }
 
 /// Consulta a la cuenta que hizo un intento (D240, D242). Sin la marca del intento, o si la
-/// cuenta ya no es el mismo buzón, `unavailable`. Si la cuenta se reconectó después del intento y
+/// cuenta ya no existe o ya no es el mismo buzón, `attempt_unverifiable` (D246); una cuenta que
+/// existe pero no responde, `unavailable`. Si la cuenta se reconectó después del intento y
 /// su registro local no conoce la clave, no se puede afirmar «no enviado»: devuelve `not_found`,
 /// que solo cierra la persona con «Confirmo que no se envió».
 fn lookup_marked(
@@ -960,17 +970,20 @@ fn lookup_marked(
     key: &str,
 ) -> Result<Option<Value>, ConnectorError> {
     let Some(mark) = mark else {
-        return Err(unavailable(
+        return Err(unverifiable(
             "no consta la dirección de la cuenta que hizo el envío; no se puede saber si salió",
         ));
     };
-    if let Some((_, current)) = accounts.identity(account) {
-        if !same_mailbox(mark.address.as_deref(), current.as_deref()) {
-            return Err(unavailable(format!(
-                "la cuenta {account} ya no es el buzón desde el que se hizo el envío; no se \
-                 puede saber si salió"
-            )));
-        }
+    let Some((_, current)) = accounts.identity(account) else {
+        return Err(unverifiable(format!(
+            "la cuenta {account} ya no está conectada; no se puede saber si el correo salió"
+        )));
+    };
+    if !same_mailbox(mark.address.as_deref(), current.as_deref()) {
+        return Err(unverifiable(format!(
+            "la cuenta {account} ya no es el buzón desde el que se hizo el envío; no se puede \
+             saber si salió"
+        )));
     }
     let found = accounts.lookup_in(account, key)?;
     if found.is_none() && accounts.epoch_of(account) != Some(mark.epoch) {
@@ -1681,10 +1694,30 @@ impl App {
                 attempt_mark(&result, action.version).as_ref(),
                 &action.idempotency_key,
             ),
-            None => Err(unavailable(
+            None => Err(unverifiable(
                 "no consta la cuenta que inició el envío; no se puede saber si salió",
             )),
         }
+    }
+
+    /// Si alguna tarea de envío abierta tiene un intento sin cerrar hecho por esa cuenta: quitarla
+    /// dejaría el envío sin forma de comprobarse (D246).
+    pub(crate) fn account_has_unsettled_sends(&self, account: &str) -> AppResult<bool> {
+        for task in self.store.all_tasks()? {
+            if task.kind != SEND_SALES_DOCUMENT || task.state.is_final() {
+                continue;
+            }
+            let result = task.result.clone().unwrap_or(Value::Null);
+            for action in self.store.task_actions(task.id)? {
+                if action.kind == SEND_SALES_DOCUMENT
+                    && action.is_unsettled()
+                    && attempt_account(&result, action.version).as_deref() == Some(account)
+                {
+                    return Ok(true);
+                }
+            }
+        }
+        Ok(false)
     }
 
     /// Al abrir: los envíos de documentos que quedaron pendientes se reconcilian cada uno en su

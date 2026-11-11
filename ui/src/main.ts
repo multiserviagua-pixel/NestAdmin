@@ -230,7 +230,7 @@ import {
 
 import { createSalesView } from "./ventas-view";
 import { salesErrorText } from "./ventas-text";
-import { SEND_APPROVE_BUTTON, SEND_DISCARD_BUTTON, SEND_KIND, SEND_OPEN_PDF_BUTTON, SEND_SAVE_BUTTON, formatSize, sendApproveBlock, sendAttachment, sendConfirmText, sendDiscardText, sendDocumentLabel, sendNotices, sendOutcome, sendRecipient } from "./ventas-envio-text";
+import { SEND_APPROVE_BUTTON, SEND_CONFIRM_UNVERIFIED_BUTTON, SEND_DISCARD_BUTTON, SEND_KIND, SEND_OPEN_PDF_BUTTON, SEND_SAVE_BUTTON, SEND_UNVERIFIED_TEXT, formatSize, sendApproveBlock, sendAttachment, sendConfirmText, sendDiscardText, sendDocumentLabel, sendIsUnverifiable, sendNotices, sendOutcome, sendRecipient } from "./ventas-envio-text";
 import { actionBar, dataTable, emptyState, h, helpTip, icon, sectionHeader, statusChip, tabs, type Child, type IconName, type Tone } from "./components";
 import {
   BOARD_COLUMNS,
@@ -796,6 +796,7 @@ function recoveryBox(task: Task, verb: string, salesSend = false) {
   const version = r.recovery?.version ?? r.attempt?.version;
   const error = r.recovery?.error;
   const missing = r.recovery?.needs_confirmation === true;
+  const unverifiable = salesSend && sendIsUnverifiable(r);
   return h(
     "div",
     { class: "recovery" },
@@ -806,7 +807,9 @@ function recoveryBox(task: Task, verb: string, salesSend = false) {
       error ? ` (último error: ${error})` : "",
       salesSend ? ". Se conserva el contenido aprobado." : ". Se conserva el contenido aprobado; la IA no ha propuesto otro.",
     ),
-    missing
+    unverifiable
+      ? h("p", {}, SEND_UNVERIFIED_TEXT)
+      : missing
       ? h(
           "p",
           {},
@@ -817,7 +820,17 @@ function recoveryBox(task: Task, verb: string, salesSend = false) {
           {},
           `Aprobar lo vuelve a intentar con la misma clave: si ya se hizo, solo se confirma y nunca se repite. Si cambia el contenido, antes de ${verb} la versión nueva se comprueba que la anterior no se realizó.`,
         ),
-    missing
+    unverifiable
+      ? h(
+          "div",
+          { class: "buttons" },
+          h(
+            "button",
+            { onclick: () => void act(() => api.salesConfirmSendNotSentUnverified(task.id).catch((e) => Promise.reject(salesErrorText(e))).then((t) => afterConfirm(t))) },
+            SEND_CONFIRM_UNVERIFIED_BUTTON,
+          ),
+        )
+      : missing
       ? h(
           "div",
           { class: "buttons" },

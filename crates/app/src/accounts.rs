@@ -28,6 +28,9 @@ pub const DEFAULT_MAIL_LIMIT: usize = 25;
 /// Límite superior configurable: evita leer un buzón entero por error.
 pub const MAX_MAIL_LIMIT: usize = 500;
 const ACCOUNTS_FILE: &str = "cuentas.json";
+/// Contadores de identificadores (D246). Van aparte para que `cuentas.json` siga siendo una lista
+/// simple que también lee la versión anterior de la aplicación.
+const COUNTERS_FILE: &str = "cuentas-contadores.json";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -261,13 +264,8 @@ pub(crate) struct Accounts {
     counters: BTreeMap<String, u32>,
 }
 
-/// Formato de `cuentas.json` desde D242. Las listas anteriores son un vector simple.
-#[derive(Serialize)]
-struct AccountsFileRef<'a> {
-    counters: &'a BTreeMap<String, u32>,
-    accounts: Vec<&'a AccountRecord>,
-}
-
+/// Formato de `cuentas.json` que escribió D242 en la rama de desarrollo: `{counters, accounts}`.
+/// Solo se lee, para migrarlo a la lista simple y al archivo de contadores (D246).
 #[derive(Deserialize)]
 struct AccountsFileOwned {
     #[serde(default)]
@@ -282,8 +280,42 @@ enum AccountsFileAny {
     Current(AccountsFileOwned),
 }
 
-fn serial_of(id: &str, prefix: &str) -> Option<u32> {
-    id.strip_prefix(prefix)?.strip_prefix('-')?.parse().ok()
+/// Prefijo del proveedor y número de un identificador de cuenta que aparece al inicio de un
+/// texto, solo si le sigue el final, `:` (ID de mensaje o borrador) o `/` (clave de idempotencia).
+fn account_serial(text: &str) -> Option<(&'static str, u32)> {
+    for kind in [MailProviderKind::Google, MailProviderKind::Microsoft] {
+        let Some(rest) = text
+            .strip_prefix(kind.prefix())
+            .and_then(|r| r.strip_prefix('-'))
+        else {
+            continue;
+        };
+        let digits = rest.chars().take_while(char::is_ascii_digit).count();
+        if digits == 0 || !matches!(rest[digits..].chars().next(), None | Some(':' | '/')) {
+            continue;
+        }
+        return rest[..digits]
+            .parse()
+            .ok()
+            .map(|serial| (kind.prefix(), serial));
+    }
+    None
+}
+
+/// Todas las cadenas de un JSON, para buscar en ellas identificadores de cuenta.
+pub(crate) fn json_strings<'a>(value: &'a Value, out: &mut Vec<&'a str>) {
+    match value {
+        Value::String(text) => out.push(text),
+        Value::Array(items) => items.iter().for_each(|v| json_strings(v, out)),
+        Value::Object(fields) => fields.values().for_each(|v| json_strings(v, out)),
+        _ => {}
+    }
+}
+
+fn write_atomic(path: &Path, text: &str) -> io::Result<()> {
+    let temporary = path.with_extension("json.tmp");
+    fs::write(&temporary, text)?;
+    fs::rename(temporary, path)
 }
 
 fn issue(code: &str, message: impl Into<String>) -> ConnectorError {
@@ -401,7 +433,13 @@ impl Accounts {
     /// comportamiento anterior a las cuentas reales.
     pub(crate) fn open(dir: &Path, simulator: MailSimulator, env: MailEnv) -> io::Result<Self> {
         fs::create_dir_all(dir)?;
-        let mut counters: BTreeMap<String, u32> = BTreeMap::new();
+        let mut counters: BTreeMap<String, u32> = match fs::read_to_string(dir.join(COUNTERS_FILE))
+        {
+            Ok(text) => serde_json::from_str(&text).unwrap_or_default(),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => BTreeMap::new(),
+            Err(e) => return Err(e),
+        };
+        let mut migrate = false;
         let records: Vec<AccountRecord> = match fs::read_to_string(dir.join(ACCOUNTS_FILE)) {
             Ok(text) => {
                 let file: AccountsFileAny =
@@ -409,7 +447,12 @@ impl Accounts {
                 let mut records = match file {
                     AccountsFileAny::Legacy(records) => records,
                     AccountsFileAny::Current(file) => {
-                        counters = file.counters;
+                        // Formato de la rama de desarrollo: sus contadores pasan al archivo propio.
+                        for (prefix, n) in file.counters {
+                            let entry = counters.entry(prefix).or_insert(0);
+                            *entry = (*entry).max(n);
+                        }
+                        migrate = true;
                         file.accounts
                     }
                 };
@@ -432,20 +475,45 @@ impl Accounts {
             list: Vec::new(),
             counters,
         };
-        // Una lista sin contador (anterior a D242) lo inicia con el máximo actual.
+        // Un contador que falta (lista anterior a D242) se inicia con el máximo actual.
         for record in &records {
-            for kind in [MailProviderKind::Google, MailProviderKind::Microsoft] {
-                if let Some(n) = serial_of(&record.id, kind.prefix()) {
-                    let entry = accounts
-                        .counters
-                        .entry(kind.prefix().to_owned())
-                        .or_insert(0);
-                    *entry = (*entry).max(n);
-                }
-            }
+            accounts.raise_counter(&record.id);
         }
         accounts.list = records.into_iter().map(|r| accounts.build(r)).collect();
+        if migrate {
+            accounts.save()?;
+        }
         Ok(accounts)
+    }
+
+    /// Sube el contador del proveedor si el texto empieza por un identificador mayor.
+    fn raise_counter(&mut self, text: &str) -> bool {
+        let Some((prefix, serial)) = account_serial(text) else {
+            return false;
+        };
+        let entry = self.counters.entry(prefix.to_owned()).or_insert(0);
+        if serial > *entry {
+            *entry = serial;
+            return true;
+        }
+        false
+    }
+
+    /// Los identificadores que ya constan en tareas, acciones y reglas (D246) también cuentan:
+    /// una lista sin contadores no debe volver a dar el de una cuenta quitada. Guarda los
+    /// contadores solo si cambiaron.
+    pub(crate) fn seed_counters<'a>(
+        &mut self,
+        texts: impl IntoIterator<Item = &'a str>,
+    ) -> io::Result<()> {
+        let mut changed = false;
+        for text in texts {
+            changed |= self.raise_counter(text);
+        }
+        if changed {
+            self.save()?;
+        }
+        Ok(())
     }
 
     /// Para pruebas: añade una cuenta con un conector propio (por ejemplo, uno sin Enviados).
@@ -510,16 +578,14 @@ impl Accounts {
         }
     }
 
+    /// Guarda los contadores y después la lista (D246): si se corta entre medias, un contador de
+    /// más no repite ningún identificador.
     fn save(&self) -> io::Result<()> {
-        let file = AccountsFileRef {
-            counters: &self.counters,
-            accounts: self.list.iter().map(|a| &a.record).collect(),
-        };
-        let text = serde_json::to_string_pretty(&file).map_err(io::Error::other)?;
-        let path = self.dir.join(ACCOUNTS_FILE);
-        let temporary = path.with_extension("json.tmp");
-        fs::write(&temporary, text)?;
-        fs::rename(temporary, path)
+        let counters = serde_json::to_string_pretty(&self.counters).map_err(io::Error::other)?;
+        write_atomic(&self.dir.join(COUNTERS_FILE), &counters)?;
+        let records: Vec<&AccountRecord> = self.list.iter().map(|a| &a.record).collect();
+        let list = serde_json::to_string_pretty(&records).map_err(io::Error::other)?;
+        write_atomic(&self.dir.join(ACCOUNTS_FILE), &list)
     }
 
     pub(crate) fn limit(&self) -> usize {
@@ -629,14 +695,16 @@ impl Accounts {
             })
     }
 
-    /// Identificador nuevo (D242): nunca se reutiliza uno ya dado, aunque su cuenta se quitara,
-    /// porque el id está en las tareas, las acciones y las reglas guardadas.
+    /// Identificador nuevo (D242, D246): nunca se reutiliza uno ya dado, aunque su cuenta se
+    /// quitara, porque el id está en las tareas, las acciones y las reglas guardadas.
     fn next_id(&mut self, kind: MailProviderKind) -> String {
         let prefix = kind.prefix();
         let used = self
             .list
             .iter()
-            .filter_map(|a| serial_of(&a.record.id, prefix))
+            .filter_map(|a| account_serial(&a.record.id))
+            .filter(|(p, _)| *p == prefix)
+            .map(|(_, n)| n)
             .max()
             .unwrap_or(0);
         let counter = self.counters.entry(prefix.to_owned()).or_insert(0);
@@ -833,8 +901,9 @@ impl Accounts {
         Ok((messages, page.next_cursor))
     }
 
-    /// Proveedor y dirección conocida de una cuenta: con ellos, y no con el identificador (que se
-    /// reutiliza al quitar y volver a añadir cuentas), se reconoce «el mismo buzón» (D133).
+    /// Proveedor y dirección conocida de una cuenta: con ellos, y no solo con el identificador (que
+    /// antes de D242 se reutilizaba al quitar y volver a añadir cuentas), se reconoce «el mismo
+    /// buzón» (D133).
     pub(crate) fn identity(&self, id: &str) -> Option<(MailProviderKind, Option<String>)> {
         let account = self.list.iter().find(|a| a.record.id == id)?;
         Some((account.record.provider, account.record.address.clone()))

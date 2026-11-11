@@ -388,6 +388,7 @@ export const api = {
   salesEditSend: (id: number, to: string, subject: string, body: string, account: string) => invoke<Task>("sales_edit_send", { id, to, subject, body, account }),
   salesApproveSend: (id: number, version: number) => invoke<Task>("sales_approve_send", { id, version }),
   salesConfirmSendNotSent: (id: number) => invoke<Task>("sales_confirm_send_not_sent", { id }),
+  salesConfirmSendNotSentUnverified: (id: number) => invoke<Task>("sales_confirm_send_not_sent_unverified", { id }),
   salesRejectSend: (id: number) => invoke<Task>("sales_reject_send", { id }),
   salesSendTask: (id: number) => invoke<Task | null>("sales_send_task", { id }),
   salesDocumentSends: (id: number) => invoke<SalesSend[]>("sales_document_sends", { id }),

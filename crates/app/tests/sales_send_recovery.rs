@@ -81,8 +81,8 @@ enum Resp {
 
 struct World {
     base: String,
-    /// Dirección que devuelve el perfil del buzón.
-    address: String,
+    /// Dirección que devuelve el perfil del buzón; `None` si el proveedor no la da.
+    address: Option<String>,
     uploads: usize,
     sends: usize,
     drop_send: bool,
@@ -95,7 +95,7 @@ fn serve() -> (String, Shared) {
     let base = format!("http://{}", listener.local_addr().unwrap());
     let world = Arc::new(Mutex::new(World {
         base: base.clone(),
-        address: "oficina@empresa.test".into(),
+        address: Some("oficina@empresa.test".into()),
         uploads: 0,
         sends: 0,
         drop_send: false,
@@ -221,7 +221,15 @@ impl Fixture {
     }
 
     fn set_address(&self, address: &str) {
-        self.gmail.1.lock().unwrap().address = address.into();
+        self.gmail.1.lock().unwrap().address = Some(address.into());
+    }
+
+    fn clear_address(&self) {
+        self.gmail.1.lock().unwrap().address = None;
+    }
+
+    fn correo(&self) -> PathBuf {
+        self.dir.path().join("correo")
     }
 
     fn counters(&self) -> (usize, usize) {
@@ -358,11 +366,19 @@ fn an_account_id_is_never_reused_and_the_counter_survives_reopening_and_legacy_l
     assert_eq!(add_google(&mut app), "google-4");
     app.remove_mail_account("google-4").unwrap();
 
-    // El contador consta en el archivo y sobrevive a reabrir la aplicación.
+    // El contador consta en su archivo y sobrevive a reabrir la aplicación; `cuentas.json` sigue
+    // siendo una lista simple (D246).
     drop(app);
-    let list =
-        std::fs::read_to_string(fixture.dir.path().join("correo").join("cuentas.json")).unwrap();
-    assert!(list.contains("\"counters\""), "{list}");
+    let list: Value = serde_json::from_str(
+        &std::fs::read_to_string(fixture.correo().join("cuentas.json")).unwrap(),
+    )
+    .unwrap();
+    assert!(list.is_array(), "{list}");
+    let counters: Value = serde_json::from_str(
+        &std::fs::read_to_string(fixture.correo().join("cuentas-contadores.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(counters["google"], 4);
     let mut app = fixture.open();
     assert_eq!(add_google(&mut app), "google-5");
     drop(app);
@@ -554,4 +570,130 @@ fn after_a_cut_a_reconnected_account_with_an_empty_local_record_never_concludes_
     assert_eq!(done.state, TaskState::Completed);
     assert_eq!(fixture.counters(), (2, 2));
     assert_eq!(app.sales_document_sends(id).unwrap().len(), 1);
+}
+
+// ---- Segunda ronda de correcciones (D246) ----
+
+/// Lo que lee `main` de `cuentas.json`: una lista de este registro (sin `deny_unknown_fields`).
+#[derive(Debug, serde::Deserialize)]
+#[allow(dead_code)]
+struct MainAccountRecord {
+    id: String,
+    provider: String,
+    label: String,
+    #[serde(default)]
+    address: Option<String>,
+}
+
+fn read_as_main(fixture: &Fixture) -> Vec<MainAccountRecord> {
+    let text = std::fs::read_to_string(fixture.correo().join("cuentas.json")).unwrap();
+    serde_json::from_str(&text).expect("`main` lee cuentas.json como una lista de cuentas")
+}
+
+#[test]
+fn cuentas_json_stays_a_plain_list_that_main_reads_and_the_branch_format_is_migrated() {
+    let fixture = Fixture::new();
+    fixture.set_address(MAILBOX_A);
+    let mut app = fixture.open();
+    assert_eq!(add_google(&mut app), "google-1");
+    app.reconnect_mail_account("google-1", &tokens()).unwrap();
+    app.remove_mail_account("google-1").unwrap();
+    assert_eq!(add_google(&mut app), "google-2");
+    drop(app);
+    let list = read_as_main(&fixture);
+    assert_eq!(
+        list.iter().map(|a| a.id.as_str()).collect::<Vec<_>>(),
+        ["simulador", "google-2"]
+    );
+    assert_eq!(list[1].address.as_deref(), Some(MAILBOX_A));
+
+    // El formato que escribió esta rama, `{counters, accounts}`, se lee y se migra a los dos
+    // archivos: la lista simple y los contadores.
+    std::fs::remove_file(fixture.correo().join("cuentas-contadores.json")).unwrap();
+    std::fs::write(
+        fixture.correo().join("cuentas.json"),
+        json!({
+            "counters": { "google": 6 },
+            "accounts": [
+                { "id": "simulador", "provider": "simulator", "label": "Correo simulado" },
+                { "id": "google-2", "provider": "google", "label": "Google 2",
+                  "address": MAILBOX_A, "epoch": 3 },
+            ],
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let mut app = fixture.open();
+    let list = read_as_main(&fixture);
+    assert_eq!(list.len(), 2, "ya es una lista");
+    let counters: Value = serde_json::from_str(
+        &std::fs::read_to_string(fixture.correo().join("cuentas-contadores.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(counters["google"], 6);
+    assert_eq!(add_google(&mut app), "google-7");
+    // Una lista simple sin archivo de contadores se abre con el valor por defecto.
+    drop(app);
+    std::fs::remove_file(fixture.correo().join("cuentas-contadores.json")).unwrap();
+    let mut app = fixture.open();
+    assert_eq!(add_google(&mut app), "google-8");
+}
+
+#[test]
+fn counters_started_from_a_plain_list_also_count_the_ids_in_tasks() {
+    let fixture = Fixture::new();
+    let mut app = fixture.open();
+    let customer = setup(&mut app);
+    assert_eq!(add_google(&mut app), "google-1");
+    assert_eq!(add_google(&mut app), "google-2");
+    let id = issue_quote(&mut app, customer);
+    let task = app.prepare_sales_send(id).unwrap();
+    app.edit_sales_send(task.id, CLIENT_EMAIL, "Asunto", "Texto", "google-2")
+        .unwrap();
+    app.remove_mail_account("google-2").unwrap();
+    drop(app);
+
+    // `main` reescribe la lista sin contadores y sin la cuenta quitada.
+    std::fs::remove_file(fixture.correo().join("cuentas-contadores.json")).unwrap();
+    std::fs::write(
+        fixture.correo().join("cuentas.json"),
+        json!([
+            { "id": "simulador", "provider": "simulator", "label": "Correo simulado" },
+            { "id": "google-1", "provider": "google", "label": "Google 1", "address": MAILBOX_A },
+        ])
+        .to_string(),
+    )
+    .unwrap();
+    let mut app = fixture.open();
+    // La tarea guarda `google-2`: su identificador no vuelve a darse.
+    assert_eq!(add_google(&mut app), "google-3");
+}
+
+#[test]
+fn a_send_without_any_mailbox_address_fails_closed_and_the_case_and_spaces_of_an_address_do_not_matter(
+) {
+    let fixture = Fixture::new();
+    let mut app = fixture.open();
+    let customer = setup(&mut app);
+
+    // Sin dirección en la cuenta ni en lo preparado (ambas faltan): no se afirma «mismo buzón».
+    fixture.clear_address();
+    assert_eq!(add_google(&mut app), "google-1");
+    let id = issue_quote(&mut app, customer);
+    let task = app.prepare_sales_send(id).unwrap();
+    assert!(task.result.clone().unwrap()["account"]["address"].is_null());
+    let error = app.approve(task.id, 1).unwrap_err();
+    assert_eq!(code(&error), "account_unavailable");
+    assert_eq!(fixture.counters(), (0, 0));
+    app.reject(task.id).unwrap();
+
+    // Con dirección, mayúsculas y espacios de más no cambian el buzón.
+    fixture.set_address("  Oficina@Empresa.TEST ");
+    app.reconnect_mail_account("google-1", &tokens()).unwrap();
+    let task = app.prepare_sales_send(id).unwrap();
+    fixture.set_address(MAILBOX_A);
+    app.reconnect_mail_account("google-1", &tokens()).unwrap();
+    let done = app.approve(task.id, 1).unwrap();
+    assert_eq!(done.state, TaskState::Completed);
+    assert_eq!(fixture.counters(), (1, 1));
 }

@@ -209,12 +209,14 @@ pub fn header_value(text: &str) -> String {
     text.chars().filter(|c| !c.is_control()).collect()
 }
 
-/// Bytes de texto por palabra codificada: `=?UTF-8?B?` y `?=` suman 12 caracteres y el límite de
-/// RFC 2047 es 75, así que caben 63 de base64, es decir, 45 bytes (60 caracteres) por palabra.
-const ENCODED_WORD_BYTES: usize = 45;
+/// Bytes de texto por palabra codificada. `=?UTF-8?B?` y `?=` suman 12 caracteres y la línea no
+/// debe pasar de 76 (RFC 2047 §2) contando `Subject: ` (9) en la primera: caben 55 de base64
+/// (múltiplo de 4: 52), es decir, 39 bytes por palabra. Así la primera línea mide 73 y las
+/// siguientes, 65 (un espacio de pliegue y la palabra).
+const ENCODED_WORD_BYTES: usize = 39;
 
 /// Codifica una cabecera con caracteres no ASCII (RFC 2047, base64 en UTF-8). Cada palabra
-/// codificada mide como mucho 75 caracteres y no parte un carácter UTF-8; si hacen falta varias
+/// codificada mide como mucho 64 caracteres y no parte un carácter UTF-8; si hacen falta varias
 /// se separan con un pliegue de línea (CRLF y un espacio), que el lector descarta al unirlas.
 pub fn encode_header(text: &str) -> String {
     let clean = header_value(text);
@@ -358,7 +360,7 @@ mod tests {
     }
 
     #[test]
-    fn a_long_subject_is_split_in_encoded_words_of_at_most_75_characters() {
+    fn a_long_subject_is_split_in_encoded_words_and_no_header_line_passes_76_characters() {
         let subject = "Presupuesto P-2026-0042 — Instalación eléctrica de la nave número 7 ñandú (revisión 3) — Empresa Ejemplo, S. L. — ¡Gracias!";
         let encoded = encode_header(subject);
         let words: Vec<&str> = encoded.split("\r\n ").collect();
@@ -366,6 +368,12 @@ mod tests {
         let mut joined = Vec::new();
         for word in &words {
             assert!(word.len() <= 75, "{} caracteres: {word}", word.len());
+            // La primera línea lleva «Subject: » delante; las demás, un espacio de pliegue.
+            assert!(
+                "Subject: ".len() + word.len() <= 76,
+                "{} caracteres: {word}",
+                word.len()
+            );
             let inner = word
                 .strip_prefix("=?UTF-8?B?")
                 .and_then(|w| w.strip_suffix("?="))
@@ -376,7 +384,7 @@ mod tests {
         }
         assert_eq!(joined.concat(), subject);
         // Un carácter de varios bytes justo en el límite tampoco se parte.
-        let edge = format!("{}€€€€€€€€€€", "a".repeat(43));
+        let edge = format!("{}€€€€€€€€€€", "a".repeat(37));
         for word in encode_header(&edge).split("\r\n ") {
             assert!(word.len() <= 75);
             let inner = &word[10..word.len() - 2];

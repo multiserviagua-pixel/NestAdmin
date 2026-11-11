@@ -17,6 +17,11 @@ export const SEND_APPROVE_BUTTON = "Aprobar y enviar";
 export const SEND_SAVE_BUTTON = "Guardar cambios";
 export const SEND_DISCARD_BUTTON = "Descartar";
 export const SEND_CONFIRM_NOT_SENT_BUTTON = "Confirmo que no se envió: preparar uno nuevo";
+export const SEND_CONFIRM_UNVERIFIED_BUTTON = "No se puede comprobar si salió; confirmo que no se envió";
+/** Código de recuperación cuando la cuenta del intento ya no existe, es otro buzón o falta la marca (D246). */
+export const SEND_UNVERIFIABLE_CODE = "attempt_unverifiable";
+export const SEND_UNVERIFIED_TEXT =
+  "La cuenta que hizo el intento ya no está conectada o ya no es el mismo buzón, así que no se puede comprobar si el correo salió. Mire la carpeta Enviados de ese buzón: si no está y está seguro de que no salió, confírmelo para preparar un envío nuevo con el texto de abajo; después tendrá que aprobarlo. Si salió, no lo repita.";
 export const SEND_OPEN_PDF_BUTTON = "Abrir el PDF";
 export const SEND_HISTORY_TITLE = "Envíos por correo";
 export const SEND_HISTORY_EMPTY = "Todavía no se ha enviado por correo.";
@@ -107,7 +112,13 @@ export function sendApproveBlock(result: Record<string, any> | null | undefined,
   if (r.checks?.pdf === "too_large") return "El PDF supera los 3 MB y no se puede enviar.";
   if (r.checks?.pdf === "failed") return "No se pudo preparar el PDF: no se puede enviar.";
   if (r.recovery?.needs_confirmation === true) return "Para aprobar, confirme primero que el intento anterior no se envió.";
+  if (sendIsUnverifiable(r)) return "No se puede comprobar si el intento anterior salió: confírmelo antes de aprobar.";
   return null;
+}
+
+/** ¿El último intento no se puede comprobar y solo lo cierra la persona? (D246) */
+export function sendIsUnverifiable(result: Record<string, any> | null | undefined): boolean {
+  return result?.recovery?.error === SEND_UNVERIFIABLE_CODE;
 }
 
 /** Adjunto de la tarjeta: nombre y tamaño. `null` si no consta. */

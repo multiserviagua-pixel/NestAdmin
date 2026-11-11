@@ -976,6 +976,7 @@ impl App {
             verifactu_producer: None,
         };
         app.store.recover()?;
+        app.seed_account_counters()?;
         app.store.reconcile_actions(SEND_DRAFT, &app.mail)?;
         app.store.reconcile_actions(REGISTER_INVOICE, &app.admin)?;
         // Los envíos de documentos de venta se reconcilian cada uno en su cuenta (D240).
@@ -985,9 +986,43 @@ impl App {
         Ok(app)
     }
 
+    /// Los identificadores de cuenta que ya constan en las tareas, las acciones y las reglas
+    /// guardadas suben el contador de identificadores (D246): con un `cuentas.json` sin contadores
+    /// (el de la versión anterior) no se vuelve a dar el de una cuenta quitada.
+    fn seed_account_counters(&mut self) -> AppResult<()> {
+        let mut texts: Vec<String> = Vec::new();
+        for task in self.store.all_tasks()? {
+            texts.push(task.input_ref.clone());
+            let mut found = Vec::new();
+            if let Some(result) = &task.result {
+                accounts::json_strings(result, &mut found);
+            }
+            texts.extend(found.into_iter().map(str::to_owned));
+            if task.kind == SEND_SALES_DOCUMENT || task.kind == EMAIL {
+                for action in self.store.task_actions(task.id)? {
+                    texts.push(action.idempotency_key);
+                    let mut found = Vec::new();
+                    if let Some(receipt) = &action.receipt {
+                        accounts::json_strings(receipt, &mut found);
+                    }
+                    texts.extend(found.into_iter().map(str::to_owned));
+                }
+            }
+        }
+        for rule in self.store.rules()? {
+            let mut found = Vec::new();
+            accounts::json_strings(&rule.conditions, &mut found);
+            texts.extend(found.into_iter().map(str::to_owned));
+        }
+        self.mail
+            .seed_counters(texts.iter().map(String::as_str))
+            .map_err(AppError::from)
+    }
+
     /// Una tarea que seguía en revisión cuando se cortó su acción y cuya acción consta ya
     /// confirmada (por ejemplo, al reconciliar al abrir) se completa: no se vuelve a pedir
-    /// aprobación de algo que ya ocurrió.
+    /// aprobación de algo que ya ocurrió. Un fallo en una tarea no impide abrir la aplicación ni
+    /// cerrar las demás: se anota en el registro (D246).
     fn complete_confirmed_reviews(&mut self) -> AppResult<()> {
         let mut tasks = self.store.tasks_in(TaskState::AwaitingReview)?;
         // Un envío de documento cuya respuesta se perdió queda fallido o en cola, pero su acción
@@ -1001,19 +1036,56 @@ impl App {
             );
         }
         for task in tasks {
-            let kind = action_kind(&task);
-            let done = self
-                .store
-                .task_actions(task.id)?
-                .into_iter()
-                .rfind(|a| a.kind == kind && a.status == "confirmed");
-            if let Some(done) = done {
-                let result = task.result.clone().unwrap_or(Value::Null);
-                let receipt = done.receipt.unwrap_or(Value::Null);
-                self.complete_with(task.id, result, done.version, receipt, None)?;
+            if let Err(error) = self.complete_confirmed(&task, false) {
+                self.note_recovery_error(&task, &error);
+            }
+        }
+        // Una tarea de envío cancelada cuya acción consta confirmada (el correo salió) conserva su
+        // estado, pero su historial y el estado del documento se reparan (D246).
+        for task in self.store.tasks_in(TaskState::Cancelled)? {
+            if task.kind != SEND_SALES_DOCUMENT {
+                continue;
+            }
+            if let Err(error) = self.complete_confirmed(&task, true) {
+                self.note_recovery_error(&task, &error);
             }
         }
         Ok(())
+    }
+
+    fn complete_confirmed(&mut self, task: &Task, cancelled: bool) -> AppResult<()> {
+        let kind = action_kind(task);
+        let done = self
+            .store
+            .task_actions(task.id)?
+            .into_iter()
+            .rfind(|a| a.kind == kind && a.status == "confirmed");
+        let Some(done) = done else {
+            return Ok(());
+        };
+        let result = task.result.clone().unwrap_or(Value::Null);
+        if cancelled {
+            // Ya reparada: la fila del historial con esa clave existe.
+            let Some(document) = result["document"]["id"].as_i64() else {
+                return Ok(());
+            };
+            if self
+                .store
+                .sales_document_sends(document)?
+                .iter()
+                .any(|s| s.idempotency_key == done.idempotency_key)
+            {
+                return Ok(());
+            }
+        }
+        let receipt = done.receipt.unwrap_or(Value::Null);
+        self.complete_with(task.id, result, done.version, receipt, None)?;
+        Ok(())
+    }
+
+    fn note_recovery_error(&mut self, task: &Task, error: &AppError) {
+        let note = json!({ "task": task.id, "kind": task.kind, "code": error.code() });
+        let _ = self.store.record_note("open.recover_task", "error", &note);
     }
 
     /// Resultado guardado de una tarea cuya acción ya se intentó (D50): se reutiliza al
@@ -2726,6 +2798,20 @@ impl App {
     /// se completa con ese recibo. Si no, los intentos se cierran como sustituidos y el mismo
     /// contenido pasa a una versión nueva, con claves nuevas, que requiere aprobación (D50).
     pub fn confirm_not_sent(&mut self, task_id: i64) -> AppResult<Task> {
+        self.confirm_not_sent_with(task_id, false)
+    }
+
+    /// Salida explícita de un envío de documento que no se puede comprobar (D246): la cuenta que
+    /// hizo el intento ya no existe, se reconectó a otro buzón o falta la marca del intento. La
+    /// persona confirma «No se puede comprobar si salió; confirmo que no se envió». Solo cambia
+    /// lo que hace `confirm_not_sent` con ese error (`attempt_unverifiable`): cualquier intento que
+    /// sí se pueda comprobar se comprueba igual, y un recibo encontrado completa la tarea. Deja
+    /// constancia en el registro de que se confirmó sin poder comprobarlo.
+    pub fn confirm_not_sent_unverified(&mut self, task_id: i64) -> AppResult<Task> {
+        self.confirm_not_sent_with(task_id, true)
+    }
+
+    fn confirm_not_sent_with(&mut self, task_id: i64, unverified: bool) -> AppResult<Task> {
         let (task, mut result) = self.reviewable(task_id)?;
         let kind = action_kind(&task);
         let actions: Vec<ActionRecord> = self
@@ -2744,6 +2830,7 @@ impl App {
             return self.complete_with(task.id, result, done.version, receipt, None);
         }
         let mut unsent = Vec::new();
+        let mut unverifiable: Vec<i64> = Vec::new();
         for action in actions.iter().filter(|a| a.is_unsettled()) {
             let found = self.lookup_action(&task, kind, action);
             match found {
@@ -2753,16 +2840,26 @@ impl App {
                 }
                 Ok(None) => unsent.push(action),
                 Err(e) if e.code == nestadmin_simulators::codes::NOT_FOUND => unsent.push(action),
+                Err(e) if unverified && e.code == sales::send_codes::ATTEMPT_UNVERIFIABLE => {
+                    unsent.push(action);
+                    unverifiable.push(action.version);
+                }
                 Err(e) => return Err(AppError::Connector(e)),
             }
         }
         for action in unsent {
-            self.store.supersede_action(
-                task.id,
-                action,
-                &Authorization::Approval,
-                "el usuario confirmó que no se realizó",
-            )?;
+            let reason = if unverifiable.contains(&action.version) {
+                "el usuario confirmó que no se realizó sin poder comprobarlo"
+            } else {
+                "el usuario confirmó que no se realizó"
+            };
+            self.store
+                .supersede_action(task.id, action, &Authorization::Approval, reason)?;
+        }
+        if !unverifiable.is_empty() {
+            let note = json!({ "task": task.id, "versions": unverifiable });
+            self.store
+                .record_note("sales.send_unverified_confirmed", "ok", &note)?;
         }
         let version = result["version"].as_i64().unwrap_or(1);
         result["version"] = json!(version + 1);
@@ -3047,6 +3144,15 @@ impl App {
     /// encoladas de esa cuenta siguen visibles; enviar desde ellas falla con el motivo. Las
     /// tareas pendientes de su primera lectura se cancelan.
     pub fn remove_mail_account(&mut self, id: &str) -> AppResult<()> {
+        // Con envíos de documentos sin confirmar no se puede comprobar si salieron sin esa cuenta
+        // (D246): primero se resuelven.
+        if self.account_has_unsettled_sends(id)? {
+            return Err(sales::send_error(
+                sales::send_codes::ACCOUNT_HAS_PENDING_SENDS,
+                "Hay envíos de documentos de venta sin confirmar desde esta cuenta; resuélvalos \
+                 antes de quitarla",
+            ));
+        }
         // Se resuelve antes de quitarla (migra una marca guardada por identificador si ya consta la
         // dirección) y se buscan también las marcas que apunten a este identificador.
         let sources = self.account_read_sources(id)?;

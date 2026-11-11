@@ -712,12 +712,34 @@ fn a_cut_leaves_the_receipt_to_be_found_when_the_app_reopens() {
     app.retry(task_id).unwrap();
     process_all(&mut app);
     let result = result_of(&app, task_id);
-    assert_eq!(result["recovery"]["error"], "unavailable");
+    assert_eq!(result["recovery"]["error"], "attempt_unverifiable");
     assert_eq!(result["recovery"]["needs_confirmation"], false);
     assert!(sent(&app).is_empty());
     assert!(app.sales_document_sends(id).unwrap().is_empty());
+    // «Confirmo que no se envió» normal no basta: no se puede comprobar (D246).
     let error = app.confirm_not_sent(task_id).unwrap_err();
-    assert_eq!(code(&error), "unavailable");
+    assert_eq!(code(&error), "attempt_unverifiable");
+    assert_eq!(code(&app.reject(task_id).unwrap_err()), "send_in_progress");
+
+    // La salida explícita de la persona abre la versión nueva y deja constancia en el registro.
+    let confirmed = app.confirm_not_sent_unverified(task_id).unwrap();
+    assert_eq!(confirmed.state, TaskState::AwaitingReview);
+    let fresh = confirmed.result.unwrap();
+    assert_eq!(fresh["version"], 2);
+    assert!(fresh.get("recovery").is_none());
+    assert!(app
+        .audit_log()
+        .unwrap()
+        .iter()
+        .any(|e| e.action == "sales.send_unverified_confirmed"));
+    // La cuenta sigue sin existir: aprobar no envía; la persona puede descartar la tarea.
+    assert_eq!(
+        code(&app.approve(task_id, 2).unwrap_err()),
+        "account_unavailable"
+    );
+    assert_eq!(app.reject(task_id).unwrap().state, TaskState::Cancelled);
+    assert!(sent(&app).is_empty());
+    assert!(app.sales_document_sends(id).unwrap().is_empty());
 }
 
 #[test]
@@ -1326,18 +1348,26 @@ fn a_missing_attempt_account_is_unavailable_and_never_falls_back_to_the_current_
     process_all(&mut app);
     let review = task_of(&app, task.id);
     assert_eq!(review.state, TaskState::AwaitingReview);
-    assert_eq!(review.result.unwrap()["recovery"]["error"], "unavailable");
+    assert_eq!(
+        review.result.unwrap()["recovery"]["error"],
+        "attempt_unverifiable"
+    );
     assert!(app.sales_document_sends(id).unwrap().is_empty());
     assert_eq!(status(&app, id), Status::Issued);
     assert_eq!(sim.sent().unwrap().len(), 1, "nada se envió otra vez");
     assert_eq!(
         code(&app.confirm_not_sent(task.id).unwrap_err()),
-        "unavailable"
+        "attempt_unverifiable"
     );
+    // Solo la salida explícita de la persona lo cierra, con su versión y aprobación nuevas.
+    let confirmed = app.confirm_not_sent_unverified(task.id).unwrap();
+    assert_eq!(confirmed.state, TaskState::AwaitingReview);
+    assert_eq!(confirmed.result.unwrap()["version"], 2);
+    assert_eq!(sim.sent().unwrap().len(), 1, "confirmar no envía");
 }
 
 #[test]
-fn an_account_disconnected_after_the_attempt_is_unavailable_never_not_sent() {
+fn an_account_with_an_unconfirmed_send_cannot_be_removed_until_it_is_resolved() {
     let dir = tempfile::tempdir().unwrap();
     let (mut app, customer, flags, sim) = lossy_app(dir.path());
     let id = issue(&mut app, DocumentKind::Quote, customer);
@@ -1346,26 +1376,29 @@ fn an_account_disconnected_after_the_attempt_is_unavailable_never_not_sent() {
     assert_eq!(app.approve(task.id, 1).unwrap().state, TaskState::Failed);
     assert_eq!(sim.sent().unwrap().len(), 1);
 
-    // La cuenta se desconecta después del intento: no se sabe si salió.
-    app.remove_mail_account("lossy").unwrap();
+    // Quitar la cuenta dejaría el envío sin forma de comprobarse: se niega con un código estable.
+    let error = app.remove_mail_account("lossy").unwrap_err();
+    assert_eq!(code(&error), "account_has_pending_sends");
+    assert!(error.to_string().contains("resuélvalos antes de quitarla"));
+    assert!(app.mail_accounts().accounts.iter().any(|a| a.id == "lossy"));
+
+    // También con el intento ya en revisión y sin comprobar.
+    flags.drop_send.store(false, Ordering::SeqCst);
+    flags.lookup_unavailable.store(true, Ordering::SeqCst);
     app.retry(task.id).unwrap();
     process_all(&mut app);
-    let review = task_of(&app, task.id);
-    assert_eq!(review.state, TaskState::AwaitingReview);
-    let result = review.result.unwrap();
-    assert_eq!(result["recovery"]["error"], "unavailable");
-    assert_eq!(result["recovery"]["needs_confirmation"], false);
-    // Ni aprobar ni «Confirmo que no se envió» lo cierran, y no hay otro envío.
-    let error = app.approve(task.id, 1).unwrap_err();
-    assert_eq!(code(&error), "account_unavailable");
+    assert_eq!(task_of(&app, task.id).state, TaskState::AwaitingReview);
     assert_eq!(
-        code(&app.confirm_not_sent(task.id).unwrap_err()),
-        "unavailable"
+        code(&app.remove_mail_account("lossy").unwrap_err()),
+        "account_has_pending_sends"
     );
-    assert_eq!(code(&app.reject(task.id).unwrap_err()), "send_in_progress");
-    assert_eq!(sim.sent().unwrap().len(), 1);
-    assert!(sent(&app).is_empty());
-    assert!(app.sales_document_sends(id).unwrap().is_empty());
+
+    // Resuelto el envío (no salió, según la propia cuenta), ya se puede quitar.
+    flags.lookup_unavailable.store(false, Ordering::SeqCst);
+    flags.lookup_not_found.store(true, Ordering::SeqCst);
+    let confirmed = app.confirm_not_sent(task.id).unwrap();
+    assert_eq!(confirmed.state, TaskState::AwaitingReview);
+    app.remove_mail_account("lossy").unwrap();
 }
 
 #[test]
@@ -1475,4 +1508,96 @@ fn light_letterhead() -> Vec<u8> {
         )
         .unwrap();
     document.save_to_bytes().unwrap()
+}
+
+// ---- Segunda ronda de correcciones (D246) ----
+
+#[test]
+fn reopening_repairs_a_cancelled_send_whose_action_is_confirmed_without_changing_its_state() {
+    let dir = tempfile::tempdir().unwrap();
+    let (id, task_id);
+    {
+        let (mut app, customer, flags, _sim) = lossy_app(dir.path());
+        id = issue(&mut app, DocumentKind::Invoice, customer);
+        let task = app.prepare_sales_send(id).unwrap();
+        task_id = task.id;
+        flags.drop_send.store(true, Ordering::SeqCst);
+        assert_eq!(app.approve(task.id, 1).unwrap().state, TaskState::Failed);
+        // El daño que dejaba «Descartar»: tarea cancelada, acción confirmada y sin fila.
+        force_state(dir.path(), task.id, "confirmed", "cancelled");
+        assert!(app.sales_document_sends(id).unwrap().is_empty());
+    }
+    let app = open(dir.path());
+    assert_eq!(task_of(&app, task_id).state, TaskState::Cancelled);
+    assert_eq!(status(&app, id), Status::Sent, "issued pasa a sent");
+    assert_eq!(app.sales_document_sends(id).unwrap().len(), 1);
+    // Reabrir otra vez no duplica nada.
+    drop(app);
+    let app = open(dir.path());
+    assert_eq!(task_of(&app, task_id).state, TaskState::Cancelled);
+    assert_eq!(app.sales_document_sends(id).unwrap().len(), 1);
+}
+
+#[test]
+fn reopening_closes_a_queued_send_whose_action_is_confirmed_through_running() {
+    let dir = tempfile::tempdir().unwrap();
+    let (id, task_id);
+    {
+        let (mut app, customer, flags, _sim) = lossy_app(dir.path());
+        id = issue(&mut app, DocumentKind::Invoice, customer);
+        let task = app.prepare_sales_send(id).unwrap();
+        task_id = task.id;
+        flags.drop_send.store(true, Ordering::SeqCst);
+        assert_eq!(app.approve(task.id, 1).unwrap().state, TaskState::Failed);
+        force_state(dir.path(), task.id, "confirmed", "queued");
+    }
+    let app = open(dir.path());
+    assert_eq!(task_of(&app, task_id).state, TaskState::Completed);
+    assert_eq!(status(&app, id), Status::Sent);
+    assert_eq!(app.sales_document_sends(id).unwrap().len(), 1);
+    assert!(app.sales_send_task(id).unwrap().is_none());
+}
+
+#[test]
+fn a_task_that_cannot_be_closed_at_open_is_noted_and_the_others_are_still_closed() {
+    let dir = tempfile::tempdir().unwrap();
+    let (broken, good, good_doc);
+    {
+        let (mut app, customer, flags, _sim) = lossy_app(dir.path());
+        flags.drop_send.store(true, Ordering::SeqCst);
+        let first = issue(&mut app, DocumentKind::Invoice, customer);
+        let task = app.prepare_sales_send(first).unwrap();
+        broken = task.id;
+        assert_eq!(app.approve(task.id, 1).unwrap().state, TaskState::Failed);
+        good_doc = issue(&mut app, DocumentKind::Invoice, customer);
+        let task = app.prepare_sales_send(good_doc).unwrap();
+        good = task.id;
+        assert_eq!(app.approve(task.id, 1).unwrap().state, TaskState::Failed);
+        force_state(dir.path(), broken, "confirmed", "failed");
+        force_state(dir.path(), good, "confirmed", "failed");
+        // El documento de la primera tarea ya no se puede cargar.
+        let conn = rusqlite::Connection::open(dir.path().join("nestadmin.db")).unwrap();
+        conn.execute(
+            "UPDATE tasks SET result = json_set(result, '$.document.id', 999999) WHERE id = ?1",
+            [broken],
+        )
+        .unwrap();
+    }
+    // Abrir no falla: el error de esa tarea se anota y la otra se cierra.
+    let app = open(dir.path());
+    assert_eq!(task_of(&app, broken).state, TaskState::Failed);
+    assert_eq!(task_of(&app, good).state, TaskState::Completed);
+    assert_eq!(status(&app, good_doc), Status::Sent);
+    let notes: Vec<_> = app
+        .audit_log()
+        .unwrap()
+        .into_iter()
+        .filter(|e| e.action == "open.recover_task")
+        .collect();
+    assert_eq!(notes.len(), 1, "{notes:?}");
+    assert!(notes[0]
+        .detail
+        .as_deref()
+        .unwrap()
+        .contains(&broken.to_string()));
 }
