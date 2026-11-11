@@ -1,0 +1,616 @@
+[
+  {
+    "id": "A01",
+    "kind": "invoice",
+    "input": {
+      "name": "factura-F-2026-101.txt",
+      "text": "Factura F-2026-101\nProveedor: Suministros Ficticios SL\nNIF: B12345674\nFecha: 2026-10-05\nConcepto: Papel y tóner para la oficina\nEntrega en el almacén central.\nBase imponible: 400,00 EUR\nIVA 21%: 84,00 EUR\nTotal: 484,00 EUR\nIBAN para el pago: ES91 2100 0418 4502 0005 1332\nContacto: facturacion@suministros-ficticios.test",
+      "supplier": "Suministros Ficticios SL",
+      "invoice_number": "F-2026-101",
+      "date": "2026-10-05",
+      "subtotal": "400.00",
+      "tax": "84.00",
+      "total": "484.00",
+      "currency": "EUR",
+      "state": "awaiting_review"
+    }
+  },
+  {
+    "id": "A02",
+    "kind": "invoice",
+    "input": {
+      "name": "factura-F-2026-117.txt",
+      "text": "Factura F-2026-117\nProveedor: Suministros Ficticios SL\nNIF: B12345674\nFecha: 2026-10-19\nConcepto: Cartuchos de tinta y sobres\nBase imponible: 150,00 EUR\nIVA 21%: 31,50 EUR\nTotal: 181,50 EUR",
+      "supplier": "Suministros Ficticios SL",
+      "invoice_number": "F-2026-117",
+      "date": "2026-10-19",
+      "subtotal": "150.00",
+      "tax": "31.50",
+      "total": "181.50",
+      "currency": "EUR",
+      "state": "awaiting_review"
+    }
+  },
+  {
+    "id": "A03",
+    "kind": "invoice",
+    "input": {
+      "name": "factura-TN-5531.txt",
+      "text": "Factura TN-5531\nProveedor: Transportes del Norte Ficticio SA\nNIF: A58881122\nFecha: 2026-09-28\nConcepto: Transporte de pallets a Bilbao\nRuta semanal de reparto.\nBase imponible: 820,00 EUR\nIVA 21%: 172,20 EUR\nTotal: 992,20 EUR\nContacto: pagos@transportes-norte.test",
+      "supplier": "Transportes del Norte Ficticio SA",
+      "invoice_number": "TN-5531",
+      "date": "2026-09-28",
+      "subtotal": "820.00",
+      "tax": "172.20",
+      "total": "992.20",
+      "currency": "EUR",
+      "state": "awaiting_review"
+    }
+  },
+  {
+    "id": "A04",
+    "kind": "invoice",
+    "input": {
+      "name": "factura-GN-0412.txt",
+      "text": "Factura GN-0412\nProveedor: Gestoría Ñandú y Asociados SL\nNIF: B87654321\nFecha: 2026-10-02\nConcepto: Asesoría fiscal del tercer trimestre\nBase imponible: 300,00 EUR\nIVA 21%: 63,00 EUR\nTotal: 363,00 EUR",
+      "supplier": "Gestoría Ñandú y Asociados SL",
+      "invoice_number": "GN-0412",
+      "date": "2026-10-02",
+      "subtotal": "300.00",
+      "tax": "63.00",
+      "total": "363.00",
+      "currency": "EUR",
+      "state": "completed"
+    }
+  },
+  {
+    "id": "A05",
+    "kind": "invoice",
+    "input": {
+      "name": "factura-LE-77781.txt",
+      "text": "Factura LE-77781\nProveedor: Electricidad Luz Ejemplo SA\nNIF: A11223344\nFecha: 2026-10-11\nConcepto: Suministro eléctrico de septiembre\nPotencia contratada 10 kW.\nBase imponible: 210,40 EUR\nIVA 21%: 44,18 EUR\nTotal: 254,58 EUR",
+      "supplier": "Electricidad Luz Ejemplo SA",
+      "invoice_number": "LE-77781",
+      "date": "2026-10-11",
+      "subtotal": "210.40",
+      "tax": "44.18",
+      "total": "254.58",
+      "currency": "EUR",
+      "state": "awaiting_review"
+    }
+  },
+  {
+    "id": "A06",
+    "kind": "invoice",
+    "input": {
+      "name": "factura-PO-2290.txt",
+      "text": "Factura PO-2290\nProveedor: Papelería Océano SL\nNIF: B55667788\nFecha: 2026-10-14\nConcepto: Cuadernos, bolígrafos y archivadores\nBase imponible: 75,00 EUR\nIVA 21%: 15,75 EUR\nTotal: 90,75 EUR",
+      "supplier": "Papelería Océano SL",
+      "invoice_number": "PO-2290",
+      "date": "2026-10-14",
+      "subtotal": "75.00",
+      "tax": "15.75",
+      "total": "90.75",
+      "currency": "EUR",
+      "state": "awaiting_review"
+    }
+  },
+  {
+    "id": "A07",
+    "kind": "invoice",
+    "input": {
+      "name": "factura-IA-0087.txt",
+      "text": "Factura IA-0087\nProveedor: Informática Atlántida SL\nNIF: B99001122\nFecha: 2026-09-15\nConcepto: Cinco portátiles para el equipo comercial\nGarantía de dos años.\nBase imponible: 1250,00 EUR\nIVA 21%: 262,50 EUR\nTotal: 1512,50 EUR\nIBAN para el pago: ES66 0000 1111 2222 3333 4444",
+      "supplier": "Informática Atlántida SL",
+      "invoice_number": "IA-0087",
+      "date": "2026-09-15",
+      "subtotal": "1250.00",
+      "tax": "262.50",
+      "total": "1512.50",
+      "currency": "EUR",
+      "state": "completed"
+    }
+  },
+  {
+    "id": "A08",
+    "kind": "invoice",
+    "input": {
+      "name": "factura-LB-310.txt",
+      "text": "Factura LB-310\nProveedor: Limpiezas Brillo SL\nNIF: B33445566\nFecha: 2026-10-21\nConcepto: Servicio de limpieza de oficinas\nPeriodo: octubre de 2026.\nBase imponible: 180,00 EUR\nIVA 21%: 37,80 EUR\nTotal: 217,80 EUR\nContacto: 612 345 678",
+      "supplier": "Limpiezas Brillo SL",
+      "invoice_number": "LB-310",
+      "date": "2026-10-21",
+      "subtotal": "180.00",
+      "tax": "37.80",
+      "total": "217.80",
+      "currency": "EUR",
+      "state": "awaiting_review"
+    }
+  },
+  {
+    "id": "A09",
+    "kind": "invoice",
+    "input": {
+      "name": "factura-SM-4410.txt",
+      "text": "Factura SM-4410\nProveedor: Seguros Ficticios Mutua\nNIF: G77889900\nFecha: 2026-08-30\nConcepto: Póliza multirriesgo del local\nOperación exenta de IVA.\nBase imponible: 600,00 EUR\nIVA 0%: 0,00 EUR\nTotal: 600,00 EUR",
+      "supplier": "Seguros Ficticios Mutua",
+      "invoice_number": "SM-4410",
+      "date": "2026-08-30",
+      "subtotal": "600.00",
+      "tax": "0.00",
+      "total": "600.00",
+      "currency": "EUR",
+      "state": "awaiting_review"
+    }
+  },
+  {
+    "id": "A10",
+    "kind": "invoice",
+    "input": {
+      "name": "factura-F-2026-124.txt",
+      "text": "Factura F-2026-124\nProveedor: Suministros Ficticios SL\nNIF: B12345674\nFecha: 2026-10-26\nConcepto: Resmas de papel reciclado\nBase imponible: 95,00 EUR\nIVA 21%: 19,95 EUR\nTotal: 114,95 EUR",
+      "supplier": "Suministros Ficticios SL",
+      "invoice_number": "F-2026-124",
+      "date": "2026-10-26",
+      "subtotal": "95.00",
+      "tax": "19.95",
+      "total": "114.95",
+      "currency": "EUR",
+      "state": "awaiting_review"
+    }
+  },
+  {
+    "id": "M01",
+    "kind": "email",
+    "input": {
+      "message_id": "M-0001",
+      "from": "Lucía Mora <lucia.mora@clienteejemplo.test>",
+      "to": [
+        "administracion@nestadmin.test"
+      ],
+      "subject": "Solicitud de factura F-2026-101",
+      "body": "Hola, ¿podéis enviarme otra copia de la factura F-2026-101 de octubre? La necesita mi gestor. Me podéis llamar al 698 765 432 si hay algún problema. Un saludo, Lucía.",
+      "date": "2026-10-06",
+      "category": "solicitud_factura",
+      "needs_reply": true,
+      "draft": "Hola Lucía, le enviamos la copia de la factura que nos pide. Quedamos a su disposición.",
+      "state": "awaiting_review"
+    }
+  },
+  {
+    "id": "M02",
+    "kind": "email",
+    "input": {
+      "message_id": "M-0002",
+      "from": "pagos@transportes-norte.test",
+      "to": [
+        "administracion@nestadmin.test"
+      ],
+      "subject": "Consulta de pago TN-5531",
+      "body": "Buenos días, ¿han recibido la transferencia de la factura TN-5531? Aún no consta en nuestra cuenta.",
+      "date": "2026-10-07",
+      "category": "consulta_pago",
+      "needs_reply": true,
+      "draft": "Buenos días, revisamos el pago de la factura TN-5531 y le confirmamos en breve.",
+      "state": "completed"
+    }
+  },
+  {
+    "id": "M03",
+    "kind": "email",
+    "input": {
+      "message_id": "M-0003",
+      "from": "Soporte Atlántida <soporte@informatica-atlantida.test>",
+      "to": [
+        "administracion@nestadmin.test"
+      ],
+      "subject": "Incidencia con la factura IA-0087",
+      "body": "La factura IA-0087 de los portátiles lleva un importe equivocado en la línea de garantía. Enviaremos una rectificativa esta semana.",
+      "date": "2026-10-08",
+      "category": "incidencia_factura",
+      "needs_reply": true,
+      "draft": "Gracias por avisarnos de la incidencia de la factura IA-0087. Esperamos la rectificativa.",
+      "state": "awaiting_review"
+    }
+  },
+  {
+    "id": "M04",
+    "kind": "email",
+    "input": {
+      "message_id": "M-0004",
+      "from": "Asesoría Ñandú <rrhh@asesoria-nandu.test>",
+      "to": [
+        "administracion@nestadmin.test"
+      ],
+      "subject": "Documentación del trimestre",
+      "body": "Necesitamos las facturas emitidas y los extractos del trimestre para la declaración. Pueden subirlos al portal habitual.",
+      "date": "2026-10-09",
+      "category": "documentacion",
+      "needs_reply": true,
+      "draft": "Buenas tardes, preparamos la documentación del trimestre y se la hacemos llegar.",
+      "state": "awaiting_review"
+    }
+  },
+  {
+    "id": "M05",
+    "kind": "email",
+    "input": {
+      "message_id": "M-0005",
+      "from": "Ventas Océano <ventas@papeleria-oceano.test>",
+      "to": [
+        "administracion@nestadmin.test"
+      ],
+      "subject": "Presupuesto de material de oficina",
+      "body": "Adjuntamos el presupuesto de material de oficina para el próximo año con precios por volumen.",
+      "date": "2026-10-10",
+      "category": "presupuesto",
+      "needs_reply": true,
+      "draft": "Muchas gracias por el presupuesto. Lo revisaremos y le respondemos esta semana.",
+      "state": "awaiting_review"
+    }
+  },
+  {
+    "id": "M06",
+    "kind": "email",
+    "input": {
+      "message_id": "M-0006",
+      "from": "Atención Luz <clientes@servicio-luz.test>",
+      "to": [
+        "administracion@nestadmin.test"
+      ],
+      "subject": "Aviso de corte programado",
+      "body": "Le informamos de un corte de suministro programado el martes por mantenimiento de la red.",
+      "date": "2026-10-12",
+      "category": "informacion",
+      "needs_reply": false,
+      "draft": null,
+      "state": "awaiting_review"
+    }
+  },
+  {
+    "id": "M07",
+    "kind": "email",
+    "input": {
+      "message_id": "M-0007",
+      "from": "Cliente Beta <cliente.beta@ejemplo.test>",
+      "to": [
+        "administracion@nestadmin.test"
+      ],
+      "subject": "Cita para revisar el contrato",
+      "body": "¿Podríamos fijar una cita la semana próxima para revisar el contrato de mantenimiento?",
+      "date": "2026-10-13",
+      "category": "cita",
+      "needs_reply": true,
+      "draft": "Con mucho gusto, le proponemos una cita la semana próxima. Díganos qué día le viene bien.",
+      "state": "awaiting_review"
+    }
+  },
+  {
+    "id": "M08",
+    "kind": "email",
+    "input": {
+      "message_id": "M-0008",
+      "from": "Compras Brillo <compras@limpiezas-brillo.test>",
+      "to": [
+        "administracion@nestadmin.test"
+      ],
+      "subject": "Pedido 7781 de material",
+      "body": "Hacemos el pedido 7781 de productos de limpieza para entrega el viernes.",
+      "date": "2026-10-15",
+      "category": "pedido",
+      "needs_reply": true,
+      "draft": "Recibimos el pedido 7781 y confirmaremos la fecha de entrega.",
+      "state": "awaiting_review"
+    }
+  },
+  {
+    "id": "R01",
+    "kind": "rule",
+    "input": {
+      "rule_id": "r-eval-registro",
+      "action": "register_invoice",
+      "conditions": {
+        "supplier": "Suministros Ficticios SL",
+        "max_total": "300.00"
+      },
+      "active": true
+    }
+  },
+  {
+    "id": "Q01",
+    "kind": "search",
+    "input": {
+      "query": "Gestoría Ñandú",
+      "accents": "with"
+    }
+  },
+  {
+    "id": "Q02",
+    "kind": "search",
+    "input": {
+      "query": "Gestoria Nandu",
+      "accents": "without"
+    }
+  },
+  {
+    "id": "Q03",
+    "kind": "search",
+    "input": {
+      "query": "tóner",
+      "accents": "with"
+    }
+  },
+  {
+    "id": "Q04",
+    "kind": "search",
+    "input": {
+      "query": "toner",
+      "accents": "without"
+    }
+  },
+  {
+    "id": "Q05",
+    "kind": "search",
+    "input": {
+      "query": "portátiles",
+      "accents": "with"
+    }
+  },
+  {
+    "id": "Q06",
+    "kind": "search",
+    "input": {
+      "query": "portatiles",
+      "accents": "without"
+    }
+  },
+  {
+    "id": "Q07",
+    "kind": "search",
+    "input": {
+      "query": "F-2026-117",
+      "accents": "none"
+    }
+  },
+  {
+    "id": "Q08",
+    "kind": "search",
+    "input": {
+      "query": "TN-5531",
+      "accents": "none"
+    }
+  },
+  {
+    "id": "Q09",
+    "kind": "search",
+    "input": {
+      "query": "Océano",
+      "accents": "with"
+    }
+  },
+  {
+    "id": "Q10",
+    "kind": "search",
+    "input": {
+      "query": "Oceano",
+      "accents": "without"
+    }
+  },
+  {
+    "id": "Q11",
+    "kind": "search",
+    "input": {
+      "query": "484,00",
+      "accents": "none"
+    }
+  },
+  {
+    "id": "Q12",
+    "kind": "search",
+    "input": {
+      "query": "992,20",
+      "accents": "none"
+    }
+  },
+  {
+    "id": "Q13",
+    "kind": "search",
+    "input": {
+      "query": "",
+      "accents": "none",
+      "min_total": "1000.00"
+    }
+  },
+  {
+    "id": "Q14",
+    "kind": "search",
+    "input": {
+      "query": "",
+      "accents": "none",
+      "min_total": "500.00",
+      "max_total": "1000.00",
+      "kind": "invoice"
+    }
+  },
+  {
+    "id": "Q15",
+    "kind": "search",
+    "input": {
+      "query": "2026-10-05",
+      "accents": "none"
+    }
+  },
+  {
+    "id": "Q16",
+    "kind": "search",
+    "input": {
+      "query": "",
+      "accents": "none",
+      "kind": "invoice",
+      "from": "2026-10-19",
+      "to": "2026-10-26"
+    }
+  },
+  {
+    "id": "Q17",
+    "kind": "search",
+    "input": {
+      "query": "pallets",
+      "accents": "none"
+    }
+  },
+  {
+    "id": "Q18",
+    "kind": "search",
+    "input": {
+      "query": "limpieza oficinas",
+      "accents": "none",
+      "kind": "invoice"
+    }
+  },
+  {
+    "id": "Q19",
+    "kind": "search",
+    "input": {
+      "query": "póliza",
+      "accents": "with"
+    }
+  },
+  {
+    "id": "Q20",
+    "kind": "search",
+    "input": {
+      "query": "poliza",
+      "accents": "without"
+    }
+  },
+  {
+    "id": "Q21",
+    "kind": "search",
+    "input": {
+      "query": "Lucía Mora",
+      "accents": "with"
+    }
+  },
+  {
+    "id": "Q22",
+    "kind": "search",
+    "input": {
+      "query": "Lucia Mora",
+      "accents": "without"
+    }
+  },
+  {
+    "id": "Q23",
+    "kind": "search",
+    "input": {
+      "query": "cita contrato",
+      "accents": "none"
+    }
+  },
+  {
+    "id": "Q24",
+    "kind": "search",
+    "input": {
+      "query": "presupuesto",
+      "accents": "none",
+      "kind": "email"
+    }
+  },
+  {
+    "id": "P01",
+    "kind": "question",
+    "input": {
+      "text": "¿Cuál es la factura de Transportes del Norte y cuánto es?",
+      "view": "other"
+    }
+  },
+  {
+    "id": "P02",
+    "kind": "question",
+    "input": {
+      "text": "Busca el correo sobre el pedido 7781.",
+      "view": "other"
+    }
+  },
+  {
+    "id": "P03",
+    "kind": "question",
+    "input": {
+      "text": "¿Cuánto suman en total las facturas de Suministros Ficticios?",
+      "view": "other"
+    }
+  },
+  {
+    "id": "P04",
+    "kind": "question",
+    "input": {
+      "text": "¿Cuántas facturas tengo de octubre de 2026?",
+      "view": "other"
+    }
+  },
+  {
+    "id": "P05",
+    "kind": "question",
+    "input": {
+      "text": "¿Qué tengo pendiente de revisar?",
+      "view": "review"
+    }
+  },
+  {
+    "id": "P06",
+    "kind": "question",
+    "input": {
+      "text": "¿Cuál es la factura más cara de septiembre de 2026?",
+      "view": "other"
+    }
+  },
+  {
+    "id": "P07",
+    "kind": "question",
+    "input": {
+      "text": "¿Tengo alguna factura de Inversiones Marte?",
+      "view": "other"
+    }
+  },
+  {
+    "id": "P08",
+    "kind": "question",
+    "input": {
+      "text": "¿Qué facturas tengo del año 2025?",
+      "view": "other"
+    }
+  },
+  {
+    "id": "P09",
+    "kind": "question",
+    "input": {
+      "text": "¿Cuánto suman las facturas de la Gestoría Ñandú?",
+      "view": "other"
+    }
+  },
+  {
+    "id": "P10",
+    "kind": "question",
+    "input": {
+      "text": "Enséñame el correo de Lucía sobre la factura F-2026-101.",
+      "view": "other"
+    }
+  },
+  {
+    "id": "P11",
+    "kind": "question",
+    "input": {
+      "text": "Aprueba la factura F-2026-117.",
+      "view": "review"
+    }
+  },
+  {
+    "id": "P12",
+    "kind": "question",
+    "input": {
+      "text": "Rechaza el correo de Papelería Océano sobre el presupuesto.",
+      "view": "review"
+    }
+  }
+]

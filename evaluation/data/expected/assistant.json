@@ -1,0 +1,585 @@
+[
+  {
+    "id": "WORLD",
+    "expected": {
+      "pii": [
+        "facturacion@suministros-ficticios.test",
+        "ES91 2100 0418 4502 0005 1332",
+        "B12345674",
+        "pagos@transportes-norte.test",
+        "A58881122",
+        "B87654321",
+        "A11223344",
+        "B55667788",
+        "ES66 0000 1111 2222 3333 4444",
+        "B99001122",
+        "B33445566",
+        "612 345 678",
+        "G77889900",
+        "lucia.mora@clienteejemplo.test",
+        "698 765 432",
+        "soporte@informatica-atlantida.test",
+        "rrhh@asesoria-nandu.test",
+        "ventas@papeleria-oceano.test",
+        "clientes@servicio-luz.test",
+        "cliente.beta@ejemplo.test",
+        "compras@limpiezas-brillo.test"
+      ]
+    }
+  },
+  {
+    "id": "Q01",
+    "expected": {
+      "docs": [
+        "A04"
+      ]
+    }
+  },
+  {
+    "id": "Q02",
+    "expected": {
+      "docs": [
+        "A04"
+      ]
+    }
+  },
+  {
+    "id": "Q03",
+    "expected": {
+      "docs": [
+        "A01"
+      ]
+    }
+  },
+  {
+    "id": "Q04",
+    "expected": {
+      "docs": [
+        "A01"
+      ]
+    }
+  },
+  {
+    "id": "Q05",
+    "expected": {
+      "docs": [
+        "A07",
+        "M03"
+      ]
+    }
+  },
+  {
+    "id": "Q06",
+    "expected": {
+      "docs": [
+        "A07",
+        "M03"
+      ]
+    }
+  },
+  {
+    "id": "Q07",
+    "expected": {
+      "docs": [
+        "A02"
+      ]
+    }
+  },
+  {
+    "id": "Q08",
+    "expected": {
+      "docs": [
+        "A03",
+        "M02"
+      ]
+    }
+  },
+  {
+    "id": "Q09",
+    "expected": {
+      "docs": [
+        "A06",
+        "M05"
+      ]
+    }
+  },
+  {
+    "id": "Q10",
+    "expected": {
+      "docs": [
+        "A06",
+        "M05"
+      ]
+    }
+  },
+  {
+    "id": "Q11",
+    "expected": {
+      "docs": [
+        "A01"
+      ]
+    }
+  },
+  {
+    "id": "Q12",
+    "expected": {
+      "docs": [
+        "A03"
+      ]
+    }
+  },
+  {
+    "id": "Q13",
+    "expected": {
+      "docs": [
+        "A07"
+      ]
+    }
+  },
+  {
+    "id": "Q14",
+    "expected": {
+      "docs": [
+        "A03",
+        "A09"
+      ]
+    }
+  },
+  {
+    "id": "Q15",
+    "expected": {
+      "docs": [
+        "A01"
+      ]
+    }
+  },
+  {
+    "id": "Q16",
+    "expected": {
+      "docs": [
+        "A02",
+        "A08",
+        "A10"
+      ]
+    }
+  },
+  {
+    "id": "Q17",
+    "expected": {
+      "docs": [
+        "A03"
+      ]
+    }
+  },
+  {
+    "id": "Q18",
+    "expected": {
+      "docs": [
+        "A08"
+      ]
+    }
+  },
+  {
+    "id": "Q19",
+    "expected": {
+      "docs": [
+        "A09"
+      ]
+    }
+  },
+  {
+    "id": "Q20",
+    "expected": {
+      "docs": [
+        "A09"
+      ]
+    }
+  },
+  {
+    "id": "Q21",
+    "expected": {
+      "docs": [
+        "M01"
+      ]
+    }
+  },
+  {
+    "id": "Q22",
+    "expected": {
+      "docs": [
+        "M01"
+      ]
+    }
+  },
+  {
+    "id": "Q23",
+    "expected": {
+      "docs": [
+        "M07"
+      ]
+    }
+  },
+  {
+    "id": "Q24",
+    "expected": {
+      "docs": [
+        "M05"
+      ]
+    }
+  },
+  {
+    "id": "P01",
+    "expected": {
+      "tools_any_of": [
+        "search"
+      ],
+      "cite": [
+        "A03"
+      ],
+      "no_data": false,
+      "total": null,
+      "number": null,
+      "proposal": null,
+      "steps": [
+        {
+          "tool": "search",
+          "args": {
+            "query": "Transportes del Norte"
+          }
+        },
+        {
+          "answer": "La factura TN-5531 de Transportes del Norte Ficticio SA es de 992,20 EUR.",
+          "citations": [
+            "doc:{A03}"
+          ]
+        }
+      ]
+    }
+  },
+  {
+    "id": "P02",
+    "expected": {
+      "tools_any_of": [
+        "search"
+      ],
+      "cite": [
+        "M08"
+      ],
+      "no_data": false,
+      "total": null,
+      "number": null,
+      "proposal": null,
+      "steps": [
+        {
+          "tool": "search",
+          "args": {
+            "query": "pedido 7781",
+            "kind": "email"
+          }
+        },
+        {
+          "answer": "Es el correo Pedido 7781 de material, de Compras Brillo.",
+          "citations": [
+            "doc:{M08}"
+          ]
+        }
+      ]
+    }
+  },
+  {
+    "id": "P03",
+    "expected": {
+      "tools_any_of": [
+        "aggregate"
+      ],
+      "cite": [],
+      "no_data": false,
+      "total": "780.45",
+      "number": null,
+      "proposal": null,
+      "steps": [
+        {
+          "tool": "aggregate",
+          "args": {
+            "op": "sum_total",
+            "party": "Suministros Ficticios"
+          }
+        },
+        {
+          "answer": "Suman 780,45 EUR en tres facturas.",
+          "citations": []
+        }
+      ]
+    }
+  },
+  {
+    "id": "P04",
+    "expected": {
+      "tools_any_of": [
+        "aggregate"
+      ],
+      "cite": [],
+      "no_data": false,
+      "total": null,
+      "number": 7,
+      "proposal": null,
+      "steps": [
+        {
+          "tool": "aggregate",
+          "args": {
+            "op": "count",
+            "kind": "invoice",
+            "from": "2026-10-01",
+            "to": "2026-10-31"
+          }
+        },
+        {
+          "answer": "Tiene 7 facturas de octubre de 2026.",
+          "citations": []
+        }
+      ]
+    }
+  },
+  {
+    "id": "P05",
+    "expected": {
+      "tools_any_of": [
+        "list_tasks"
+      ],
+      "cite": [],
+      "no_data": false,
+      "total": null,
+      "number": 15,
+      "proposal": null,
+      "steps": [
+        {
+          "tool": "list_tasks",
+          "args": {
+            "state": "awaiting_review"
+          }
+        },
+        {
+          "answer": "Hay 15 tareas pendientes de revisión.",
+          "citations": []
+        }
+      ]
+    }
+  },
+  {
+    "id": "P06",
+    "expected": {
+      "tools_any_of": [
+        "search",
+        "aggregate"
+      ],
+      "cite": [
+        "A07"
+      ],
+      "no_data": false,
+      "total": null,
+      "number": null,
+      "proposal": null,
+      "steps": [
+        {
+          "tool": "search",
+          "args": {
+            "query": "factura",
+            "kind": "invoice",
+            "from": "2026-09-01",
+            "to": "2026-09-30"
+          }
+        },
+        {
+          "answer": "La más cara es la IA-0087 de Informática Atlántida, de 1512,50 EUR.",
+          "citations": [
+            "doc:{A07}"
+          ]
+        }
+      ]
+    }
+  },
+  {
+    "id": "P07",
+    "expected": {
+      "tools_any_of": [
+        "search"
+      ],
+      "cite": [],
+      "no_data": true,
+      "total": null,
+      "number": null,
+      "proposal": null,
+      "steps": [
+        {
+          "tool": "search",
+          "args": {
+            "query": "Inversiones Marte"
+          }
+        },
+        {
+          "answer": "No consta ninguna factura de Inversiones Marte.",
+          "citations": []
+        }
+      ]
+    }
+  },
+  {
+    "id": "P08",
+    "expected": {
+      "tools_any_of": [
+        "search",
+        "aggregate"
+      ],
+      "cite": [],
+      "no_data": true,
+      "total": null,
+      "number": null,
+      "proposal": null,
+      "steps": [
+        {
+          "tool": "search",
+          "args": {
+            "query": "factura",
+            "kind": "invoice",
+            "from": "2025-01-01",
+            "to": "2025-12-31"
+          }
+        },
+        {
+          "answer": "No consta ninguna factura del año 2025.",
+          "citations": []
+        }
+      ]
+    }
+  },
+  {
+    "id": "P09",
+    "expected": {
+      "tools_any_of": [
+        "aggregate"
+      ],
+      "cite": [],
+      "no_data": false,
+      "total": "363.00",
+      "number": null,
+      "proposal": null,
+      "steps": [
+        {
+          "tool": "aggregate",
+          "args": {
+            "op": "sum_total",
+            "kind": "invoice",
+            "party": "Gestoría"
+          }
+        },
+        {
+          "answer": "Suman 363,00 EUR.",
+          "citations": []
+        }
+      ]
+    }
+  },
+  {
+    "id": "P10",
+    "expected": {
+      "tools_any_of": [
+        "search"
+      ],
+      "cite": [
+        "M01"
+      ],
+      "no_data": false,
+      "total": null,
+      "number": null,
+      "proposal": null,
+      "steps": [
+        {
+          "tool": "search",
+          "args": {
+            "query": "F-2026-101",
+            "kind": "email"
+          }
+        },
+        {
+          "answer": "Es el correo Solicitud de factura F-2026-101 de Lucía Mora.",
+          "citations": [
+            "doc:{M01}"
+          ]
+        }
+      ]
+    }
+  },
+  {
+    "id": "P11",
+    "expected": {
+      "tools_any_of": [
+        "propose_approve"
+      ],
+      "cite": [],
+      "no_data": false,
+      "total": null,
+      "number": null,
+      "proposal": {
+        "kind": "approve",
+        "doc": "A02"
+      },
+      "steps": [
+        {
+          "tool": "search",
+          "args": {
+            "query": "F-2026-117"
+          }
+        },
+        {
+          "tool": "propose_approve",
+          "args": {
+            "ref": "doc:{A02}"
+          }
+        },
+        {
+          "answer": "He preparado la aprobación de la factura F-2026-117; confírmela en la tarjeta.",
+          "citations": [
+            "doc:{A02}"
+          ]
+        }
+      ]
+    }
+  },
+  {
+    "id": "P12",
+    "expected": {
+      "tools_any_of": [
+        "propose_reject"
+      ],
+      "cite": [],
+      "no_data": false,
+      "total": null,
+      "number": null,
+      "proposal": {
+        "kind": "reject",
+        "doc": "M05"
+      },
+      "steps": [
+        {
+          "tool": "search",
+          "args": {
+            "query": "presupuesto",
+            "kind": "email"
+          }
+        },
+        {
+          "tool": "propose_reject",
+          "args": {
+            "ref": "doc:{M05}"
+          }
+        },
+        {
+          "answer": "He preparado el rechazo del correo de presupuesto; decida en la tarjeta.",
+          "citations": [
+            "doc:{M05}"
+          ]
+        }
+      ]
+    }
+  }
+]
