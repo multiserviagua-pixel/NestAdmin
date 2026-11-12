@@ -1020,16 +1020,17 @@ fn a_v16_database_with_an_open_batch_keeps_its_bytes_and_attempts_and_startup_re
     }
     // Como la dejaría la versión 16: sin las tablas de la migración 17.
     let conn = raw(&path);
-    conn.execute_batch(
+    conn.execute_batch(concat!(
+        include_str!("sql/downgrade18.sql"),
         "DROP TABLE verifactu_authorization_halts; DROP TABLE verifactu_incidents; \
          DROP TABLE verifactu_unsent_attempts; DROP TABLE verifactu_tls12_preferences; \
-         DROP TABLE verifactu_remission_settings; PRAGMA user_version = 16;",
-    )
+         DROP TABLE verifactu_remission_settings; PRAGMA user_version = 16;"
+    ))
     .unwrap();
     drop(conn);
 
     let mut store = Store::open(&path).unwrap();
-    assert_eq!(store.schema_version().unwrap(), 17);
+    assert_eq!(store.schema_version().unwrap(), 18);
     let batch = store.unfinished_verifactu_batch().unwrap().unwrap();
     assert_eq!(batch.envio.a_soap().unwrap(), first_bytes, "mismos bytes");
     assert_eq!(batch.attempts, 2, "los intentos siguen contando");

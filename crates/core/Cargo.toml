@@ -12,7 +12,9 @@ nestadmin-sales = { path = "../sales" }
 nestadmin-verifactu = { path = "../verifactu" }
 # Misma configuración que nestadmin-sales y nestadmin-documents (D04, D75).
 rust_decimal = { version = "1", default-features = false, features = ["std", "serde"] }
-rusqlite = { version = "0.41", features = ["bundled"] }
+rusqlite = { version = "0.41", features = ["bundled", "backup"] }
+# Bytes aleatorios del sistema para el número de instalación (D291); ya está en el árbol (`mail`).
+getrandom = "0.3"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"

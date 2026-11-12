@@ -51,6 +51,14 @@ pub enum CoreError {
     InvalidFilter(String),
     #[error("la conversación {0} no existe")]
     ConversationNotFound(i64),
+    #[error("wrong_database: se esperaba la base {expected} y esta es {found}")]
+    WrongDatabase { expected: String, found: String },
+    #[error("{code}: {message}")]
+    Profile { code: &'static str, message: String },
+    #[error("archivo: {0}")]
+    Io(#[from] std::io::Error),
+    #[error("el sistema no da bytes aleatorios: {0}")]
+    Entropy(String),
     #[error("conector: {0}")]
     Connector(#[from] crate::actions::ConnectorError),
 }

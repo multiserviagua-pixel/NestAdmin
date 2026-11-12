@@ -10,6 +10,7 @@ pub mod installation;
 pub mod mail_signals;
 pub mod pipeline;
 pub mod preferences;
+pub mod profiles;
 pub mod queue;
 pub mod rule_panel;
 pub mod rules;

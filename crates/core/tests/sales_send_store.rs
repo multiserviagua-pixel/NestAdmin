@@ -165,14 +165,14 @@ fn a_version_14_database_migrates_to_15_with_a_copy_and_keeps_its_documents() {
     // Como la dejaría la versión 14: sin las tablas de envíos.
     let conn = rusqlite::Connection::open(&path).unwrap();
     conn.execute_batch(
-        "DROP TABLE verifactu_authorization_halts; DROP TABLE verifactu_incidents; DROP TABLE verifactu_unsent_attempts; DROP TABLE verifactu_tls12_preferences; DROP TABLE verifactu_remission_settings; DROP TABLE verifactu_subsanations; DROP TABLE verifactu_record_results; DROP TABLE verifactu_batch_results; DROP TABLE verifactu_batch_attempts; DROP TABLE verifactu_batch_records; DROP TABLE verifactu_batches; DROP TABLE verifactu_record_environments; DROP TABLE verifactu_environment_changes; DROP TABLE sales_send_triggers; DROP TABLE sales_document_sends; PRAGMA user_version = 14;",
+        concat!(include_str!("sql/downgrade18.sql"), "DROP TABLE verifactu_authorization_halts; DROP TABLE verifactu_incidents; DROP TABLE verifactu_unsent_attempts; DROP TABLE verifactu_tls12_preferences; DROP TABLE verifactu_remission_settings; DROP TABLE verifactu_subsanations; DROP TABLE verifactu_record_results; DROP TABLE verifactu_batch_results; DROP TABLE verifactu_batch_attempts; DROP TABLE verifactu_batch_records; DROP TABLE verifactu_batches; DROP TABLE verifactu_record_environments; DROP TABLE verifactu_environment_changes; DROP TABLE sales_send_triggers; DROP TABLE sales_document_sends; PRAGMA user_version = 14;"),
     )
     .unwrap();
     drop(conn);
 
     let store = Store::open(&path).unwrap();
     assert_eq!(store.schema_version().unwrap(), SCHEMA_VERSION);
-    assert_eq!(SCHEMA_VERSION, 17);
+    assert_eq!(SCHEMA_VERSION, 18);
     let backup = backup_path(&path, 14);
     assert_eq!(backup.file_name().unwrap(), "nestadmin.esquema-14.db");
     assert!(backup.exists(), "copia previa a migrar");

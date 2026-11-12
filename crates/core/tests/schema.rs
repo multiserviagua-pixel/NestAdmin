@@ -46,7 +46,7 @@ const DROP_VERIFACTU: &str = "DROP TABLE verifactu_records;";
 const DROP_INSTALLATION: &str = "DROP TABLE installation;";
 /// Quita lo que añadió la migración 15 (envíos de documentos de venta). Va antes de los `DROP`
 /// anteriores.
-const DROP_SENDS: &str = "DROP TABLE verifactu_authorization_halts; DROP TABLE verifactu_incidents; DROP TABLE verifactu_unsent_attempts; DROP TABLE verifactu_tls12_preferences; DROP TABLE verifactu_remission_settings; DROP TABLE verifactu_subsanations; DROP TABLE verifactu_record_results; DROP TABLE verifactu_batch_results; DROP TABLE verifactu_batch_attempts; DROP TABLE verifactu_batch_records; DROP TABLE verifactu_batches; DROP TABLE verifactu_record_environments; DROP TABLE verifactu_environment_changes; DROP TABLE sales_send_triggers; DROP TABLE sales_document_sends;";
+const DROP_SENDS: &str = concat!(include_str!("sql/downgrade18.sql"), "DROP TABLE verifactu_authorization_halts; DROP TABLE verifactu_incidents; DROP TABLE verifactu_unsent_attempts; DROP TABLE verifactu_tls12_preferences; DROP TABLE verifactu_remission_settings; DROP TABLE verifactu_subsanations; DROP TABLE verifactu_record_results; DROP TABLE verifactu_batch_results; DROP TABLE verifactu_batch_attempts; DROP TABLE verifactu_batch_records; DROP TABLE verifactu_batches; DROP TABLE verifactu_record_environments; DROP TABLE verifactu_environment_changes; DROP TABLE sales_send_triggers; DROP TABLE sales_document_sends;");
 /// Quita lo que añadió la migración 14 (membretes). Va antes de los `DROP` anteriores.
 const DROP_LETTERHEAD: &str = "DROP TABLE company_letterheads; ALTER TABLE company DROP COLUMN letterhead_sha256; ALTER TABLE company DROP COLUMN letterhead_top_mm; ALTER TABLE company DROP COLUMN letterhead_right_mm; ALTER TABLE company DROP COLUMN letterhead_bottom_mm; ALTER TABLE company DROP COLUMN letterhead_left_mm;";
 
@@ -134,7 +134,7 @@ fn migrating_from_schema_2_adds_sales_tables_and_keeps_a_copy() {
 
     let store = Store::open(&path).unwrap();
     assert_eq!(store.schema_version().unwrap(), SCHEMA_VERSION);
-    assert_eq!(SCHEMA_VERSION, 17);
+    assert_eq!(SCHEMA_VERSION, 18);
     assert_eq!(
         store.audit_log().unwrap().len(),
         1,

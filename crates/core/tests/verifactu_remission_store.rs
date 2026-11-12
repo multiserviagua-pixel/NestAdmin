@@ -395,11 +395,11 @@ fn records_before_migration_16_get_the_inherited_production_environment() {
     // Como la dejaría la versión 15: sin las tablas de remisión.
     let conn = raw(&path);
     conn.execute_batch(
-        "DROP TABLE verifactu_authorization_halts; DROP TABLE verifactu_incidents; DROP TABLE verifactu_unsent_attempts; DROP TABLE verifactu_tls12_preferences; DROP TABLE verifactu_remission_settings; DROP TABLE verifactu_subsanations; DROP TABLE verifactu_record_results; \
+        concat!(include_str!("sql/downgrade18.sql"), "DROP TABLE verifactu_authorization_halts; DROP TABLE verifactu_incidents; DROP TABLE verifactu_unsent_attempts; DROP TABLE verifactu_tls12_preferences; DROP TABLE verifactu_remission_settings; DROP TABLE verifactu_subsanations; DROP TABLE verifactu_record_results; \
          DROP TABLE verifactu_batch_results; DROP TABLE verifactu_batch_attempts; \
          DROP TABLE verifactu_batch_records; DROP TABLE verifactu_batches; \
          DROP TABLE verifactu_record_environments; DROP TABLE verifactu_environment_changes; \
-         PRAGMA user_version = 15;",
+         PRAGMA user_version = 15;"),
     )
     .unwrap();
     drop(conn);

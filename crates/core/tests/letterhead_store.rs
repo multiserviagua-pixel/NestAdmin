@@ -81,21 +81,21 @@ fn a_version_13_database_migrates_and_keeps_its_issued_documents() {
     // Como la dejaría la versión 13: sin membretes ni columnas nuevas en la empresa.
     let conn = rusqlite::Connection::open(&path).unwrap();
     conn.execute_batch(
-        "DROP TABLE verifactu_authorization_halts; DROP TABLE verifactu_incidents; DROP TABLE verifactu_unsent_attempts; DROP TABLE verifactu_tls12_preferences; DROP TABLE verifactu_remission_settings; DROP TABLE verifactu_subsanations; DROP TABLE verifactu_record_results; DROP TABLE verifactu_batch_results; DROP TABLE verifactu_batch_attempts; DROP TABLE verifactu_batch_records; DROP TABLE verifactu_batches; DROP TABLE verifactu_record_environments; DROP TABLE verifactu_environment_changes; DROP TABLE sales_send_triggers; DROP TABLE sales_document_sends; \
+        concat!(include_str!("sql/downgrade18.sql"), "DROP TABLE verifactu_authorization_halts; DROP TABLE verifactu_incidents; DROP TABLE verifactu_unsent_attempts; DROP TABLE verifactu_tls12_preferences; DROP TABLE verifactu_remission_settings; DROP TABLE verifactu_subsanations; DROP TABLE verifactu_record_results; DROP TABLE verifactu_batch_results; DROP TABLE verifactu_batch_attempts; DROP TABLE verifactu_batch_records; DROP TABLE verifactu_batches; DROP TABLE verifactu_record_environments; DROP TABLE verifactu_environment_changes; DROP TABLE sales_send_triggers; DROP TABLE sales_document_sends; \
          DROP TABLE company_letterheads; \
          ALTER TABLE company DROP COLUMN letterhead_sha256; \
          ALTER TABLE company DROP COLUMN letterhead_top_mm; \
          ALTER TABLE company DROP COLUMN letterhead_right_mm; \
          ALTER TABLE company DROP COLUMN letterhead_bottom_mm; \
          ALTER TABLE company DROP COLUMN letterhead_left_mm; \
-         PRAGMA user_version = 13;",
+         PRAGMA user_version = 13;"),
     )
     .unwrap();
     drop(conn);
 
     let mut store = Store::open(&path).unwrap();
     assert_eq!(store.schema_version().unwrap(), SCHEMA_VERSION);
-    assert_eq!(SCHEMA_VERSION, 17);
+    assert_eq!(SCHEMA_VERSION, 18);
     assert!(backup_path(&path, 13).exists(), "copia previa a migrar");
 
     // Los datos se conservan; la empresa queda sin membrete y con los márgenes de fábrica.

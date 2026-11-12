@@ -99,6 +99,9 @@ CREATE TABLE rules (
     // subsanaciones, de solo inserción (D248-D258); ver sales/verifactu_remission.rs.
     include_str!("migrations/016_verifactu_remission.sql"),
     include_str!("migrations/017_verifactu_sending.sql"),
+    // Identidad de cada base, perfiles de datos y marcador del traslado; envíos de venta con
+    // `taxpayer_id` (D287-D291); ver profiles/.
+    include_str!("migrations/018_profiles.sql"),
 ];
 
 /// Base de datos local. Cada operación pública se confirma en una transacción,
@@ -161,6 +164,16 @@ impl Store {
             .execute("VACUUM INTO ?1", [partial.to_string_lossy()])?;
         std::fs::rename(&partial, &target).map_err(CoreError::Backup)?;
         Ok(())
+    }
+
+    /// Cierra la base de forma ordenada: vuelca el WAL al archivo principal y suelta el archivo,
+    /// de modo que quede un único archivo listo para renombrarse.
+    pub(crate) fn finish(self) -> Result<()> {
+        // Una base en memoria no tiene WAL y el pragma devuelve una fila igualmente.
+        let _busy: i64 = self
+            .conn
+            .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |r| r.get(0))?;
+        self.conn.close().map_err(|(_, e)| CoreError::Storage(e))
     }
 
     pub fn schema_version(&self) -> Result<i64> {

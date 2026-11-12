@@ -7,16 +7,21 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use rusqlite::{OptionalExtension, TransactionBehavior};
 use sha2::{Digest, Sha256};
 
-use crate::error::Result;
+use crate::error::{CoreError, Result};
 use crate::store::now_ms;
 use crate::Store;
 
 /// Longitud del número de instalación: 16 caracteres hexadecimales en mayúsculas.
 pub const INSTALLATION_ID_LEN: usize = 16;
 
-/// Deriva un número de instalación de datos no secretos: la semilla de quien llama (por
-/// ejemplo la ruta de los datos), el instante en nanosegundos y el identificador del proceso.
-fn generate(seed: &str) -> String {
+/// Deriva un número de instalación de la semilla de quien llama (por ejemplo la ruta de los
+/// datos), el instante en nanosegundos, el identificador del proceso y 16 bytes aleatorios del
+/// sistema (D291): sin ellos, dos bases creadas con la misma semilla en el mismo instante y
+/// proceso darían el mismo número. El formato de salida no cambia. Si el sistema no da bytes
+/// aleatorios es un error: no se degrada en silencio a datos predecibles.
+fn generate(seed: &str) -> Result<String> {
+    let mut random = [0u8; 16];
+    getrandom::fill(&mut random).map_err(|e| CoreError::Entropy(e.to_string()))?;
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_nanos())
@@ -26,12 +31,13 @@ fn generate(seed: &str) -> String {
     hasher.update(seed.as_bytes());
     hasher.update(nanos.to_le_bytes());
     hasher.update(std::process::id().to_le_bytes());
-    hasher
+    hasher.update(random);
+    Ok(hasher
         .finalize()
         .iter()
         .take(INSTALLATION_ID_LEN / 2)
         .map(|b| format!("{b:02X}"))
-        .collect()
+        .collect())
 }
 
 impl Store {
@@ -60,7 +66,7 @@ impl Store {
         let number = match existing {
             Some(number) => number,
             None => {
-                let number = generate(seed);
+                let number = generate(seed)?;
                 tx.execute(
                     "INSERT INTO installation (id, number, created_at) VALUES (1, ?1, ?2)",
                     rusqlite::params![number, now_ms()],
