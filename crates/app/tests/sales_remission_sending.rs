@@ -14,7 +14,7 @@ use std::sync::{Arc, Mutex};
 
 use nestadmin_ai::{AiError, GenerateRequest, GenerateResult, Provider, ProviderKind};
 use nestadmin_app::remission::{
-    CertificateProvider, PumpReport, SenderCredentials, SimMode, SimulatorTransport,
+    CertificateProvider, PumpReport, PumpStart, SenderCredentials, SimMode, SimulatorTransport,
     VerifactuStatusView, AUTHORIZATION_DECLARATION, SUBMIT_VERIFACTU,
 };
 use nestadmin_app::sales::SalesClock;
@@ -426,7 +426,10 @@ fn a_certificate_that_needs_the_user_leaves_no_attempt_and_a_foreign_3000_is_not
     );
     let status = h.status();
     assert!(status.needs_certificate);
-    assert!(status.incident_open);
+    assert!(
+        !status.incident_open,
+        "el certificado no es una incidencia técnica (D282)"
+    );
     let unsent = status.last_unsent.unwrap();
     assert_eq!(unsent.code, "certificate_needs_user");
     assert_eq!(unsent.batch_id, 1);
@@ -476,12 +479,14 @@ fn a_missing_or_unconfigured_certificate_is_an_unsent_attempt_not_an_error() {
     h.emit();
     match h.pump() {
         PumpReport::NotSent { code, batch_id, .. } => {
-            assert_eq!((code.as_str(), batch_id), ("certificate_missing", 1));
+            // Sin proveedor no se abre ningún lote (batch_id 0): nada a lo que anotarlo.
+            assert_eq!((code.as_str(), batch_id), ("certificate_missing", 0));
         }
         other => panic!("{other:?}"),
     }
-    assert_eq!(batch_counts(&h), (0, 1, 0));
-    assert_eq!(h.task_error_code(), "certificate_missing");
+    assert_eq!(h.count("SELECT count(*) FROM verifactu_batches"), 0);
+    assert_eq!(batch_counts(&h), (0, 0, 0));
+    assert_eq!(h.status().last_unsent.unwrap().code, "certificate_missing");
 
     // Con proveedor pero sin certificado vinculado en la configuración.
     let certs = FakeCerts::new(vec![]);
@@ -524,7 +529,7 @@ fn a_missing_or_unconfigured_certificate_is_an_unsent_attempt_not_an_error() {
     }
     assert_eq!(batch_counts(&h).0, 0, "ninguno anotó un intento");
     assert_eq!(h.count("SELECT count(*) FROM verifactu_batches"), 1);
-    assert_eq!(h.count("SELECT count(*) FROM verifactu_unsent_attempts"), 5);
+    assert_eq!(h.count("SELECT count(*) FROM verifactu_unsent_attempts"), 3);
 }
 
 #[test]
@@ -1032,10 +1037,11 @@ fn preproduction_and_production_without_the_real_network_are_unsent_attempts_and
         }
         assert_eq!(certs.calls(), (0, 0), "no se obtuvo ninguna clave");
         assert_eq!(
-            batch_counts(&h),
-            (0, 1, 0),
-            "intento sin envío, sin intento"
+            h.count("SELECT count(*) FROM verifactu_batches"),
+            0,
+            "sin lote"
         );
+        assert_eq!(batch_counts(&h), (0, 0, 0), "ni lote ni intento");
         let status = h.status();
         assert_eq!(status.last_unsent.unwrap().code, "network_disabled");
         assert_eq!(
@@ -1085,4 +1091,303 @@ fn the_status_shows_the_age_of_the_oldest_unanswered_record_and_the_open_inciden
     let status = h.status();
     assert_eq!(status.oldest_pending_age_seconds, None);
     assert!(!status.incident_open);
+}
+
+// --- Correcciones de la revisión del arquitecto sobre D1 ---
+
+impl Harness {
+    /// Cierra la aplicación y la abre de nuevo sobre los mismos datos (reinicio).
+    fn reopen(&mut self) {
+        let filler_dir = tempfile::tempdir().unwrap();
+        let filler = open_app(filler_dir.path(), &self.clock);
+        drop(std::mem::replace(&mut self.app, filler));
+        self.app = open_app(self.dir.path(), &self.clock);
+    }
+}
+
+#[test]
+fn authorization_rejected_is_derived_from_the_database_and_survives_a_restart() {
+    let mut h = Harness::new();
+    h.app
+        .set_verifactu_sim_mode(Some(SimMode::AuthorizationFault));
+    h.emit();
+    assert_eq!(h.pump(), PumpReport::AuthorizationRejected { code: 4112 });
+    h.reopen();
+    // Tras reabrir, el estado sale de la base: con su código, sin pasada previa.
+    let status = h.status();
+    assert!(status.authorization_rejected);
+    assert_eq!(status.authorization_code, Some(4112));
+    let batches = h.count("SELECT count(*) FROM verifactu_batches");
+    // La primera pasada tras reabrir tampoco reintenta: sigue parada.
+    assert_eq!(h.pump(), PumpReport::AuthorizationRejected { code: 4112 });
+    assert_eq!(h.count("SELECT count(*) FROM verifactu_batches"), batches);
+    // Declarar que está arreglado la reanuda también tras reabrir.
+    assert!(h.app.verifactu_declare_authorization_fixed().unwrap());
+    assert!(!h.status().authorization_rejected);
+    h.reopen();
+    assert!(!h.status().authorization_rejected, "la reanudación consta");
+}
+
+#[test]
+fn a_settings_change_while_the_certificate_is_obtained_aborts_the_attempt_and_asks_for_another_pass(
+) {
+    let certs = FakeCerts::new(vec![]);
+    let (mut h, transport, _sim) = Harness::certified(vec![], certs);
+    h.emit();
+    let job = match h.app.verifactu_pump_begin(false).unwrap() {
+        PumpStart::Credentials(job) => job,
+        _ => panic!("se esperaba la obtención del certificado"),
+    };
+    let fetched = job.run();
+    // Mientras tanto el usuario cambia la configuración (otro representante, otro certificado).
+    h.app
+        .set_verifactu_remission_settings(
+            Some(&CertificateSource::Pfx {
+                reference: "ffeeddccbbaa99887766554433221100".into(),
+            }),
+            SenderCapacity::Attorney,
+            None,
+            "usuario_configuracion",
+        )
+        .unwrap();
+    let _ = h.app.verifactu_pump_requested();
+    match h.app.verifactu_pump_attempt(fetched).unwrap() {
+        PumpStart::Idle(PumpReport::NotSent { code, .. }) => assert_eq!(code, "settings_changed"),
+        _ => panic!("no debía continuar con la clave anterior"),
+    }
+    assert_eq!(batch_counts(&h).0, 0, "no se anotó ningún intento");
+    assert!(transport.calls().is_empty());
+    assert!(h.app.verifactu_pump_requested(), "pide otra pasada");
+    assert!(!h.status().incident_open, "no es una incidencia técnica");
+    // La siguiente pasada usa la configuración nueva y envía.
+    h.wait();
+    let report = h.pump();
+    assert!(matches!(report, PumpReport::Sent { .. }), "{report:?}");
+    assert_eq!(transport.calls().len(), 1);
+}
+
+#[test]
+fn an_authorization_fault_of_a_send_made_before_a_settings_change_does_not_halt() {
+    let mut h = Harness::new();
+    h.app
+        .set_verifactu_sim_mode(Some(SimMode::AuthorizationFault));
+    h.emit();
+    let job = match h.app.verifactu_pump_begin(false).unwrap() {
+        PumpStart::Job(job) => job,
+        _ => panic!("se esperaba una llamada"),
+    };
+    // La configuración cambia mientras el envío está en curso.
+    h.app
+        .set_verifactu_remission_settings(
+            None,
+            SenderCapacity::Attorney,
+            None,
+            "usuario_configuracion",
+        )
+        .unwrap();
+    let report = h.app.verifactu_pump_finish(job.run()).unwrap();
+    assert!(
+        matches!(
+            report,
+            PumpReport::Fault {
+                code: Some(4112),
+                ..
+            }
+        ),
+        "{report:?}"
+    );
+    assert!(
+        !h.status().authorization_rejected,
+        "el Fault era de la configuración anterior"
+    );
+    h.wait();
+    let report = h.pump();
+    assert!(
+        matches!(report, PumpReport::Sent { accepted: 1, .. }),
+        "{report:?}"
+    );
+}
+
+#[test]
+fn no_batch_is_opened_without_transport_provider_or_certificate_so_a_later_representante_is_in_the_first(
+) {
+    let mut h = Harness::with_environment("preproduccion");
+    let sim = Arc::new(SimuladorAeat::iniciar(ConfigSimulador::default()).unwrap());
+    let transport = ScriptedTransport::new(&sim, vec![]);
+    h.app.set_verifactu_transport(Some(transport.clone()));
+    h.emit();
+    // Sin proveedor ni certificado vinculado: no hay lote.
+    for _ in 0..2 {
+        match h.pump() {
+            PumpReport::NotSent { code, batch_id, .. } => {
+                assert_eq!((code.as_str(), batch_id), ("certificate_missing", 0));
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+    assert_eq!(h.count("SELECT count(*) FROM verifactu_batches"), 0);
+    // El `Representante` se configura después, con el certificado: entra en el primer lote.
+    h.app.set_certificate_provider(FakeCerts::new(vec![]));
+    h.app
+        .set_verifactu_remission_settings(
+            Some(&CertificateSource::Pfx {
+                reference: "00112233445566778899aabbccddeeff".into(),
+            }),
+            SenderCapacity::Collaborator,
+            Some(&PersonaEs::new("Gestoría Demo SL", "B00000034")),
+            "usuario_configuracion",
+        )
+        .unwrap();
+    let report = h.pump();
+    assert!(matches!(report, PumpReport::Sent { .. }), "{report:?}");
+    assert!(transport.calls()[0].body.contains("Representante"));
+}
+
+#[test]
+fn configuring_the_representante_with_an_open_batch_does_not_change_its_bytes() {
+    let certs = FakeCerts::new(vec![Err(CertError::NeedsUser)]);
+    let (mut h, transport, _sim) = Harness::certified(vec![Step::Simulator], certs);
+    h.emit();
+    assert!(matches!(h.pump(), PumpReport::NeedsUser { .. }));
+    assert_eq!(h.count("SELECT count(*) FROM verifactu_batches"), 1);
+    // Con un lote ya abierto, el representante nuevo no entra en él.
+    h.app
+        .set_verifactu_remission_settings(
+            Some(&CertificateSource::Pfx {
+                reference: "00112233445566778899aabbccddeeff".into(),
+            }),
+            SenderCapacity::Collaborator,
+            Some(&PersonaEs::new("Gestoría Demo SL", "B00000034")),
+            "usuario_configuracion",
+        )
+        .unwrap();
+    let report = h.pump_now();
+    assert!(matches!(report, PumpReport::Sent { .. }), "{report:?}");
+    assert!(!transport.calls()[0].body.contains("Representante"));
+    // Pero sí el lote siguiente.
+    h.wait();
+    h.emit();
+    assert!(matches!(h.pump(), PumpReport::Sent { .. }));
+    assert!(transport.calls()[1].body.contains("Representante"));
+}
+
+#[test]
+fn only_network_and_tls_failures_open_an_incident_in_the_pump() {
+    let certs = FakeCerts::new(vec![]);
+    let (mut h, _transport, _sim) = Harness::certified(
+        vec![
+            Step::NotSent(NotSentReason::CertificateRejected),
+            Step::NotSent(NotSentReason::WrongEnvironment),
+            Step::NotSent(NotSentReason::TlsHandshake),
+        ],
+        certs,
+    );
+    h.emit();
+    assert!(matches!(h.pump(), PumpReport::NotSent { .. }));
+    assert!(!h.status().incident_open, "certificate_rejected");
+    h.wait();
+    assert!(matches!(h.pump(), PumpReport::NotSent { .. }));
+    assert!(!h.status().incident_open, "wrong_environment");
+    h.wait();
+    assert!(matches!(h.pump(), PumpReport::NotSent { .. }));
+    assert!(h.status().incident_open, "tls_handshake_failed");
+}
+
+#[test]
+fn sensitive_certificate_data_never_reaches_the_database_the_history_or_the_outputs() {
+    use rcgen::{CertificateParams, DistinguishedName, DnType};
+    use rustls::pki_types::{PrivateKeyDer, PrivatePkcs8KeyDer};
+    const NIF: &str = "SENTINELANIF-Z9Z9";
+    const NAME: &str = "SENTINELANOMBRE-Q8Q8";
+    struct SentinelCerts;
+    impl CertificateProvider for SentinelCerts {
+        fn acquire(
+            &self,
+            _source: &CertificateSource,
+            _interactive: bool,
+            _now_ms: i64,
+        ) -> Result<SenderCredentials, CertError> {
+            let key = rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256).unwrap();
+            let mut params =
+                CertificateParams::new(vec!["remision.example.invalid".to_owned()]).unwrap();
+            let mut dn = DistinguishedName::new();
+            dn.push(DnType::CommonName, NAME);
+            dn.push(DnType::CustomDnType(vec![2, 5, 4, 5]), NIF);
+            params.distinguished_name = dn;
+            let cert = params.self_signed(&key).unwrap();
+            let der = PrivateKeyDer::from(PrivatePkcs8KeyDer::from(key.serialize_der()));
+            let signing = rustls::crypto::ring::sign::any_supported_type(&der).unwrap();
+            Ok(SenderCredentials {
+                credentials: ClientCredentials::new(vec![cert.der().to_vec()], signing),
+                kind: CertificateKind::PersonaFisica,
+                fingerprint: "ab".repeat(32),
+            })
+        }
+    }
+    let (mut h, _transport, _sim) = Harness::certified(
+        vec![
+            Step::NotSent(NotSentReason::TlsHandshake),
+            Step::SimulatorTls12,
+            Step::NoResponse(NoResponseReason::ReadTimeout),
+        ],
+        FakeCerts::new(vec![]),
+    );
+    h.app.set_certificate_provider(Arc::new(SentinelCerts));
+    let mut outputs: Vec<String> = Vec::new();
+    h.emit();
+    for _ in 0..3 {
+        outputs.push(format!("{:?}", h.pump()));
+        h.wait();
+    }
+    let status = h.status();
+    outputs.push(serde_json::to_string(&status).unwrap());
+    outputs.push(format!("{:?}", status.last_error));
+    outputs.push(format!("{:?}", synthetic_debug()));
+    // Todas las tablas de la base, con todas las columnas convertidas a texto.
+    let conn = h.raw();
+    let tables: Vec<String> = conn
+        .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'")
+        .unwrap()
+        .query_map([], |r| r.get(0))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    for table in &tables {
+        let columns: Vec<String> = conn
+            .prepare(&format!("PRAGMA table_info({table})"))
+            .unwrap()
+            .query_map([], |r| r.get::<_, String>(1))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        for column in columns {
+            let sql = format!(
+                "SELECT group_concat(CAST({column} AS TEXT) || ' ' || hex({column}) || ' ' || \
+                 CAST(CAST({column} AS BLOB) AS TEXT), ' ') FROM {table}"
+            );
+            if let Ok(Some(text)) = conn.query_row(&sql, [], |r| r.get::<_, Option<String>>(0)) {
+                outputs.push(text);
+            }
+        }
+    }
+    let hex_of = |text: &str| text.bytes().map(|b| format!("{b:02X}")).collect::<String>();
+    assert!(
+        outputs.len() > 40,
+        "se recorrieron las tablas y las salidas"
+    );
+    for sentinel in [NIF, NAME] {
+        let hex = hex_of(sentinel);
+        for (i, output) in outputs.iter().enumerate() {
+            assert!(!output.contains(sentinel), "{sentinel} en la salida {i}");
+            assert!(!output.contains(&hex), "{sentinel} (hex) en la salida {i}");
+        }
+    }
+}
+
+/// El `Debug` de las credenciales (la cadena y la clave) no muestra nada del certificado.
+fn synthetic_debug() -> String {
+    format!(
+        "{:?}",
+        synthetic_credentials(CertificateKind::PersonaFisica, &"cd".repeat(32))
+    )
 }

@@ -464,6 +464,9 @@ pub(crate) struct RemissionRuntime {
     /// La última pasada terminó en `certificate_needs_user`: el registro espera a «Remitir
     /// ahora» (el worker nunca abre una ventana, D280).
     needs_certificate: bool,
+    /// Lo último que impidió abrir un lote sin llegar a abrirlo (sin transporte, proveedor o
+    /// certificado vinculado): no hay lote al que anotarlo, así que solo vive en memoria.
+    unbatched: Option<VerifactuUnsentView>,
     /// Aún no hubo ninguna pasada desde que se abrió la aplicación: la primera reintenta
     /// enseguida, sin esperar la espera que dejaron los fallos anteriores (D281).
     startup_pending: bool,
@@ -487,6 +490,7 @@ impl RemissionRuntime {
             last_error: None,
             certificates: None,
             needs_certificate: false,
+            unbatched: None,
             startup_pending: true,
             #[cfg(debug_assertions)]
             sim_mode: std::env::var(SIM_VARIABLE)
@@ -759,6 +763,8 @@ pub struct VerifactuJob {
     batch_id: i64,
     /// Intento anotado antes de la llamada: se anula si el cuerpo no llegó a escribirse (D280).
     attempt_id: i64,
+    /// Identificador de la configuración de remisión con la que se preparó la pasada (D281).
+    settings_id: i64,
     body: String,
     started_ms: i64,
     wire: Wire,
@@ -772,6 +778,7 @@ pub struct VerifactuSent {
     task_id: i64,
     batch_id: i64,
     attempt_id: i64,
+    settings_id: i64,
     started_ms: i64,
     report: TransportReport,
     /// Huella del certificado usado, para recordar si solo negoció TLS 1.2 (D279).
@@ -814,6 +821,7 @@ impl VerifactuJob {
             task_id: self.task_id,
             batch_id: self.batch_id,
             attempt_id: self.attempt_id,
+            settings_id: self.settings_id,
             started_ms: self.started_ms,
             report,
             fingerprint,
@@ -836,6 +844,7 @@ pub struct CredentialJob {
     provider: Arc<dyn CertificateProvider>,
     transport: Arc<dyn SoapTransport>,
     aeat: AeatEnvironment,
+    settings_id: i64,
 }
 
 /// Lo que dio la obtención del certificado, listo para [`App::verifactu_pump_attempt`].
@@ -847,6 +856,7 @@ pub struct CredentialsFetched {
     started_ms: i64,
     transport: Arc<dyn SoapTransport>,
     aeat: AeatEnvironment,
+    settings_id: i64,
     result: Result<SenderCredentials, CertError>,
 }
 
@@ -867,9 +877,19 @@ impl CredentialJob {
             started_ms: self.started_ms,
             transport: self.transport,
             aeat: self.aeat,
+            settings_id: self.settings_id,
             result,
         }
     }
+}
+
+/// Lo que hace falta para enviar con certificado (ver `App::remote_prereqs`).
+struct RemotePrereqs {
+    aeat: AeatEnvironment,
+    transport: Arc<dyn SoapTransport>,
+    source: CertificateSource,
+    provider: Arc<dyn CertificateProvider>,
+    settings_id: i64,
 }
 
 /// Resultado de preparar una pasada.
@@ -1224,6 +1244,15 @@ impl App {
         let batch = match open {
             Some(batch) => batch,
             None => {
+                // Sin lote abierto se comprueban antes el transporte, el proveedor y el
+                // certificado vinculado: si falta algo no se abre el lote, y así un
+                // `Representante` configurado después entra en el primero (D283).
+                if environment != VerifactuEnvironment::Simulador {
+                    if let Err(code) = self.remote_prereqs(environment)? {
+                        return Ok(PumpStart::Idle(self.note_unbatched(code, now)));
+                    }
+                }
+                self.remission.unbatched = None;
                 let header = self.remission_header(environment)?;
                 match self
                     .store
@@ -1255,6 +1284,10 @@ impl App {
             return self.credentials_phase(lease, task.id, &batch, body, now, manual, environment);
         };
         // El intento se anota ANTES de la llamada (D252).
+        let settings_id = match self.store.verifactu_remission_settings() {
+            Ok(settings) => settings.id,
+            Err(error) => return Err(self.fail_task_with(task.id, error)),
+        };
         let ticket = match self.store.begin_verifactu_attempt_ticket(batch.id, now) {
             Ok(ticket) => ticket,
             Err(error) => return Err(self.fail_task_with(task.id, error)),
@@ -1273,6 +1306,7 @@ impl App {
             task_id: task.id,
             batch_id: batch.id,
             attempt_id: ticket.attempt_id,
+            settings_id,
             body,
             started_ms: now,
             wire: Wire::Simulator {
@@ -1306,40 +1340,13 @@ impl App {
         manual: bool,
         environment: VerifactuEnvironment,
     ) -> AppResult<PumpStart> {
-        let aeat = match environment {
-            VerifactuEnvironment::Produccion => AeatEnvironment::Production,
-            _ => AeatEnvironment::Preproduction,
-        };
-        // Sin la red real compilada no se abre ningún socket ni se toca el certificado.
-        let transport = match self.remote_transport(aeat) {
-            Ok(transport) => transport,
-            Err(code) => {
+        let prereqs = match self.remote_prereqs(environment) {
+            Ok(Ok(prereqs)) => prereqs,
+            Ok(Err(code)) => {
                 let report = self.finish_unsent(task_id, batch.id, code, None, now);
                 return Ok(PumpStart::Idle(report));
             }
-        };
-        let settings = match self.store.verifactu_remission_settings() {
-            Ok(settings) => settings,
-            Err(error) => return Err(self.fail_task_with(task_id, error)),
-        };
-        let source = match settings.certificate_source.as_deref() {
-            None => None,
-            Some(json) => match serde_json::from_str::<CertificateSource>(json) {
-                Ok(source) => Some(Ok(source)),
-                Err(_) => Some(Err(CertError::Invalid)),
-            },
-        };
-        let (source, provider) = match (source, self.remission.certificates.clone()) {
-            (Some(Ok(source)), Some(provider)) => (source, provider),
-            (Some(Err(error)), _) => {
-                let report = self.finish_unsent(task_id, batch.id, error.code(), None, now);
-                return Ok(PumpStart::Idle(report));
-            }
-            _ => {
-                let code = CertError::Missing.code();
-                let report = self.finish_unsent(task_id, batch.id, code, None, now);
-                return Ok(PumpStart::Idle(report));
-            }
+            Err(error) => return Err(self.fail_task_with_app(task_id, error)),
         };
         Ok(PumpStart::Credentials(CredentialJob {
             lease,
@@ -1348,11 +1355,73 @@ impl App {
             body,
             started_ms: now,
             manual,
+            source: prereqs.source,
+            provider: prereqs.provider,
+            transport: prereqs.transport,
+            aeat: prereqs.aeat,
+            settings_id: prereqs.settings_id,
+        }))
+    }
+
+    fn fail_task_with_app(&mut self, task_id: i64, error: AppError) -> AppError {
+        let _ = self.store.fail(
+            task_id,
+            &task_error(error.code(), "no se pudo preparar el envío", true),
+        );
+        error
+    }
+
+    /// Lo que hace falta para enviar con certificado: el transporte (sin la red real compilada,
+    /// `network_disabled`), la configuración vigente, el certificado vinculado y quien lo
+    /// proporciona. `Ok(Err(código))` dice qué falta, con el código del motivo sin envío.
+    fn remote_prereqs(
+        &self,
+        environment: VerifactuEnvironment,
+    ) -> AppResult<Result<RemotePrereqs, &'static str>> {
+        let aeat = match environment {
+            VerifactuEnvironment::Produccion => AeatEnvironment::Production,
+            _ => AeatEnvironment::Preproduction,
+        };
+        let transport = match self.remote_transport(aeat) {
+            Ok(transport) => transport,
+            Err(code) => return Ok(Err(code)),
+        };
+        let settings = self.store.verifactu_remission_settings()?;
+        let source = match settings.certificate_source.as_deref() {
+            None => return Ok(Err(CertError::Missing.code())),
+            Some(json) => match serde_json::from_str::<CertificateSource>(json) {
+                Ok(source) => source,
+                Err(_) => return Ok(Err(CertError::Invalid.code())),
+            },
+        };
+        let Some(provider) = self.remission.certificates.clone() else {
+            return Ok(Err(CertError::Missing.code()));
+        };
+        Ok(Ok(RemotePrereqs {
+            aeat,
+            transport,
             source,
             provider,
-            transport,
-            aeat,
+            settings_id: settings.id,
         }))
+    }
+
+    /// Falta algo para enviar y ni siquiera hay lote: no se abre ninguno (D283). Queda como
+    /// último error y como último intento sin envío en memoria, sin lote (`batch_id` 0).
+    fn note_unbatched(&mut self, code: &'static str, now: i64) -> PumpReport {
+        let message = unsent_message(code);
+        self.remission.unbatched = Some(VerifactuUnsentView {
+            batch_id: 0,
+            code: code.to_owned(),
+            at: now,
+        });
+        self.remission.needs_certificate = false;
+        self.note_issue(code, message.clone());
+        PumpReport::NotSent {
+            batch_id: 0,
+            code: code.to_owned(),
+            message,
+        }
     }
 
     /// El transporte hacia la AEAT: el TLS mutuo (solo con la característica `aeat-red`, D285) o,
@@ -1379,9 +1448,22 @@ impl App {
             started_ms,
             transport,
             aeat,
+            settings_id,
             result,
         } = fetched;
         let now = self.remission_now_ms().unwrap_or(started_ms);
+        // La configuración cambió mientras se obtenía la clave (otro certificado, otro
+        // representante): no se envía con lo anterior; se anota y se pide otra pasada.
+        let current = match self.store.verifactu_remission_settings() {
+            Ok(settings) => settings.id,
+            Err(error) => return Err(self.fail_task_with(task_id, error)),
+        };
+        if current != settings_id {
+            let report = self.finish_unsent(task_id, batch_id, "settings_changed", None, now);
+            self.pump_after_write();
+            drop(lease);
+            return Ok(PumpStart::Idle(report));
+        }
         let credentials = match result {
             Ok(credentials) => credentials,
             Err(error) => {
@@ -1411,6 +1493,7 @@ impl App {
             task_id,
             batch_id,
             attempt_id: ticket.attempt_id,
+            settings_id,
             body,
             started_ms: now,
             wire: Wire::Remote {
@@ -1484,9 +1567,13 @@ impl App {
             task_id,
             &task_error(error.code, error.message.clone(), true),
         );
-        let _ = self
-            .store
-            .open_verifactu_incident(Some(batch_id), reason, now);
+        // Solo la red, el TLS y los fallos del servicio abren una incidencia (D282): un 401, un
+        // 429 o una respuesta ilegible no son una incidencia técnica de remisión.
+        if error.code == TRANSPORT_UNAVAILABLE {
+            let _ = self
+                .store
+                .open_verifactu_incident(Some(batch_id), reason, now);
+        }
         self.note_issue(error.code, error.message.clone());
         PumpReport::NoResponse {
             batch_id,
@@ -1505,6 +1592,7 @@ impl App {
             task_id,
             batch_id,
             attempt_id,
+            settings_id,
             started_ms,
             report,
             fingerprint,
@@ -1557,6 +1645,35 @@ impl App {
                         return Err(error.into());
                     }
                 };
+                // Un `Fault` de autorización de un envío con la configuración anterior no vale
+                // para la nueva: no se para (D281).
+                if let ResultadoEnvio::Fallo(fault) = &result {
+                    let stale = FaultClass::of(fault.codigo) == FaultClass::Authorization
+                        && self
+                            .store
+                            .verifactu_remission_settings()
+                            .map(|current| current.id != settings_id)
+                            .unwrap_or(false);
+                    if stale {
+                        let _ = self
+                            .store
+                            .resume_verifactu_authorization_after_settings_change(
+                                "configuracion_cambiada_durante_envio",
+                                now,
+                            );
+                        let _ = self.store.fail(
+                            task_id,
+                            &task_error(CODE_SOAP_FAULT, fault.faultstring.clone(), true),
+                        );
+                        self.note_issue(CODE_SOAP_FAULT, fault.faultstring.clone());
+                        self.pump_after_write();
+                        return Ok(PumpReport::Fault {
+                            batch_id,
+                            code: fault.codigo,
+                            description: fault.faultstring.clone(),
+                        });
+                    }
+                }
                 self.note_result_issue(&closure, &result);
                 self.finish_submit_task(task_id, &closure, &result)
             }
@@ -2009,7 +2126,7 @@ impl App {
             _ => None,
         };
         let halt = self.store.verifactu_authorization_halt()?;
-        let last_unsent =
+        let stored_unsent =
             self.store
                 .verifactu_last_unsent_attempt()?
                 .map(|unsent| VerifactuUnsentView {
@@ -2017,6 +2134,12 @@ impl App {
                     code: unsent.reason_code,
                     at: unsent.attempted_at,
                 });
+        // El último sin lote (solo en memoria) manda si es más reciente que el guardado.
+        let last_unsent = match (stored_unsent, self.remission.unbatched.clone()) {
+            (Some(stored), Some(unbatched)) if stored.at > unbatched.at => Some(stored),
+            (_, Some(unbatched)) => Some(unbatched),
+            (stored, None) => stored,
+        };
         let next_send_at = self.store.verifactu_next_send_at(environment)?;
         let wait_remaining_seconds = match (next_send_at, self.remission_now_ms()) {
             (Some(at), Ok(now)) => Some(u64::try_from((at - now + 999) / 1000).unwrap_or(0)),
@@ -2086,6 +2209,9 @@ fn unsent_message(code: &str) -> String {
         "server_certificate_invalid" => "El certificado del servidor no es de confianza.",
         "tls_handshake_failed" | "tls_timeout" => {
             "No se pudo establecer la conexión segura: el registro queda pendiente."
+        }
+        "settings_changed" => {
+            "La configuración de remisión cambió durante el envío: se vuelve a intentar con la nueva."
         }
         "wrong_environment" => "El transporte no corresponde al entorno de la remisión.",
         _ => "El envío no llegó a salir: el registro queda pendiente.",

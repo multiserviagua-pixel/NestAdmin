@@ -241,10 +241,36 @@ export function autoRefreshDelayMs(status: Pick<VerifactuStatusView, "pending" |
 }
 
 /** Firma del estado visible: si cambia, el aviso de la última pasada deja de ser cierto. */
-export function statusSignature(status: Pick<VerifactuStatusView, "records" | "last_batch" | "pending" | "sending" | "halted"> | null | undefined): string {
+export function statusSignature(status: Pick<VerifactuStatusView, "records" | "last_batch" | "pending" | "sending" | "halted"> & Partial<Pick<VerifactuStatusView, "authorization_rejected" | "authorization_code">> | null | undefined): string {
   if (!status) return "";
-  return JSON.stringify([status.records.map((r) => [r.record_id, r.status]), status.last_batch?.id ?? null, status.last_batch?.outcome ?? null, status.pending, status.sending, status.halted]);
+  return JSON.stringify([status.records.map((r) => [r.record_id, r.status]), status.last_batch?.id ?? null, status.last_batch?.outcome ?? null, status.pending, status.sending, status.halted, status.authorization_rejected ?? false, status.authorization_code ?? null]);
 }
+
+export const RESUME_AUTHORIZATION_BUTTON = "Ya está arreglado, reanudar";
+
+/** Explicación en lenguaje llano de cada código de autorización de la AEAT (D281). */
+export function authorizationCodeText(code: number | null): string {
+  switch (code) {
+    case 4112:
+      return "el certificado no está autorizado para este obligado. Dé de alta el apoderamiento o la colaboración social, o cambie de certificado.";
+    case 4105:
+    case 4117:
+    case 4123:
+    case 4124:
+      return "el representante indicado no es válido para este obligado o este certificado. Revise los datos del representante o dé de alta la representación.";
+    default:
+      return "el certificado o el representante no están autorizados.";
+  }
+}
+
+/** Alerta persistente de la remisión parada por autorización; `null` si no lo está. */
+export function authorizationAlertText(status: Pick<VerifactuStatusView, "authorization_rejected" | "authorization_code">): string | null {
+  if (!status.authorization_rejected) return null;
+  const code = status.authorization_code === null ? "" : ` (código ${status.authorization_code})`;
+  return `La AEAT rechazó la autorización${code}: ${authorizationCodeText(status.authorization_code)} La remisión de esta base está parada y no se reintenta sola hasta que cambie el certificado o la configuración, o declare que ya lo arregló.`;
+}
+
+export const RESUME_AUTHORIZATION_CONFIRM = "¿Confirma que ya ha dado de alta el apoderamiento o la colaboración, o ha cambiado de certificado? La remisión se reanudará y se intentará enviar ahora.";
 
 // ---- Resultado de «Remitir ahora» ----
 

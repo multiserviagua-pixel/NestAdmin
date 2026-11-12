@@ -393,3 +393,35 @@ fn reason_codes_are_stable_and_carry_no_system_text() {
         assert!(code.bytes().all(|b| b.is_ascii_lowercase() || b == b'_'));
     }
 }
+
+/// El servidor rechaza el certificado cliente muy tarde: la alerta llega 400 ms después del
+/// saludo, bastante más que la gracia de 100 ms con la que el transporte escucha tras el saludo
+/// TLS 1.3, y por tanto cuando el cliente ya escribió el cuerpo. Aun así debe ser `NotSent`
+/// (D280): el servidor nunca completó el saludo con nuestro certificado, nunca leyó la petición
+/// y ningún servidor responde a una petición con una alerta de certificado. Si se clasificara
+/// como `SentNoResponse`, un certificado rechazado anotaría un intento que cuenta y un duplicado
+/// ajeno podría darse por propio.
+#[test]
+fn a_certificate_alert_after_the_grace_and_after_writing_the_body_is_still_not_sent() {
+    let ca = new_ca("AC PRUEBA SINTETICA");
+    let server = MtlsServer::start_slow_rejecting(
+        &ca.der,
+        server_cert(&ca, &["localhost"]),
+        std::time::Duration::from_millis(400),
+    );
+    let creds = client_cert(&ca, Kind::PersonaFisica).credentials();
+    let report =
+        server
+            .transport("localhost", &ca.der)
+            .send(endpoint(), BODY, &creds, TlsPreference::Auto);
+    assert!(
+        matches!(report.outcome, SendOutcome::NotSent(_)),
+        "{:?}",
+        report.outcome
+    );
+    assert!(!report.outcome.body_may_have_been_sent());
+    assert!(
+        server.seen().requests.is_empty(),
+        "el servidor nunca vio el cuerpo"
+    );
+}

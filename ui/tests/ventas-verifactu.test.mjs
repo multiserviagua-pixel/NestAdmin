@@ -24,6 +24,10 @@ import {
   statusSignature,
   subsanationSources,
   environmentLine,
+  authorizationAlertText,
+  authorizationCodeText,
+  RESUME_AUTHORIZATION_BUTTON,
+  RESUME_AUTHORIZATION_CONFIRM,
   environmentOptions,
   haltedText,
   nextSendText,
@@ -320,4 +324,21 @@ test("los resultados de remisión con certificado tienen su texto y no cuentan c
   const notSent = pumpReportText({ state: "not_sent", batch_id: 2, code: "network_disabled", message: "Sin red real." });
   assert.equal(notSent.tone, "warn");
   assert.match(notSent.text, /lote 2.*No cuenta como intento/);
+});
+
+test("la remisión parada por autorización se ve con su código en lenguaje llano y entra en la firma del estado (D281)", () => {
+  assert.equal(authorizationAlertText({ authorization_rejected: false, authorization_code: null }), null);
+  const alert = authorizationAlertText({ authorization_rejected: true, authorization_code: 4112 });
+  assert.match(alert, /4112/);
+  assert.match(alert, /no está autorizado para este obligado/);
+  assert.match(alert, /apoderamiento o la colaboración social, o cambie de certificado/);
+  assert.match(alert, /no se reintenta sola/);
+  assert.match(authorizationCodeText(4124), /representante/);
+  assert.match(authorizationCodeText(null), /no están autorizados/);
+  assert.equal(RESUME_AUTHORIZATION_BUTTON, "Ya está arreglado, reanudar");
+  assert.match(RESUME_AUTHORIZATION_CONFIRM, /¿Confirma/);
+  const base = { records: [record({ status: "pending" })], last_batch: batch(), pending: 1, sending: 0, halted: false };
+  assert.notEqual(statusSignature(base), statusSignature({ ...base, authorization_rejected: true, authorization_code: 4112 }));
+  assert.notEqual(statusSignature({ ...base, authorization_rejected: true, authorization_code: 4112 }), statusSignature({ ...base, authorization_rejected: true, authorization_code: 4124 }));
+  assert.equal(statusSignature(base), statusSignature({ ...base, authorization_rejected: false, authorization_code: null }));
 });

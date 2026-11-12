@@ -58,7 +58,8 @@ pub use verifactu_remission::{
 pub use verifactu_sending::{
     retry_wait_seconds, AuthorizationHalt, FaultClass, RemissionSettings, SenderCapacity,
     VerifactuIncident, VerifactuUnsentAttempt, WaitMode, AUTHORIZATION_FAULT_CODES,
-    CODE_AUTHORIZATION_REJECTED, FAST_RETRIES, MAX_RETRY_WAIT_SECONDS, TECHNICAL_FAULT_CODES,
+    CODE_AUTHORIZATION_REJECTED, FAST_RETRIES, INCIDENT_UNSENT_REASONS, MAX_RETRY_WAIT_SECONDS,
+    TECHNICAL_FAULT_CODES,
 };
 
 // Conversiones entre los tipos puros y el texto guardado.

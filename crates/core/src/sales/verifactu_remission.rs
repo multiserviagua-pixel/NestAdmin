@@ -1423,13 +1423,19 @@ impl Store {
     }
 }
 
-/// El registro estuvo en un lote anterior con respuesta, con intento anotado y sin línea para él
-/// (una respuesta parcial lo dejó fuera): la AEAT pudo recibirlo, así que un 3000 o un 3001 en
-/// el lote actual puede ser suyo. Un lote cerrado por `Fault` no cuenta: la AEAT rechazó el
-/// mensaje entero y no guardó nada.
+/// El registro estuvo en un lote anterior que la AEAT pudo recibir, así que un 3000 o un 3001 en
+/// el lote actual puede ser suyo (D50, D252): (a) un lote respondido, con intento que cuenta y sin
+/// línea para él (una respuesta parcial lo dejó fuera), o (b) un lote cerrado por `Fault` con dos o
+/// más intentos que cuentan: el último recibió el `Fault` (la AEAT no guardó nada con él), pero
+/// uno anterior sin respuesta (`SentNoResponse`) pudo haberlo registrado. Un `Fault` con un solo
+/// intento que cuenta no cuenta: la AEAT rechazó el mensaje entero. Los intentos anulados
+/// (`verifactu_unsent_attempts`) no cuentan nunca (D280).
 fn was_sent_before(conn: &Connection, batch_id: i64, record_id: i64) -> SalesResult<bool> {
+    const COUNTED: &str = "(SELECT count(*) FROM verifactu_batch_attempts a WHERE         a.batch_id = br.batch_id AND NOT EXISTS (SELECT 1 FROM verifactu_unsent_attempts u         WHERE u.attempt_id = a.id))";
     let n: i64 = conn.query_row(
-        "SELECT count(*) FROM verifactu_batch_records br          JOIN verifactu_batch_results z ON z.batch_id = br.batch_id AND z.outcome = 'responded'          WHERE br.record_id = ?1 AND br.batch_id <> ?2          AND EXISTS (SELECT 1 FROM verifactu_batch_attempts a WHERE a.batch_id = br.batch_id AND NOT EXISTS (SELECT 1 FROM verifactu_unsent_attempts u WHERE u.attempt_id = a.id))          AND NOT EXISTS (SELECT 1 FROM verifactu_record_results x                          WHERE x.batch_id = br.batch_id AND x.record_id = br.record_id)",
+        &format!(
+            "SELECT count(*) FROM verifactu_batch_records br              JOIN verifactu_batch_results z ON z.batch_id = br.batch_id              WHERE br.record_id = ?1 AND br.batch_id <> ?2 AND (                (z.outcome = 'responded' AND {COUNTED} >= 1 AND NOT EXISTS                  (SELECT 1 FROM verifactu_record_results x                   WHERE x.batch_id = br.batch_id AND x.record_id = br.record_id))                OR (z.outcome = 'fault' AND {COUNTED} >= 2))"
+        ),
         params![record_id, batch_id],
         |r| r.get(0),
     )?;

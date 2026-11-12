@@ -197,7 +197,7 @@ fn the_new_tables_are_insert_only() {
         .unwrap();
     let batch = open_batch(&mut store, ms(3));
     store
-        .note_verifactu_unsent_attempt(batch.id, "certificate_missing", ms(4))
+        .note_verifactu_unsent_attempt(batch.id, "connect_failed", ms(4))
         .unwrap();
     store.begin_verifactu_attempt(batch.id, ms(5)).unwrap();
     store
@@ -879,18 +879,197 @@ fn a_record_generated_before_the_incident_does_not_mark_its_batch() {
 }
 
 #[test]
-fn an_unsent_attempt_opens_an_incident_too() {
+fn only_network_and_tls_unsent_attempts_open_an_incident() {
     let mut store = Store::open_in_memory().unwrap();
     let customer = setup(&mut store);
     issue_at(&mut store, customer, &ctx(0));
     let batch = open_batch(&mut store, ms(10));
-    assert!(!store.verifactu_incident_open().unwrap());
+    // Configuración o compilación: no son una incidencia técnica (D282).
+    for (n, reason) in [
+        "network_disabled",
+        "wrong_environment",
+        "certificate_missing",
+        "certificate_expired",
+        "certificate_needs_user",
+        "certificate_rejected",
+        "settings_changed",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        store
+            .note_verifactu_unsent_attempt(batch.id, reason, ms(20 + n as i64))
+            .unwrap();
+        assert!(!store.verifactu_incident_open().unwrap(), "{reason}");
+    }
+    let ticket = store
+        .begin_verifactu_attempt_ticket(batch.id, ms(40))
+        .unwrap();
     store
-        .note_verifactu_unsent_attempt(batch.id, "certificate_missing", ms(20))
+        .void_verifactu_attempt(ticket.attempt_id, "certificate_key_unsupported", ms(41))
+        .unwrap();
+    assert!(!store.verifactu_incident_open().unwrap());
+    // Red y TLS sí.
+    store
+        .note_verifactu_unsent_attempt(batch.id, "tls_handshake_failed", ms(50))
         .unwrap();
     assert!(store.verifactu_incident_open().unwrap());
     assert_eq!(
         store.verifactu_incidents().unwrap()[0].reason_code,
-        "certificate_missing"
+        "tls_handshake_failed"
     );
+}
+
+#[test]
+fn the_unsent_table_refuses_a_closed_batch_and_an_attempt_of_another_batch() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("nestadmin.db");
+    let mut store = Store::open(&path).unwrap();
+    let customer = setup(&mut store);
+    issue_at(&mut store, customer, &ctx(0));
+    let sim = simulator();
+    let first = open_batch(&mut store, ms(10));
+    let ticket = store
+        .begin_verifactu_attempt_ticket(first.id, ms(11))
+        .unwrap();
+    respond(&mut store, &sim, &first, ms(12));
+    issue_at(&mut store, customer, &ctx(100));
+    let second = open_batch(&mut store, ms(110));
+    let conn = raw(&path);
+    // Lote cerrado.
+    let closed = conn.execute(
+        "INSERT INTO verifactu_unsent_attempts (batch_id, attempt_id, reason_code, attempted_at) \
+         VALUES (?1, NULL, 'connect_failed', 1)",
+        [first.id],
+    );
+    assert!(closed.unwrap_err().to_string().contains("cerrado"));
+    // Intento de otro lote.
+    let crossed = conn.execute(
+        "INSERT INTO verifactu_unsent_attempts (batch_id, attempt_id, reason_code, attempted_at) \
+         VALUES (?1, ?2, 'connect_failed', 1)",
+        [second.id, ticket.attempt_id],
+    );
+    assert!(crossed.unwrap_err().to_string().contains("otro lote"));
+    assert_eq!(count(&path, "verifactu_unsent_attempts"), 0);
+}
+
+#[test]
+fn a_duplicate_after_a_no_response_attempt_and_a_technical_fault_is_our_own() {
+    let mut store = Store::open_in_memory().unwrap();
+    let customer = setup(&mut store);
+    let (_, alta) = issue_at(&mut store, customer, &ctx(0));
+    let sim = simulator();
+    // Lote A: el cuerpo llega, la AEAT lo guarda y se pierde la respuesta.
+    let a = open_batch(&mut store, ms(10));
+    store.begin_verifactu_attempt(a.id, ms(11)).unwrap();
+    sim.estado().perder_siguiente_respuesta = true;
+    assert!(post(&sim.url(), &a.envio.a_soap().unwrap()).is_none());
+    // Reintento: un Fault técnico cierra A y sus registros vuelven a pendientes.
+    store.begin_verifactu_attempt(a.id, ms(70)).unwrap();
+    store
+        .close_verifactu_batch(a.id, &fault(4108), ms(71))
+        .unwrap();
+    // Lote B: la AEAT responde 3000 y, como A pudo haberlo registrado, es propio.
+    let b = open_batch(&mut store, ms(200));
+    assert_eq!(b.record_ids, vec![alta]);
+    store.begin_verifactu_attempt(b.id, ms(201)).unwrap();
+    respond(&mut store, &sim, &b, ms(202));
+    let view = store.verifactu_record_state(alta).unwrap();
+    assert_eq!(view.status, VerifactuStatus::Accepted);
+    assert!(view.duplicate);
+}
+
+#[test]
+fn a_duplicate_after_a_single_attempt_fault_or_only_voided_attempts_is_not_ours() {
+    let mut store = Store::open_in_memory().unwrap();
+    let customer = setup(&mut store);
+    let (_, alta) = issue_at(&mut store, customer, &ctx(0));
+    let sim = simulator();
+    let record = store.verifactu_records().unwrap()[0].record.clone();
+    sim.sembrar(&[record]); // otro remitente lo envió
+                            // A: un intento anulado (nunca escrito) y un Fault con un solo intento que cuenta.
+    let a = open_batch(&mut store, ms(10));
+    let voided = store.begin_verifactu_attempt_ticket(a.id, ms(11)).unwrap();
+    store
+        .void_verifactu_attempt(voided.attempt_id, "connect_failed", ms(12))
+        .unwrap();
+    store.begin_verifactu_attempt(a.id, ms(70)).unwrap();
+    store
+        .close_verifactu_batch(a.id, &fault(4108), ms(71))
+        .unwrap();
+    let b = open_batch(&mut store, ms(200));
+    store.begin_verifactu_attempt(b.id, ms(201)).unwrap();
+    respond(&mut store, &sim, &b, ms(202));
+    assert_eq!(state(&store, alta), VerifactuStatus::UnexpectedDuplicate);
+}
+
+#[test]
+fn a_v16_database_with_an_open_batch_keeps_its_bytes_and_attempts_and_startup_resends_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("nestadmin.db");
+    let first_bytes;
+    {
+        let mut store = Store::open(&path).unwrap();
+        let customer = setup(&mut store);
+        issue_at(&mut store, customer, &ctx(0));
+        let batch = open_batch(&mut store, ms(10));
+        first_bytes = batch.envio.a_soap().unwrap();
+        // Dos intentos sin respuesta, como los dejaba E5.
+        store.begin_verifactu_attempt(batch.id, ms(11)).unwrap();
+        store.begin_verifactu_attempt(batch.id, ms(80)).unwrap();
+    }
+    // Como la dejaría la versión 16: sin las tablas de la migración 17.
+    let conn = raw(&path);
+    conn.execute_batch(
+        "DROP TABLE verifactu_authorization_halts; DROP TABLE verifactu_incidents; \
+         DROP TABLE verifactu_unsent_attempts; DROP TABLE verifactu_tls12_preferences; \
+         DROP TABLE verifactu_remission_settings; PRAGMA user_version = 16;",
+    )
+    .unwrap();
+    drop(conn);
+
+    let mut store = Store::open(&path).unwrap();
+    assert_eq!(store.schema_version().unwrap(), 17);
+    let batch = store.unfinished_verifactu_batch().unwrap().unwrap();
+    assert_eq!(batch.envio.a_soap().unwrap(), first_bytes, "mismos bytes");
+    assert_eq!(batch.attempts, 2, "los intentos siguen contando");
+    assert!(!first_bytes.contains("Incidencia"));
+    // El arranque no espera los fallos anteriores y reenvía el lote; el 3000 sería propio.
+    assert_eq!(
+        store
+            .verifactu_next_send_at_mode(SIM, WaitMode::Startup)
+            .unwrap(),
+        None
+    );
+    assert!(store.verifactu_next_send_at(SIM).unwrap().is_some());
+    let sim = simulator();
+    let record = store.verifactu_records().unwrap()[0].clone();
+    sim.sembrar(std::slice::from_ref(&record.record));
+    store.begin_verifactu_attempt(batch.id, ms(300)).unwrap();
+    respond(&mut store, &sim, &batch, ms(301));
+    let view = store.verifactu_record_state(record.id).unwrap();
+    assert_eq!(
+        (view.status, view.duplicate),
+        (VerifactuStatus::Accepted, true)
+    );
+}
+
+#[test]
+fn a_settings_change_during_a_send_resumes_an_authorization_halt_it_caused() {
+    let mut store = Store::open_in_memory().unwrap();
+    let customer = setup(&mut store);
+    issue_at(&mut store, customer, &ctx(0));
+    let batch = open_batch(&mut store, ms(10));
+    store.begin_verifactu_attempt(batch.id, ms(11)).unwrap();
+    store
+        .close_verifactu_batch(batch.id, &fault(4112), ms(12))
+        .unwrap();
+    assert!(store.verifactu_authorization_halt().unwrap().is_some());
+    assert!(store
+        .resume_verifactu_authorization_after_settings_change(
+            "configuracion_cambiada_durante_envio",
+            ms(13)
+        )
+        .unwrap());
+    assert!(store.verifactu_authorization_halt().unwrap().is_none());
 }

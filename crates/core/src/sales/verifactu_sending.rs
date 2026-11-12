@@ -86,6 +86,19 @@ pub fn retry_wait_seconds(consecutive_failures: u32) -> u32 {
         .min(MAX_RETRY_WAIT_SECONDS)
 }
 
+/// Motivos de un intento sin envío que abren una incidencia técnica (D282): solo los de la red y
+/// el TLS. Los de configuración o compilación (`network_disabled`, `wrong_environment`,
+/// `certificate_*`, `settings_changed`) no son una incidencia técnica de la AEAT ni de la
+/// conexión: el usuario o el instalador deben arreglarlos y no justifican `Incidencia = S`.
+pub const INCIDENT_UNSENT_REASONS: [&str; 6] = [
+    "dns_failed",
+    "connect_failed",
+    "connect_timeout",
+    "server_certificate_invalid",
+    "tls_handshake_failed",
+    "tls_timeout",
+];
+
 /// Motivos de un intento sin envío: solo `a-z`, `0-9` y `_`, hasta 64 caracteres. Son códigos
 /// estables, nunca texto del sistema ni datos del certificado.
 fn valid_reason(code: &str) -> bool {
@@ -634,7 +647,7 @@ impl Store {
 
     /// Anota que el intento falló ANTES de anotarlo (el certificado o la clave no estaban
     /// disponibles): no hay intento, no cuenta para considerar propio un duplicado 3000 (D50,
-    /// D252) y abre una incidencia (D282). Falla si el lote no existe o ya está cerrado.
+    /// D252) y, si el motivo es de red o TLS ([`INCIDENT_UNSENT_REASONS`]), abre una incidencia (D282). Falla si el lote no existe o ya está cerrado.
     pub fn note_verifactu_unsent_attempt(
         &mut self,
         batch_id: i64,
@@ -651,7 +664,9 @@ impl Store {
              attempted_at) VALUES (?1, NULL, ?2, ?3)",
             params![batch_id, reason_code, now_ms],
         )?;
-        open_incident(&tx, reason_code, Some(batch_id), now_ms)?;
+        if INCIDENT_UNSENT_REASONS.contains(&reason_code) {
+            open_incident(&tx, reason_code, Some(batch_id), now_ms)?;
+        }
         tx.commit()?;
         Ok(())
     }
@@ -693,7 +708,9 @@ impl Store {
              attempted_at) VALUES (?1, ?2, ?3, ?4)",
             params![batch_id, attempt_id, reason_code, now_ms],
         )?;
-        open_incident(&tx, reason_code, Some(batch_id), now_ms)?;
+        if INCIDENT_UNSENT_REASONS.contains(&reason_code) {
+            open_incident(&tx, reason_code, Some(batch_id), now_ms)?;
+        }
         tx.commit()?;
         Ok(())
     }
@@ -772,6 +789,22 @@ impl Store {
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         let resumed = resume_authorization(&tx, "declaration", authorization, now_ms)?;
+        tx.commit()?;
+        Ok(resumed)
+    }
+
+    /// La configuración de remisión cambió mientras había un envío en curso y ese envío terminó en
+    /// un `Fault` de autorización que ya no vale (se debió al certificado o a la configuración
+    /// anteriores): reanuda la remisión con la causa `settings_change`. Devuelve si estaba parada.
+    pub fn resume_verifactu_authorization_after_settings_change(
+        &mut self,
+        authorization: &str,
+        now_ms: i64,
+    ) -> SalesResult<bool> {
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let resumed = resume_authorization(&tx, "settings_change", authorization.trim(), now_ms)?;
         tx.commit()?;
         Ok(resumed)
     }

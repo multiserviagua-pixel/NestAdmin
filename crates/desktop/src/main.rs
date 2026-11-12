@@ -2394,7 +2394,9 @@ impl std::fmt::Display for PumpDriveError {
 /// con el cerrojo de la aplicación; la obtención del certificado (que puede tardar, con una
 /// tarjeta o un proveedor en la nube) y la llamada de red, sin él. Con `declared_fixed` (solo
 /// «Remitir ahora») el usuario declara antes que ya arregló la autorización y la remisión
-/// parada por un `Fault` de autorización se reanuda (D281).
+/// parada por un `Fault` de autorización se reanuda (D281). Si el estado interno falla después de
+/// `job.run()`, el intento ya anotado sigue contando como enviado (D252): es la opción
+/// conservadora, porque el cuerpo pudo llegar a la AEAT.
 pub(crate) fn drive_verifactu_pump(
     shared: &Shared,
     manual: bool,
@@ -2437,7 +2439,17 @@ pub(crate) fn drive_verifactu_pump(
 /// certificado (D280). Devuelve si hizo una remisión; un error solo se muestra, no detiene la
 /// cola.
 fn resume_verifactu<R: Runtime>(shared: &SharedState, handle: &AppHandle<R>) -> bool {
-    match drive_verifactu_pump(shared, false, false) {
+    // La remisión parada por autorización se avisa a la ventana una sola vez al entrar en ese
+    // estado (también tras reabrir la aplicación), no en cada tick (D281).
+    static AUTHORIZATION_NOTIFIED: AtomicBool = AtomicBool::new(false);
+    let report = drive_verifactu_pump(shared, false, false);
+    let rejected = matches!(report, Ok(PumpReport::AuthorizationRejected { .. }));
+    if !rejected {
+        AUTHORIZATION_NOTIFIED.store(false, Ordering::SeqCst);
+    } else if !AUTHORIZATION_NOTIFIED.swap(true, Ordering::SeqCst) {
+        changed(handle);
+    }
+    match report {
         Ok(
             PumpReport::Idle
             | PumpReport::Busy

@@ -46,8 +46,21 @@ CREATE TABLE verifactu_unsent_attempts (
 
 CREATE INDEX verifactu_unsent_attempts_batch ON verifactu_unsent_attempts (batch_id);
 
+-- Un intento sin envío solo se anota en un lote abierto y, si anula un intento, en el lote de
+-- ese intento: nada se anota contra un lote ya cerrado ni cruzando lotes.
+CREATE TRIGGER verifactu_unsent_attempts_check
+BEFORE INSERT ON verifactu_unsent_attempts
+BEGIN
+    SELECT RAISE(ABORT, 'el lote de Verifactu ya está cerrado')
+    WHERE EXISTS (SELECT 1 FROM verifactu_batch_results WHERE batch_id = NEW.batch_id);
+    SELECT RAISE(ABORT, 'el intento anulado es de otro lote')
+    WHERE NEW.attempt_id IS NOT NULL AND NOT EXISTS (
+        SELECT 1 FROM verifactu_batch_attempts WHERE id = NEW.attempt_id AND batch_id = NEW.batch_id
+    );
+END;
+
 -- Incidencias técnicas de remisión (D282): se abre con un fallo técnico (sin respuesta, no
--- enviado, `Fault` técnico) y se cierra con el siguiente envío con respuesta. Está abierta si la
+-- enviado por la red o el TLS, `Fault` técnico) y se cierra con el siguiente envío con respuesta. Está abierta si la
 -- última fila es `open`. Un registro se generó durante una incidencia si su fecha cae entre una
 -- apertura y su cierre (se deduce por el momento).
 CREATE TABLE verifactu_incidents (

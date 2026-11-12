@@ -102,6 +102,9 @@ import {
   canSubsanate,
   environmentLine,
   haltedText,
+  authorizationAlertText,
+  RESUME_AUTHORIZATION_BUTTON,
+  RESUME_AUTHORIZATION_CONFIRM,
   nextSendText,
   autoRefreshDelayMs,
   lastErrorText,
@@ -1610,13 +1613,13 @@ export function createSalesView(ctx: Context) {
 
   const noticeClass = (tone: PumpText["tone"]) => (tone === "neutral" ? "info" : tone);
 
-  async function remitNow() {
+  async function remitNow(declaredFixed?: boolean) {
     if (s.remitting) return;
     s.remitting = true;
     s.pump = null;
     ctx.render();
     try {
-      s.pump = pumpReportText(await api.verifactuSubmitNow());
+      s.pump = pumpReportText(await api.verifactuSubmitNow(declaredFixed));
     } catch (error) {
       s.pump = { tone: "error", text: salesErrorText(error) };
     }
@@ -1630,6 +1633,12 @@ export function createSalesView(ctx: Context) {
     // El aviso de esta pasada se conserva aunque el estado haya cambiado por ella.
     s.pump = shown;
     ctx.render();
+  }
+
+  /** «Ya está arreglado, reanudar»: tras confirmar, declara que la autorización está arreglada y remite. */
+  async function resumeAuthorization() {
+    if (!(await ctx.ask(RESUME_AUTHORIZATION_CONFIRM))) return;
+    await remitNow(true);
   }
 
   async function refreshRecords() {
@@ -1661,6 +1670,7 @@ export function createSalesView(ctx: Context) {
       return h("div", { class: "notice warn", role: "alert" }, h("span", {}, `No se pudo leer el estado de la remisión${s.verifactuError ? `: ${s.verifactuError}` : "."}`), h("button", { onclick: () => void refreshRecords() }, "Reintentar"));
     }
     const halted = haltedText(v);
+    const authorization = authorizationAlertText(v);
     const lastError = lastErrorText(v.last_error);
     const batch = v.last_batch ? batchText(v.last_batch) : null;
     return h(
@@ -1668,6 +1678,14 @@ export function createSalesView(ctx: Context) {
       { class: "verifactu-head" },
       h("div", { class: "notice info", role: "status" }, h("span", {}, h("strong", {}, environmentLine(v.environment)), v.environment_notice ? ` — ${v.environment_notice}` : "")),
       halted ? h("div", { class: "notice error", role: "alert" }, h("span", {}, halted)) : null,
+      authorization
+        ? h(
+            "div",
+            { class: "notice error", role: "alert", "data-testid": "verifactu-authorization" },
+            h("span", {}, authorization),
+            h("button", { "data-focus-key": "verifactu:resume-authorization", disabled: s.remitting, onclick: () => void resumeAuthorization() }, RESUME_AUTHORIZATION_BUTTON),
+          )
+        : null,
       lastError ? h("div", { class: "notice warn", role: "alert" }, h("span", {}, lastError)) : null,
       h(
         "ul",

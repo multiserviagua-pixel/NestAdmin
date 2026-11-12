@@ -21,7 +21,9 @@ use rcgen::{
     BasicConstraints, CertificateParams, DistinguishedName, DnType, DnValue,
     ExtendedKeyUsagePurpose, IsCa, Issuer, KeyPair, KeyUsagePurpose, PKCS_ECDSA_P256_SHA256,
 };
+use rustls::client::danger::HandshakeSignatureValid;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
+use rustls::server::danger::{ClientCertVerified, ClientCertVerifier};
 use rustls::server::WebPkiClientVerifier;
 use rustls::sign::{Signer, SigningKey};
 use rustls::{RootCertStore, ServerConfig, ServerConnection, SignatureAlgorithm, SignatureScheme};
@@ -245,6 +247,53 @@ pub struct Seen {
     pub requests: Vec<Vec<u8>>,
 }
 
+/// Verificador que espera y rechaza siempre (ver [`MtlsServer::start_slow_rejecting`]).
+#[derive(Debug)]
+struct SlowReject {
+    inner: Arc<dyn ClientCertVerifier>,
+    delay: Duration,
+}
+
+impl ClientCertVerifier for SlowReject {
+    fn root_hint_subjects(&self) -> &[rustls::DistinguishedName] {
+        self.inner.root_hint_subjects()
+    }
+
+    fn verify_client_cert(
+        &self,
+        _end_entity: &CertificateDer<'_>,
+        _intermediates: &[CertificateDer<'_>],
+        _now: rustls::pki_types::UnixTime,
+    ) -> Result<ClientCertVerified, rustls::Error> {
+        thread::sleep(self.delay);
+        Err(rustls::Error::InvalidCertificate(
+            rustls::CertificateError::BadEncoding,
+        ))
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &rustls::DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        self.inner.verify_tls12_signature(message, cert, dss)
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &rustls::DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        self.inner.verify_tls13_signature(message, cert, dss)
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+        self.inner.supported_verify_schemes()
+    }
+}
+
 pub struct MtlsServer {
     pub addr: SocketAddr,
     pub simulator: Arc<SimuladorAeat>,
@@ -257,13 +306,40 @@ impl MtlsServer {
     /// `client_ca`: la CA que firma los certificados cliente aceptados. `server`: certificado
     /// del servidor y su clave PKCS#8.
     pub fn start(client_ca: &[u8], server: (Vec<u8>, Vec<u8>), behavior: Behavior) -> Self {
+        let verifier = Self::webpki_verifier(client_ca);
+        Self::start_with_verifier(verifier, server, behavior)
+    }
+
+    fn webpki_verifier(client_ca: &[u8]) -> Arc<dyn ClientCertVerifier> {
         let provider = Arc::new(rustls::crypto::ring::default_provider());
         let mut roots = RootCertStore::empty();
         roots.add(CertificateDer::from(client_ca.to_vec())).unwrap();
-        let verifier =
-            WebPkiClientVerifier::builder_with_provider(Arc::new(roots), provider.clone())
-                .build()
-                .unwrap();
+        WebPkiClientVerifier::builder_with_provider(Arc::new(roots), provider)
+            .build()
+            .unwrap()
+    }
+
+    /// Un servidor que rechaza todo certificado cliente, pero tarda `delay` en hacerlo: la
+    /// alerta de certificado llega mucho después de que el cliente termine su saludo TLS 1.3 y
+    /// escriba el cuerpo.
+    pub fn start_slow_rejecting(
+        client_ca: &[u8],
+        server: (Vec<u8>, Vec<u8>),
+        delay: Duration,
+    ) -> Self {
+        let verifier = Arc::new(SlowReject {
+            inner: Self::webpki_verifier(client_ca),
+            delay,
+        });
+        Self::start_with_verifier(verifier, server, Behavior::Proxy)
+    }
+
+    fn start_with_verifier(
+        verifier: Arc<dyn ClientCertVerifier>,
+        server: (Vec<u8>, Vec<u8>),
+        behavior: Behavior,
+    ) -> Self {
+        let provider = Arc::new(rustls::crypto::ring::default_provider());
         let config = ServerConfig::builder_with_provider(provider)
             .with_protocol_versions(&[&rustls::version::TLS13, &rustls::version::TLS12])
             .unwrap()
