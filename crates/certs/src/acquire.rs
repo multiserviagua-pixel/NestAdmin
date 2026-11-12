@@ -2,8 +2,9 @@
 //! Windows: se firma con CNG. La aplicación nunca maneja el PIN; si hace falta, lo pide Windows
 //! en su propio diálogo y solo en modo [`AcquireMode::Interactive`].
 
-use std::path::Path;
-use std::sync::Arc;
+use std::path::{Path, PathBuf};
+use std::sync::{mpsc, Arc};
+use std::time::Duration;
 
 use rustls::sign::{Signer, SigningKey};
 use rustls::{Error as TlsError, SignatureAlgorithm, SignatureScheme};
@@ -12,7 +13,9 @@ use rustls_cng::error::CngError;
 use rustls_cng::key::{AlgorithmGroup, NCryptKey, SignaturePadding};
 use rustls_cng::signer::CngSigningKey;
 
-use crate::store::{acquire_raw, find_by_thumbprint, pick_pfx_leaf, provider_of, Store};
+use crate::store::{
+    acquire_raw, build_chain, find_by_thumbprint, pick_pfx_leaf, provider_of, Store,
+};
 use crate::vault;
 use crate::{inspect, validate, CertError, CertificateInfo, CertificateSource, KeyProvider};
 
@@ -73,7 +76,6 @@ impl Signer for KeepSigner {
 }
 
 /// Cadena de certificados y clave de firma, lista para un `ResolvesClientCert` (B3).
-#[derive(Debug)]
 pub struct CertifiedSigner {
     /// Certificado final primero, después los intermedios (sin la raíz), en DER.
     pub chain: Vec<Vec<u8>>,
@@ -81,6 +83,16 @@ pub struct CertifiedSigner {
     /// Datos del certificado final (con datos personales: solo para la interfaz).
     pub info: CertificateInfo,
     pub provider: KeyProvider,
+}
+
+impl std::fmt::Debug for CertifiedSigner {
+    /// Solo el número de certificados y el proveedor: nada del titular, el NIF ni la huella.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CertifiedSigner")
+            .field("chain_len", &self.chain.len())
+            .field("provider", &self.provider)
+            .finish_non_exhaustive()
+    }
 }
 
 // Códigos HRESULT de Windows que se traducen (solo para clasificar; no se muestran).
@@ -95,12 +107,22 @@ const NTE_USER_CANCELLED: u32 = 0x8009_0036;
 const CRYPT_E_NOT_FOUND: u32 = 0x8009_2004;
 const CRYPT_E_NO_KEY_PROPERTY: u32 = 0x8009_200B;
 const ERROR_CANCELLED: u32 = 1223;
+/// `HRESULT_FROM_WIN32(ERROR_CANCELLED)`.
+const HRESULT_CANCELLED: u32 = 0x8007_04C7;
+const NTE_DEVICE_NOT_READY: u32 = 0x8009_0030;
+const NTE_DEVICE_NOT_FOUND: u32 = 0x8009_0035;
+/// `SCARD_W_CHV_BLOCKED`: la tarjeta está bloqueada; pedir el PIN otra vez no sirve.
+const SCARD_W_CHV_BLOCKED: u32 = 0x8010_006C;
 
 fn map_os_error(code: u32) -> CertError {
     match code {
-        // PIN, confirmación o tarjeta ausente, bloqueada o retirada (SCARD_*, 0x8010xxxx).
-        NTE_SILENT_CONTEXT | NTE_USER_CANCELLED | ERROR_CANCELLED => CertError::NeedsUser,
-        c if c >> 16 == 0x8010 => CertError::NeedsUser,
+        // Una tarjeta bloqueada es inútil: no se vuelve a pedir el PIN.
+        SCARD_W_CHV_BLOCKED => CertError::Rejected,
+        // PIN, confirmación, dispositivo no listo o ausente, tarjeta ausente o retirada
+        // (SCARD_*, 0x8010xxxx) y bloqueo o fallo transitorio del TPM (0x8028xxxx).
+        NTE_SILENT_CONTEXT | NTE_USER_CANCELLED | ERROR_CANCELLED | HRESULT_CANCELLED
+        | NTE_DEVICE_NOT_READY | NTE_DEVICE_NOT_FOUND => CertError::NeedsUser,
+        c if c >> 16 == 0x8010 || c >> 16 == 0x8028 => CertError::NeedsUser,
         NTE_BAD_KEYSET
         | NTE_KEYSET_NOT_DEF
         | NTE_NO_KEY
@@ -125,6 +147,9 @@ fn map_cng(error: &CngError) -> CertError {
 fn probe(key: &NCryptKey) -> Result<(), CertError> {
     let padding = match key.algorithm_group().map_err(|e| map_cng(&e))? {
         AlgorithmGroup::Rsa => SignaturePadding::Pkcs1,
+        // Windows etiqueta como ECDH muchas claves EC importadas que sí firman (los PFX con
+        // curva P-256, por ejemplo): se intenta firmar y, si la clave de verdad no firma,
+        // `NTE_NOT_SUPPORTED` o `NTE_BAD_ALGID` dan `KeyUnsupported` (`map_os_error`).
         AlgorithmGroup::Ecdsa | AlgorithmGroup::Ecdh => SignaturePadding::None,
     };
     key.sign(&[0x5A; 32], padding)
@@ -160,6 +185,10 @@ fn resolve(
 
 /// Obtiene la cadena y la clave de firma de `source`.
 ///
+/// **Los proveedores de tarjeta o de la nube pueden ignorar el modo silencioso y colgarse**
+/// (D280). Por eso B3 ejecutará `acquire` fuera del hilo de la remisión y con un tiempo límite;
+/// si se agota, el resultado es `NeedsUser`. [`acquire_with_timeout`] lo hace ya.
+///
 /// Orden: se resuelve el certificado (`Missing`), se valida con el reloj `now_ms` (`Expired`,
 /// `KeyUnsupported`, `Rejected` si no sirve para `clientAuth`) y, solo entonces, se abre la
 /// clave y se firma una huella de prueba. En `Silent` no se muestra nada: si Windows necesita
@@ -177,13 +206,13 @@ pub fn acquire(
     // El NIF del obligado no interviene aquí: la coincidencia no bloquea (D283).
     validate(&info, "", now_ms).into_result()?;
 
-    let key = acquire_raw(&context, mode == AcquireMode::Silent).map_err(map_os_error)?;
+    // La clave que Windows deja en el contexto solo existe en la vía del PFX.
+    let from_pfx = matches!(source, CertificateSource::Pfx { .. });
+    let key = acquire_raw(&context, mode == AcquireMode::Silent, from_pfx).map_err(map_os_error)?;
     probe(&key)?;
     let inner = CngSigningKey::new(key).map_err(|e| map_cng(&e))?;
-    let chain = match context.as_chain_der() {
-        Ok(chain) if !chain.is_empty() => chain,
-        _ => vec![context.as_der().to_vec()],
-    };
+    // Sin descargas de red; si no se puede construir, es un error, no solo el final.
+    let chain = build_chain(&context, &store).ok_or(CertError::Rejected)?;
     Ok(CertifiedSigner {
         chain,
         key: Arc::new(CertKey {
@@ -195,6 +224,41 @@ pub fn acquire(
         }),
         info,
         provider,
+    })
+}
+
+/// Ejecuta `f` en un hilo y espera como mucho `timeout`; si se agota, `NeedsUser`. El hilo
+/// sigue por su cuenta y su resultado se descarta.
+fn run_with_timeout<T: Send + 'static>(
+    timeout: Duration,
+    f: impl FnOnce() -> Result<T, CertError> + Send + 'static,
+) -> Result<T, CertError> {
+    let (tx, rx) = mpsc::channel();
+    std::thread::Builder::new()
+        .name("certs-acquire".into())
+        .spawn(move || {
+            let _ = tx.send(f());
+        })
+        .map_err(|_| CertError::Rejected)?;
+    rx.recv_timeout(timeout)
+        .unwrap_or(Err(CertError::NeedsUser))
+}
+
+/// [`acquire`] en un hilo aparte con tiempo límite: un proveedor que ignora el modo silencioso
+/// y se cuelga devuelve `NeedsUser` al agotarse `timeout`, sin bloquear a quien llama.
+pub fn acquire_with_timeout(
+    source: &CertificateSource,
+    store_dir: &Path,
+    entropy: &[u8],
+    mode: AcquireMode,
+    now_ms: i64,
+    timeout: Duration,
+) -> Result<CertifiedSigner, CertError> {
+    let source = source.clone();
+    let store_dir: PathBuf = store_dir.to_path_buf();
+    let entropy = entropy.to_vec();
+    run_with_timeout(timeout, move || {
+        acquire(&source, &store_dir, &entropy, mode, now_ms)
     })
 }
 
@@ -212,10 +276,31 @@ mod tests {
         assert_eq!(map_os_error(NTE_BAD_KEYSET), CertError::Missing);
         assert_eq!(map_os_error(CRYPT_E_NO_KEY_PROPERTY), CertError::Missing);
         assert_eq!(map_os_error(NTE_BAD_ALGID), CertError::KeyUnsupported);
+        assert_eq!(map_os_error(HRESULT_CANCELLED), CertError::NeedsUser);
+        assert_eq!(map_os_error(NTE_DEVICE_NOT_READY), CertError::NeedsUser);
+        assert_eq!(map_os_error(NTE_DEVICE_NOT_FOUND), CertError::NeedsUser);
+        assert_eq!(map_os_error(0x8028_0921), CertError::NeedsUser); // TPM bloqueado
+        assert_eq!(map_os_error(SCARD_W_CHV_BLOCKED), CertError::Rejected);
         assert_eq!(map_os_error(0xDEAD_BEEF), CertError::Rejected);
         assert_eq!(
             map_cng(&CngError::UnsupportedKeyAlgorithmGroup),
             CertError::KeyUnsupported
         );
+    }
+
+    #[test]
+    fn a_hung_provider_times_out_as_needs_user() {
+        let hung = run_with_timeout(Duration::from_millis(50), || {
+            std::thread::sleep(Duration::from_secs(2));
+            Ok(1)
+        });
+        assert_eq!(hung.unwrap_err(), CertError::NeedsUser);
+        assert_eq!(
+            run_with_timeout(Duration::from_secs(10), || Ok(7)).unwrap(),
+            7
+        );
+        let failed: Result<u8, _> =
+            run_with_timeout(Duration::from_secs(10), || Err(CertError::Missing));
+        assert_eq!(failed.unwrap_err(), CertError::Missing);
     }
 }

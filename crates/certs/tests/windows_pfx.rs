@@ -36,6 +36,26 @@ fn bin_files(dir: &Path) -> Vec<std::path::PathBuf> {
     }
 }
 
+/// Nombres de archivo (solo nombres) de `%APPDATA%\Microsoft\Crypto\Keys` y de cada
+/// `Crypto\RSA\<SID>`, ordenados.
+fn crypto_key_files() -> Vec<String> {
+    let Some(appdata) = std::env::var_os("APPDATA") else {
+        return vec![];
+    };
+    let crypto = Path::new(&appdata).join("Microsoft").join("Crypto");
+    let mut dirs = vec![crypto.join("Keys")];
+    if let Ok(rd) = fs::read_dir(crypto.join("RSA")) {
+        dirs.extend(rd.filter_map(|e| e.ok()).map(|e| e.path()));
+    }
+    let mut names: Vec<String> = dirs
+        .iter()
+        .flat_map(|d| bin_files(d))
+        .map(|p| p.to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    names
+}
+
 fn spki_key(cert_der: &[u8]) -> Vec<u8> {
     let (_, cert) = X509Certificate::from_der(cert_der).unwrap();
     cert.public_key().subject_public_key.data.to_vec()
@@ -91,6 +111,126 @@ fn import_acquire_and_sign_with_the_cng_key() {
 }
 
 #[test]
+fn the_chain_has_the_leaf_and_the_intermediate_but_not_the_root() {
+    let dir = tempfile::tempdir().unwrap();
+    let m = three_levels(PASSWORD);
+    let (reference, _) = import_pfx(&m.pfx, PASSWORD, dir.path(), ENTROPY).unwrap();
+    let signer = acquire(
+        &source(&reference),
+        dir.path(),
+        ENTROPY,
+        AcquireMode::Silent,
+        NOW_MS,
+    )
+    .unwrap();
+    assert_eq!(signer.chain.len(), 2);
+    assert_eq!(signer.chain[0], m.cert_der);
+    let (_, inter) = X509Certificate::from_der(&signer.chain[1]).unwrap();
+    assert_ne!(
+        inter.subject().to_string(),
+        inter.issuer().to_string(),
+        "no es la raíz"
+    );
+}
+
+#[test]
+fn the_debug_of_the_signer_shows_only_the_count_and_the_provider() {
+    let dir = tempfile::tempdir().unwrap();
+    let m = modern(PASSWORD);
+    let (reference, info) = import_pfx(&m.pfx, PASSWORD, dir.path(), ENTROPY).unwrap();
+    let signer = acquire(
+        &source(&reference),
+        dir.path(),
+        ENTROPY,
+        AcquireMode::Silent,
+        NOW_MS,
+    )
+    .unwrap();
+    let text = format!("{signer:?}");
+    assert!(
+        text.contains("chain_len") && text.contains("SoftwareCng"),
+        "{text}"
+    );
+    for forbidden in [NIF, NAME, "PRUEBA", info.fingerprint.as_str()] {
+        assert!(!text.contains(forbidden), "{text}");
+    }
+}
+
+#[test]
+fn acquire_with_timeout_returns_the_result_when_it_is_fast() {
+    let dir = tempfile::tempdir().unwrap();
+    let m = modern(PASSWORD);
+    let (reference, _) = import_pfx(&m.pfx, PASSWORD, dir.path(), ENTROPY).unwrap();
+    let signer = nestadmin_certs::acquire_with_timeout(
+        &source(&reference),
+        dir.path(),
+        ENTROPY,
+        AcquireMode::Silent,
+        NOW_MS,
+        std::time::Duration::from_secs(30),
+    )
+    .unwrap();
+    assert_eq!(signer.chain[0], m.cert_der);
+    let missing = nestadmin_certs::acquire_with_timeout(
+        &source(&"0".repeat(32)),
+        dir.path(),
+        ENTROPY,
+        AcquireMode::Silent,
+        NOW_MS,
+        std::time::Duration::from_secs(30),
+    );
+    assert_eq!(missing.map(|_| ()).unwrap_err(), CertError::Missing);
+}
+
+#[test]
+fn a_bin_copied_over_another_reference_is_missing() {
+    let dir = tempfile::tempdir().unwrap();
+    let a = modern(PASSWORD);
+    let b = modern(PASSWORD);
+    let (ref_a, _) = import_pfx(&a.pfx, PASSWORD, dir.path(), ENTROPY).unwrap();
+    let (ref_b, _) = import_pfx(&b.pfx, PASSWORD, dir.path(), ENTROPY).unwrap();
+    silent(&ref_a, dir.path(), ENTROPY, NOW_MS).unwrap();
+    silent(&ref_b, dir.path(), ENTROPY, NOW_MS).unwrap();
+    fs::copy(
+        dir.path().join(format!("{ref_a}.bin")),
+        dir.path().join(format!("{ref_b}.bin")),
+    )
+    .unwrap();
+    assert_eq!(
+        silent(&ref_b, dir.path(), ENTROPY, NOW_MS).unwrap_err(),
+        CertError::Missing
+    );
+    silent(&ref_a, dir.path(), ENTROPY, NOW_MS).unwrap();
+}
+
+#[test]
+fn an_empty_entropy_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let m = modern(PASSWORD);
+    assert_eq!(
+        import_pfx(&m.pfx, PASSWORD, dir.path(), b"").unwrap_err(),
+        PfxError::Storage
+    );
+    assert!(bin_files(dir.path()).is_empty());
+    let (reference, _) = import_pfx(&m.pfx, PASSWORD, dir.path(), ENTROPY).unwrap();
+    assert_eq!(
+        silent(&reference, dir.path(), b"", NOW_MS).unwrap_err(),
+        CertError::Missing
+    );
+}
+
+#[test]
+fn a_pfx_over_one_mib_is_invalid_before_parsing() {
+    let dir = tempfile::tempdir().unwrap();
+    let big = vec![0x30u8; (1 << 20) + 1];
+    assert_eq!(
+        import_pfx(&big, PASSWORD, dir.path(), ENTROPY).unwrap_err(),
+        PfxError::Invalid
+    );
+    assert!(bin_files(dir.path()).is_empty());
+}
+
+#[test]
 fn the_signer_keeps_working_after_the_certified_signer_is_dropped() {
     let dir = tempfile::tempdir().unwrap();
     let m = modern(PASSWORD);
@@ -124,7 +264,7 @@ fn the_bin_file_holds_neither_the_pfx_nor_the_password_in_clear() {
         format!("{reference}.bin")
     );
     let bytes = fs::read(&files[0]).unwrap();
-    assert!(bytes.starts_with(b"NACERT\x01"), "cabecera con versión");
+    assert!(bytes.starts_with(b"NACERT\x02"), "cabecera con versión");
     assert!(!contains(&bytes, PASSWORD.as_bytes()));
     assert!(!contains(&bytes, &m.pfx[..64]));
     assert!(!contains(&bytes, &m.cert_der[..64]));
@@ -292,6 +432,7 @@ fn a_certificate_missing_from_the_store_is_missing() {
 
 #[test]
 fn importing_installs_nothing_in_the_windows_store() {
+    let keys_before = crypto_key_files();
     let before: Vec<String> = nestadmin_certs::list_store_certificates()
         .into_iter()
         .map(|c| c.info.fingerprint)
@@ -313,6 +454,8 @@ fn importing_installs_nothing_in_the_windows_store() {
         .collect();
     assert_eq!(before, after);
     assert!(!after.contains(&info.fingerprint));
+    // Tampoco se persiste ninguna clave en el perfil (`Crypto\Keys` y `Crypto\RSA\<SID>`).
+    assert_eq!(keys_before, crypto_key_files());
 }
 
 #[test]

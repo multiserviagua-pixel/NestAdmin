@@ -33,6 +33,10 @@ fn blob(data: &[u8]) -> CRYPT_INTEGER_BLOB {
 
 /// Cifra para el usuario actual de Windows. `None` si DPAPI falla.
 pub(crate) fn protect(plain: &[u8], entropy: &[u8]) -> Option<Vec<u8>> {
+    // La entropía por instalación es obligatoria: vacía no aporta nada.
+    if entropy.is_empty() {
+        return None;
+    }
     let input = blob(plain);
     let entropy_blob = blob(entropy);
     let mut out = CRYPT_INTEGER_BLOB {
@@ -45,11 +49,7 @@ pub(crate) fn protect(plain: &[u8], entropy: &[u8]) -> Option<Vec<u8>> {
         let ok = CryptProtectData(
             &input,
             DESCRIPTION.as_ptr(),
-            if entropy.is_empty() {
-                ptr::null()
-            } else {
-                &entropy_blob
-            },
+            &entropy_blob,
             ptr::null(),
             ptr::null(),
             CRYPTPROTECT_UI_FORBIDDEN,
@@ -67,6 +67,9 @@ pub(crate) fn protect(plain: &[u8], entropy: &[u8]) -> Option<Vec<u8>> {
 /// Descifra un blob de [`protect`] con la misma entropía y el mismo usuario. `None` si no
 /// coincide, está manipulado o es de otro usuario.
 pub(crate) fn unprotect(sealed: &[u8], entropy: &[u8]) -> Option<Zeroizing<Vec<u8>>> {
+    if entropy.is_empty() {
+        return None;
+    }
     let input = blob(sealed);
     let entropy_blob = blob(entropy);
     let mut out = CRYPT_INTEGER_BLOB {
@@ -78,11 +81,7 @@ pub(crate) fn unprotect(sealed: &[u8], entropy: &[u8]) -> Option<Zeroizing<Vec<u
         let ok = CryptUnprotectData(
             &input,
             ptr::null_mut(),
-            if entropy.is_empty() {
-                ptr::null()
-            } else {
-                &entropy_blob
-            },
+            &entropy_blob,
             ptr::null(),
             ptr::null(),
             CRYPTPROTECT_UI_FORBIDDEN,

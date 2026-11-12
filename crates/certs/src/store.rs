@@ -11,14 +11,16 @@ use rustls_cng::key::NCryptKey;
 use windows_sys::Win32::Foundation::GetLastError;
 use windows_sys::Win32::Security::Cryptography::{
     CertCloseStore, CertDuplicateCertificateContext, CertEnumCertificatesInStore,
-    CertGetCertificateContextProperty, CertOpenStore, CryptAcquireCertificatePrivateKey,
-    NCryptGetProperty, PFXImportCertStore, CERT_CONTEXT, CERT_KEY_CONTEXT,
-    CERT_KEY_CONTEXT_PROP_ID, CERT_KEY_PROV_INFO_PROP_ID, CERT_KEY_SPEC, CERT_NCRYPT_KEY_SPEC,
-    CERT_STORE_OPEN_EXISTING_FLAG, CERT_STORE_PROV_SYSTEM_W, CERT_STORE_READONLY_FLAG,
-    CERT_SYSTEM_STORE_CURRENT_USER_ID, CERT_SYSTEM_STORE_LOCATION_SHIFT,
-    CRYPT_ACQUIRE_ONLY_NCRYPT_KEY_FLAG, CRYPT_ACQUIRE_SILENT_FLAG, CRYPT_INTEGER_BLOB,
-    CRYPT_KEY_PROV_INFO, HCERTSTORE, HCRYPTPROV_OR_NCRYPT_KEY_HANDLE, NCRYPT_ALLOW_EXPORT_FLAG,
-    NCRYPT_EXPORT_POLICY_PROPERTY, PKCS12_ALWAYS_CNG_KSP, PKCS12_NO_PERSIST_KEY,
+    CertFreeCertificateChain, CertGetCertificateChain, CertGetCertificateContextProperty,
+    CertOpenStore, CryptAcquireCertificatePrivateKey, NCryptGetProperty, PFXImportCertStore,
+    CERT_CHAIN_CACHE_ONLY_URL_RETRIEVAL, CERT_CHAIN_CONTEXT, CERT_CHAIN_PARA, CERT_CONTEXT,
+    CERT_KEY_CONTEXT, CERT_KEY_CONTEXT_PROP_ID, CERT_KEY_PROV_INFO_PROP_ID, CERT_KEY_SPEC,
+    CERT_NCRYPT_KEY_SPEC, CERT_STORE_OPEN_EXISTING_FLAG, CERT_STORE_PROV_SYSTEM_W,
+    CERT_STORE_READONLY_FLAG, CERT_SYSTEM_STORE_CURRENT_USER_ID, CERT_SYSTEM_STORE_LOCATION_SHIFT,
+    CERT_TRUST_IS_PARTIAL_CHAIN, CERT_TRUST_IS_SELF_SIGNED, CRYPT_ACQUIRE_ONLY_NCRYPT_KEY_FLAG,
+    CRYPT_ACQUIRE_SILENT_FLAG, CRYPT_INTEGER_BLOB, CRYPT_KEY_PROV_INFO, HCERTSTORE,
+    HCRYPTPROV_OR_NCRYPT_KEY_HANDLE, NCRYPT_ALLOW_EXPORT_FLAG, NCRYPT_EXPORT_POLICY_PROPERTY,
+    PKCS12_ALWAYS_CNG_KSP, PKCS12_NO_PERSIST_KEY,
 };
 use zeroize::Zeroizing;
 
@@ -27,6 +29,11 @@ use crate::{inspect, CertificateInfo};
 /// `CERT_SYSTEM_STORE_LOCAL_MACHINE_ID` (2): el crate `windows-sys` no lo exporta con ese nombre
 /// en todas sus versiones, así que se fija aquí.
 const LOCAL_MACHINE_ID: u32 = 2;
+
+/// Tamaño máximo de un PFX admitido (1 MiB).
+pub(crate) const MAX_PFX_BYTES: usize = 1 << 20;
+/// Windows `ERROR_INVALID_DATA`.
+const ERROR_INVALID_DATA: u32 = 13;
 
 /// Dónde está el certificado dentro de Windows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -112,8 +119,13 @@ impl Store {
         let mut wide: Zeroizing<Vec<u16>> = Zeroizing::new(Vec::with_capacity(password.len() + 1));
         wide.extend(password.encode_utf16());
         wide.push(0);
+        // Un PFX razonable pesa pocos KiB: más de 1 MiB se rechaza sin analizarlo.
+        let len = match u32::try_from(data.len()) {
+            Ok(len) if data.len() <= MAX_PFX_BYTES => len,
+            _ => return Err(ERROR_INVALID_DATA),
+        };
         let blob = CRYPT_INTEGER_BLOB {
-            cbData: data.len() as u32,
+            cbData: len,
             pbData: data.as_ptr() as *mut u8,
         };
         // SAFETY: `blob` y `wide` viven durante la llamada.
@@ -156,7 +168,7 @@ impl Store {
 pub(crate) fn pick_pfx_leaf(store: &Store) -> Option<CertContext> {
     let mut fallback = None;
     for ctx in store.certificates() {
-        if acquire_raw(&ctx, true).is_err() {
+        if acquire_raw(&ctx, true, true).is_err() {
             continue;
         }
         match inspect(ctx.as_der()) {
@@ -172,7 +184,11 @@ pub(crate) fn pick_pfx_leaf(store: &Store) -> Option<CertContext> {
 ///
 /// Si Windows deja la clave en el contexto (PFX sin persistir), el manejador es prestado y el
 /// llamador debe conservar el contexto mientras use la clave; si no, es propio y se libera solo.
-pub(crate) fn acquire_raw(ctx: &CertContext, silent: bool) -> Result<NCryptKey, u32> {
+pub(crate) fn acquire_raw(
+    ctx: &CertContext,
+    silent: bool,
+    allow_key_context: bool,
+) -> Result<NCryptKey, u32> {
     let mut handle = HCRYPTPROV_OR_NCRYPT_KEY_HANDLE::default();
     let mut key_spec = CERT_KEY_SPEC::default();
     let mut caller_free = 0;
@@ -193,8 +209,12 @@ pub(crate) fn acquire_raw(ctx: &CertContext, silent: bool) -> Result<NCryptKey, 
         // SAFETY: lectura del último error del hilo.
         let code = unsafe { GetLastError() };
         // Un PFX sin persistir deja la clave en `CERT_KEY_CONTEXT`, que `CryptAcquire...` no
-        // sirve; se lee ese contexto a mano.
-        return key_from_context(ctx, silent).ok_or(code);
+        // sirve; se lee ese contexto a mano, solo en la vía del PFX. En la del almacén se
+        // conserva el error original.
+        if allow_key_context {
+            return key_from_context(ctx, silent).ok_or(code);
+        }
+        return Err(code);
     }
     let mut key = if caller_free != 0 {
         NCryptKey::new_owned(handle)
@@ -323,9 +343,68 @@ fn exportable_of(ctx: &CertContext, provider: KeyProvider) -> Option<bool> {
         // Las claves de una tarjeta no se exportan.
         KeyProvider::SmartCard => Some(false),
         // Solo se consulta, en silencio, donde no puede aparecer ningún diálogo.
-        KeyProvider::SoftwareCng => acquire_raw(ctx, true).ok().and_then(|k| export_policy(&k)),
+        KeyProvider::SoftwareCng => acquire_raw(ctx, true, false)
+            .ok()
+            .and_then(|k| export_policy(&k)),
         KeyProvider::LegacyCsp | KeyProvider::Other => None,
     }
+}
+
+/// Construye la cadena que se envía en el saludo TLS: certificado final primero, después los
+/// intermedios, sin la raíz autofirmada. Usa `extra` (el almacén del PFX o el del certificado)
+/// como almacén adicional y no descarga nada de la red (`CERT_CHAIN_CACHE_ONLY_URL_RETRIEVAL`).
+/// `None` si Windows no puede construirla o queda incompleta (falta un emisor).
+pub(crate) fn build_chain(ctx: &CertContext, extra: &Store) -> Option<Vec<Vec<u8>>> {
+    let para = CERT_CHAIN_PARA {
+        cbSize: std::mem::size_of::<CERT_CHAIN_PARA>() as u32,
+        ..Default::default()
+    };
+    let mut chain_ctx: *mut CERT_CHAIN_CONTEXT = ptr::null_mut();
+    // SAFETY: parámetros válidos durante la llamada; el contexto de cadena se libera abajo.
+    let ok = unsafe {
+        CertGetCertificateChain(
+            ptr::null_mut(),
+            ctx.inner(),
+            ptr::null(),
+            extra.0,
+            &para,
+            CERT_CHAIN_CACHE_ONLY_URL_RETRIEVAL,
+            ptr::null(),
+            &mut chain_ctx,
+        )
+    };
+    if ok == 0 || chain_ctx.is_null() {
+        return None;
+    }
+    let mut out = Vec::new();
+    let mut complete = false;
+    // SAFETY: Windows devuelve una cadena con al menos una cadena simple cuando `cChain > 0`;
+    // los elementos son válidos hasta `CertFreeCertificateChain`.
+    unsafe {
+        if (*chain_ctx).cChain > 0 {
+            let simple = *(*chain_ctx).rgpChain;
+            complete = (*simple).TrustStatus.dwErrorStatus & CERT_TRUST_IS_PARTIAL_CHAIN == 0;
+            let elements =
+                std::slice::from_raw_parts((*simple).rgpElement, (*simple).cElement as usize);
+            for (i, element) in elements.iter().enumerate() {
+                let self_signed =
+                    (**element).TrustStatus.dwInfoStatus & CERT_TRUST_IS_SELF_SIGNED != 0;
+                if i > 0 && self_signed {
+                    break;
+                }
+                let cert = (**element).pCertContext;
+                out.push(
+                    std::slice::from_raw_parts(
+                        (*cert).pbCertEncoded,
+                        (*cert).cbCertEncoded as usize,
+                    )
+                    .to_vec(),
+                );
+            }
+        }
+        CertFreeCertificateChain(chain_ctx);
+    }
+    (complete && !out.is_empty()).then_some(out)
 }
 
 /// Lista los certificados con clave privada de `CurrentUser\MY` y, si se puede abrir sin

@@ -1,8 +1,9 @@
 //! Custodia de PFX (D278): un archivo `<referencia>.bin` cifrado con DPAPI de usuario, con
 //! entropía por instalación y sin interfaz. Nunca en el Administrador de credenciales (D121).
 //!
-//! Formato del archivo (versión 1): `NACERT` + byte de versión + blob de DPAPI. El texto en
-//! claro del blob es `longitud del PFX (u32 LE)` + PFX + contraseña (UTF-8). Se escribe a un
+//! Formato del archivo (versión 2): `NACERT` + byte de versión + blob de DPAPI. El texto en
+//! claro del blob es la referencia (32 bytes ASCII, para que no se puedan intercambiar los
+//! archivos de dos referencias) + `longitud del PFX (u32 LE)` + PFX + contraseña (UTF-8). Se escribe a un
 //! temporal y se renombra, y los búferes en claro se ponen a cero.
 
 use std::fs;
@@ -15,11 +16,12 @@ use windows_sys::Win32::Security::Cryptography::{
 use zeroize::Zeroizing;
 
 use crate::dpapi;
-use crate::store::{pick_pfx_leaf, Store};
+use crate::store::{pick_pfx_leaf, Store, MAX_PFX_BYTES};
 use crate::{inspect, CertificateInfo};
 
 const MAGIC: &[u8; 6] = b"NACERT";
-const FORMAT_VERSION: u8 = 1;
+const FORMAT_VERSION: u8 = 2;
+const REFERENCE_LEN: usize = 32;
 const HEADER_LEN: usize = MAGIC.len() + 1;
 /// Windows `ERROR_INVALID_PASSWORD`.
 const ERROR_INVALID_PASSWORD: u32 = 86;
@@ -88,6 +90,10 @@ fn new_reference() -> Option<String> {
 /// DPAPI. Devuelve la referencia opaca y los datos del certificado. Admite PFX antiguos (RC2,
 /// 3DES, SHA-1), que analiza Windows. `entropy` es la de la instalación.
 ///
+/// `store_dir` debe ser la carpeta de datos del usuario de la aplicación (por ejemplo bajo
+/// `%LOCALAPPDATA%`): DPAPI de usuario protege el contenido, pero no los permisos de la carpeta.
+/// Se rechaza un PFX de más de 1 MiB (`Invalid`) y una `entropy` vacía (`Storage`).
+///
 /// Quien llama es dueño de `bytes` y de `password` y debe ponerlos a cero cuando acabe
 /// (`zeroize`); aquí se ponen a cero las copias internas, salvo las que hace Windows.
 pub fn import_pfx(
@@ -96,6 +102,13 @@ pub fn import_pfx(
     store_dir: &Path,
     entropy: &[u8],
 ) -> Result<(String, CertificateInfo), PfxError> {
+    if entropy.is_empty() {
+        return Err(PfxError::Storage);
+    }
+    if bytes.len() > MAX_PFX_BYTES {
+        return Err(PfxError::Invalid);
+    }
+    let pfx_len = u32::try_from(bytes.len()).map_err(|_| PfxError::Invalid)?;
     let store = Store::import_pfx(bytes, password).map_err(|code| {
         if code == ERROR_INVALID_PASSWORD {
             PfxError::WrongPassword
@@ -108,15 +121,17 @@ pub fn import_pfx(
     drop(leaf);
     drop(store);
 
-    let mut plain: Zeroizing<Vec<u8>> =
-        Zeroizing::new(Vec::with_capacity(4 + bytes.len() + password.len()));
-    plain.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
+    let reference = new_reference().ok_or(PfxError::Storage)?;
+    let mut plain: Zeroizing<Vec<u8>> = Zeroizing::new(Vec::with_capacity(
+        REFERENCE_LEN + 4 + bytes.len() + password.len(),
+    ));
+    plain.extend_from_slice(reference.as_bytes());
+    plain.extend_from_slice(&pfx_len.to_le_bytes());
     plain.extend_from_slice(bytes);
     plain.extend_from_slice(password.as_bytes());
     let sealed = dpapi::protect(&plain, entropy).ok_or(PfxError::Storage)?;
     drop(plain);
 
-    let reference = new_reference().ok_or(PfxError::Storage)?;
     let mut file = Vec::with_capacity(HEADER_LEN + sealed.len());
     file.extend_from_slice(MAGIC);
     file.push(FORMAT_VERSION);
@@ -157,7 +172,7 @@ pub fn remove_pfx(reference: &str, store_dir: &Path) -> Result<(), PfxError> {
 /// Lee y descifra un PFX custodiado. `None` si no existe, la cabecera no es la esperada, el
 /// archivo está manipulado o DPAPI no lo descifra (otro usuario o entropía distinta).
 pub(crate) fn load(reference: &str, store_dir: &Path, entropy: &[u8]) -> Option<PfxSecret> {
-    if !valid_reference(reference) {
+    if !valid_reference(reference) || entropy.is_empty() {
         return None;
     }
     let file = fs::read(path_of(store_dir, reference)).ok()?;
@@ -168,9 +183,14 @@ pub(crate) fn load(reference: &str, store_dir: &Path, entropy: &[u8]) -> Option<
         return None;
     }
     let plain = dpapi::unprotect(&file[HEADER_LEN..], entropy)?;
-    let len = u32::from_le_bytes(plain.get(..4)?.try_into().ok()?) as usize;
-    let pfx = plain.get(4..4usize.checked_add(len)?)?;
-    let password = std::str::from_utf8(plain.get(4 + len..)?).ok()?;
+    // La referencia cifrada debe ser la pedida: un `.bin` copiado sobre otro no vale.
+    if plain.get(..REFERENCE_LEN)? != reference.as_bytes() {
+        return None;
+    }
+    let body = plain.get(REFERENCE_LEN..)?;
+    let len = u32::from_le_bytes(body.get(..4)?.try_into().ok()?) as usize;
+    let pfx = body.get(4..4usize.checked_add(len)?)?;
+    let password = std::str::from_utf8(body.get(4 + len..)?).ok()?;
     Some(PfxSecret {
         pfx: Zeroizing::new(pfx.to_vec()),
         password: Zeroizing::new(password.to_owned()),

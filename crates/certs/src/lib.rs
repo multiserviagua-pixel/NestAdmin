@@ -29,7 +29,7 @@ pub use source::CertificateSource;
 pub use validate::{validate, ExpiryWarning, NifMatch, Validation, ValidityStatus, MIN_RSA_BITS};
 
 #[cfg(windows)]
-pub use acquire::{acquire, AcquireMode, CertKey, CertifiedSigner};
+pub use acquire::{acquire, acquire_with_timeout, AcquireMode, CertKey, CertifiedSigner};
 #[cfg(windows)]
 pub use store::{list_store_certificates, KeyProvider, StoreCertificate, StoreLocation};
 #[cfg(windows)]

@@ -115,6 +115,73 @@ pub fn without_key(password: &str) -> Vec<u8> {
     store.writer(password).write().unwrap()
 }
 
+fn ca_params(name: &str) -> CertificateParams {
+    let mut params = CertificateParams::default();
+    params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+    params.key_usages = vec![KeyUsagePurpose::KeyCertSign];
+    let mut dn = DistinguishedName::new();
+    dn.push(DnType::CommonName, name);
+    params.distinguished_name = dn;
+    params.not_before = date_time_ymd(2026, 1, 1);
+    params.not_after = date_time_ymd(2030, 1, 1);
+    params
+}
+
+/// PFX con tres niveles: final, intermedio y raíz autofirmada. La cadena enviada debe llevar
+/// solo el final y el intermedio.
+pub fn three_levels(password: &str) -> Material {
+    let root_key = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256).unwrap();
+    let root_params = ca_params("RAIZ PRUEBA SINTETICA");
+    let root_der = root_params
+        .clone()
+        .self_signed(&root_key)
+        .unwrap()
+        .der()
+        .to_vec();
+    let root = Issuer::new(root_params, root_key);
+
+    let inter_key = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256).unwrap();
+    let inter_params = ca_params("INTERMEDIA PRUEBA SINTETICA");
+    let inter_der = inter_params
+        .clone()
+        .signed_by(&inter_key, &root)
+        .unwrap()
+        .der()
+        .to_vec();
+    let inter = Issuer::new(inter_params, inter_key);
+
+    let key = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256).unwrap();
+    let mut params = CertificateParams::default();
+    let mut dn = DistinguishedName::new();
+    dn.push(DnType::CommonName, NAME);
+    dn.push(
+        DnType::CustomDnType(vec![2, 5, 4, 5]),
+        utf8(&format!("IDCES-{NIF}")),
+    );
+    params.distinguished_name = dn;
+    params.key_usages = vec![KeyUsagePurpose::DigitalSignature];
+    params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ClientAuth];
+    params.not_before = date_time_ymd(2026, 1, 1);
+    params.not_after = date_time_ymd(2030, 1, 1);
+    let cert_der = params.signed_by(&key, &inter).unwrap().der().to_vec();
+
+    let chain = PrivateKeyChain::new(
+        b"prueba".as_slice(),
+        PrivateKey::from_der(&key.serialize_der()).unwrap(),
+        [
+            Certificate::from_der(&cert_der).unwrap(),
+            Certificate::from_der(&inter_der).unwrap(),
+            Certificate::from_der(&root_der).unwrap(),
+        ],
+    );
+    let mut store = KeyStore::new();
+    store.add_entry("prueba", KeyStoreEntry::PrivateKeyChain(chain));
+    Material {
+        pfx: store.writer(password).write().unwrap(),
+        cert_der,
+    }
+}
+
 /// Busca `needle` dentro de `haystack`.
 pub fn contains(haystack: &[u8], needle: &[u8]) -> bool {
     !needle.is_empty() && haystack.windows(needle.len()).any(|w| w == needle)
@@ -127,7 +194,17 @@ pub struct OpenSsl {
     pub cert_der: Vec<u8>,
 }
 
+/// Si `NESTADMIN_REQUIRE_OPENSSL=1` y no hay `openssl` utilizable, la prueba falla; sin la
+/// variable, devuelve `None` y la prueba imprime `NO EJECUTADA`.
 pub fn openssl_pfx(bits: u32, legacy_pbe: Option<&str>, password: &str) -> Option<OpenSsl> {
+    let result = openssl_pfx_inner(bits, legacy_pbe, password);
+    if result.is_none() && std::env::var("NESTADMIN_REQUIRE_OPENSSL").as_deref() == Ok("1") {
+        panic!("NESTADMIN_REQUIRE_OPENSSL=1 y no hay `openssl` utilizable en el PATH");
+    }
+    result
+}
+
+fn openssl_pfx_inner(bits: u32, legacy_pbe: Option<&str>, password: &str) -> Option<OpenSsl> {
     use std::process::Command;
     let dir = tempfile::tempdir().ok()?;
     let p = |name: &str| dir.path().join(name).to_string_lossy().into_owned();
