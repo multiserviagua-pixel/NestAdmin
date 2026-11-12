@@ -9,6 +9,12 @@ correo-oauth.json
 !.env.example
 *.key
 *.pem
+# Certificados (T18b, D278): nunca en el repositorio; los de prueba se generan al ejecutar las pruebas.
+*.pfx
+*.p12
+*.cer
+*.crt
+*.der
 
 # Cachés y artefactos generados.
 __pycache__/
