@@ -47,7 +47,7 @@ Licencia del proyecto original de cada DLL de `tesseract\`. JBIG-KIT (GPL) y lib
 | `libzstd.dll` | Zstandard | BSD-3-Clause OR GPL-2.0-only |
 | `zlib1.dll` | zlib | Zlib |
 
-## Crates de Rust enlazados en `nestadmin.exe` (294)
+## Crates de Rust enlazados en `nestadmin.exe` (295)
 
 Dependencias normales de `nestadmin-desktop` para `x86_64-pc-windows-msvc`; se excluyen las de compilación y pruebas.
 
@@ -210,6 +210,7 @@ Dependencias normales de `nestadmin-desktop` para `x86_64-pc-windows-msvc`; se e
 | rand | 0.9.5 | MIT OR Apache-2.0 | https://github.com/rust-random/rand |
 | rand_chacha | 0.3.1 | MIT OR Apache-2.0 | https://github.com/rust-random/rand |
 | rand_chacha | 0.9.0 | MIT OR Apache-2.0 | https://github.com/rust-random/rand |
+| rand_core | 0.10.1 | MIT OR Apache-2.0 | https://github.com/rust-random/rand_core |
 | rand_core | 0.6.4 | MIT OR Apache-2.0 | https://github.com/rust-random/rand |
 | rand_core | 0.9.5 | MIT OR Apache-2.0 | https://github.com/rust-random/rand |
 | raw-window-handle | 0.6.2 | MIT OR Apache-2.0 OR Zlib | https://github.com/rust-windowing/raw-window-handle |

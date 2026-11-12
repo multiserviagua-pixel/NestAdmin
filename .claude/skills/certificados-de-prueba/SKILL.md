@@ -7,7 +7,7 @@ description: Cómo generar en NestAdmin certificados electrónicos sintéticos d
 
 Reglas que no cambian: **prohibido usar certificados reales, claves privadas reales, PFX reales ni NIF reales** en el repositorio, en fixtures, capturas, registros o evidencias. Todo certificado de una prueba se genera en el momento, en un directorio temporal de la prueba, y se borra al terminar. Nunca se contacta con la AEAT. Pruebas manuales sobre `tauri dev`; instalador solo para la versión final o si el usuario lo pide; git solo local.
 
-Esta skill describe lo que prevé T18b (D278, D279, D285, R35, T18c y T18d). Los nombres de funciones y de la característica de Cargo pueden ajustarse al implementar B1 y B3; si algo no existe aún, impleméntelo siguiendo esta guía en vez de añadir un archivo de certificado.
+Esta skill describe T18b (D278, D279, D285, R35, T18c y T18d). Los nombres de funciones y de la característica de Cargo pueden ajustarse al implementar B1 y B3; si algo no existe aún, impleméntelo siguiendo esta guía en vez de añadir un archivo de certificado.
 
 ## Reglas de higiene
 
@@ -45,10 +45,10 @@ Para los OID que `rcgen` no trae con nombre (`organizationIdentifier`, 2.5.4.97,
 
 ## PFX
 
-- **PFX moderno:** `p12-keystore` (o equivalente) con el certificado, la clave y la CA; se escribe en el directorio temporal con la contraseña de prueba. Se carga con `CertStore::from_pkcs12` y `NO_PERSIST_KEY` para tener una firma CNG real sin tocar el almacén (B2).
-- **PFX antiguo (3DES o RC2, SHA1):** `p12-keystore` no genera cifrados antiguos. Hágalo en la prueba con OpenSSL, si está instalado: `openssl pkcs12 -export -legacy -certpbe PBE-SHA1-3DES -keypbe PBE-SHA1-3DES -macalg sha1 -inkey clave.pem -in cert.pem -certfile ca.pem -out antiguo.pfx -passout pass:prueba-sintetica` (para RC2, `-certpbe PBE-SHA1-RC2-40 -keypbe PBE-SHA1-RC2-40`), escribiendo antes los PEM en el directorio temporal. Si `openssl` no está disponible, la prueba se marca `#[ignore]` con el motivo y se anota en el informe como **no ejecutada**; no se sustituye por un archivo versionado.
+- **PFX moderno:** `p12-keystore` con el certificado, la clave (PKCS#8 de `rcgen`) y la CA; se escribe en memoria con la contraseña de prueba. Lo analiza `import_pfx` con `PFXImportCertStore` y `PKCS12_NO_PERSIST_KEY`, sin tocar el almacén (B2); la clave queda en la propiedad `CERT_KEY_CONTEXT` del certificado, que `CryptAcquireCertificatePrivateKey` no sirve, y por eso `acquire` la lee a mano. Las pruebas de B2 están en `crates/certs/tests/windows_pfx.rs` y `windows_store.rs`, con el material en `tests/pfx_support/`.
+- **PFX antiguo (3DES o RC2, SHA1):** `p12-keystore` escribe 3DES con HMAC-SHA1 (`EncryptionAlgorithm::PbeWithShaAnd3KeyTripleDesCbc` y `MacAlgorithm::HmacSha1`), que ya basta para la prueba sin OpenSSL. Para RC2-40 y claves RSA, la prueba usa OpenSSL si está en el PATH (OpenSSL 3 con `-legacy`): `openssl pkcs12 -export -legacy -certpbe PBE-SHA1-RC2-40 -keypbe PBE-SHA1-RC2-40 -macalg sha1 -inkey clave.pem -in cert.pem -out antiguo.pfx -passout pass:prueba-sintetica` (para 3DES, `PBE-SHA1-3DES`), con los PEM en un directorio temporal. Si `openssl` no está disponible o no admite `-legacy`, la prueba imprime `NO EJECUTADA` y no falla; anótelo en el informe como **no ejecutada**. No se sustituye por un archivo versionado. Los certificados de OpenSSL tienen la vigencia del momento en que se generan: la prueba usa el reloj real, no `NOW_MS`.
 - **PFX con contraseña errónea y archivo corrupto:** deben dar error propio, sin texto del sistema ni la ruta, y sin dejar nada en el almacén de DPAPI.
-- Las pruebas de DPAPI y CNG son `cfg(windows)`. La parte pura (tipo, vigencia, `clientAuth`, NIF, caducidad) corre en cualquier plataforma.
+- Las pruebas de DPAPI y CNG son `cfg(windows)`. **Prueba manual de `NeedsUser` (sin hardware no se puede automatizar):** en `tauri dev`, con un certificado cuya clave pida PIN o confirmación (tarjeta o DNIe con minidriver, tarjeta virtual del TPM con política de PIN, o un certificado importado con protección fuerte), `acquire` en `Silent` debe devolver `certificate_needs_user` sin mostrar ninguna ventana ni bloquearse, y en `Interactive` Windows debe mostrar su diálogo; con la tarjeta retirada, también `certificate_needs_user`. B2 solo prueba en automático la traducción de los códigos de Windows (`map_os_error`). Si no hay hardware, anótelo como no probado. La parte pura (tipo, vigencia, `clientAuth`, NIF, caducidad) corre en cualquier plataforma.
 
 ## Simulador con TLS mutuo
 

@@ -1,0 +1,221 @@
+//! Obtención de la clave de firma de un certificado (D278, D280). La clave nunca sale de
+//! Windows: se firma con CNG. La aplicación nunca maneja el PIN; si hace falta, lo pide Windows
+//! en su propio diálogo y solo en modo [`AcquireMode::Interactive`].
+
+use std::path::Path;
+use std::sync::Arc;
+
+use rustls::sign::{Signer, SigningKey};
+use rustls::{Error as TlsError, SignatureAlgorithm, SignatureScheme};
+use rustls_cng::cert::CertContext;
+use rustls_cng::error::CngError;
+use rustls_cng::key::{AlgorithmGroup, NCryptKey, SignaturePadding};
+use rustls_cng::signer::CngSigningKey;
+
+use crate::store::{acquire_raw, find_by_thumbprint, pick_pfx_leaf, provider_of, Store};
+use crate::vault;
+use crate::{inspect, validate, CertError, CertificateInfo, CertificateSource, KeyProvider};
+
+/// Cómo se pide la clave.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AcquireMode {
+    /// Sin ventana ni PIN: si la clave necesita PIN, confirmación o una tarjeta que no está,
+    /// devuelve `NeedsUser`. Es el modo de la remisión automática.
+    Silent,
+    /// Windows puede mostrar su diálogo (PIN, tarjeta). Es el modo de «Remitir ahora».
+    Interactive,
+}
+
+/// Lo que se retiene mientras se use la clave: el contexto del certificado y el almacén que lo
+/// sujeta (con un PFX sin persistir, la clave vive en el contexto).
+#[derive(Debug)]
+struct Keep {
+    _context: CertContext,
+    _store: Arc<Store>,
+}
+
+/// Clave de firma de un certificado de Windows lista para `rustls`: implementa `SigningKey` y
+/// sujeta lo que necesita mientras exista (ella o cualquier firmante que de ella salga).
+#[derive(Debug)]
+pub struct CertKey {
+    inner: CngSigningKey,
+    keep: Arc<Keep>,
+}
+
+impl SigningKey for CertKey {
+    fn choose_scheme(&self, offered: &[SignatureScheme]) -> Option<Box<dyn Signer>> {
+        let inner = self.inner.choose_scheme(offered)?;
+        Some(Box::new(KeepSigner {
+            inner,
+            _keep: self.keep.clone(),
+        }))
+    }
+
+    fn algorithm(&self) -> SignatureAlgorithm {
+        self.inner.algorithm()
+    }
+}
+
+#[derive(Debug)]
+struct KeepSigner {
+    inner: Box<dyn Signer>,
+    _keep: Arc<Keep>,
+}
+
+impl Signer for KeepSigner {
+    fn sign(&self, message: &[u8]) -> Result<Vec<u8>, TlsError> {
+        self.inner.sign(message)
+    }
+
+    fn scheme(&self) -> SignatureScheme {
+        self.inner.scheme()
+    }
+}
+
+/// Cadena de certificados y clave de firma, lista para un `ResolvesClientCert` (B3).
+#[derive(Debug)]
+pub struct CertifiedSigner {
+    /// Certificado final primero, después los intermedios (sin la raíz), en DER.
+    pub chain: Vec<Vec<u8>>,
+    pub key: Arc<CertKey>,
+    /// Datos del certificado final (con datos personales: solo para la interfaz).
+    pub info: CertificateInfo,
+    pub provider: KeyProvider,
+}
+
+// Códigos HRESULT de Windows que se traducen (solo para clasificar; no se muestran).
+const NTE_BAD_ALGID: u32 = 0x8009_0008;
+const NTE_NO_KEY: u32 = 0x8009_000D;
+const NTE_NOT_FOUND: u32 = 0x8009_0011;
+const NTE_BAD_KEYSET: u32 = 0x8009_0016;
+const NTE_KEYSET_NOT_DEF: u32 = 0x8009_0019;
+const NTE_SILENT_CONTEXT: u32 = 0x8009_0022;
+const NTE_NOT_SUPPORTED: u32 = 0x8009_0029;
+const NTE_USER_CANCELLED: u32 = 0x8009_0036;
+const CRYPT_E_NOT_FOUND: u32 = 0x8009_2004;
+const CRYPT_E_NO_KEY_PROPERTY: u32 = 0x8009_200B;
+const ERROR_CANCELLED: u32 = 1223;
+
+fn map_os_error(code: u32) -> CertError {
+    match code {
+        // PIN, confirmación o tarjeta ausente, bloqueada o retirada (SCARD_*, 0x8010xxxx).
+        NTE_SILENT_CONTEXT | NTE_USER_CANCELLED | ERROR_CANCELLED => CertError::NeedsUser,
+        c if c >> 16 == 0x8010 => CertError::NeedsUser,
+        NTE_BAD_KEYSET
+        | NTE_KEYSET_NOT_DEF
+        | NTE_NO_KEY
+        | NTE_NOT_FOUND
+        | CRYPT_E_NOT_FOUND
+        | CRYPT_E_NO_KEY_PROPERTY => CertError::Missing,
+        NTE_BAD_ALGID | NTE_NOT_SUPPORTED => CertError::KeyUnsupported,
+        _ => CertError::Rejected,
+    }
+}
+
+fn map_cng(error: &CngError) -> CertError {
+    match error {
+        CngError::WindowsError(code) => map_os_error(*code),
+        CngError::UnsupportedKeyAlgorithmGroup => CertError::KeyUnsupported,
+        _ => CertError::Rejected,
+    }
+}
+
+/// Firma una huella de prueba para comprobar que la clave responde sin ayuda (o, en modo
+/// interactivo, para que Windows pida ya el PIN). El resultado se descarta.
+fn probe(key: &NCryptKey) -> Result<(), CertError> {
+    let padding = match key.algorithm_group().map_err(|e| map_cng(&e))? {
+        AlgorithmGroup::Rsa => SignaturePadding::Pkcs1,
+        AlgorithmGroup::Ecdsa | AlgorithmGroup::Ecdh => SignaturePadding::None,
+    };
+    key.sign(&[0x5A; 32], padding)
+        .map(|_| ())
+        .map_err(|e| map_cng(&e))
+}
+
+/// Resuelve la fuente en un contexto de certificado y su almacén.
+fn resolve(
+    source: &CertificateSource,
+    store_dir: &Path,
+    entropy: &[u8],
+) -> Result<(CertContext, Arc<Store>, KeyProvider), CertError> {
+    match source {
+        CertificateSource::Store { thumbprint_sha256 } => {
+            let (ctx, store) = find_by_thumbprint(thumbprint_sha256).ok_or(CertError::Missing)?;
+            let provider = provider_of(&ctx).ok_or(CertError::Missing)?;
+            if provider == KeyProvider::LegacyCsp {
+                return Err(CertError::KeyUnsupported);
+            }
+            Ok((ctx, store, provider))
+        }
+        CertificateSource::Pfx { reference } => {
+            let secret = vault::load(reference, store_dir, entropy).ok_or(CertError::Missing)?;
+            let store =
+                Store::import_pfx(&secret.pfx, &secret.password).map_err(|_| CertError::Missing)?;
+            drop(secret);
+            let ctx = pick_pfx_leaf(&store).ok_or(CertError::Missing)?;
+            Ok((ctx, Arc::new(store), KeyProvider::SoftwareCng))
+        }
+    }
+}
+
+/// Obtiene la cadena y la clave de firma de `source`.
+///
+/// Orden: se resuelve el certificado (`Missing`), se valida con el reloj `now_ms` (`Expired`,
+/// `KeyUnsupported`, `Rejected` si no sirve para `clientAuth`) y, solo entonces, se abre la
+/// clave y se firma una huella de prueba. En `Silent` no se muestra nada: si Windows necesita
+/// al usuario devuelve `NeedsUser` (D280: no se anota ningún intento). Ningún error lleva texto
+/// del sistema, NIF ni nombre.
+pub fn acquire(
+    source: &CertificateSource,
+    store_dir: &Path,
+    entropy: &[u8],
+    mode: AcquireMode,
+    now_ms: i64,
+) -> Result<CertifiedSigner, CertError> {
+    let (context, store, provider) = resolve(source, store_dir, entropy)?;
+    let info = inspect(context.as_der())?;
+    // El NIF del obligado no interviene aquí: la coincidencia no bloquea (D283).
+    validate(&info, "", now_ms).into_result()?;
+
+    let key = acquire_raw(&context, mode == AcquireMode::Silent).map_err(map_os_error)?;
+    probe(&key)?;
+    let inner = CngSigningKey::new(key).map_err(|e| map_cng(&e))?;
+    let chain = match context.as_chain_der() {
+        Ok(chain) if !chain.is_empty() => chain,
+        _ => vec![context.as_der().to_vec()],
+    };
+    Ok(CertifiedSigner {
+        chain,
+        key: Arc::new(CertKey {
+            inner,
+            keep: Arc::new(Keep {
+                _context: context,
+                _store: store,
+            }),
+        }),
+        info,
+        provider,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn windows_codes_map_to_stable_errors() {
+        // Sin hardware no se puede provocar un PIN: se comprueba la traducción de los códigos.
+        assert_eq!(map_os_error(NTE_SILENT_CONTEXT), CertError::NeedsUser);
+        assert_eq!(map_os_error(NTE_USER_CANCELLED), CertError::NeedsUser);
+        assert_eq!(map_os_error(0x8010_000C), CertError::NeedsUser); // sin tarjeta
+        assert_eq!(map_os_error(0x8010_0069), CertError::NeedsUser); // tarjeta retirada
+        assert_eq!(map_os_error(NTE_BAD_KEYSET), CertError::Missing);
+        assert_eq!(map_os_error(CRYPT_E_NO_KEY_PROPERTY), CertError::Missing);
+        assert_eq!(map_os_error(NTE_BAD_ALGID), CertError::KeyUnsupported);
+        assert_eq!(map_os_error(0xDEAD_BEEF), CertError::Rejected);
+        assert_eq!(
+            map_cng(&CngError::UnsupportedKeyAlgorithmGroup),
+            CertError::KeyUnsupported
+        );
+    }
+}

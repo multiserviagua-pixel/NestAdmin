@@ -1,7 +1,7 @@
 [package]
 name = "nestadmin-certs"
 version = "0.1.0"
-description = "Análisis y validación de certificados X.509 de remisión (T18b, D278): huella, tipo, NIF, vigencia, clientAuth y clave. Parte pura y multiplataforma; sin CNG, PFX, DPAPI ni red."
+description = "Certificados de remisión (T18b, D278): análisis y validación X.509 (multiplataforma) y, en Windows, almacén CNG y PFX custodiado con DPAPI."
 edition.workspace = true
 license.workspace = true
 publish.workspace = true
@@ -9,10 +9,22 @@ publish.workspace = true
 [dependencies]
 # Reutiliza la validación de NIF, NIE y CIF del núcleo de venta (D80) en vez de duplicarla.
 nestadmin-sales = { path = "../sales" }
+serde = { version = "1", features = ["derive"] }
 sha2 = "0.10"
 thiserror = "2"
 x509-parser = "=0.18.1"
+zeroize = "1"
+
+[target.'cfg(windows)'.dependencies]
+# Puente CNG de rustls (D279): la clave del almacén no sale de Windows. Sin `aws-lc-rs`.
+rustls-cng = { version = "=0.7.1", default-features = false }
+rustls = { version = "0.23", default-features = false, features = ["std"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security_Cryptography"] }
 
 [dev-dependencies]
 # Solo con el backend `ring`: nada de `aws-lc-rs` (D279). Certificados sintéticos en tiempo de ejecución.
 rcgen = { version = "0.14", default-features = false, features = ["ring", "pem"] }
+p12-keystore = "0.4"
+tempfile = "3"
+ring = "0.17"
+serde_json = "1"
