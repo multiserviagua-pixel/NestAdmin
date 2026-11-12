@@ -31,5 +31,7 @@ Cada decisión (`D<n>`) tiene un número definitivo desde que se escribe, para q
 | D178–D178 | Aprendizaje continuo de las respuestas hechas fuera, 2026-11-10 | Asignado |
 | D179–D192 | Chat de la aplicación: asistente y búsqueda (D179–D192), 2026-11-10 | Asignado |
 | D193–D212 | `claude/fase-11-conexion`: conexión de la venta a la aplicación (registros Verifactu, capa de aplicación, ventana, PDF, envío y remisión), 2026-11-10 | Reservado |
+| D213–D262 | `claude/fase-11-conexion`: bloques que esa rama se asignó en su propia copia de esta tabla (correcciones, PDF y membrete, envío de documentos de venta y remisión a la AEAT), anotados aquí el 2026-11-12 para no pisarlos | Reservado |
+| D263–D268 | Endurecimiento del asistente tras la evaluación de inyección (D263–D266; D267–D268, reserva), 2026-11-12 | Asignado |
 
-Siguiente número libre: **D213**.
+Siguiente número libre: **D269**.
