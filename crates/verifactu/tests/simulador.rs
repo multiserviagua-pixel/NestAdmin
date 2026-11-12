@@ -183,3 +183,51 @@ fn cuenta_envios_anticipados() {
     assert_eq!(e.envios_procesados, 2);
     assert_eq!(e.envios_anticipados, 1);
 }
+
+/// `Fault` forzado (D281): la petición no se procesa y el `Fault` lleva el código pedido.
+#[test]
+fn fault_forzado_no_procesa_la_peticion() {
+    let sim = simulador(60);
+    for codigo in [4112u32, 4108] {
+        sim.estado().fallo_soap_siguiente = Some(codigo);
+        let (http, r) = enviar(&sim, &envio(cadena()));
+        assert_eq!(http, 500);
+        match r {
+            ResultadoEnvio::Fallo(f) => assert_eq!(f.codigo, Some(codigo)),
+            otro => panic!("{otro:?}"),
+        }
+        assert!(sim.estado().registros.is_empty(), "no se procesó nada");
+    }
+    // Es de un solo envío.
+    let r = respuesta(enviar(&sim, &envio(cadena())).1);
+    assert_eq!(r.estado_envio, EstadoEnvio::Correcto);
+}
+
+/// `Representante` (D283): se acepta con un NIF bien formado y sin él no hace falta; un NIF mal
+/// formado es un `Fault` de cabecera.
+#[test]
+fn representante_se_valida_en_su_forma_minima() {
+    let sim = simulador(60);
+    let mut e = envio(cadena());
+    assert!(e.cabecera.representante.is_none());
+    assert!(!e.a_soap().unwrap().contains("Representante"));
+    assert_eq!(enviar(&sim, &e).0, 200);
+
+    let sim = simulador(60);
+    e.cabecera.representante = Some(PersonaEs::new("Gestoría Demo SL", NIF_CLIENTE));
+    assert!(e.a_soap().unwrap().contains("Representante"));
+    assert_eq!(enviar(&sim, &e).0, 200);
+    assert_eq!(sim.estado().envios_procesados, 1);
+
+    // Un NIF con la forma incorrecta no sale de `validar`; el simulador, aun así, rechaza uno
+    // que llegara de otro cliente.
+    let sim = simulador(60);
+    let soap = e.a_soap().unwrap().replace(NIF_CLIENTE, "BAD");
+    let (http, cuerpo) = post(&sim.url(), &soap).expect("respuesta");
+    assert_eq!(http, 500);
+    match ResultadoEnvio::desde_xml(&cuerpo).unwrap() {
+        ResultadoEnvio::Fallo(f) => assert_eq!(f.codigo, Some(4117)),
+        otro => panic!("{otro:?}"),
+    }
+    assert!(sim.estado().registros.is_empty());
+}

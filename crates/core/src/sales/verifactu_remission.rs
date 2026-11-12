@@ -28,6 +28,10 @@ use super::verifactu::{
     insert_record, next_link, record_error, rows_matching, VerifactuContext, VerifactuKind,
     VerifactuRecordRow,
 };
+use super::verifactu_sending::{
+    close_incident, generated_during_incident, halt_authorization, open_incident,
+    retry_failure_wait, FaultClass, WaitMode,
+};
 use super::{SalesResult, SalesStoreError};
 use crate::store::now_ms;
 use crate::Store;
@@ -148,7 +152,7 @@ impl From<VerifactuEnvironment> for RecordEnvironment {
     }
 }
 
-fn coded(code: &str, message: impl Into<String>) -> SalesStoreError {
+pub(super) fn coded(code: &str, message: impl Into<String>) -> SalesStoreError {
     SalesStoreError::External {
         code: code.to_owned(),
         message: message.into(),
@@ -436,7 +440,10 @@ pub struct VerifactuBatchSummary {
     pub environment: VerifactuEnvironment,
     pub record_count: u32,
     pub started_at: i64,
+    /// Intentos que cuentan como envío (D252, D280).
     pub attempts: u32,
+    /// Intentos sin envío (el cuerpo no llegó a escribirse): no cuentan (D280).
+    pub unsent_attempts: u32,
     /// `None` mientras el lote está abierto.
     pub result: Option<VerifactuBatchResult>,
 }
@@ -480,13 +487,32 @@ fn open_batch_ids(conn: &Connection) -> SalesResult<Vec<i64>> {
     Ok(ids)
 }
 
-fn attempts_of(conn: &Connection, batch_id: i64) -> SalesResult<u32> {
+/// Intentos que cuentan como envío: los anotados menos los que el transporte anuló por no haber
+/// escrito el cuerpo (`verifactu_unsent_attempts`, D280).
+pub(super) fn attempts_of(conn: &Connection, batch_id: i64) -> SalesResult<u32> {
     let n: i64 = conn.query_row(
-        "SELECT count(*) FROM verifactu_batch_attempts WHERE batch_id = ?1",
+        "SELECT count(*) FROM verifactu_batch_attempts a WHERE a.batch_id = ?1 AND NOT EXISTS          (SELECT 1 FROM verifactu_unsent_attempts u WHERE u.attempt_id = a.id)",
         [batch_id],
         |r| r.get(0),
     )?;
     Ok(u32::try_from(n).unwrap_or(u32::MAX))
+}
+
+fn unsent_of(conn: &Connection, batch_id: i64) -> SalesResult<u32> {
+    let n: i64 = conn.query_row(
+        "SELECT count(*) FROM verifactu_unsent_attempts WHERE batch_id = ?1",
+        [batch_id],
+        |r| r.get(0),
+    )?;
+    Ok(u32::try_from(n).unwrap_or(u32::MAX))
+}
+
+/// Intento anotado antes de la llamada, con su identificador por si hay que anularlo (D280).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VerifactuAttemptTicket {
+    pub attempt_id: i64,
+    /// Número de intento que cuenta tras anotarlo.
+    pub counted: u32,
 }
 
 fn load_batch(conn: &Connection, batch_id: i64) -> SalesResult<VerifactuBatch> {
@@ -533,7 +559,7 @@ fn load_batch(conn: &Connection, batch_id: i64) -> SalesResult<VerifactuBatch> {
     })
 }
 
-fn audit_remission(
+pub(super) fn audit_remission(
     conn: &Connection,
     action: &str,
     authorization: &str,
@@ -547,15 +573,31 @@ fn audit_remission(
     Ok(())
 }
 
+/// `Fault` de esquema seguidos desde el último lote respondido (D259, D281). Los `Fault`
+/// técnicos no cuentan ni cortan la racha (nunca paran la remisión) y uno de autorización la
+/// reinicia: su paro es otro (`verifactu_authorization_halts`).
 fn consecutive_faults(conn: &Connection, environment: VerifactuEnvironment) -> SalesResult<u32> {
     let mut stmt = conn.prepare(
-        "SELECT r.outcome FROM verifactu_batch_results r JOIN verifactu_batches b \
+        "SELECT r.outcome, r.error_code FROM verifactu_batch_results r JOIN verifactu_batches b \
          ON b.id = r.batch_id WHERE b.environment = ?1 ORDER BY r.batch_id DESC",
     )?;
-    let outcomes = stmt
-        .query_map([environment.as_str()], |r| r.get::<_, String>(0))?
+    let rows = stmt
+        .query_map([environment.as_str()], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, Option<i64>>(1)?))
+        })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
-    Ok(outcomes.iter().take_while(|o| *o == "fault").count() as u32)
+    let mut count = 0u32;
+    for (outcome, code) in rows {
+        if outcome != "fault" {
+            break;
+        }
+        match FaultClass::of(code.and_then(|c| u32::try_from(c).ok())) {
+            FaultClass::Schema => count += 1,
+            FaultClass::Technical => {}
+            FaultClass::Authorization => break,
+        }
+    }
+    Ok(count)
 }
 
 /// Resultado de una línea de respuesta ya clasificado.
@@ -861,6 +903,16 @@ impl Store {
         if chosen.is_empty() {
             return Ok(None);
         }
+        // `Incidencia = S` se decide ahora, al abrir el lote (D282): si alguno de sus registros
+        // se generó durante una incidencia abierta. Un lote ya abierto se reenvía con los
+        // mismos bytes y no se recalcula nada.
+        let mut header = header.clone();
+        if generated_during_incident(&tx, &chosen)? {
+            let mut voluntary = header.remision_voluntaria.take().unwrap_or_default();
+            voluntary.incidencia = Some(true);
+            header.remision_voluntaria = Some(voluntary);
+        }
+        let header = &header;
         let envio = Envio {
             cabecera: header.clone(),
             registros: chosen.iter().map(|r| r.record.clone()).collect(),
@@ -911,8 +963,22 @@ impl Store {
 
     /// Anota un intento de envío del lote, ANTES de la llamada (D252): sin esa anotación, un
     /// corte durante el envío no dejaría rastro de que el lote pudo llegar a la AEAT. Devuelve
-    /// el número de intento (1 el primero). Falla si el lote no existe o ya está cerrado.
+    /// el número de intento que cuenta (1 el primero). Falla si el lote no existe o ya está
+    /// cerrado. Si después el transporte dice que el cuerpo no llegó a escribirse, quien llama
+    /// lo anula con [`Store::void_verifactu_attempt`] (D280).
     pub fn begin_verifactu_attempt(&mut self, batch_id: i64, now_ms: i64) -> SalesResult<u32> {
+        Ok(self
+            .begin_verifactu_attempt_ticket(batch_id, now_ms)?
+            .counted)
+    }
+
+    /// Como [`Store::begin_verifactu_attempt`], pero devuelve también el identificador del
+    /// intento anotado, para poder anularlo (D280).
+    pub fn begin_verifactu_attempt_ticket(
+        &mut self,
+        batch_id: i64,
+        now_ms: i64,
+    ) -> SalesResult<VerifactuAttemptTicket> {
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -921,9 +987,13 @@ impl Store {
             "INSERT INTO verifactu_batch_attempts (batch_id, attempted_at) VALUES (?1, ?2)",
             params![batch_id, now_ms],
         )?;
-        let attempts = attempts_of(&tx, batch_id)?;
+        let attempt_id = tx.last_insert_rowid();
+        let counted = attempts_of(&tx, batch_id)?;
         tx.commit()?;
-        Ok(attempts)
+        Ok(VerifactuAttemptTicket {
+            attempt_id,
+            counted,
+        })
     }
 
     /// Cierra el lote con una respuesta entendida o un `Fault` SOAP y guarda el resultado de
@@ -978,9 +1048,28 @@ impl Store {
                 )?;
                 closure.fault_code = f.codigo;
                 closure.missing_record_ids = batch.record_ids.clone();
+                match FaultClass::of(f.codigo) {
+                    // El certificado no está autorizado o el `Representante` no vale: la
+                    // remisión de esta base se para hasta que el usuario actúe (D281).
+                    FaultClass::Authorization => {
+                        halt_authorization(&tx, batch_id, f.codigo.unwrap_or(0), now_ms)?;
+                    }
+                    // Técnico: nunca para; se anota la incidencia (D282).
+                    FaultClass::Technical => {
+                        open_incident(
+                            &tx,
+                            &format!("fault_{}", f.codigo.unwrap_or(0)),
+                            Some(batch_id),
+                            now_ms,
+                        )?;
+                    }
+                    FaultClass::Schema => {}
+                }
             }
             ResultadoEnvio::Respuesta(r) => {
                 closure.outcome = BatchOutcome::Responded;
+                // Un envío con respuesta cierra la incidencia abierta (D282).
+                close_incident(&tx, batch_id, now_ms)?;
                 closure.wait_seconds = r.tiempo_espera_envio;
                 closure.csv = r.csv.clone();
                 let send_state = format!("{:?}", r.estado_envio);
@@ -1101,12 +1190,22 @@ impl Store {
     }
 
     /// Momento (milisegundos Unix) a partir del cual se puede enviar el siguiente lote, o
-    /// `None` si no hay restricción (D251): el fin del último lote cerrado más el tiempo de
-    /// espera de la AEAT, o, con un lote abierto, su último intento más la espera mínima de
-    /// 60 s tras un fallo sin respuesta; el mayor de los dos.
+    /// `None` si no hay restricción (D251, D281): el fin del último lote cerrado más el tiempo
+    /// de espera de la AEAT y, tras fallos seguidos (sin respuesta, sin envío o `Fault`
+    /// técnico), el último fallo más una espera creciente de 60 s a una hora como mucho; el
+    /// mayor de los dos. Es la espera de la remisión automática.
     pub fn verifactu_next_send_at(
         &self,
         environment: VerifactuEnvironment,
+    ) -> SalesResult<Option<i64>> {
+        self.verifactu_next_send_at_mode(environment, WaitMode::Automatic)
+    }
+
+    /// Como [`Store::verifactu_next_send_at`], según quién pregunta ([`WaitMode`]).
+    pub fn verifactu_next_send_at_mode(
+        &self,
+        environment: VerifactuEnvironment,
+        mode: WaitMode,
     ) -> SalesResult<Option<i64>> {
         let last_result: Option<(i64, i64)> = self
             .conn
@@ -1118,16 +1217,9 @@ impl Store {
                 |r| Ok((r.get(0)?, r.get(1)?)),
             )
             .optional()?;
-        let last_attempt: Option<i64> = self.conn.query_row(
-            "SELECT max(a.attempted_at) FROM verifactu_batch_attempts a \
-             JOIN verifactu_batches b ON b.id = a.batch_id WHERE b.environment = ?1 \
-             AND NOT EXISTS (SELECT 1 FROM verifactu_batch_results r WHERE r.batch_id = b.id)",
-            [environment.as_str()],
-            |r| r.get(0),
-        )?;
         let from_result = last_result.map(|(at, wait)| at + wait * 1000);
-        let from_attempt = last_attempt.map(|at| at + i64::from(MIN_RETRY_WAIT_SECONDS) * 1000);
-        Ok(match (from_result, from_attempt) {
+        let from_failure = retry_failure_wait(&self.conn, environment, mode)?;
+        Ok(match (from_result, from_failure) {
             (Some(a), Some(b)) => Some(a.max(b)),
             (a, b) => a.or(b),
         })
@@ -1215,6 +1307,7 @@ impl Store {
             record_count: u32::try_from(record_count).unwrap_or(0),
             started_at,
             attempts: attempts_of(&self.conn, id)?,
+            unsent_attempts: unsent_of(&self.conn, id)?,
             result,
         }))
     }
@@ -1336,14 +1429,14 @@ impl Store {
 /// mensaje entero y no guardó nada.
 fn was_sent_before(conn: &Connection, batch_id: i64, record_id: i64) -> SalesResult<bool> {
     let n: i64 = conn.query_row(
-        "SELECT count(*) FROM verifactu_batch_records br          JOIN verifactu_batch_results z ON z.batch_id = br.batch_id AND z.outcome = 'responded'          WHERE br.record_id = ?1 AND br.batch_id <> ?2          AND EXISTS (SELECT 1 FROM verifactu_batch_attempts a WHERE a.batch_id = br.batch_id)          AND NOT EXISTS (SELECT 1 FROM verifactu_record_results x                          WHERE x.batch_id = br.batch_id AND x.record_id = br.record_id)",
+        "SELECT count(*) FROM verifactu_batch_records br          JOIN verifactu_batch_results z ON z.batch_id = br.batch_id AND z.outcome = 'responded'          WHERE br.record_id = ?1 AND br.batch_id <> ?2          AND EXISTS (SELECT 1 FROM verifactu_batch_attempts a WHERE a.batch_id = br.batch_id AND NOT EXISTS (SELECT 1 FROM verifactu_unsent_attempts u WHERE u.attempt_id = a.id))          AND NOT EXISTS (SELECT 1 FROM verifactu_record_results x                          WHERE x.batch_id = br.batch_id AND x.record_id = br.record_id)",
         params![record_id, batch_id],
         |r| r.get(0),
     )?;
     Ok(n > 0)
 }
 
-fn ensure_batch_open(conn: &Connection, batch_id: i64) -> SalesResult<()> {
+pub(super) fn ensure_batch_open(conn: &Connection, batch_id: i64) -> SalesResult<()> {
     let exists: i64 = conn.query_row(
         "SELECT count(*) FROM verifactu_batches WHERE id = ?1",
         [batch_id],

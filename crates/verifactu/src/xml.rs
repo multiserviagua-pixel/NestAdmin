@@ -34,7 +34,8 @@ impl PersonaEs {
         }
     }
 
-    fn validar(&self, campo: &str) -> Result<(), Error> {
+    /// Valida el nombre (hasta 120 caracteres) y el NIF; `campo` es la ruta que va en el error.
+    pub fn validar(&self, campo: &str) -> Result<(), Error> {
         validar_texto(
             &self.nombre_razon,
             &format!("{campo}/NombreRazon"),

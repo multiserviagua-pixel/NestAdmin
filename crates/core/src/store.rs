@@ -98,6 +98,7 @@ CREATE TABLE rules (
     // Remisión de los registros Verifactu a la AEAT: entorno, lotes, resultados y
     // subsanaciones, de solo inserción (D248-D258); ver sales/verifactu_remission.rs.
     include_str!("migrations/016_verifactu_remission.sql"),
+    include_str!("migrations/017_verifactu_sending.sql"),
 ];
 
 /// Base de datos local. Cada operación pública se confirma en una transacción,

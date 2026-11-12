@@ -28,6 +28,7 @@ pub mod master;
 pub mod sends;
 pub mod verifactu;
 pub mod verifactu_remission;
+pub mod verifactu_sending;
 
 pub use collections::{GeneratedDraft, RecurringRecord, RecurringRun};
 pub use documents::{
@@ -48,11 +49,16 @@ pub use verifactu::{
     CODE_CLOCK_BEHIND, CODE_RECORD_INVALID,
 };
 pub use verifactu_remission::{
-    BatchClosure, BatchOutcome, RecordEnvironment, VerifactuBatch, VerifactuBatchResult,
-    VerifactuBatchSummary, VerifactuEnvironment, VerifactuRecordState, VerifactuStatus,
-    VerifactuSubsanation, CODE_BATCH_OPEN, CODE_BATCH_REJECTED, CODE_ENVIRONMENT_BUSY,
-    CODE_ENVIRONMENT_CHANGED, MAX_AUTOMATIC_FAULTS, MIN_RETRY_WAIT_SECONDS,
+    BatchClosure, BatchOutcome, RecordEnvironment, VerifactuAttemptTicket, VerifactuBatch,
+    VerifactuBatchResult, VerifactuBatchSummary, VerifactuEnvironment, VerifactuRecordState,
+    VerifactuStatus, VerifactuSubsanation, CODE_BATCH_OPEN, CODE_BATCH_REJECTED,
+    CODE_ENVIRONMENT_BUSY, CODE_ENVIRONMENT_CHANGED, MAX_AUTOMATIC_FAULTS, MIN_RETRY_WAIT_SECONDS,
     OBLIGATION_AUTHORIZATION,
+};
+pub use verifactu_sending::{
+    retry_wait_seconds, AuthorizationHalt, FaultClass, RemissionSettings, SenderCapacity,
+    VerifactuIncident, VerifactuUnsentAttempt, WaitMode, AUTHORIZATION_FAULT_CODES,
+    CODE_AUTHORIZATION_REJECTED, FAST_RETRIES, MAX_RETRY_WAIT_SECONDS, TECHNICAL_FAULT_CODES,
 };
 
 // Conversiones entre los tipos puros y el texto guardado.

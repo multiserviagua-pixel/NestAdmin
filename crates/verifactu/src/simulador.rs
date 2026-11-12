@@ -85,6 +85,10 @@ pub struct Estado {
     pub perder_siguiente_respuesta: bool,
     /// La siguiente petición recibe este estado HTTP sin procesarse.
     pub fallo_http_siguiente: Option<u16>,
+    /// La siguiente petición recibe este `Fault` SOAP (HTTP 500) sin procesarse: sirve para
+    /// ensayar la clasificación de D281 (4112 de autorización, 4108 técnico...). Solo lo fija
+    /// quien prueba; la AEAT real decide por sí misma.
+    pub fallo_soap_siguiente: Option<u32>,
     ultimo_envio: Option<Instant>,
     secuencia: u32,
 }
@@ -245,6 +249,15 @@ fn atender(mut s: TcpStream, estado: &Mutex<Estado>) -> std::io::Result<()> {
             "servicio no disponible (simulado)",
         );
     }
+    if let Some(codigo) = e.fallo_soap_siguiente.take() {
+        drop(e);
+        return responder(
+            &mut s,
+            500,
+            "text/xml; charset=utf-8",
+            &fallo(codigo, "Fallo simulado."),
+        );
+    }
     if !linea.starts_with("POST ") {
         drop(e);
         return responder(
@@ -335,6 +348,14 @@ fn procesar(e: &mut Estado, cuerpo: &str) -> (u16, String) {
     let nombre = obligado.texto_de("NombreRazon").unwrap_or_default();
     if nif.len() != 9 || !nif.bytes().all(|c| c.is_ascii_alphanumeric()) {
         return (500, fallo(4116, "Error en la cabecera: el campo NIF del bloque ObligadoEmision tiene un formato incorrecto."));
+    }
+    // `Representante`, en su forma mínima: si viene, su NIF tiene que estar bien formado. La AEAT
+    // real también comprueba que el certificado lo represente (4105, 4117, 4123, 4124): aquí no.
+    if let Some(representante) = envio.ruta(&["Cabecera", "Representante"]) {
+        let nif = representante.texto_de("NIF").unwrap_or_default();
+        if nif.len() != 9 || !nif.bytes().all(|c| c.is_ascii_alphanumeric()) {
+            return (500, fallo(4117, "Error en la cabecera: el campo NIF del bloque Representante tiene un formato incorrecto."));
+        }
     }
     if let Some(censo) = &e.config.censo {
         if !censo.contains(&nif) {
