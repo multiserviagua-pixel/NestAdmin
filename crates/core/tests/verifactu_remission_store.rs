@@ -1402,3 +1402,206 @@ fn a_simulator_seeded_with_the_accepted_records_does_not_reject_an_anulacion_aft
     assert_eq!(closure.accepted, 1);
     assert_eq!(state(&store, anulacion), VerifactuStatus::Accepted);
 }
+
+// --- Revisión de E5: respuestas parciales, emisores y siembra con errores ---
+
+const FAULT_XML: &str = "<?xml version=\"1.0\"?><env:Envelope xmlns:env=\"http://schemas.xmlsoap.org/soap/envelope/\"><env:Body><env:Fault><faultcode>env:Client</faultcode><faultstring>Codigo[4104].Error en la cabecera</faultstring></env:Fault></env:Body></env:Envelope>";
+
+/// Respuesta parcial con una sola línea (la del registro dado, aceptada).
+fn partial_answer(record: &RegistroFacturacion, operation: &str) -> ResultadoEnvio {
+    let id = record.id_factura();
+    let xml = format!(
+        "<env:Envelope xmlns:env=\"http://schemas.xmlsoap.org/soap/envelope/\"><env:Body><tikR:RespuestaRegFactuSistemaFacturacion xmlns:tikR=\"urn:r\" xmlns:tik=\"urn:t\"><tikR:TiempoEsperaEnvio>60</tikR:TiempoEsperaEnvio><tikR:EstadoEnvio>ParcialmenteCorrecto</tikR:EstadoEnvio><tikR:RespuestaLinea><tikR:IDFactura><tik:IDEmisorFactura>{}</tik:IDEmisorFactura><tik:NumSerieFactura>{}</tik:NumSerieFactura><tik:FechaExpedicionFactura>{}</tik:FechaExpedicionFactura></tikR:IDFactura><tikR:Operacion><tik:TipoOperacion>{operation}</tik:TipoOperacion></tikR:Operacion><tikR:EstadoRegistro>Correcto</tikR:EstadoRegistro></tikR:RespuestaLinea></tikR:RespuestaRegFactuSistemaFacturacion></env:Body></env:Envelope>",
+        id.nif_emisor, id.num_serie, id.fecha_expedicion
+    );
+    ResultadoEnvio::desde_xml(&xml).unwrap()
+}
+
+fn record_of(store: &Store, record_id: i64) -> RegistroFacturacion {
+    store
+        .verifactu_records()
+        .unwrap()
+        .into_iter()
+        .find(|r| r.id == record_id)
+        .unwrap()
+        .record
+}
+
+/// Abre un lote, anota el intento y lo cierra con la respuesta dada.
+fn close_with(store: &mut Store, result: &ResultadoEnvio, now: i64) -> BatchClosure {
+    let batch = store
+        .open_verifactu_batch(VerifactuEnvironment::Simulador, &header(), now, true)
+        .unwrap()
+        .unwrap();
+    store.begin_verifactu_attempt(batch.id, now).unwrap();
+    store.close_verifactu_batch(batch.id, result, now).unwrap()
+}
+
+#[test]
+fn a_record_missing_from_a_partial_response_is_our_own_duplicate_in_the_next_batch() {
+    let mut store = Store::open_in_memory().unwrap();
+    let customer = setup(&mut store);
+    let sim = simulator();
+    let a = issue_at(&mut store, customer, &ctx(0)).1;
+    let b = issue_at(&mut store, customer, &ctx(30)).1;
+    let answer = partial_answer(&record_of(&store, a), "Alta");
+    let closure = close_with(&mut store, &answer, T0);
+    assert_eq!(
+        (closure.accepted, closure.missing_record_ids.clone()),
+        (1, vec![b])
+    );
+    // La AEAT sí tenía b aunque la línea no llegara: el 3000 del lote siguiente es suyo.
+    sim.sembrar(&[record_of(&store, b)]);
+    let closure = pump(&mut store, &sim, T0 + 60_000).closed();
+    assert_eq!((closure.accepted, closure.unexpected_duplicates), (1, 0));
+    let s = store.verifactu_record_state(b).unwrap();
+    assert_eq!(s.status, VerifactuStatus::Accepted);
+    assert!(s.duplicate);
+    assert_eq!(s.aeat_code, Some(3000));
+}
+
+#[test]
+fn a_void_missing_from_a_partial_response_answered_3001_in_the_next_batch_is_accepted() {
+    let mut store = Store::open_in_memory().unwrap();
+    let customer = setup(&mut store);
+    let sim = simulator();
+    let (doc, _) = issue_at(&mut store, customer, &ctx(0));
+    pump(&mut store, &sim, T0).closed();
+    store.void_sales_invoice_registered(doc, &ctx(60)).unwrap();
+    let void = last_record_id(&store);
+    let other = issue_at(&mut store, customer, &ctx(90)).1;
+    let answer = partial_answer(&record_of(&store, other), "Alta");
+    let closure = close_with(&mut store, &answer, T0 + 60_000);
+    assert_eq!(closure.missing_record_ids, vec![void]);
+    sim.sembrar(&[record_of(&store, void)]);
+    let closure = pump(&mut store, &sim, T0 + 120_000).closed();
+    assert_eq!((closure.accepted, closure.rejected), (1, 0));
+    let s = store.verifactu_record_state(void).unwrap();
+    assert_eq!(s.status, VerifactuStatus::Accepted);
+    assert!(s.duplicate);
+    assert_eq!(s.aeat_code, Some(3001));
+}
+
+#[test]
+fn a_record_that_was_only_in_a_fault_batch_is_not_our_duplicate() {
+    let mut store = Store::open_in_memory().unwrap();
+    let customer = setup(&mut store);
+    let sim = simulator();
+    let a = issue_at(&mut store, customer, &ctx(0)).1;
+    let fault = ResultadoEnvio::desde_xml(FAULT_XML).unwrap();
+    close_with(&mut store, &fault, T0);
+    // El Fault rechaza el mensaje entero: la AEAT no guardó nada, así que un 3000 es ajeno.
+    sim.sembrar(&[record_of(&store, a)]);
+    let closure = pump(&mut store, &sim, T0 + 60_000).closed();
+    assert_eq!((closure.accepted, closure.unexpected_duplicates), (0, 1));
+    assert_eq!(state(&store, a), VerifactuStatus::UnexpectedDuplicate);
+}
+
+#[test]
+fn a_batch_is_cut_when_the_issuer_changes() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("nestadmin.db");
+    let mut store = Store::open(&path).unwrap();
+    let customer = setup(&mut store);
+    let a = issue_at(&mut store, customer, &ctx(0)).1;
+    let b = issue_at(&mut store, customer, &ctx(30)).1;
+    let c = issue_at(&mut store, customer, &ctx(60)).1;
+    // El segundo registro pasa a ser de otro emisor (el trigger solo se quita en la prueba).
+    let conn = raw(&path);
+    conn.execute_batch("DROP TRIGGER verifactu_records_no_update;")
+        .unwrap();
+    conn.execute(
+        "UPDATE verifactu_records SET issuer_tax_id = 'B00000034' WHERE id = ?1",
+        [b],
+    )
+    .unwrap();
+    drop(conn);
+    let first = store
+        .open_verifactu_batch(VerifactuEnvironment::Simulador, &header(), T0, false)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        first.record_ids,
+        vec![a],
+        "el lote se corta ante el otro emisor"
+    );
+    store.begin_verifactu_attempt(first.id, T0).unwrap();
+    let sim = simulator();
+    let result =
+        ResultadoEnvio::desde_xml(&post(&sim.url(), &first.envio.a_soap().unwrap()).unwrap().1)
+            .unwrap();
+    store.close_verifactu_batch(first.id, &result, T0).unwrap();
+    let second = store
+        .open_verifactu_batch(
+            VerifactuEnvironment::Simulador,
+            &header(),
+            T0 + 60_000,
+            false,
+        )
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        second.record_ids,
+        vec![b],
+        "el siguiente lote es del otro emisor"
+    );
+    store
+        .begin_verifactu_attempt(second.id, T0 + 60_000)
+        .unwrap();
+    let _ = c;
+}
+
+#[test]
+fn the_accepted_seed_keeps_accepted_with_errors_and_the_simulator_stores_it() {
+    let mut store = Store::open_in_memory().unwrap();
+    let customer = setup(&mut store);
+    let sim = simulator();
+    let a = issue_at(&mut store, customer, &ctx(0)).1;
+    let b = issue_at(&mut store, customer, &ctx(30)).1;
+    force(&sim, &serie_of(&store, a), 2000, true);
+    let closure = pump(&mut store, &sim, T0).closed();
+    assert_eq!((closure.accepted, closure.accepted_with_errors), (1, 1));
+    let seed = store
+        .verifactu_accepted_seed(VerifactuEnvironment::Simulador)
+        .unwrap();
+    let flags: Vec<bool> = seed.iter().map(|(_, with_errors)| *with_errors).collect();
+    assert_eq!(flags, vec![true, false], "{a} con errores, {b} correcto");
+    let fresh = simulator();
+    fresh.sembrar_con_estado(&seed);
+    let state = fresh.estado();
+    let stored = |record: &RegistroFacturacion| {
+        let id = record.id_factura();
+        state
+            .registros
+            .get(&(
+                id.nif_emisor.clone(),
+                id.num_serie.clone(),
+                id.fecha_expedicion.to_string(),
+            ))
+            .unwrap()
+            .estado
+            .clone()
+    };
+    assert_eq!(stored(&seed[0].0), "AceptadaConErrores");
+    assert_eq!(stored(&seed[1].0), "Correcta");
+}
+
+#[test]
+fn a_batch_summary_is_available_by_id_for_open_and_closed_batches() {
+    let mut store = Store::open_in_memory().unwrap();
+    let customer = setup(&mut store);
+    issue_at(&mut store, customer, &ctx(0));
+    assert!(store.verifactu_batch_summary(1).unwrap().is_none());
+    let fault = ResultadoEnvio::desde_xml(FAULT_XML).unwrap();
+    let batch = store
+        .open_verifactu_batch(VerifactuEnvironment::Simulador, &header(), T0, true)
+        .unwrap()
+        .unwrap();
+    let open = store.verifactu_batch_summary(batch.id).unwrap().unwrap();
+    assert!(open.result.is_none());
+    store.begin_verifactu_attempt(batch.id, T0).unwrap();
+    store.close_verifactu_batch(batch.id, &fault, T0).unwrap();
+    let closed = store.verifactu_batch_summary(batch.id).unwrap().unwrap();
+    assert_eq!(closed.result.unwrap().outcome, BatchOutcome::Fault);
+    assert_eq!(closed.environment, VerifactuEnvironment::Simulador);
+}

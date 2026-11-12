@@ -1513,7 +1513,8 @@ export interface VerifactuRecord {
 export type VerifactuEnvironment = "simulador" | "preproduccion" | "produccion";
 
 /** Estado derivado de un registro respecto a la AEAT (D249, ajuste 6). */
-export type VerifactuStatus = "pending" | "sending" | "accepted" | "accepted_with_errors" | "rejected" | "subsanated" | "unexpected_duplicate";
+/** `other_environment`: pendiente o en envío de otro entorno (p. ej. producción heredada): no se remite desde el vigente. */
+export type VerifactuStatus = "pending" | "sending" | "accepted" | "accepted_with_errors" | "rejected" | "subsanated" | "unexpected_duplicate" | "other_environment";
 
 export interface VerifactuRecordView {
   record_id: number;
@@ -1568,6 +1569,17 @@ export interface VerifactuStatusView {
   sending: number;
   rejected: number;
   unexpected_duplicates: number;
+  /** Último error de preparación o de transporte; `null` si no hay. Solo en memoria. */
+  last_error: VerifactuIssueView | null;
+}
+
+/** Error de la remisión (código estable y texto), con cuántas veces seguidas se repitió. */
+export interface VerifactuIssueView {
+  code: string;
+  message: string;
+  /** Milisegundos Unix. */
+  at: number;
+  occurrences: number;
 }
 
 /** Resultado de una pasada de remisión («Remitir ahora»). */

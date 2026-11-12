@@ -601,7 +601,13 @@ export function exemptionText(exemption: { qualification: SalesQualification; de
 
 export const EMPTY_LIST = "Todavía no hay documentos. Cree un borrador con «Nuevo documento».";
 export const NO_TOTALS = "Los totales aparecerán cuando el borrador tenga al menos una línea válida y se guarde.";
-export const VERIFACTU_READONLY = "Los registros no se pueden editar ni borrar. Se crean al emitir o anular una factura y se remiten solos a la AEAT; aquí se ve cómo va cada uno.";
+/** Aviso de la pestaña de registros: a dónde se remiten depende del entorno vigente. */
+export function verifactuReadonlyText(environment: string | null | undefined): string {
+  const base = "Los registros no se pueden editar ni borrar. Se crean al emitir o anular una factura";
+  if (environment === "simulador") return `${base} y se remiten solos al simulador de este equipo, no a la AEAT; aquí se ve cómo va cada uno.`;
+  if (environment === "preproduccion" || environment === "produccion") return `${base} y se remiten solos a la AEAT; aquí se ve cómo va cada uno.`;
+  return `${base}; aquí se ve cómo va cada uno y, cuando se lea el estado de la remisión, a dónde se remiten.`;
+}
 
 // ---- Membrete PDF de fondo (D222, D223) ----
 

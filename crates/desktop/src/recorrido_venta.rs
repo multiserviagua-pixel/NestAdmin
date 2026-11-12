@@ -153,6 +153,38 @@ impl Session {
         )
     }
 
+    #[cfg_attr(not(debug_assertions), allow(dead_code))]
+    /// Un llamador de comandos que se puede llevar a otro hilo (la ventana es `Send`): sirve para
+    /// probar que un comando lento no bloquea a los demás.
+    pub(super) fn caller(&self) -> impl Fn(&str, Value) -> Result<Value, String> + Send + 'static {
+        let window = self.window.clone();
+        move |cmd, args| {
+            let url = if cfg!(windows) {
+                "http://tauri.localhost"
+            } else {
+                "tauri://localhost"
+            };
+            get_ipc_response(
+                &window,
+                InvokeRequest {
+                    cmd: cmd.into(),
+                    callback: CallbackFn(0),
+                    error: CallbackFn(1),
+                    url: url.parse().unwrap(),
+                    body: InvokeBody::Json(args),
+                    headers: Default::default(),
+                    invoke_key: INVOKE_KEY.to_owned(),
+                },
+            )
+            .map(|body| body.deserialize::<Value>().unwrap())
+            .map_err(|e| {
+                e.as_str()
+                    .map(str::to_owned)
+                    .unwrap_or_else(|| e.to_string())
+            })
+        }
+    }
+
     /// Un comando con argumentos JSON, como `invoke(cmd, args)`.
     pub(super) fn call(&self, cmd: &str, args: Value) -> Result<Value, String> {
         self.request(cmd, InvokeBody::Json(args), Default::default())
@@ -189,6 +221,7 @@ impl Session {
         self.ok("sales_setup_status", json!({}))
     }
 
+    #[cfg_attr(not(debug_assertions), allow(dead_code))]
     /// Adelanta el reloj de la venta (el de la remisión, D251) estos segundos.
     pub(super) fn advance_clock(&self, seconds: i64) {
         self.clock.advance(seconds);

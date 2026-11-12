@@ -230,7 +230,7 @@ import {
 
 import { createSalesView } from "./ventas-view";
 import { salesErrorText } from "./ventas-text";
-import { ENVIRONMENT_SIMULATOR_NOTE, environmentLine, environmentOptions } from "./ventas-verifactu-text";
+import { REMISSION_TASK_HINT, REMISSION_TASK_LABEL, SUBMIT_VERIFACTU_KIND, canRetryTask, environmentLine, environmentNote, environmentOptions } from "./ventas-verifactu-text";
 import type { VerifactuEnvironment, VerifactuStatusView } from "./types";
 import { SEND_APPROVE_BUTTON, SEND_CONFIRM_UNVERIFIED_BUTTON, SEND_DISCARD_BUTTON, SEND_KIND, SEND_OPEN_PDF_BUTTON, SEND_SAVE_BUTTON, SEND_UNVERIFIED_TEXT, formatSize, sendApproveBlock, sendAttachment, sendConfirmText, sendDiscardText, sendDocumentLabel, sendIsUnverifiable, sendNotices, sendOutcome, sendRecipient } from "./ventas-envio-text";
 import { actionBar, dataTable, emptyState, h, helpTip, icon, sectionHeader, statusChip, tabs, type Child, type IconName, type Tone } from "./components";
@@ -2050,7 +2050,7 @@ function breakable(text: string): Child[] {
   return out;
 }
 
-const kindLabel = (kind: string) => (isKnownKind(kind) ? (kind === "invoice" ? "Factura" : kind === SEND_KIND ? "Envío de venta" : "Correo") : "Tipo no reconocido");
+const kindLabel = (kind: string) => (kind === SUBMIT_VERIFACTU_KIND ? REMISSION_TASK_LABEL : isKnownKind(kind) ? (kind === "invoice" ? "Factura" : kind === SEND_KIND ? "Envío de venta" : "Correo") : "Tipo no reconocido");
 
 function reasonSpan(reason: TaskReason): HTMLElement {
   return reason.tone === "error"
@@ -2185,9 +2185,10 @@ function taskActions(t: Task): HTMLElement {
         )
       : null,
     blocked ? h("button", { type: "button", "aria-label": actionLabel(CANCEL_ALSO_LABEL, title(t)), "data-focus-key": `task:cancel-also:${t.id}`, onclick: () => void cancelAlso(t) }, CANCEL_ALSO_LABEL) : null,
-    t.state === "failed"
+    t.state === "failed" && canRetryTask(t.kind)
       ? h("button", { "data-focus-key": `task:retry:${t.id}`, onclick: () => void act(() => api.retry(t.id), "Tarea reencolada") }, "Reintentar")
       : null,
+    t.state === "failed" && !canRetryTask(t.kind) ? h("span", { class: "meta" }, REMISSION_TASK_HINT) : null,
     t.state === "awaiting_review" ? h("button", { "data-focus-key": `task:review:${t.id}`, onclick: () => openInReview(t) }, "Revisar") : null,
   );
 }
@@ -6314,7 +6315,7 @@ function verifactuSection(): HTMLElement {
         ),
       ),
     ),
-    h("p", { class: "meta" }, ENVIRONMENT_SIMULATOR_NOTE),
+    environmentNote(current) ? h("p", { class: "meta" }, environmentNote(current)) : null,
   );
 }
 
@@ -7768,7 +7769,10 @@ void (async () => {
     void refreshCheck();
     return;
   }
-  onChanged(() => void refresh(true));
+  onChanged(() => {
+    void refresh(true);
+    sales.changed();
+  });
   onMailSignIn((url) => {
     state.signInUrl = url;
     render(true);

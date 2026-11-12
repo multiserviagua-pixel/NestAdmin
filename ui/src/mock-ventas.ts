@@ -684,6 +684,7 @@ function verifactuStatus(): VerifactuStatusView {
     sending: countStatus("sending"),
     rejected: countStatus("rejected"),
     unexpected_duplicates: countStatus("unexpected_duplicate"),
+    last_error: null,
   };
 }
 

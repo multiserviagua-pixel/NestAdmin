@@ -10,6 +10,9 @@
 //! hace cada pasada: espera al estado que importa con la pasada manual y adelanta el reloj de la
 //! venta cuando la remisión dice que hay que esperar.
 
+use std::net::TcpListener;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use nestadmin_app::remission::SimMode;
@@ -216,5 +219,119 @@ fn la_remision_verifactu_desde_la_ventana_de_principio_a_fin_con_el_simulador() 
         json!({ "environment": "simulador", "changed": false })
     );
     assert_eq!(s.ok("verifactu_environment", json!({})), "simulador");
+    s.close();
+}
+
+/// Servidor que acepta conexiones y no contesta nunca (como una red que se cuelga).
+struct SilentServer {
+    url: String,
+    hits: Arc<AtomicUsize>,
+    stop: Arc<AtomicBool>,
+    handle: Option<std::thread::JoinHandle<()>>,
+}
+
+impl SilentServer {
+    fn start() -> Self {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let url = format!("http://{}/servicio", listener.local_addr().unwrap());
+        let hits = Arc::new(AtomicUsize::new(0));
+        let stop = Arc::new(AtomicBool::new(false));
+        let (h, s) = (hits.clone(), stop.clone());
+        let handle = std::thread::spawn(move || {
+            let mut held = Vec::new();
+            while !s.load(Ordering::SeqCst) {
+                match listener.accept() {
+                    Ok((stream, _)) => {
+                        h.fetch_add(1, Ordering::SeqCst);
+                        held.push(stream);
+                    }
+                    Err(_) => std::thread::sleep(Duration::from_millis(20)),
+                }
+            }
+        });
+        Self {
+            url,
+            hits,
+            stop,
+            handle: Some(handle),
+        }
+    }
+}
+
+impl Drop for SilentServer {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::SeqCst);
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
+#[test]
+fn remitir_ahora_no_retiene_el_cerrojo_durante_la_red_y_otro_comando_responde() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = dir.path().join("datos");
+    let s = Session::open(&data);
+    let (customer, product) = master_data(&s);
+    s.write_producer(PRODUCER);
+    s.ok("reload_verifactu_producer", json!({}));
+
+    // Todo envío va a un servidor que acepta la conexión y no contesta.
+    let server = SilentServer::start();
+    s.app
+        .state::<SharedState>()
+        .app()
+        .unwrap()
+        .set_verifactu_endpoint(Some(server.url.clone()));
+    let doc = issue(&s, customer, product);
+    let record = alta_of(&s, doc);
+
+    // «Remitir ahora» desde otro hilo: se queda esperando la respuesta que no llega.
+    let call = s.caller();
+    let manual = std::thread::spawn(move || call("verifactu_submit_now", json!({})));
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while server.hits.load(Ordering::SeqCst) == 0 {
+        assert!(Instant::now() < deadline, "ningún envío llegó al servidor");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+
+    // Con la llamada de red en curso (hasta 10 s de espera), otros comandos responden al momento:
+    // la aplicación no está bloqueada.
+    for command in [
+        "verifactu_status",
+        "sales_setup_status",
+        "verifactu_environment",
+    ] {
+        let started = Instant::now();
+        let value = s.ok(command, json!({}));
+        let took = started.elapsed();
+        assert!(
+            took < Duration::from_secs(3),
+            "{command} tardó {took:?} con la remisión en la red: {value}"
+        );
+    }
+    let st = status(&s);
+    assert_eq!(record_of(&st, record)["status"], "sending", "{st}");
+
+    // La pasada manual acaba sin respuesta (o, si la del tick iba primero, dice que hay otra en
+    // curso); el lote queda abierto y se ve el motivo.
+    let report = manual.join().unwrap().expect("la pasada manual contesta");
+    let state = report["state"].as_str().unwrap().to_owned();
+    assert!(
+        state == "no_response" || state == "busy",
+        "pasada manual: {report}"
+    );
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        let st = status(&s);
+        if st["last_error"]["code"] == "unavailable" {
+            assert_eq!(record_of(&st, record)["status"], "sending");
+            assert_eq!(st["last_batch"]["outcome"], Value::Null, "{st}");
+            break;
+        }
+        assert!(Instant::now() < deadline, "no se vio el último error: {st}");
+        std::thread::sleep(Duration::from_millis(100));
+    }
     s.close();
 }

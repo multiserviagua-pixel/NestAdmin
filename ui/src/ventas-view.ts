@@ -49,7 +49,7 @@ import {
   STATUS_LABEL,
   STATUS_ORDER,
   TAX_PERCENTS,
-  VERIFACTU_READONLY,
+  verifactuReadonlyText,
   ZERO_RATE_QUALIFICATIONS,
   allowedActions,
   chainText,
@@ -103,6 +103,12 @@ import {
   environmentLine,
   haltedText,
   nextSendText,
+  autoRefreshDelayMs,
+  lastErrorText,
+  pumpVisible,
+  recordKindText,
+  statusSignature,
+  subsanationSources,
   pendingText,
   pumpReportText,
   recordStatusText,
@@ -262,6 +268,7 @@ export function createSalesView(ctx: Context) {
   async function loadRecords() {
     s.records = await api.verifactuRecords();
     s.setup = await api.salesSetupStatus();
+    const before = statusSignature(s.verifactu);
     try {
       s.verifactu = await api.verifactuStatus();
       s.verifactuError = null;
@@ -269,6 +276,38 @@ export function createSalesView(ctx: Context) {
       s.verifactu = null;
       s.verifactuError = salesErrorText(error);
     }
+    // El aviso de la última pasada se refería al estado de entonces: si cambió, ya no vale.
+    if (statusSignature(s.verifactu) !== before) s.pump = null;
+  }
+
+  // Mientras la pestaña de registros está abierta y hay algo en envío, pendiente o en espera,
+  // el estado se vuelve a leer solo (y al terminar el worker una pasada, `changed()`), para que
+  // «En envío» y «faltan N s» no queden desfasados.
+  let refreshTimer: number | null = null;
+
+  function scheduleAutoRefresh() {
+    if (refreshTimer !== null) return;
+    const delay = autoRefreshDelayMs(s.verifactu);
+    if (delay === null || s.tab !== "records") return;
+    refreshTimer = window.setTimeout(() => {
+      refreshTimer = null;
+      void refreshIfVisible();
+    }, delay);
+  }
+
+  async function refreshIfVisible() {
+    if (s.tab !== "records" || s.remitting || !document.getElementById("ventas-panel")) return;
+    try {
+      await loadRecords();
+    } catch {
+      // Un fallo de lectura se verá al actualizar a mano.
+    }
+    ctx.render();
+  }
+
+  /** El worker terminó una pasada (u otro cambio): se lee el estado si la pestaña lo necesita. */
+  function changed() {
+    if (autoRefreshDelayMs(s.verifactu) !== null) void refreshIfVisible();
   }
 
   async function loadLogo() {
@@ -1582,15 +1621,19 @@ export function createSalesView(ctx: Context) {
       s.pump = { tone: "error", text: salesErrorText(error) };
     }
     s.remitting = false;
+    const shown = s.pump;
     try {
       await loadRecords();
     } catch (error) {
       s.message = { kind: "error", text: salesErrorText(error) };
     }
+    // El aviso de esta pasada se conserva aunque el estado haya cambiado por ella.
+    s.pump = shown;
     ctx.render();
   }
 
   async function refreshRecords() {
+    s.pump = null;
     try {
       await loadRecords();
     } catch (error) {
@@ -1618,12 +1661,14 @@ export function createSalesView(ctx: Context) {
       return h("div", { class: "notice warn", role: "alert" }, h("span", {}, `No se pudo leer el estado de la remisión${s.verifactuError ? `: ${s.verifactuError}` : "."}`), h("button", { onclick: () => void refreshRecords() }, "Reintentar"));
     }
     const halted = haltedText(v);
+    const lastError = lastErrorText(v.last_error);
     const batch = v.last_batch ? batchText(v.last_batch) : null;
     return h(
       "div",
       { class: "verifactu-head" },
       h("div", { class: "notice info", role: "status" }, h("span", {}, h("strong", {}, environmentLine(v.environment)), v.environment_notice ? ` — ${v.environment_notice}` : "")),
       halted ? h("div", { class: "notice error", role: "alert" }, h("span", {}, halted)) : null,
+      lastError ? h("div", { class: "notice warn", role: "alert" }, h("span", {}, lastError)) : null,
       h(
         "ul",
         { class: "meta" },
@@ -1637,7 +1682,7 @@ export function createSalesView(ctx: Context) {
         h("button", { class: "primary", "data-focus-key": "verifactu:remit", disabled: s.remitting, onclick: () => void remitNow() }, s.remitting ? "Remitiendo…" : REMIT_NOW_BUTTON),
         h("button", { "data-focus-key": "verifactu:refresh", disabled: s.remitting, onclick: () => void refreshRecords() }, "Actualizar estado"),
       ),
-      s.pump ? h("div", { class: `notice ${noticeClass(s.pump.tone)}`, role: s.pump.tone === "error" || s.pump.tone === "warn" ? "alert" : "status" }, h("span", {}, s.pump.text)) : null,
+      s.pump && pumpVisible(s.pump, Date.now()) ? h("div", { class: `notice ${noticeClass(s.pump.tone)}`, role: s.pump.tone === "error" || s.pump.tone === "warn" ? "alert" : "status" }, h("span", {}, s.pump.text)) : null,
     );
   }
 
@@ -1650,18 +1695,20 @@ export function createSalesView(ctx: Context) {
       { class: "verifactu-state" },
       statusChip(text.label, text.tone),
       text.detail ? h("p", { class: "meta" }, text.detail) : null,
-      canSubsanate(view) ? h("button", { "data-focus-key": `verifactu:subsanate:${view.record_id}`, onclick: () => void subsanate(view) }, SUBSANATE_BUTTON) : null,
+      canSubsanate(view, s.verifactu?.environment) ? h("button", { "data-focus-key": `verifactu:subsanate:${view.record_id}`, onclick: () => void subsanate(view) }, SUBSANATE_BUTTON) : null,
     );
   }
 
   function recordsTab(): HTMLElement {
     const chain = s.setup?.chain ?? null;
     const byRecord = new Map((s.verifactu?.records ?? []).map((r) => [r.record_id, r]));
+    const sources = subsanationSources(s.verifactu?.records ?? []);
+    scheduleAutoRefresh();
     return h(
       "div",
       {},
       sectionHeader("Registros Verifactu"),
-      h("p", { class: "meta" }, VERIFACTU_READONLY),
+      h("p", { class: "meta" }, verifactuReadonlyText(s.verifactu?.environment)),
       h("div", { class: chain?.state === "broken" ? "notice error" : "notice info", role: chain?.state === "broken" ? "alert" : "status" }, h("span", {}, chainText(chain))),
       remissionHeader(),
       s.records.length === 0
@@ -1670,7 +1717,7 @@ export function createSalesView(ctx: Context) {
             [{ label: "N.º" }, { label: "Tipo" }, { label: "Factura" }, { label: "Fecha" }, { label: "Total", numeric: true }, { label: "Estado AEAT" }, { label: "Huella" }, { label: "Detalle" }],
             s.records.map((r) => [
               r.id,
-              r.kind === "alta" ? "Alta" : "Anulación",
+              recordKindText(r.kind, sources.get(r.id)),
               r.invoice_number,
               r.issue_date,
               r.total ? formatMoney(r.total) : "—",
@@ -1725,5 +1772,5 @@ export function createSalesView(ctx: Context) {
     );
   }
 
-  return { view, enter };
+  return { view, enter, changed };
 }

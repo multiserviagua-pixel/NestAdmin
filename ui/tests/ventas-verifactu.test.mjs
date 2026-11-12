@@ -1,15 +1,28 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { VERIFACTU_ERROR_CODES, salesErrorText } from "../src/ventas-text.ts";
+import { VERIFACTU_ERROR_CODES, salesErrorText, verifactuReadonlyText } from "../src/ventas-text.ts";
 import { sentAtText } from "../src/ventas-envio-text.ts";
 import {
+  AUTO_REFRESH_MS,
+  ENVIRONMENT_SIMULATOR_NOTE,
   ENVIRONMENT_UNAVAILABLE_NOTE,
   NO_AEAT_DETAIL,
+  PRODUCTION_LEGACY_TEXT,
+  REMISSION_TASK_LABEL,
   REMIT_NOW_BUTTON,
+  SUBMIT_VERIFACTU_KIND,
   UNEXPECTED_DUPLICATE_TEXT,
   aeatText,
+  autoRefreshDelayMs,
   batchText,
+  canRetryTask,
   canSubsanate,
+  environmentNote,
+  lastErrorText,
+  pumpVisible,
+  recordKindText,
+  statusSignature,
+  subsanationSources,
   environmentLine,
   environmentOptions,
   haltedText,
@@ -196,7 +209,9 @@ test("la espera restante y el siguiente envío permitido", () => {
   assert.equal(waitText(Number.NaN), "0 s");
   const zone = "UTC";
   const waiting = nextSendText({ next_send_at: T0 + 45_000, wait_remaining_seconds: 45, last_batch: batch() }, zone);
-  assert.equal(waiting, `Siguiente envío permitido: ${sentAtText(T0 + 45_000, zone)} (faltan 45 s).`);
+  // La etiqueta «Siguiente envío:» la pone la cabecera: el texto no la repite.
+  assert.equal(waiting, `${sentAtText(T0 + 45_000, zone)} (faltan 45 s)`);
+  assert.doesNotMatch(waiting, /Siguiente envío/);
   assert.match(nextSendText({ next_send_at: T0, wait_remaining_seconds: 0, last_batch: batch() }, zone), /ha pasado la espera/);
   assert.match(nextSendText({ next_send_at: null, wait_remaining_seconds: null, last_batch: null }, zone), /Todavía no se ha enviado ningún lote/);
   assert.match(nextSendText({ next_send_at: null, wait_remaining_seconds: null, last_batch: batch() }, zone), /no hay espera/);
@@ -220,4 +235,77 @@ test("el entorno: el simulador dice que no se envía nada y los demás no se pue
   assert.equal(options[0].note, null);
   assert.equal(options[1].note, ENVIRONMENT_UNAVAILABLE_NOTE);
   assert.match(ENVIRONMENT_UNAVAILABLE_NOTE, /certificado y la declaración responsable \(T18b\)/);
+});
+
+test("un registro de otro entorno (producción heredada) no se muestra como pendiente ni ofrece acciones", () => {
+  const legacy = record({ status: "other_environment", environment: "produccion_heredado" });
+  const text = recordStatusText(legacy);
+  assert.equal(text.label, "Otro entorno");
+  assert.equal(text.detail, PRODUCTION_LEGACY_TEXT);
+  assert.match(text.detail, /no se remite al simulador/);
+  assert.equal(canSubsanate(legacy, "simulador"), false);
+  // Ni siquiera rechazado: el heredado no tiene acciones.
+  assert.equal(canSubsanate(record({ status: "rejected", environment: "produccion_heredado" }), "simulador"), false);
+  assert.equal(canSubsanate(record({ status: "rejected", environment: "produccion" }), "simulador"), false);
+  assert.equal(canSubsanate(record({ status: "rejected", environment: "simulador" }), "simulador"), true);
+});
+
+test("el registro de subsanación dice a cuál subsana", () => {
+  const sources = subsanationSources([record({ record_id: 5, status: "subsanated", subsanation_record_id: 9 }), record({ record_id: 9 })]);
+  assert.equal(sources.get(9), 5);
+  assert.equal(sources.has(5), false);
+  assert.equal(recordKindText("alta", sources.get(9)), "Alta (subsanación del registro 5)");
+  assert.equal(recordKindText("anulacion", 5), "Anulación (subsanación del registro 5)");
+  assert.equal(recordKindText("alta", sources.get(5)), "Alta");
+  assert.equal(recordKindText("anulacion", null), "Anulación");
+});
+
+test("el último error de la remisión se muestra con su código y texto", () => {
+  assert.equal(lastErrorText(null), null);
+  const once = lastErrorText({ code: "verifactu_record_invalid", message: "no consta la razón social del emisor", at: T0, occurrences: 1 });
+  assert.match(once, /^Último error de la remisión \[verifactu_record_invalid\]: no consta la razón social del emisor\./);
+  assert.doesNotMatch(once, /veces seguidas/);
+  assert.match(lastErrorText({ code: "unauthorized", message: "HTTP 401", at: T0, occurrences: 4 }), /\[unauthorized\] \(4 veces seguidas\): HTTP 401/);
+});
+
+test("la nota del simulador solo sale con el entorno simulador y el aviso de la pestaña depende del entorno", () => {
+  assert.equal(environmentNote("simulador"), ENVIRONMENT_SIMULATOR_NOTE);
+  for (const other of ["preproduccion", "produccion", null, undefined]) assert.equal(environmentNote(other), null, String(other));
+  assert.match(verifactuReadonlyText("simulador"), /simulador de este equipo, no a la AEAT/);
+  assert.doesNotMatch(verifactuReadonlyText("simulador"), /solos a la AEAT/);
+  assert.match(verifactuReadonlyText("produccion"), /solos a la AEAT/);
+  assert.doesNotMatch(verifactuReadonlyText(null), /remiten solos a la AEAT/);
+});
+
+test("la tarea de remisión tiene etiqueta propia y no se reintenta desde Tareas", () => {
+  assert.equal(SUBMIT_VERIFACTU_KIND, "submit_verifactu");
+  assert.equal(REMISSION_TASK_LABEL, "Remisión Verifactu");
+  assert.equal(canRetryTask("submit_verifactu"), false);
+  assert.equal(canRetryTask("invoice"), true);
+  assert.equal(canRetryTask("email"), true);
+});
+
+test("el aviso «faltan N s» caduca y el estado se relee solo mientras haya algo en curso", () => {
+  const now = T0;
+  const waiting = pumpReportText({ state: "waiting", seconds: 51, until: now + 51_000 }, now);
+  assert.equal(pumpVisible(waiting, now + 50_000), true);
+  assert.equal(pumpVisible(waiting, now + 51_000), false);
+  assert.equal(pumpVisible(waiting, now + 10 * 60_000), false);
+  assert.equal(pumpVisible(null, now), false);
+  // Los demás avisos no caducan por tiempo.
+  assert.equal(pumpVisible(pumpReportText({ state: "idle" }, now), now + 10 * 60_000), true);
+  assert.equal(autoRefreshDelayMs(null), null);
+  assert.equal(autoRefreshDelayMs({ pending: 0, sending: 0, wait_remaining_seconds: 0 }), null);
+  assert.equal(autoRefreshDelayMs({ pending: 0, sending: 0, wait_remaining_seconds: null }), null);
+  assert.equal(autoRefreshDelayMs({ pending: 1, sending: 0, wait_remaining_seconds: null }), AUTO_REFRESH_MS);
+  assert.equal(autoRefreshDelayMs({ pending: 0, sending: 2, wait_remaining_seconds: 0 }), AUTO_REFRESH_MS);
+  assert.equal(autoRefreshDelayMs({ pending: 0, sending: 0, wait_remaining_seconds: 30 }), AUTO_REFRESH_MS);
+});
+
+test("la firma del estado cambia cuando cambia un registro o el lote", () => {
+  const base = { records: [record({ status: "sending" })], last_batch: batch(), pending: 0, sending: 1, halted: false };
+  assert.equal(statusSignature(base), statusSignature({ ...base }));
+  assert.notEqual(statusSignature(base), statusSignature({ ...base, records: [record({ status: "accepted" })], sending: 0 }));
+  assert.notEqual(statusSignature(base), statusSignature({ ...base, last_batch: batch({ id: 5 }) }));
+  assert.equal(statusSignature(null), "");
 });

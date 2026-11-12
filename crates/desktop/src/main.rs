@@ -12,10 +12,10 @@ mod ventas;
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use nestadmin_ai::{CredentialStore, ProviderChoice, Secret};
 use nestadmin_app::accounts::{
@@ -2403,6 +2403,22 @@ fn resume_verifactu<R: Runtime>(shared: &SharedState, handle: &AppHandle<R>) -> 
     true
 }
 
+/// Espera hasta cinco segundos a que haya algo que hacer: el aviso `wake` o una petición de
+/// remisión Verifactu (tras emitir, anular o subsanar, D250), que se atiende al momento en
+/// lugar de esperar al siguiente tick.
+fn idle_wait(shared: &SharedState, wake: &Receiver<()>) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < deadline && !shared.stopping.load(Ordering::SeqCst) {
+        match wake.recv_timeout(Duration::from_millis(250)) {
+            Ok(()) | Err(RecvTimeoutError::Disconnected) => return,
+            Err(RecvTimeoutError::Timeout) => {}
+        }
+        if shared.app().is_ok_and(|app| app.verifactu_pump_requested()) {
+            return;
+        }
+    }
+}
+
 /// Procesa la cola sin bloquear la ventana: la llamada al modelo se hace sin el cerrojo.
 fn worker<R: Runtime>(shared: SharedState, handle: AppHandle<R>, wake: Receiver<()>) {
     let mut probe = probe::WaitProbe::default();
@@ -2436,11 +2452,11 @@ fn worker<R: Runtime>(shared: SharedState, handle: AppHandle<R>, wake: Receiver<
                 }
                 auto_refine(&shared, &handle);
                 probe_provider_wait(&shared, &handle, &mut probe, &probing);
-                let _ = wake.recv_timeout(Duration::from_secs(5));
+                idle_wait(&shared, &wake);
             }
             Err(error) => {
                 eprintln!("cola no disponible: {error}");
-                let _ = wake.recv_timeout(Duration::from_secs(5));
+                idle_wait(&shared, &wake);
             }
         }
     }
@@ -2969,7 +2985,7 @@ mod recorrido;
 mod recorrido_envio;
 #[cfg(test)]
 mod recorrido_pdf;
-#[cfg(test)]
+#[cfg(all(test, debug_assertions))]
 mod recorrido_remision;
 #[cfg(test)]
 mod recorrido_venta;

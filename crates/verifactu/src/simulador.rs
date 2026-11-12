@@ -94,7 +94,15 @@ impl Estado {
     /// deja la factura `Anulada` (también si no había alta). No cuenta como envío ni responde
     /// nada; sirve para recuperar la memoria del simulador tras reabrir la aplicación.
     pub fn sembrar(&mut self, registros: &[RegistroFacturacion]) {
-        for r in registros {
+        let con_estado: Vec<(RegistroFacturacion, bool)> =
+            registros.iter().cloned().map(|r| (r, false)).collect();
+        self.sembrar_con_estado(&con_estado);
+    }
+
+    /// Como [`Estado::sembrar`], pero cada alta lleva si se aceptó con errores: queda
+    /// `AceptadaConErrores` en lugar de `Correcta`. El indicador no afecta a las anulaciones.
+    pub fn sembrar_con_estado(&mut self, registros: &[(RegistroFacturacion, bool)]) {
+        for (r, con_errores) in registros {
             let id = r.id_factura();
             let clave = (
                 id.nif_emisor.clone(),
@@ -103,9 +111,14 @@ impl Estado {
             );
             self.secuencia += 1;
             let (estado, id_peticion) = match r {
-                RegistroFacturacion::Alta(_) => {
-                    ("Correcta", format!("SEMBRADO{:012}", self.secuencia))
-                }
+                RegistroFacturacion::Alta(_) => (
+                    if *con_errores {
+                        "AceptadaConErrores"
+                    } else {
+                        "Correcta"
+                    },
+                    format!("SEMBRADO{:012}", self.secuencia),
+                ),
                 RegistroFacturacion::Anulacion(_) => (
                     "Anulada",
                     self.registros
@@ -176,6 +189,12 @@ impl SimuladorAeat {
     /// Siembra el simulador con registros ya aceptados (ver [`Estado::sembrar`]).
     pub fn sembrar(&self, registros: &[RegistroFacturacion]) {
         self.estado().sembrar(registros);
+    }
+
+    /// Siembra con el indicador «aceptado con errores» por alta (ver
+    /// [`Estado::sembrar_con_estado`]).
+    pub fn sembrar_con_estado(&self, registros: &[(RegistroFacturacion, bool)]) {
+        self.estado().sembrar_con_estado(registros);
     }
 
     /// Acceso al estado para preparar escenarios y comprobar efectos.

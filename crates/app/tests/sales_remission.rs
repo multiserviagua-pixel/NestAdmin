@@ -1175,3 +1175,356 @@ fn issuing_voiding_and_subsanating_return_without_touching_the_network() {
     });
     assert_eq!(h.count("SELECT count(*) FROM verifactu_batch_attempts"), 0);
 }
+
+// --- Revisión de E5: paro con lote abierto, respuestas parciales, emisores y avisos ---
+
+impl Harness {
+    /// Como `emit`, pero sin pasada de la bomba: el registro queda pendiente.
+    fn emit_quiet(&mut self) -> i64 {
+        let mut input = DraftInput::new(DocumentKind::Invoice);
+        input.customer_id = Some(self.customer);
+        let id = self.app.create_sales_draft(&input).unwrap();
+        self.app
+            .add_sales_line_from_product(id, self.product, d("1"), Decimal::ZERO)
+            .unwrap();
+        self.app.issue_sales_document(id, None).unwrap();
+        id
+    }
+
+    fn record(&self, record_id: i64) -> RegistroFacturacion {
+        self.app
+            .verifactu_records()
+            .unwrap()
+            .into_iter()
+            .find(|r| r.id == record_id)
+            .unwrap()
+            .record
+    }
+}
+
+fn company(name: &str, tax_id: &str) -> Company {
+    Company {
+        name: Some(name.into()),
+        tax_id: Some(tax_id.into()),
+        address: Some("Calle Ficticia 9, 28000 Madrid".into()),
+        email: None,
+        iban: None,
+        logo: None,
+        logo_mime: None,
+    }
+}
+
+#[test]
+fn a_halted_pump_still_resends_the_open_batch() {
+    let mut h = Harness::new();
+    h.app.set_verifactu_sim_mode(Some(SimMode::SchemaFault));
+    let doc = h.emit();
+    let alta = h.alta(doc);
+    for _ in 0..2 {
+        h.wait();
+        h.app.set_verifactu_sim_mode(Some(SimMode::SchemaFault));
+        assert!(matches!(
+            h.app.verifactu_pump(false).unwrap(),
+            PumpReport::Fault { .. }
+        ));
+    }
+    assert!(h.app.verifactu_status().unwrap().halted);
+    h.wait();
+    assert_eq!(h.app.verifactu_pump(false).unwrap(), PumpReport::Halted);
+    // «Remitir ahora» abre un lote y pierde la respuesta: el lote queda abierto.
+    h.app
+        .set_verifactu_sim_mode(Some(SimMode::LoseNextResponse));
+    match h.app.verifactu_pump(true).unwrap() {
+        PumpReport::NoResponse { .. } => {}
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(h.view(alta).status, "sending");
+    assert!(h.app.verifactu_status().unwrap().halted);
+    // El tick automático reenvía el lote abierto aunque la remisión esté parada.
+    h.wait();
+    let report = h.app.verifactu_pump(false).unwrap();
+    assert_eq!(sent_counts(&report), (1, 0, 0));
+    assert_eq!(h.view(alta).status, "accepted");
+    assert!(!h.app.verifactu_status().unwrap().halted);
+    assert_eq!(h.count("SELECT count(*) FROM verifactu_batches"), 4);
+}
+
+#[test]
+fn a_record_missing_from_a_partial_response_that_returns_as_3000_is_our_own_duplicate() {
+    let mut h = Harness::new();
+    h.emit();
+    let second = h.emit_quiet();
+    let third = h.emit_quiet();
+    let (b, c) = (h.alta(second), h.alta(third));
+    let id_b = h.id_factura(b);
+    h.wait();
+    let server = serve(vec![(
+        200,
+        response_xml("ParcialmenteCorrecto", &[(&id_b, "Alta", "Correcto")]),
+    )]);
+    h.app.set_verifactu_endpoint(Some(server.url.clone()));
+    match h.app.verifactu_pump(false).unwrap() {
+        PumpReport::Sent {
+            accepted, missing, ..
+        } => assert_eq!((accepted, missing), (1, 1)),
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(h.view(c).status, "pending");
+    // La AEAT sí lo había recibido aunque la línea no llegara: en el lote siguiente es 3000.
+    h.app.set_verifactu_endpoint(None);
+    let record = h.record(c);
+    h.app.verifactu_simulator().unwrap().sembrar(&[record]);
+    h.wait();
+    let report = h.app.verifactu_pump(false).unwrap();
+    assert_eq!(sent_counts(&report), (1, 0, 0));
+    let view = h.view(c);
+    assert_eq!(view.status, "accepted");
+    assert!(view.duplicate);
+    assert_eq!(view.aeat_code, Some(3000));
+    assert_eq!(h.app.verifactu_status().unwrap().unexpected_duplicates, 0);
+}
+
+#[test]
+fn a_void_missing_from_a_partial_response_that_returns_as_3001_is_accepted() {
+    let mut h = Harness::new();
+    let first = h.emit();
+    h.wait();
+    h.app.void_sales_invoice(first).unwrap();
+    let other = h.emit_quiet();
+    let (void, alta) = (h.anulacion(first), h.alta(other));
+    let id_alta = h.id_factura(alta);
+    let server = serve(vec![(
+        200,
+        response_xml("ParcialmenteCorrecto", &[(&id_alta, "Alta", "Correcto")]),
+    )]);
+    h.app.set_verifactu_endpoint(Some(server.url.clone()));
+    match h.app.verifactu_pump(false).unwrap() {
+        PumpReport::Sent {
+            accepted, missing, ..
+        } => assert_eq!((accepted, missing), (1, 1)),
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(h.view(void).status, "pending");
+    h.app.set_verifactu_endpoint(None);
+    let record = h.record(void);
+    h.app.verifactu_simulator().unwrap().sembrar(&[record]);
+    h.wait();
+    let report = h.app.verifactu_pump(false).unwrap();
+    assert_eq!(sent_counts(&report), (1, 0, 0));
+    let view = h.view(void);
+    assert_eq!(view.status, "accepted");
+    assert!(view.duplicate);
+    assert_eq!(view.aeat_code, Some(3001));
+}
+
+/// Inserta una alta pendiente de otro emisor tras la última (sin recalcular la huella: el
+/// simulador la acepta con errores, 2000). Devuelve su id.
+fn insert_other_issuer(h: &Harness, nif: &str, name: &str) -> i64 {
+    let template = h.app.verifactu_records().unwrap().pop().unwrap();
+    let RegistroFacturacion::Alta(mut alta) = template.record.clone() else {
+        unreachable!()
+    };
+    alta.id_factura.nif_emisor = nif.to_owned();
+    alta.id_factura.num_serie = "OTRO-0001".to_owned();
+    alta.nombre_razon_emisor = name.to_owned();
+    alta.encadenamiento = template.record.siguiente_encadenamiento();
+    alta.huella = format!("{:064X}", 7);
+    let record = RegistroFacturacion::Alta(alta);
+    let id = record.id_factura().clone();
+    let conn = h.raw();
+    conn.execute(
+        "INSERT INTO verifactu_records (kind, document_id, issuer_tax_id, invoice_number, \
+         issue_date, invoice_type, total, tax_total, previous_id, previous_hash, \
+         generated_at, hash, record_json, created_at) \
+         VALUES ('alta', ?1, ?2, ?3, ?4, 'F1', '121.00', '21.00', ?5, ?6, ?7, ?8, ?9, 0)",
+        rusqlite::params![
+            template.document_id,
+            id.nif_emisor,
+            id.num_serie,
+            id.fecha_expedicion.to_string(),
+            template.id,
+            template.hash,
+            template.generated_at,
+            record.huella(),
+            serde_json::to_string(&record).unwrap(),
+        ],
+    )
+    .unwrap();
+    let record_id = conn.last_insert_rowid();
+    conn.execute(
+        "INSERT INTO verifactu_record_environments (record_id, environment) \
+         VALUES (?1, 'simulador')",
+        [record_id],
+    )
+    .unwrap();
+    record_id
+}
+
+#[test]
+fn pending_records_of_two_issuers_go_in_separate_batches_and_nothing_blocks() {
+    let mut h = Harness::new();
+    let first = h.emit_quiet();
+    let a = h.alta(first);
+    let b = insert_other_issuer(&h, "B00000034", "Otra Empresa Demo SL");
+    assert_ne!(h.id_factura(a).nif_emisor, h.id_factura(b).nif_emisor);
+    // Primer lote: solo el primer emisor.
+    let report = h.app.verifactu_pump(false).unwrap();
+    assert_eq!(sent_counts(&report), (1, 0, 0));
+    assert_eq!(h.view(a).status, "accepted");
+    assert_eq!(h.view(b).status, "pending");
+    let status = h.app.verifactu_status().unwrap();
+    assert!(status.last_error.is_none(), "{:?}", status.last_error);
+    assert_eq!(status.pending, 1);
+    assert_eq!(status.last_batch.unwrap().record_count, 1);
+    // Segundo lote, tras la espera: el otro emisor, con su razón social.
+    h.wait();
+    let report = h.app.verifactu_pump(false).unwrap();
+    let (accepted, with_errors, rejected) = sent_counts(&report);
+    assert_eq!((accepted + with_errors, rejected), (1, 0));
+    assert_eq!(h.view(b).status, "accepted_with_errors");
+    let requests = h.requests();
+    assert_eq!(requests.len(), 2);
+    assert!(requests[1].contains("Otra Empresa Demo SL"));
+    assert!(!requests[0].contains("Otra Empresa Demo SL"));
+    assert_eq!(h.count("SELECT count(*) FROM verifactu_batches"), 2);
+}
+
+#[test]
+fn the_header_uses_the_current_company_name_when_it_changed() {
+    let mut h = Harness::new();
+    h.emit_quiet();
+    h.app
+        .set_sales_company(&company("Taller Renombrado SL", "B12345674"))
+        .unwrap();
+    let report = h.app.verifactu_pump(false).unwrap();
+    assert_eq!(sent_counts(&report), (1, 0, 0));
+    let request = h.requests().pop().unwrap();
+    assert!(request.contains("Taller Renombrado SL"), "{request}");
+}
+
+#[test]
+fn the_last_error_is_visible_and_cleared_by_a_good_send() {
+    let mut h = Harness::new();
+    let server = serve(vec![
+        (401, String::new()),
+        (200, response_xml("Incorrecto", &[])),
+    ]);
+    h.app.set_verifactu_endpoint(Some(server.url.clone()));
+    let doc = h.emit();
+    let alta = h.alta(doc);
+    let error = h.app.verifactu_status().unwrap().last_error.unwrap();
+    assert_eq!(error.code, "unauthorized");
+    assert!(error.message.contains("401"));
+    assert_eq!(error.occurrences, 1);
+    // Una respuesta `Incorrecto` sin ninguna línea no deja nada resuelto: también se ve.
+    h.wait();
+    match h.app.verifactu_pump(false).unwrap() {
+        PumpReport::Sent { missing, .. } => assert_eq!(missing, 1),
+        other => panic!("{other:?}"),
+    }
+    let error = h.app.verifactu_status().unwrap().last_error.unwrap();
+    assert_eq!(error.code, "empty_response");
+    assert_eq!(h.view(alta).status, "pending");
+    // Un envío normal borra el error.
+    h.app.set_verifactu_endpoint(None);
+    h.wait();
+    let report = h.app.verifactu_pump(false).unwrap();
+    assert_eq!(sent_counts(&report), (1, 0, 0));
+    assert!(h.app.verifactu_status().unwrap().last_error.is_none());
+    // Y repetir el mismo código seguido lo cuenta.
+    let doc2 = h.emit_quiet();
+    let id = h.alta(doc2);
+    let bad = serve(vec![(401, String::new())]);
+    h.app.set_verifactu_endpoint(Some(bad.url.clone()));
+    for _ in 0..3 {
+        h.wait();
+        let _ = h.app.verifactu_pump(false).unwrap();
+    }
+    let error = h.app.verifactu_status().unwrap().last_error.unwrap();
+    assert_eq!(
+        (error.code.as_str(), error.occurrences),
+        ("unauthorized", 3)
+    );
+    assert_eq!(h.view(id).status, "sending");
+}
+
+#[test]
+fn a_task_closed_by_fault_stays_failed_when_it_is_retried_or_recovered() {
+    let mut h = Harness::new();
+    h.app.set_verifactu_sim_mode(Some(SimMode::SchemaFault));
+    let doc = h.emit();
+    let alta = h.alta(doc);
+    let task = h.submit_tasks().pop().unwrap();
+    assert_eq!(task.state, TaskState::Failed);
+    assert_eq!(task.error.as_ref().unwrap().code, "verifactu_fault");
+    // «Reintentar» la deja en cola con su lote ya cerrado por el Fault: no se da por buena.
+    h.app.retry(task.id).unwrap();
+    assert!(matches!(
+        h.app.verifactu_pump(false).unwrap(),
+        PumpReport::Waiting { .. }
+    ));
+    let task = h
+        .submit_tasks()
+        .into_iter()
+        .find(|t| t.id == task.id)
+        .unwrap();
+    assert_eq!(task.state, TaskState::Failed);
+    assert_eq!(task.error.as_ref().unwrap().code, "verifactu_fault");
+    assert!(task.result.is_none(), "no se completa con `recovered`");
+    // La recuperación al abrir hace lo mismo con una tarea que quedó en cola.
+    h.app.retry(task.id).unwrap();
+    h.reopen();
+    let task = h
+        .submit_tasks()
+        .into_iter()
+        .find(|t| t.id == task.id)
+        .unwrap();
+    assert_eq!(task.state, TaskState::Failed);
+    assert!(task.result.is_none());
+    assert_eq!(h.view(alta).status, "pending");
+}
+
+#[test]
+fn a_pending_record_of_inherited_production_is_not_shown_as_pending() {
+    let mut h = Harness::new();
+    let doc = h.emit_quiet();
+    let alta = h.alta(doc);
+    let conn = h.raw();
+    conn.execute_batch("DROP TRIGGER verifactu_record_environments_no_update;")
+        .unwrap();
+    conn.execute(
+        "UPDATE verifactu_record_environments SET environment = 'produccion_heredado' \
+         WHERE record_id = ?1",
+        [alta],
+    )
+    .unwrap();
+    drop(conn);
+    let status = h.app.verifactu_status().unwrap();
+    assert_eq!(status.pending, 0, "la cabecera no lo cuenta");
+    let view = status.records.iter().find(|r| r.record_id == alta).unwrap();
+    assert_eq!(view.status, "other_environment", "la tabla tampoco");
+    assert_eq!(view.environment, "produccion_heredado");
+    assert_eq!(h.app.verifactu_pump(false).unwrap(), PumpReport::Idle);
+    assert!(h.requests().is_empty());
+}
+
+#[test]
+fn the_simulator_keeps_accepted_with_errors_when_seeded_after_reopening() {
+    let mut h = Harness::new();
+    h.app
+        .set_verifactu_sim_mode(Some(SimMode::AcceptWithErrors));
+    let doc = h.emit();
+    let alta = h.alta(doc);
+    assert_eq!(h.view(alta).status, "accepted_with_errors");
+    h.reopen();
+    let id = h.id_factura(alta);
+    let key = (
+        id.nif_emisor.clone(),
+        id.num_serie.clone(),
+        id.fecha_expedicion.to_string(),
+    );
+    let sim = h.app.verifactu_simulator().unwrap();
+    let state = sim.estado();
+    let stored = state.registros.get(&key).expect("sembrado");
+    assert_eq!(stored.estado, "AceptadaConErrores");
+}

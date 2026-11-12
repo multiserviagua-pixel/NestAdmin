@@ -29,7 +29,9 @@ use nestadmin_core::sales::{
     CODE_ENVIRONMENT_BUSY, CODE_RECORD_INVALID, MAX_AUTOMATIC_FAULTS,
 };
 use nestadmin_core::{Task, TaskState};
-use nestadmin_verifactu::simulador::{ConfigSimulador, ErrorForzado, SimuladorAeat};
+#[cfg(debug_assertions)]
+use nestadmin_verifactu::simulador::ErrorForzado;
+use nestadmin_verifactu::simulador::{ConfigSimulador, SimuladorAeat};
 use nestadmin_verifactu::xml::{Cabecera, PersonaEs};
 use nestadmin_verifactu::{FalloSoap, RegistroFacturacion, ResultadoEnvio};
 use serde::Serialize;
@@ -49,6 +51,10 @@ pub const TRANSPORT_RATE_LIMITED: &str = "rate_limited";
 pub const TRANSPORT_UNAUTHORIZED: &str = "unauthorized";
 /// Código de la tarea cuyo lote se cerró con un `Fault` SOAP (D259).
 pub const CODE_SOAP_FAULT: &str = "verifactu_fault";
+/// Código del último error cuando una respuesta no trae líneas para los registros enviados.
+pub const CODE_EMPTY_RESPONSE: &str = "empty_response";
+/// Estado que se muestra de un registro pendiente o en envío que es de otro entorno.
+pub const OTHER_ENVIRONMENT: &str = "other_environment";
 /// Variable que fuerza respuestas del simulador (solo compilaciones de depuración y entorno
 /// `simulador`, D254).
 pub const SIM_VARIABLE: &str = "NESTADMIN_VERIFACTU_SIM";
@@ -181,6 +187,8 @@ pub(crate) struct RemissionRuntime {
     /// Una emisión, anulación o subsanación pidió remitir: lo atiende el worker (D250).
     requested: Arc<std::sync::atomic::AtomicBool>,
     simulator: Option<Arc<SimuladorAeat>>,
+    /// Último error al preparar o enviar una pasada (en memoria): lo ve la interfaz.
+    last_error: Option<RemissionIssue>,
     #[cfg(debug_assertions)]
     sim_mode: Option<SimMode>,
     /// Servidor de pruebas que sustituye al simulador (solo depuración).
@@ -194,6 +202,7 @@ impl RemissionRuntime {
             busy: Arc::new(Mutex::new(false)),
             requested: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             simulator: None,
+            last_error: None,
             #[cfg(debug_assertions)]
             sim_mode: std::env::var(SIM_VARIABLE)
                 .ok()
@@ -202,6 +211,16 @@ impl RemissionRuntime {
             endpoint: None,
         }
     }
+}
+
+/// Último error de la remisión (preparación, transporte, `Fault` o respuesta vacía).
+#[derive(Debug, Clone)]
+struct RemissionIssue {
+    code: String,
+    message: String,
+    at: i64,
+    /// Veces seguidas que ocurrió el mismo código desde el último envío bien resuelto.
+    occurrences: u32,
 }
 
 /// Concesión de la exclusión de la bomba: se libera al soltarla (también si el trabajo se
@@ -342,6 +361,20 @@ pub struct VerifactuStatusView {
     pub rejected: u32,
     /// Duplicados que la AEAT tenía y no eran nuestros (visibles, no aceptados).
     pub unexpected_duplicates: u32,
+    /// Último error de preparación o de transporte (código estable y texto), hasta el siguiente
+    /// envío bien resuelto o hasta que no quede nada pendiente. Solo se guarda en memoria.
+    pub last_error: Option<VerifactuIssueView>,
+}
+
+/// Error de la remisión tal como lo ve la interfaz.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct VerifactuIssueView {
+    pub code: String,
+    pub message: String,
+    /// Milisegundos Unix.
+    pub at: i64,
+    /// Veces seguidas que se repitió el mismo error.
+    pub occurrences: u32,
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -506,9 +539,9 @@ impl App {
         }
         let accepted = self
             .store
-            .verifactu_accepted_records(VerifactuEnvironment::Simulador)?;
+            .verifactu_accepted_seed(VerifactuEnvironment::Simulador)?;
         let sim = SimuladorAeat::iniciar(ConfigSimulador::default())?;
-        sim.sembrar(&accepted);
+        sim.sembrar_con_estado(&accepted);
         let sim = Arc::new(sim);
         self.remission.simulator = Some(Arc::clone(&sim));
         Ok(sim)
@@ -647,6 +680,34 @@ impl App {
     /// intento. No hace ninguna llamada de red; devuelve el trabajo para hacerla sin tener la
     /// aplicación (el escritorio suelta su cerrojo durante la llamada).
     pub fn verifactu_pump_begin(&mut self, manual: bool) -> AppResult<PumpStart> {
+        let started = self.pump_begin_inner(manual);
+        match &started {
+            Err(error) => {
+                let (code, message) = (error.code().to_owned(), error.to_string());
+                self.note_issue(&code, message);
+            }
+            Ok(PumpStart::Idle(PumpReport::Idle)) => self.remission.last_error = None,
+            Ok(_) => {}
+        }
+        started
+    }
+
+    /// Anota el último error de la remisión; el mismo código seguido suma ocurrencias.
+    fn note_issue(&mut self, code: &str, message: String) {
+        let at = self.remission_now_ms().unwrap_or(0);
+        let occurrences = match &self.remission.last_error {
+            Some(previous) if previous.code == code => previous.occurrences.saturating_add(1),
+            _ => 1,
+        };
+        self.remission.last_error = Some(RemissionIssue {
+            code: code.to_owned(),
+            message,
+            at,
+            occurrences,
+        });
+    }
+
+    fn pump_begin_inner(&mut self, manual: bool) -> AppResult<PumpStart> {
         let Some(lease) = PumpLease::acquire(&self.remission.busy) else {
             return Ok(PumpStart::Idle(PumpReport::Busy));
         };
@@ -660,7 +721,9 @@ impl App {
         self.settle_submit_tasks();
         let open = self.store.unfinished_verifactu_batch()?;
         let faults = self.store.verifactu_consecutive_faults(environment)?;
-        if !manual && faults >= MAX_AUTOMATIC_FAULTS {
+        // El paro frena abrir lotes nuevos, no reenviar el abierto: un lote sin respuesta se
+        // reenvía idéntico aunque haya tres `Fault` seguidos (D252, D259).
+        if open.is_none() && !manual && faults >= MAX_AUTOMATIC_FAULTS {
             return Ok(PumpStart::Idle(PumpReport::Halted));
         }
         let has_pending = open.is_some()
@@ -757,6 +820,7 @@ impl App {
                     task_id,
                     &task_error(error.code, error.message.clone(), true),
                 );
+                self.note_issue(error.code, error.message.clone());
                 Ok(PumpReport::NoResponse {
                     batch_id,
                     code: error.code.to_owned(),
@@ -774,8 +838,36 @@ impl App {
                         return Err(error.into());
                     }
                 };
+                self.note_result_issue(&closure, &result);
                 self.finish_submit_task(task_id, &closure, &result)
             }
+        }
+    }
+
+    /// Un `Fault` o una respuesta sin ninguna línea para los registros enviados no dejan nada
+    /// resuelto y se repetirían sin fin: se anotan como último error para que se vean. Una
+    /// respuesta normal borra el error anterior.
+    fn note_result_issue(&mut self, closure: &BatchClosure, result: &ResultadoEnvio) {
+        match result {
+            ResultadoEnvio::Fallo(f) => self.note_issue(CODE_SOAP_FAULT, f.faultstring.clone()),
+            ResultadoEnvio::Respuesta(r)
+                if closure.accepted
+                    + closure.accepted_with_errors
+                    + closure.rejected
+                    + closure.unexpected_duplicates
+                    == 0
+                    && !closure.missing_record_ids.is_empty() =>
+            {
+                self.note_issue(
+                    CODE_EMPTY_RESPONSE,
+                    format!(
+                        "la respuesta ({:?}) no trae ninguna línea para los registros enviados; \
+                         siguen pendientes",
+                        r.estado_envio
+                    ),
+                );
+            }
+            ResultadoEnvio::Respuesta(_) => self.remission.last_error = None,
         }
     }
 
@@ -826,39 +918,37 @@ impl App {
         }
     }
 
-    /// Cabecera del envío: el obligado a la emisión es el emisor de los registros pendientes
-    /// (NIF) con su razón social. Falla cerrado si faltan datos o si hay emisores distintos.
+    /// Cabecera del envío: el obligado a la emisión es el emisor del primer registro pendiente
+    /// (NIF) con su razón social; el lote se corta ante otro emisor (`open_verifactu_batch`).
+    /// Falla cerrado si falta la razón social.
     fn remission_header(&self, environment: VerifactuEnvironment) -> AppResult<Cabecera> {
         let pending = self.store.verifactu_pending_records(environment)?;
         let first = pending
             .first()
             .ok_or_else(|| sales_error(CODE_RECORD_INVALID, "no hay registros pendientes"))?;
         let nif = first.issuer_tax_id.clone();
-        if pending.iter().any(|r| r.issuer_tax_id != nif) {
-            return Err(sales_error(
-                CODE_RECORD_INVALID,
-                "hay registros pendientes de más de un emisor: no se remiten juntos",
-            ));
-        }
-        // La razón social consta en cualquier alta del emisor; sin ella, la de la empresa si su
-        // NIF es el mismo. Sin ninguna, no se inventa.
+        // La razón social vigente: la de la empresa si su NIF es el mismo; si no, la de la alta
+        // más reciente de ese NIF (no la más antigua, que pudo cambiar). Sin ninguna, no se
+        // inventa.
         let name = self
             .store
-            .verifactu_records()?
-            .into_iter()
-            .find_map(|r| match r.record {
-                RegistroFacturacion::Alta(a) if a.id_factura.nif_emisor == nif => {
-                    Some(a.nombre_razon_emisor)
-                }
-                _ => None,
-            })
+            .sales_company()
+            .ok()
+            .flatten()
+            .filter(|c| c.tax_id.as_deref() == Some(nif.as_str()))
+            .and_then(|c| c.name)
             .or_else(|| {
                 self.store
-                    .sales_company()
-                    .ok()
-                    .flatten()
-                    .filter(|c| c.tax_id.as_deref() == Some(nif.as_str()))
-                    .and_then(|c| c.name)
+                    .verifactu_records()
+                    .ok()?
+                    .into_iter()
+                    .rev()
+                    .find_map(|r| match r.record {
+                        RegistroFacturacion::Alta(a) if a.id_factura.nif_emisor == nif => {
+                            Some(a.nombre_razon_emisor)
+                        }
+                        _ => None,
+                    })
             })
             .ok_or_else(|| {
                 sales_error(
@@ -946,6 +1036,19 @@ impl App {
             }
             // El lote ya está cerrado: su resultado consta en `verifactu_batch_results`.
             self.store.claim(task.id)?;
+            let closed_by_fault = self
+                .store
+                .verifactu_batch_summary(batch_id)?
+                .and_then(|b| b.result)
+                .is_some_and(|r| r.outcome == BatchOutcome::Fault);
+            if closed_by_fault {
+                // Un `Fault` no se da por bueno al recuperar: la tarea queda fallida (D259).
+                self.store.fail(
+                    task.id,
+                    &task_error(CODE_SOAP_FAULT, "el lote se cerró con un Fault SOAP", false),
+                )?;
+                continue;
+            }
             let summary = json!({
                 "type": SUBMIT_VERIFACTU,
                 "version": 1,
@@ -1014,6 +1117,15 @@ impl App {
                 VerifactuEnvironment::Preproduccion => stored == RecordEnvironment::Preproduccion,
                 VerifactuEnvironment::Simulador => stored == RecordEnvironment::Simulador,
             };
+            // Un registro pendiente o en envío de otro entorno (p. ej. producción heredada) no
+            // se remite desde este: no cuenta como pendiente y se muestra aparte.
+            let status_text = if !in_environment
+                && matches!(status, VerifactuStatus::Pending | VerifactuStatus::Sending)
+            {
+                OTHER_ENVIRONMENT.to_owned()
+            } else {
+                status.as_str().to_owned()
+            };
             if in_environment {
                 match status {
                     VerifactuStatus::Sending => sending += 1,
@@ -1028,7 +1140,7 @@ impl App {
                 kind: kind_text(row.kind).to_owned(),
                 invoice_number: row.invoice_number.clone(),
                 issue_date: row.issue_date.clone(),
-                status: status.as_str().to_owned(),
+                status: status_text,
                 aeat_code,
                 aeat_description,
                 duplicate,
@@ -1067,6 +1179,16 @@ impl App {
             sending,
             rejected,
             unexpected_duplicates: unexpected,
+            last_error: self
+                .remission
+                .last_error
+                .as_ref()
+                .map(|e| VerifactuIssueView {
+                    code: e.code.clone(),
+                    message: e.message.clone(),
+                    at: e.at,
+                    occurrences: e.occurrences,
+                }),
         })
     }
 }

@@ -767,6 +767,34 @@ impl Store {
         Ok(rows.into_iter().map(|r| r.record).collect())
     }
 
+    /// Como [`Store::verifactu_accepted_records`], con si el último resultado del registro fue
+    /// «aceptado con errores» (el simulador lo conserva al sembrarlo).
+    pub fn verifactu_accepted_seed(
+        &self,
+        environment: VerifactuEnvironment,
+    ) -> SalesResult<Vec<(RegistroFacturacion, bool)>> {
+        ensure_all_records_have_environment(&self.conn)?;
+        let (a, b) = environment.record_environments();
+        let rows = rows_matching(
+            &self.conn,
+            "WHERE id IN (SELECT record_id FROM verifactu_record_environments              WHERE environment IN (?1, ?2))              AND EXISTS (SELECT 1 FROM verifactu_record_results x WHERE x.record_id =              verifactu_records.id AND x.status IN ('accepted', 'accepted_with_errors'))              ORDER BY id",
+            params![a, b],
+        )?;
+        let mut seed = Vec::with_capacity(rows.len());
+        for row in rows {
+            let last: Option<String> = self
+                .conn
+                .query_row(
+                    "SELECT status FROM verifactu_record_results WHERE record_id = ?1                      AND status IN ('accepted', 'accepted_with_errors')                      ORDER BY rowid DESC LIMIT 1",
+                    [row.id],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            seed.push((row.record, last.as_deref() == Some("accepted_with_errors")));
+        }
+        Ok(seed)
+    }
+
     // --- Lotes ---
 
     /// El lote abierto (sin resultado), si lo hay, para reenviarlo idéntico (D252).
@@ -819,7 +847,13 @@ impl Store {
         let mut seen = HashSet::new();
         let mut chosen: Vec<VerifactuRecordRow> = Vec::new();
         for row in pending {
-            if chosen.len() >= MAX_REGISTROS_POR_ENVIO || !seen.insert(id_key(&row)) {
+            // El lote se corta ante otro emisor (la cabecera lleva uno solo) igual que ante una
+            // factura repetida: los de otro NIF van en el lote siguiente.
+            let other_issuer = chosen
+                .first()
+                .is_some_and(|first| first.issuer_tax_id != row.issuer_tax_id);
+            if chosen.len() >= MAX_REGISTROS_POR_ENVIO || other_issuer || !seen.insert(id_key(&row))
+            {
                 break;
             }
             chosen.push(row);
@@ -966,7 +1000,8 @@ impl Store {
                         .ok_or_else(|| SalesStoreError::not_found("registro Verifactu", *id))?;
                     by_key.insert((id_key(&row), row.kind), row.id);
                 }
-                let resent = attempts >= 2;
+                // Un lote reenviado sin resultado (dos o más intentos) pudo llegar a la AEAT.
+                let batch_resent = attempts >= 2;
                 let mut answered = HashSet::new();
                 for line in &r.lineas {
                     let kind = match line.tipo_operacion.as_str() {
@@ -993,6 +1028,7 @@ impl Store {
                         closure.unmatched_lines += 1;
                         continue;
                     }
+                    let resent = batch_resent || was_sent_before(&tx, batch_id, record_id)?;
                     let class = classify(line, kind, resent);
                     match class.status {
                         "accepted" => closure.accepted += 1,
@@ -1111,11 +1147,23 @@ impl Store {
             )
             .optional()?;
         let Some(id) = id else { return Ok(None) };
-        let (record_count, started_at): (i64, i64) = self.conn.query_row(
-            "SELECT record_count, started_at FROM verifactu_batches WHERE id = ?1",
-            [id],
-            |r| Ok((r.get(0)?, r.get(1)?)),
-        )?;
+        self.verifactu_batch_summary(id)
+    }
+
+    /// Resumen de un lote concreto (abierto o cerrado), o `None` si no existe.
+    pub fn verifactu_batch_summary(&self, id: i64) -> SalesResult<Option<VerifactuBatchSummary>> {
+        let head: Option<(i64, i64, String)> = self
+            .conn
+            .query_row(
+                "SELECT record_count, started_at, environment FROM verifactu_batches                  WHERE id = ?1",
+                [id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .optional()?;
+        let Some((record_count, started_at, environment)) = head else {
+            return Ok(None);
+        };
+        let environment = VerifactuEnvironment::from_stored(&environment)?;
         #[allow(clippy::type_complexity)]
         let result: Option<(
             String,
@@ -1280,6 +1328,19 @@ impl Store {
             created: true,
         })
     }
+}
+
+/// El registro estuvo en un lote anterior con respuesta, con intento anotado y sin línea para él
+/// (una respuesta parcial lo dejó fuera): la AEAT pudo recibirlo, así que un 3000 o un 3001 en
+/// el lote actual puede ser suyo. Un lote cerrado por `Fault` no cuenta: la AEAT rechazó el
+/// mensaje entero y no guardó nada.
+fn was_sent_before(conn: &Connection, batch_id: i64, record_id: i64) -> SalesResult<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT count(*) FROM verifactu_batch_records br          JOIN verifactu_batch_results z ON z.batch_id = br.batch_id AND z.outcome = 'responded'          WHERE br.record_id = ?1 AND br.batch_id <> ?2          AND EXISTS (SELECT 1 FROM verifactu_batch_attempts a WHERE a.batch_id = br.batch_id)          AND NOT EXISTS (SELECT 1 FROM verifactu_record_results x                          WHERE x.batch_id = br.batch_id AND x.record_id = br.record_id)",
+        params![record_id, batch_id],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
 }
 
 fn ensure_batch_open(conn: &Connection, batch_id: i64) -> SalesResult<()> {

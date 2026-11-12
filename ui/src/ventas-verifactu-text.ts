@@ -4,7 +4,7 @@
 // Las marcas de tiempo del núcleo vienen en milisegundos Unix: aquí no se multiplican por 1000.
 // Los segundos de espera (`seconds`, `wait_remaining_seconds`) son segundos.
 
-import type { VerifactuBatchView, VerifactuEnvironment, VerifactuPumpReport, VerifactuRecordView, VerifactuStatusView, VerifactuSubsanation } from "./types";
+import type { VerifactuBatchView, VerifactuEnvironment, VerifactuIssueView, VerifactuPumpReport, VerifactuRecordView, VerifactuStatusView, VerifactuSubsanation } from "./types";
 import { sentAtText } from "./ventas-envio-text.ts";
 
 type Tone = "neutral" | "info" | "ok" | "warn" | "error";
@@ -13,6 +13,16 @@ export const REMIT_NOW_BUTTON = "Remitir ahora";
 export const SUBSANATE_BUTTON = "Subsanar";
 export const NO_STATUS_FOR_RECORD = "Sin estado de remisión";
 export const NO_AEAT_DETAIL = "La AEAT no devolvió código ni descripción.";
+
+/** Tipo de las tareas de remisión en Tareas (D250). */
+export const SUBMIT_VERIFACTU_KIND = "submit_verifactu";
+export const REMISSION_TASK_LABEL = "Remisión Verifactu";
+export const REMISSION_TASK_HINT = "Se reenvía desde Ventas, pestaña «Registros Verifactu», con «Remitir ahora».";
+
+/** Una tarea de remisión no se reintenta desde Tareas: la remisión la lleva la pestaña de registros. */
+export function canRetryTask(kind: string): boolean {
+  return kind !== SUBMIT_VERIFACTU_KIND;
+}
 
 // ---- Plurales y esperas ----
 
@@ -40,6 +50,20 @@ export const ENVIRONMENT_LABEL: Record<VerifactuEnvironment, string> = {
 export const ENVIRONMENT_UNAVAILABLE_NOTE = "Llegará con el certificado y la declaración responsable (T18b): todavía no se puede elegir.";
 export const ENVIRONMENT_SIMULATOR_NOTE =
   "No se envía nada a la AEAT: un simulador en este equipo hace de servidor. Las facturas emitidas con él llevan para siempre el QR de pruebas.";
+
+/** La nota del simulador solo sale con el entorno simulador; sin entorno leído o en otro, nada. */
+export function environmentNote(environment: string | null | undefined): string | null {
+  return environment === "simulador" ? ENVIRONMENT_SIMULATOR_NOTE : null;
+}
+
+export const PRODUCTION_LEGACY_TEXT = "Producción anterior; no se remite al simulador";
+
+/** Texto propio del entorno de un registro que no es el vigente. */
+export function recordEnvironmentText(environment: string): string {
+  if (environment === "produccion_heredado") return PRODUCTION_LEGACY_TEXT;
+  const label = ENVIRONMENT_LABEL[environment as VerifactuEnvironment];
+  return `${label ?? `Entorno «${environment}»`}; no se remite desde el entorno vigente`;
+}
 
 /** Línea de la cabecera: el entorno y qué significa. */
 export function environmentLine(environment: string): string {
@@ -103,14 +127,34 @@ export function recordStatusText(r: VerifactuRecordView): RecordStatusText {
     }
     case "unexpected_duplicate":
       return { label: "Duplicado inesperado", tone: "error", detail: UNEXPECTED_DUPLICATE_TEXT };
+    case "other_environment":
+      return { label: "Otro entorno", tone: "neutral", detail: recordEnvironmentText(r.environment) };
     default:
       return { label: String(r.status), tone: "neutral", detail: null };
   }
 }
 
-/** «Subsanar» solo se ofrece en un rechazado sin subsanar. */
-export function canSubsanate(r: VerifactuRecordView): boolean {
-  return r.status === "rejected";
+/**
+ * «Subsanar» solo se ofrece en un rechazado sin subsanar del entorno vigente: uno de otro
+ * entorno (p. ej. producción heredada) no tiene acciones. Sin `current` solo cuenta el estado.
+ */
+export function canSubsanate(r: VerifactuRecordView, current?: string): boolean {
+  if (r.status !== "rejected") return false;
+  if (r.environment === "produccion_heredado") return false;
+  return current === undefined || r.environment === current;
+}
+
+/** Registro rechazado al que subsana cada registro de subsanación (`nuevo -> rechazado`). */
+export function subsanationSources(records: Pick<VerifactuRecordView, "record_id" | "subsanation_record_id">[]): Map<number, number> {
+  const map = new Map<number, number>();
+  for (const r of records) if (r.subsanation_record_id !== null) map.set(r.subsanation_record_id, r.record_id);
+  return map;
+}
+
+/** «Alta», «Anulación» y, si el registro subsana a otro, «Alta (subsanación del registro 5)». */
+export function recordKindText(kind: "alta" | "anulacion", subsanatesRecordId: number | null | undefined): string {
+  const base = kind === "alta" ? "Alta" : "Anulación";
+  return subsanatesRecordId === null || subsanatesRecordId === undefined ? base : `${base} (subsanación del registro ${subsanatesRecordId})`;
 }
 
 export function subsanateConfirmText(r: VerifactuRecordView): string {
@@ -155,7 +199,8 @@ export function nextSendText(status: Pick<VerifactuStatusView, "next_send_at" | 
     return status.last_batch ? "Se puede remitir ya: no hay espera." : "Todavía no se ha enviado ningún lote: se puede remitir en cuanto haya registros.";
   }
   if (remaining !== null && remaining > 0) {
-    return `Siguiente envío permitido: ${sentAtText(status.next_send_at, timeZone)} (faltan ${waitText(remaining)}).`;
+    // La etiqueta «Siguiente envío:» la pone la cabecera: aquí solo va el valor.
+    return `${sentAtText(status.next_send_at, timeZone)} (faltan ${waitText(remaining)})`;
   }
   return "Se puede remitir ya: ha pasado la espera entre lotes.";
 }
@@ -173,6 +218,32 @@ export function pendingText(status: Pick<VerifactuStatusView, "pending" | "sendi
   if (status.rejected > 0) parts.push(`${count(status.rejected, "rechazado", "rechazados")} sin subsanar`);
   if (status.unexpected_duplicates > 0) parts.push(count(status.unexpected_duplicates, "duplicado inesperado", "duplicados inesperados"));
   return `${parts.join("; ")}.`;
+}
+
+/** Último error de preparación o de transporte, con su código estable; `null` si no hay. */
+export function lastErrorText(error: VerifactuIssueView | null | undefined): string | null {
+  if (!error) return null;
+  const times = error.occurrences > 1 ? ` (${error.occurrences} veces seguidas)` : "";
+  return `Último error de la remisión [${error.code}]${times}: ${error.message}. ${LAST_ERROR_FOLLOW_UP}`;
+}
+
+const LAST_ERROR_FOLLOW_UP = "Se vuelve a intentar sola tras la espera; «Remitir ahora» lo intenta ya.";
+
+// ---- Refresco de la pestaña ----
+
+/** Cada cuánto se vuelve a leer el estado mientras haya algo en envío, pendiente o en espera. */
+export const AUTO_REFRESH_MS = 5000;
+
+export function autoRefreshDelayMs(status: Pick<VerifactuStatusView, "pending" | "sending" | "wait_remaining_seconds"> | null | undefined): number | null {
+  if (!status) return null;
+  const waiting = (status.wait_remaining_seconds ?? 0) > 0;
+  return status.pending > 0 || status.sending > 0 || waiting ? AUTO_REFRESH_MS : null;
+}
+
+/** Firma del estado visible: si cambia, el aviso de la última pasada deja de ser cierto. */
+export function statusSignature(status: Pick<VerifactuStatusView, "records" | "last_batch" | "pending" | "sending" | "halted"> | null | undefined): string {
+  if (!status) return "";
+  return JSON.stringify([status.records.map((r) => [r.record_id, r.status]), status.last_batch?.id ?? null, status.last_batch?.outcome ?? null, status.pending, status.sending, status.halted]);
 }
 
 // ---- Resultado de «Remitir ahora» ----
@@ -196,16 +267,23 @@ export function transportText(code: string): string {
 export interface PumpText {
   tone: Tone;
   text: string;
+  /** Marca (ms Unix) a partir de la cual el aviso ya no es cierto (la espera «faltan N s»). */
+  expiresAt?: number;
 }
 
-export function pumpReportText(report: VerifactuPumpReport): PumpText {
+/** El aviso de «Remitir ahora» se muestra mientras no haya caducado. */
+export function pumpVisible(pump: PumpText | null, now: number): boolean {
+  return pump !== null && (pump.expiresAt === undefined || now < pump.expiresAt);
+}
+
+export function pumpReportText(report: VerifactuPumpReport, now: number = Date.now()): PumpText {
   switch (report.state) {
     case "idle":
       return { tone: "neutral", text: "No hay registros pendientes de remitir." };
     case "busy":
       return { tone: "info", text: "Ya hay una remisión en curso: espere a que termine." };
     case "waiting":
-      return { tone: "info", text: `Todavía no toca enviar: la AEAT pide una espera entre lotes y faltan ${waitText(report.seconds)}.` };
+      return { tone: "info", text: `Todavía no toca enviar: la AEAT pide una espera entre lotes y faltan ${waitText(report.seconds)}.`, expiresAt: now + Math.max(0, report.seconds) * 1000 };
     case "halted":
       return { tone: "warn", text: "La remisión está parada porque la AEAT devolvió varios errores de esquema (Fault) seguidos. Revise el último lote antes de insistir." };
     case "environment_unavailable":
