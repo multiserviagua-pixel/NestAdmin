@@ -33,5 +33,6 @@ Cada decisión (`D<n>`) tiene un número definitivo desde que se escribe, para q
 | D193–D212 | `claude/fase-11-conexion`: conexión de la venta a la aplicación (registros Verifactu, capa de aplicación, ventana, PDF, envío y remisión), 2026-11-10 | Reservado |
 | D213–D262 | `claude/fase-11-conexion`: bloques que esa rama se asignó en su propia copia de esta tabla (correcciones, PDF y membrete, envío de documentos de venta y remisión a la AEAT), anotados aquí el 2026-11-12 para no pisarlos | Reservado |
 | D263–D268 | Endurecimiento del asistente tras la evaluación de inyección (D263–D268), 2026-11-12 | Asignado |
+| D269–D270 | Respaldo de las respuestas del asistente (D269; D270, reserva), 2026-11-12 | Asignado |
 
-Siguiente número libre: **D269**.
+Siguiente número libre: **D271**.
