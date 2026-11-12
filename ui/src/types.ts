@@ -1239,6 +1239,14 @@ export interface ProposalCard {
   receipt: ProposalReceipt | null;
 }
 
+/** Las casillas de «lo he revisado» que se envían al confirmar (D186, D266, D267, D268); las que no se marcan faltan o van a falso. */
+export interface ProposalAcks {
+  amountsChecked?: boolean;
+  otherDocumentsChecked?: boolean;
+  unnamedChecked?: boolean;
+  unknownValuesChecked?: boolean;
+}
+
 /** Lo que devuelve confirmar; confirmar otra vez devuelve el mismo. */
 export interface ProposalReceipt {
   proposal_id: number;

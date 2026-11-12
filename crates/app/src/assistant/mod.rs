@@ -27,8 +27,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use nestadmin_ai::assistant::{
-    assistant_request, doc_id, offered_tools, parse_step, requested_actions, strip_links,
-    tool_spec, Actions, Entry, HistoryTurn, Notice, Rejection, Step, View,
+    actions_for_turn, assistant_request, doc_id, offered_tools, parse_step, requested_actions,
+    strip_links, tool_spec, Actions, Entry, HistoryTurn, Notice, Rejection, Step, View,
 };
 use nestadmin_ai::{AiError, GenerateRequest, GenerateResult, Provider, ProviderKind};
 use nestadmin_core::{NewCall, SearchHit, SentCall};
@@ -60,6 +60,11 @@ pub const MAX_FRAGMENT_CHARS: usize = 600;
 pub const MAX_DATA_CHARS: usize = 12_000;
 /// Caracteres de una pregunta. Más largo es un texto pegado, no una pregunta.
 pub const MAX_QUESTION_CHARS: usize = 4_000;
+
+/// Peticiones de una herramienta de propuesta no pedida que se avisan sin contar como salida no
+/// válida (D263): el modelo recibe un aviso de la aplicación y responde; pasado el tope, la
+/// insistencia sí cuenta como salida no válida.
+pub const MAX_NOT_REQUESTED: usize = 2;
 
 /// Marca de un fragmento recortado.
 const CUT_MARK: &str = "…[recortado]";
@@ -209,6 +214,8 @@ pub struct AssistantRun {
     proposed: HashSet<String>,
     /// El turno se cerró con la respuesta fija de la aplicación: código cerrado del motivo.
     close_reason: Option<String>,
+    /// Clases de acción abiertas en este turno (D263), para guardar las que quedaron sin usar.
+    actions: Actions,
     _guard: TurnGuard,
 }
 
@@ -334,6 +341,9 @@ pub struct TurnMeta {
     pub composed: bool,
     /// Enlaces o marcas retirados de la respuesta (D264).
     pub links_removed: u32,
+    /// Clases de acción abiertas en este turno que no se usaron (no creó propuestas): la
+    /// respuesta a una aclaración corta las hereda (D263).
+    pub open_actions: Vec<String>,
 }
 
 /// Un turno de una conversación guardada.
@@ -438,6 +448,58 @@ pub(crate) fn compose(
     assistant_request(request_id, view, &history, question, &prepared, actions)
 }
 
+/// Clases que el turno anterior dejó abiertas sin usar, si la persona está contestando a una
+/// aclaración (D263): la última respuesta del asistente fue `answered`, no creó propuestas y
+/// terminaba en una pregunta. Lo lee de lo que guardó la aplicación.
+fn inherited_actions(stored: &[nestadmin_core::StoredTurn]) -> Actions {
+    let Some(last) = stored.last() else {
+        return Actions::NONE;
+    };
+    let answered = last.role == "assistant"
+        && last.meta["outcome"].as_str() == Some("answered")
+        && last.meta["proposal_ids"]
+            .as_array()
+            .is_none_or(std::vec::Vec::is_empty)
+        && last.text.contains('?');
+    if !answered {
+        return Actions::NONE;
+    }
+    let names: Vec<String> = last.meta["open_actions"]
+        .as_array()
+        .map(|v| {
+            v.iter()
+                .filter_map(|n| n.as_str().map(str::to_owned))
+                .collect()
+        })
+        .unwrap_or_default();
+    Actions::from_names(&names)
+}
+
+/// ¿Pidió la persona varias tareas a la vez («todas», «ambas», «las dos», un número)? Permite más de
+/// una propuesta de la clase tareas en el turno (D267).
+fn asks_for_several(said: &[String]) -> bool {
+    said.iter().any(|text| {
+        nestadmin_ai::assistant::plain(text)
+            .split(|c: char| !c.is_alphanumeric())
+            .any(|w| {
+                matches!(
+                    w,
+                    "todas"
+                        | "todos"
+                        | "ambas"
+                        | "ambos"
+                        | "varias"
+                        | "varios"
+                        | "dos"
+                        | "tres"
+                        | "cuatro"
+                        | "cinco"
+                        | "cada"
+                )
+            })
+    })
+}
+
 /// Texto literal de una llamada, tal como se guarda para «Ver lo enviado».
 fn sent_text(request: &GenerateRequest) -> String {
     format!("{}\n\n{}", request.instructions, request.content)
@@ -520,6 +582,7 @@ impl AssistantJob {
             error_detail: None,
             proposed: HashSet::new(),
             close_reason: None,
+            actions,
             _guard: guard,
         };
         let external = matches!(route, Route::External { .. });
@@ -555,6 +618,7 @@ impl AssistantJob {
             .collect();
         let mut entries: Vec<StoredEntry> = Vec::new();
         let mut invalid = 0usize;
+        let mut not_requested = 0usize;
         // Llamadas ya hechas en este turno (nombre y argumentos canónicos).
         let mut made: HashSet<(String, String)> = HashSet::new();
         loop {
@@ -690,9 +754,20 @@ impl AssistantJob {
                     return state;
                 }
                 Step::Tool { name, args } => {
+                    if !actions.allows(&name) && not_requested < MAX_NOT_REQUESTED {
+                        // Una propuesta de una clase que la persona no pidió (D263): no crea nada
+                        // y el modelo recibe un aviso de la aplicación, sin contarlo como salida
+                        // no válida; así el turno acaba respondido y no agotado.
+                        not_requested += 1;
+                        state.error_detail = Some("tool_not_requested".to_owned());
+                        entries.push(StoredEntry::Notice {
+                            notice: Notice::NotRequested,
+                        });
+                        continue;
+                    }
                     if !offered.contains(&name.as_str()) {
-                        // Del catálogo, pero no de los bloques de esta vista o de una clase de
-                        // acción que la persona no pidió (D263): también es no válida.
+                        // Del catálogo, pero no de los bloques de esta vista, o la insistencia en
+                        // una clase no pedida pasado el tope: también es no válida.
                         invalid += 1;
                         state.error_detail = Some("tool_not_offered".to_owned());
                         if invalid >= MAX_INVALID {
@@ -874,6 +949,21 @@ impl App {
                 }
             }
         }
+        // D263: lo que la persona pidió. Su pregunta abre clases por sí misma; si no abre ninguna y
+        // es corta, puede ser la respuesta a una aclaración del asistente y hereda las clases que
+        // el turno anterior dejó abiertas sin usar. Todo sale de lo que guardó la aplicación.
+        let inherited = inherited_actions(&stored);
+        let actions = actions_for_turn(question, inherited);
+        let own_actions = requested_actions(question);
+        let mut said = vec![question.to_owned()];
+        if own_actions.is_empty() && !actions.is_empty() {
+            // Contesta a una aclaración: lo que la persona dijo antes también cuenta para saber si
+            // nombró el documento (D267).
+            if let Some(previous) = stored.iter().rev().find(|t| t.role == "user") {
+                said.push(previous.text.clone());
+            }
+        }
+        let many_tasks = asks_for_several(&said);
         if let Ok(mut ctx) = self.assistant.turn.lock() {
             *ctx = proposals::TurnCtx {
                 active: true,
@@ -881,6 +971,9 @@ impl App {
                 known,
                 targets,
                 created: Vec::new(),
+                actions,
+                said,
+                many_tasks,
             };
         }
         let external_provider = self.provider.kind() != ProviderKind::Ollama;
@@ -916,14 +1009,6 @@ impl App {
             }
         };
         let external = matches!(route, Route::External { .. });
-        // D263: lo que la persona pidió, con su pregunta y su turno anterior en esta conversación
-        // tal como lo guardó la aplicación (nunca un texto que el modelo pudiera escribir).
-        let previous_user_turn = stored
-            .iter()
-            .rev()
-            .find(|turn| turn.role == "user")
-            .map(|turn| turn.text.clone());
-        let actions = requested_actions(question, previous_user_turn.as_deref());
         let (history, history_withheld) = history_for(stored, external);
         self.assistant.cancel.store(false, Ordering::SeqCst);
         let info = (self.provider.kind(), self.provider.model().to_owned());
@@ -974,6 +1059,7 @@ impl App {
             error_detail,
             proposed: _,
             close_reason,
+            actions,
             _guard,
         } = run;
         let mut turn = AssistantTurn {
@@ -1114,6 +1200,16 @@ impl App {
                 ref_targets,
                 composed: turn.composed,
                 links_removed: turn.links_removed,
+                // Solo una respuesta sin propuestas deja clases abiertas sin usar.
+                open_actions: if turn.outcome == Outcome::Answered && proposal_ids.is_empty() {
+                    actions
+                        .classes()
+                        .into_iter()
+                        .map(|c| c.name().to_owned())
+                        .collect()
+                } else {
+                    Vec::new()
+                },
             };
             let saved = self.store.assistant_save_exchange(
                 conversation_id,

@@ -47,6 +47,7 @@ import type {
   AssistantConsentView,
   AssistantConversation,
   ProposalCard,
+  ProposalAcks,
   ProposalReceipt,
   AssistantPreview,
   AssistantProgress,
@@ -167,7 +168,7 @@ export const api = {
   /** Tarjetas de propuestas de una conversación con su estado actual (E3, D185); recalcula `stale` y `expired`. No ejecuta nada. */
   assistantProposals: (conversationId: number) => invoke<ProposalCard[]>("assistant_proposals", { conversationId }),
   /** Confirma una propuesta: SOLO lo llama el botón de la tarjeta. `amountsChecked` es la casilla de importes dudosos (D186) y `otherDocumentsChecked` la de datos de otros documentos en un borrador (D266); confirmar otra vez devuelve el mismo recibo. */
-  proposalConfirm: (id: number, amountsChecked?: boolean, otherDocumentsChecked?: boolean) => invoke<ProposalReceipt>("proposal_confirm", { id, amountsChecked, otherDocumentsChecked }),
+  proposalConfirm: (id: number, acks: ProposalAcks = {}) => invoke<ProposalReceipt>("proposal_confirm", { id, acks }),
   /** La persona descarta la tarjeta: ya no se puede confirmar. */
   proposalDismiss: (id: number) => invoke<ProposalCard>("proposal_dismiss", { id }),
   /** Estado del permiso para enviar datos fuera del equipo (D183). */

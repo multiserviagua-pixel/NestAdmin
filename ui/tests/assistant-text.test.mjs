@@ -752,3 +752,22 @@ test("D266: la frase del aviso dice cuántos hay y cuántos se enseñan, y la ca
   assert.ok(T.OTHER_DOCUMENTS_REQUIRED_HINT.includes("marque antes"));
   assert.ok(T.OTHER_DOCUMENTS_TITLE.includes("otros documentos"));
 });
+
+test("D267: el aviso de documento no nombrado solo sale si la aplicación lo dice expresamente", () => {
+  assert.equal(T.proposalIsUnnamed({ named_by_person: false }), true);
+  assert.equal(T.proposalIsUnnamed({ named_by_person: true }), false);
+  // Una propuesta guardada antes de D267 no lleva el dato: no avisa de lo que no sabe.
+  assert.equal(T.proposalIsUnnamed({}), false);
+  assert.equal(T.proposalIsUnnamed(null), false);
+  assert.equal(T.UNNAMED_TITLE, "Usted no nombró este documento");
+  assert.ok(T.UNNAMED_REQUIRED_HINT.includes("marque antes"));
+});
+
+test("D268: los valores de regla que no aparecen en sus documentos se rotulan y la lista vacía no avisa", () => {
+  assert.deepEqual(T.unknownRuleValues({ unknown_values: ["supplier", "sender_domain"] }), ["Proveedor", "Dominio del remitente"]);
+  assert.deepEqual(T.unknownRuleValues({ unknown_values: [] }), []);
+  assert.deepEqual(T.unknownRuleValues({}), []);
+  assert.deepEqual(T.unknownRuleValues({ unknown_values: [3, "sender", null] }), ["Remitente"]);
+  assert.equal(T.UNKNOWN_VALUES_TITLE, "No aparece en sus documentos");
+  assert.ok(T.UNKNOWN_VALUES_REQUIRED_HINT.includes("marque antes"));
+});

@@ -2868,7 +2868,8 @@ const handlers: Record<string, (a: any, options?: any) => unknown> = {
     const ids = conversation ? conversation.turns.flatMap((t) => proposalsByTurn.get(t.id) ?? []) : [];
     return ids.flatMap((id) => { const c = currentProposal(id); return c ? [structuredClone(c)] : []; });
   },
-  proposal_confirm: ({ id, amountsChecked, otherDocumentsChecked }: { id: number; amountsChecked?: boolean; otherDocumentsChecked?: boolean }): ProposalReceipt => {
+  proposal_confirm: ({ id, acks }: { id: number; acks?: { amountsChecked?: boolean; otherDocumentsChecked?: boolean; unnamedChecked?: boolean; unknownValuesChecked?: boolean } }): ProposalReceipt => {
+    const { amountsChecked, otherDocumentsChecked, unnamedChecked, unknownValuesChecked } = acks ?? {};
     const card = currentProposal(id);
     if (!card) throw "la propuesta no existe";
     if (card.status === "confirmed" && card.receipt) return structuredClone(card.receipt);
@@ -2880,6 +2881,10 @@ const handlers: Record<string, (a: any, options?: any) => unknown> = {
     // Como el fondo (D186): sin la casilla de importes, una factura dudosa no se registra y la propuesta sigue pendiente.
     if (card.kind === "approve" && card.summary.amount_review && !amountsChecked)
       throw "hay importes que no se leen sin duda: confirme antes los importes con el documento";
+    // Como el fondo (D267, D268): un documento que la persona no nombró y los valores de regla desconocidos exigen su casilla.
+    if (card.summary.named_by_person === false && !unnamedChecked) throw "usted no nombró este documento: confirme antes que es el que quiere";
+    if (Array.isArray(card.summary.unknown_values) && card.summary.unknown_values.length && !unknownValuesChecked)
+      throw "algún valor de la regla no aparece en sus documentos: confirme antes que es el que quiere";
     // Como el fondo (D266): un borrador con datos de otros documentos exige la casilla y, sin ella, sigue pendiente.
     if ((card.kind === "edit_draft" || (card.kind === "approve" && card.summary.type === "email")) && Number(card.summary.other_documents_total) > 0 && !otherDocumentsChecked)
       throw "el borrador propuesto contiene datos de otros documentos: confirme antes que ha revisado que deben ir en la respuesta";

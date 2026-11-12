@@ -154,7 +154,7 @@ impl App {
         let request = compose(
             "assistant-sample",
             View::Other,
-            requested_actions(SAMPLE_QUESTION, None),
+            requested_actions(SAMPLE_QUESTION),
             &[],
             SAMPLE_QUESTION,
             &entries,

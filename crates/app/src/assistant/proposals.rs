@@ -14,7 +14,9 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
-use nestadmin_ai::assistant::{account_index, doc_id, rule_index, suggestion_index};
+use nestadmin_ai::assistant::{
+    account_index, action_class_of, doc_id, rule_index, suggestion_index, ActionClass, Actions,
+};
 use nestadmin_ai::refine::is_format_char;
 use nestadmin_ai::tasks::{draft_flags_allowing, draft_leaks_internals};
 use nestadmin_core::actions::idempotency_key;
@@ -53,6 +55,124 @@ fn contains_word(haystack: &str, needle: &str) -> bool {
     })
 }
 
+/// Las casillas de «lo he revisado» que la persona marcó al pulsar el botón de una tarjeta. Cada
+/// una desbloquea un aviso distinto y su error cerrado es `*_ack_required`; confirmar sin la que
+/// toca deja la propuesta pendiente y no ejecuta nada.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct Confirmations {
+    /// Importes dudosos de una factura (D186): `amount_ack_required`.
+    pub amounts_checked: bool,
+    /// Datos de otros documentos en un borrador (D266): `other_documents_ack_required`.
+    pub other_documents_checked: bool,
+    /// Un documento que la persona no nombró (D267): `unnamed_ack_required`.
+    pub unnamed_checked: bool,
+    /// Valores de una regla que no aparecen en sus documentos (D268): `unknown_values_ack_required`.
+    pub unknown_values_checked: bool,
+}
+
+impl Confirmations {
+    /// Todas marcadas (pruebas y vistas previas).
+    pub const ALL: Self = Self {
+        amounts_checked: true,
+        other_documents_checked: true,
+        unnamed_checked: true,
+        unknown_values_checked: true,
+    };
+}
+
+/// Texto en minúsculas, sin tildes y con cada tramo que no es letra ni cifra reducido a un solo
+/// espacio: así `F-2026-001`, `F 2026 001` y `F‑2026‑001` (guion Unicode) se leen igual.
+fn spaced(text: &str) -> String {
+    fold(text)
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|t| !t.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Solo letras y cifras, en minúsculas y sin tildes: `F-2026-001` y `F2026001` coinciden.
+fn compact(text: &str) -> String {
+    fold(text).chars().filter(|c| c.is_alphanumeric()).collect()
+}
+
+/// Formas jurídicas que no distinguen a un proveedor de otro.
+const LEGAL_FORMS: &[&str] = &[
+    "sl", "sa", "slu", "sll", "sas", "cb", "scp", "sc", "slne", "ltd", "gmbh", "inc", "llc",
+];
+
+/// El nombre de un proveedor sin su forma jurídica final («Alfa S.L.» → «alfa»), ya comparable.
+fn strip_legal_form(text: &str) -> String {
+    let mut tokens: Vec<String> = spaced(text).split(' ').map(str::to_owned).collect();
+    loop {
+        let n = tokens.len();
+        let last = |k: usize| tokens.get(n.wrapping_sub(k)).map(String::as_str);
+        if n > 1 && last(1).is_some_and(|t| LEGAL_FORMS.contains(&t)) {
+            tokens.pop();
+        } else if n > 2
+            && matches!(
+                (last(2), last(1)),
+                (Some("s"), Some("l" | "a" | "c")) | (Some("c"), Some("b"))
+            )
+        {
+            tokens.truncate(n - 2);
+        } else if n > 3 && (last(3), last(2), last(1)) == (Some("s"), Some("l"), Some("u")) {
+            tokens.truncate(n - 3);
+        } else {
+            break;
+        }
+    }
+    tokens.join(" ")
+}
+
+/// Identificadores fiscales españoles (NIF/CIF/NIE) que contiene un texto, en mayúsculas.
+fn tax_ids_in(text: &str) -> Vec<String> {
+    let upper = text.to_uppercase();
+    let mut out: Vec<String> = Vec::new();
+    for token in upper.split(|c: char| !c.is_ascii_alphanumeric()) {
+        let b = token.as_bytes();
+        let digits = |r: std::ops::Range<usize>| b[r].iter().all(u8::is_ascii_digit);
+        let ok = b.len() == 9
+            && ((b[0].is_ascii_alphabetic()
+                && digits(1..8)
+                && (b[8].is_ascii_digit() || b[8].is_ascii_alphabetic()))
+                || (digits(0..8) && b[8].is_ascii_alphabetic()));
+        if ok && !out.iter().any(|t| t == token) {
+            out.push(token.to_owned());
+        }
+    }
+    out
+}
+
+/// Dominios de correo de uso general: no identifican a un remitente.
+const FREE_MAIL: &[&str] = &[
+    "gmail.com",
+    "hotmail.com",
+    "outlook.com",
+    "yahoo.com",
+    "yahoo.es",
+    "icloud.com",
+    "live.com",
+    "msn.com",
+    "proton.me",
+    "protonmail.com",
+];
+
+/// Palabras que el asunto de un correo comparte con cualquier otro y no nombran el documento.
+const GENERIC_SUBJECT_WORDS: &[&str] = &[
+    "factura",
+    "facturas",
+    "correo",
+    "correos",
+    "email",
+    "mensaje",
+    "tarea",
+    "respuesta",
+    "borrador",
+    "documento",
+    "documentos",
+];
+
 /// Propuestas nuevas como mucho por turno.
 pub const MAX_PER_TURN: usize = 3;
 /// Propuestas pendientes (sin caducar) como mucho por conversación.
@@ -74,6 +194,15 @@ pub(crate) struct TurnCtx {
     pub(crate) targets: BTreeMap<String, Value>,
     /// Propuestas de este turno (nuevas o reutilizadas), sin repetir.
     pub(crate) created: Vec<i64>,
+    /// Clases de acción que la persona abrió en este turno (D263). `tool_propose` las vuelve a
+    /// comprobar: la defensa no depende de que el bucle del turno haya filtrado la herramienta.
+    pub(crate) actions: Actions,
+    /// Lo que la persona escribió y cuenta como suyo en este turno (su pregunta y, si responde a
+    /// una aclaración, su turno anterior), para saber si nombró el documento (D267).
+    pub(crate) said: Vec<String>,
+    /// La persona pidió varias tareas a la vez («todas», «ambas», un número): se permite más de
+    /// una propuesta de la clase tareas (D267).
+    pub(crate) many_tasks: bool,
 }
 
 impl TurnCtx {
@@ -594,21 +723,27 @@ impl App {
         let Some(kind) = Kind::from_tool(name) else {
             return failure("unknown_tool");
         };
-        let (conversation_id, known, targets, created) = {
+        let (conversation_id, known, targets, created, said, many_tasks) = {
             let Ok(ctx) = self.assistant.turn.lock() else {
                 return failure("unavailable");
             };
             if !ctx.active {
                 return failure("no_turn");
             }
+            // D263, en profundidad: solo una clase que la persona abrió en este turno.
+            if !ctx.actions.allows(name) {
+                return failure("not_requested");
+            }
             (
                 ctx.conversation_id,
                 ctx.known.clone(),
                 ctx.targets.clone(),
                 ctx.created.clone(),
+                ctx.said.clone(),
+                ctx.many_tasks,
             )
         };
-        let built = match self.build_proposal(kind, args, &known, &targets) {
+        let built = match self.build_proposal(kind, args, &known, &targets, &said) {
             Ok(built) => built,
             // Hallado en `tauri dev` (T37d): el modelo local propone sobre una referencia que no
             // pidió antes y, con solo el código, se rinde. La aplicación le dice qué llamar.
@@ -626,7 +761,7 @@ impl App {
             }
             Err(code) => return failure(code),
         };
-        match self.save_proposal(kind, &built, conversation_id, &created) {
+        match self.save_proposal(kind, &built, conversation_id, &created, many_tasks) {
             Ok(id) => {
                 if let Ok(mut ctx) = self.assistant.turn.lock() {
                     if !ctx.created.contains(&id) {
@@ -646,6 +781,7 @@ impl App {
         built: &Built,
         conversation_id: Option<i64>,
         created: &[i64],
+        many_tasks: bool,
     ) -> Result<i64, &'static str> {
         let unavailable = |_| "unavailable";
         if let Some(existing) = self
@@ -664,6 +800,24 @@ impl App {
         }
         if created.len() >= MAX_PER_TURN {
             return Err("too_many_this_turn");
+        }
+        // D267: una sola propuesta de decidir una tarea por turno, salvo que la persona pida varias
+        // en plural («todas», «ambas», un número) o nombre el otro documento.
+        if action_class_of(&format!("propose_{}", kind.as_str())) == Some(ActionClass::Task)
+            && !many_tasks
+            && built.summary["named_by_person"] != json!(true)
+        {
+            for id in created {
+                let earlier = self.store.proposal(*id).map_err(unavailable)?;
+                if earlier.is_some_and(|row| {
+                    Kind::parse(&row.kind).is_some_and(|k| {
+                        action_class_of(&format!("propose_{}", k.as_str()))
+                            == Some(ActionClass::Task)
+                    })
+                }) {
+                    return Err("one_task_per_turn");
+                }
+            }
         }
         if self
             .store
@@ -766,54 +920,238 @@ impl App {
         (!text.trim().is_empty()).then_some(text)
     }
 
-    /// Datos de OTROS documentos que aparecen en el texto de un borrador propuesto (D266): números
-    /// de factura, nombres de archivo y nombres de proveedor o remitente de otras tareas del
-    /// índice local que no están en la tarea del correo ni en su hilo. Sin IA. Cada elemento es
-    /// `{"kind": "invoice_number" | "file_name" | "party", "value": <texto del índice>}`; los
-    /// términos de menos de `MIN_OTHER_CHARS` caracteres no cuentan y un importe suelto tampoco.
+    /// Datos de OTROS documentos que aparecen en el texto de un borrador (D266): números de
+    /// factura, nombres de archivo, nombres de proveedor o remitente, dominios de otros remitentes
+    /// y NIF de otros proveedores que están en el índice local y no en la tarea del correo ni en lo
+    /// que es de su hilo o de su remitente. Sin IA. Cada elemento es `{"kind": "invoice_number" |
+    /// "file_name" | "party" | "tax_id", "value": <texto del índice>}`.
+    ///
+    /// Cómo se compara: sin tildes ni mayúsculas, con los separadores reducidos (`F-2026-001`,
+    /// `F 2026 001` y un guion Unicode son lo mismo; `F2026001`, en forma compacta, también), el
+    /// proveedor sin su forma jurídica (`Alfa S.L.` es `alfa`) y como palabra entera, sin contar
+    /// los términos de menos de `MIN_OTHER_CHARS` caracteres. Un importe suelto no cuenta.
+    ///
+    /// Lo que es del correo: su resultado sin el borrador y, de las otras tareas, las del mismo
+    /// hilo (`thread_key`) o del mismo remitente, con su texto indexado: una respuesta que cita una
+    /// factura de un correo anterior del hilo no avisa.
+    ///
+    /// El aviso depende del índice: indexar un documento nuevo que coincida con el borrador cambia
+    /// la lista, y con ella la huella, así que la tarjeta pendiente queda obsoleta (D185). Es lo
+    /// que se quiere: la tarjeta dice siempre lo que hay ahora.
     fn other_documents_in(&self, task: &Task, body: &str) -> Result<Vec<Value>, &'static str> {
         let identities = self
             .store
             .index_identities(Some(task.id))
             .map_err(|_| "unavailable")?;
-        // Lo que es del correo y de su hilo: su resultado SIN el borrador (el borrador es justo lo
-        // que se examina, y el actual no puede dar por buenos sus propios datos).
         let mut own_result = task.result.clone().unwrap_or(Value::Null);
         if let Some(map) = own_result.as_object_mut() {
             map.remove("draft");
             map.remove("drafts");
         }
-        let own = fold(&format!("{own_result} {}", task.input_ref));
-        let text = fold(body);
-        let mut found: Vec<Value> = Vec::new();
-        let mut seen: HashSet<String> = HashSet::new();
-        for identity in identities {
-            let mut candidates: Vec<(&str, String)> = Vec::new();
-            if identity.kind == nestadmin_core::SearchKind::Invoice {
-                candidates.push(("invoice_number", identity.number.clone()));
-                candidates.push(("file_name", identity.title.clone()));
-            }
-            // Un remitente puede venir como «Nombre <dirección>»: se mira entero, el nombre y la
-            // dirección por separado.
-            candidates.push(("party", identity.party.clone()));
-            if let Some((name, rest)) = identity.party.split_once('<') {
-                candidates.push(("party", name.to_owned()));
-                candidates.push(("party", rest.trim_end_matches('>').to_owned()));
-            }
-            for (kind, value) in candidates {
-                let value = value.trim();
-                let key = fold(value);
-                if key.chars().count() < MIN_OTHER_CHARS
-                    || !contains_word(&text, &key)
-                    || contains_word(&own, &key)
-                    || !seen.insert(key)
-                {
+        let own_from = own_result["message"]["from"].as_str().map(compact);
+        let own_thread = own_result["message"]["thread_key"]
+            .as_str()
+            .filter(|k| !k.is_empty())
+            .map(str::to_owned);
+        let mut own_text = format!("{own_result} {}", task.input_ref);
+        // Otras tareas del mismo hilo o remitente: lo suyo es de este correo.
+        if task.kind == EMAIL {
+            for other in self.store.all_tasks().map_err(|_| "unavailable")? {
+                if other.id == task.id || other.kind != EMAIL {
                     continue;
                 }
-                found.push(json!({ "kind": kind, "value": value }));
+                let r = other.result.clone().unwrap_or(Value::Null);
+                let same_thread = own_thread.is_some()
+                    && r["message"]["thread_key"].as_str() == own_thread.as_deref();
+                let same_sender =
+                    own_from.is_some() && r["message"]["from"].as_str().map(compact) == own_from;
+                if same_thread || same_sender {
+                    own_text.push(' ');
+                    own_text.push_str(&other.input_ref);
+                    own_text.push(' ');
+                    own_text.push_str(&r["message"].to_string());
+                    if let Ok(Some(doc)) = self.store.indexed_document(other.id) {
+                        own_text.push(' ');
+                        own_text.push_str(&doc.body);
+                    }
+                }
+            }
+        }
+        let (own, own_compact) = (spaced(&own_text), compact(&own_text));
+        let (text, text_compact) = (spaced(body), compact(body));
+        let mentioned = |key: &str, key_compact: &str, long_compact: bool| {
+            contains_word(&text, key) || (long_compact && text_compact.contains(key_compact))
+        };
+        let is_own = |key: &str, key_compact: &str, long_compact: bool| {
+            contains_word(&own, key) || (long_compact && own_compact.contains(key_compact))
+        };
+        let mut found: Vec<Value> = Vec::new();
+        let mut seen: HashSet<String> = HashSet::new();
+        let mut push = |kind: &str, value: &str, key: String, long_compact: bool| {
+            let key_compact = key.replace(' ', "");
+            if key.chars().count() < MIN_OTHER_CHARS
+                && key_compact.chars().count() < MIN_OTHER_CHARS
+            {
+                return;
+            }
+            if mentioned(&key, &key_compact, long_compact)
+                && !is_own(&key, &key_compact, long_compact)
+                && seen.insert(key_compact)
+            {
+                found.push(json!({ "kind": kind, "value": value.trim() }));
+            }
+        };
+        for identity in identities {
+            if identity.kind == nestadmin_core::SearchKind::Invoice {
+                let number = spaced(&identity.number);
+                let long = compact(&identity.number).chars().count() >= 6;
+                push("invoice_number", &identity.number, number, long);
+                push("file_name", &identity.title, spaced(&identity.title), false);
+            }
+            // Un remitente puede venir como «Nombre <dirección>» o solo como dirección.
+            let (name, address) = match identity.party.split_once('<') {
+                Some((name, rest)) => (
+                    name.trim().to_owned(),
+                    rest.trim_end_matches('>').trim().to_owned(),
+                ),
+                None if identity.party.contains('@') => {
+                    (String::new(), identity.party.trim().to_owned())
+                }
+                None => (identity.party.trim().to_owned(), String::new()),
+            };
+            if !name.is_empty() {
+                push("party", &name, strip_legal_form(&name), false);
+            }
+            if let Some((_, domain)) = address.rsplit_once('@') {
+                let domain = domain.trim().to_lowercase();
+                if !FREE_MAIL.contains(&domain.as_str()) {
+                    push("party", &domain, spaced(&domain), false);
+                }
+                push("party", &address, spaced(&address), false);
+            }
+        }
+        // Identificadores fiscales de otros proveedores: el índice guarda el texto de cada factura.
+        for tax_id in tax_ids_in(body) {
+            let others = self
+                .store
+                .index_tasks_mentioning(&tax_id, Some(task.id))
+                .map_err(|_| "unavailable")?;
+            if !others.is_empty() && !own_compact.contains(&tax_id.to_lowercase()) {
+                let key = tax_id.to_lowercase();
+                if seen.insert(key) {
+                    found.push(json!({ "kind": "tax_id", "value": tax_id }));
+                }
             }
         }
         Ok(found)
+    }
+
+    /// ¿Nombró la persona este documento? Verdadero si algún identificador de la tarea aparece en
+    /// lo que la persona escribió en este turno (D267): el número de factura, el nombre de archivo
+    /// (con o sin extensión) o la dirección completa, en forma compacta y de 3 o más caracteres; el
+    /// proveedor o el nombre del remitente sin forma jurídica, con todas sus palabras; o una
+    /// palabra del asunto de 4 o más caracteres que no sea un nombre genérico («factura», «correo»).
+    fn named_by_person(&self, task: &Task, said: &[String]) -> bool {
+        let r = task.result.clone().unwrap_or(Value::Null);
+        let tokens: HashSet<String> = said
+            .iter()
+            .flat_map(|t| spaced(t).split(' ').map(str::to_owned).collect::<Vec<_>>())
+            .filter(|t| !t.is_empty())
+            .collect();
+        let said_compact: String = said
+            .iter()
+            .map(|t| compact(t))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let has_compact = |value: &str, min: usize| {
+            let c = compact(value);
+            c.chars().count() >= min && said_compact.contains(&c)
+        };
+        let has_name = |value: &str| {
+            let name = strip_legal_form(value);
+            let words: Vec<&str> = name.split(' ').filter(|w| !w.is_empty()).collect();
+            // Basta una palabra del nombre de 4 o más letras («la de Alfa», «el correo de Lucía»);
+            // los nombres cortos exigen todas sus palabras.
+            !words.is_empty()
+                && (words
+                    .iter()
+                    .any(|w| w.chars().count() >= 4 && tokens.contains(*w))
+                    || (words.iter().map(|w| w.chars().count()).sum::<usize>() >= 3
+                        && words.iter().all(|w| tokens.contains(*w))))
+        };
+        if task.kind == INVOICE {
+            let fields = &r["fields"];
+            let file = document_name(task, &r).unwrap_or_default();
+            let stem = file.rsplit_once('.').map_or(file.as_str(), |(s, _)| s);
+            return has_compact(fields["invoice_number"].as_str().unwrap_or_default(), 3)
+                || has_compact(&file, 4)
+                || has_compact(stem, 4)
+                || has_name(fields["supplier"].as_str().unwrap_or_default());
+        }
+        let from = r["message"]["from"].as_str().unwrap_or_default();
+        let (name, address) = match from.split_once('<') {
+            Some((n, rest)) => (n.trim(), rest.trim_end_matches('>').trim()),
+            None if from.contains('@') => ("", from.trim()),
+            None => (from.trim(), ""),
+        };
+        let subject_word = r["message"]["subject"]
+            .as_str()
+            .unwrap_or_default()
+            .split(|c: char| !c.is_alphanumeric())
+            .map(fold)
+            .any(|w| {
+                w.chars().count() >= 4
+                    && !GENERIC_SUBJECT_WORDS.contains(&w.as_str())
+                    && tokens.contains(&w)
+            });
+        (!name.is_empty() && has_name(name))
+            || (!address.is_empty() && has_compact(address, 6))
+            || subject_word
+    }
+
+    /// Valores de las condiciones de una regla (`supplier`, `sender`, `sender_domain`) que no
+    /// aparecen en ningún documento del índice local (D268). No se rechazan: la persona puede
+    /// anticipar un proveedor nuevo. La tarjeta lo avisa y exige una casilla.
+    fn unknown_rule_values(&self, conditions: &Value) -> Result<Vec<&'static str>, &'static str> {
+        let identities = self
+            .store
+            .index_identities(None)
+            .map_err(|_| "unavailable")?;
+        let mut unknown = Vec::new();
+        for field in ["supplier", "sender", "sender_domain"] {
+            let Some(value) = conditions[field].as_str().filter(|v| !v.trim().is_empty()) else {
+                continue;
+            };
+            let known = match field {
+                "supplier" => {
+                    let wanted = strip_legal_form(value);
+                    identities.iter().any(|i| {
+                        let party = strip_legal_form(&i.party);
+                        !wanted.is_empty()
+                            && !party.is_empty()
+                            && (party == wanted
+                                || contains_word(&party, &wanted)
+                                || contains_word(&wanted, &party))
+                    })
+                }
+                "sender" => {
+                    let wanted = spaced(value);
+                    identities
+                        .iter()
+                        .any(|i| contains_word(&spaced(&i.party), &wanted))
+                }
+                _ => {
+                    let wanted = spaced(value.trim_start_matches('@'));
+                    identities
+                        .iter()
+                        .any(|i| contains_word(&spaced(&i.party), &wanted))
+                }
+            };
+            if !known {
+                unknown.push(field);
+            }
+        }
+        Ok(unknown)
     }
 
     /// Recuentos de reglas activas que envían y que registran: lo que pueden hacer sin revisión.
@@ -838,7 +1176,11 @@ impl App {
     ) -> Result<(Effect, Value), &'static str> {
         if kind.on_task() {
             let task = task.ok_or("not_found")?;
-            return self.compose_task(kind, args, task);
+            let (effect, mut summary) = self.compose_task(kind, args, task)?;
+            // Una propuesta guardada antes de D267 no lleva el dato: no avisa de lo que no sabe.
+            summary["named_by_person"] =
+                args.get("named_by_person").cloned().unwrap_or(json!(true));
+            return Ok((effect, summary));
         }
         match kind {
             Kind::FetchMail => {
@@ -1057,6 +1399,7 @@ impl App {
                 "coverage": Self::coverage_of(&sim),
                 "overlaps": self.overlaps_of(&sim, None)?,
                 "stays_inactive": true,
+                "unknown_values": self.unknown_rule_values(conditions)?,
                 "basis": basis,
             }),
         ))
@@ -1114,6 +1457,7 @@ impl App {
                 "after": conditions,
                 "was_active": rule.active,
                 "stays_active": stays_active,
+                "unknown_values": self.unknown_rule_values(conditions)?,
                 "coverage": Self::coverage_of(&sim),
                 "overlaps": self.overlaps_of(&sim, Some(id))?,
                 "basis": basis,
@@ -1200,10 +1544,14 @@ impl App {
         args: &Map<String, Value>,
         known: &HashSet<String>,
         targets: &BTreeMap<String, Value>,
+        said: &[String],
     ) -> Result<Built, &'static str> {
         let (task, args_json) = if kind.on_task() {
             let task = self.task_of(args, known)?;
-            let args_json = self.validate_task_proposal(kind, args, &task)?;
+            let mut args_json = self.validate_task_proposal(kind, args, &task)?;
+            // D267: si la persona nombró el documento, se calcula ahora con sus palabras y se
+            // guarda con la propuesta; al releerla no hay pregunta, se usa lo guardado.
+            args_json["named_by_person"] = json!(self.named_by_person(&task, said));
             (Some(task), args_json)
         } else {
             (
@@ -1669,15 +2017,8 @@ impl App {
     /// - `executing` (un corte entre ejecutar y anotar): averigua si la acción ya se hizo y, si es
     ///   así, la da por confirmada sin repetirla; si no, la reintenta por el camino idempotente o
     ///   la deja `failed` si la precondición ya no se cumple.
-    pub fn proposal_confirm(
-        &mut self,
-        id: i64,
-        amounts_checked: bool,
-        other_documents_checked: bool,
-    ) -> AppResult<ProposalReceipt> {
-        self.with_chat_origin(|app| {
-            app.confirm_proposal(id, amounts_checked, other_documents_checked)
-        })
+    pub fn proposal_confirm(&mut self, id: i64, acks: Confirmations) -> AppResult<ProposalReceipt> {
+        self.with_chat_origin(|app| app.confirm_proposal(id, acks))
     }
 
     /// Ejecuta `f` con el origen `chat` en el historial. El origen se restablece SIEMPRE al salir:
@@ -1704,12 +2045,7 @@ impl App {
         }
     }
 
-    fn confirm_proposal(
-        &mut self,
-        id: i64,
-        amounts_checked: bool,
-        other_documents_checked: bool,
-    ) -> AppResult<ProposalReceipt> {
+    fn confirm_proposal(&mut self, id: i64, acks: Confirmations) -> AppResult<ProposalReceipt> {
         let row = self.store.proposal(id)?.ok_or_else(not_found)?;
         match row.status.as_str() {
             "confirmed" => {
@@ -1791,19 +2127,40 @@ impl App {
                 self.settle_status(&row, &["pending"], "stale", None);
                 return Err(self.stale_error(&row)?);
             }
-            // D266: un borrador con datos de otros documentos exige la casilla de «lo he
-            // revisado». La propuesta sigue pendiente para volver a pulsar con ella marcada.
-            let other_documents = view
-                .as_ref()
-                .and_then(|(_, summary, _)| summary["other_documents_total"].as_u64())
-                .unwrap_or(0);
-            let sends_text = row.kind == Kind::EditDraft.as_str()
-                || (row.kind == Kind::Approve.as_str() && row.task_id.is_some());
-            if sends_text && other_documents > 0 && !other_documents_checked {
-                return Err(AppError::Proposal {
-                    code: "other_documents_ack_required",
-                    message: "el borrador contiene datos de otros documentos: confirme antes que ha revisado que deben ir en la respuesta".into(),
-                });
+            // Avisos que exigen su casilla (D267, D266, D268): la propuesta sigue pendiente para
+            // volver a pulsar con ella marcada. Se comprueban antes de ejecutar nada.
+            if let Some((_, summary, _)) = view.as_ref() {
+                let unnamed = row.kind != Kind::Import.as_str()
+                    && Kind::parse(&row.kind).is_some_and(Kind::on_task)
+                    && summary["named_by_person"] == json!(false);
+                let other_documents = summary["other_documents_total"].as_u64().unwrap_or(0) > 0;
+                let unknown = summary["unknown_values"]
+                    .as_array()
+                    .is_some_and(|v| !v.is_empty());
+                let missing = if unnamed && !acks.unnamed_checked {
+                    Some((
+                        "unnamed_ack_required",
+                        "usted no nombró este documento: confirme antes que es el que quiere",
+                    ))
+                } else if other_documents && !acks.other_documents_checked {
+                    Some((
+                        "other_documents_ack_required",
+                        "el borrador contiene datos de otros documentos: confirme antes que ha revisado que deben ir en la respuesta",
+                    ))
+                } else if unknown && !acks.unknown_values_checked {
+                    Some((
+                        "unknown_values_ack_required",
+                        "algún valor de la regla no aparece en sus documentos: confirme antes que es el que quiere",
+                    ))
+                } else {
+                    None
+                };
+                if let Some((code, message)) = missing {
+                    return Err(AppError::Proposal {
+                        code,
+                        message: message.into(),
+                    });
+                }
             }
             if !self
                 .store
@@ -1815,7 +2172,7 @@ impl App {
                 });
             }
         }
-        match self.run_proposal(&row, amounts_checked) {
+        match self.run_proposal(&row, acks.amounts_checked) {
             Ok(run) => Ok(self.record_outcome(&row, run, false)),
             Err(error) => {
                 match &error {

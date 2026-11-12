@@ -615,6 +615,13 @@ export const AMOUNTS_REQUIRED_HINT = "Para registrar la factura, marque antes qu
 export const OTHER_DOCUMENTS_TITLE = "El texto propuesto incluye datos de otros documentos";
 export const OTHER_DOCUMENTS_CHECKED_LABEL = "He revisado que estos datos deben ir en la respuesta";
 export const OTHER_DOCUMENTS_REQUIRED_HINT = "Para continuar, marque antes que ha revisado que esos datos de otros documentos deben ir en la respuesta.";
+export const UNNAMED_TITLE = "Usted no nombró este documento";
+export const UNNAMED_TEXT = "En su petición no aparece el número, el archivo, el proveedor, el remitente ni el asunto de este documento. Compruebe en la tarjeta que es el que quiere.";
+export const UNNAMED_CHECKED_LABEL = "He comprobado que es el documento que quiero";
+export const UNNAMED_REQUIRED_HINT = "Para continuar, marque antes que ha comprobado que es el documento que quiere.";
+export const UNKNOWN_VALUES_TITLE = "No aparece en sus documentos";
+export const UNKNOWN_VALUES_CHECKED_LABEL = "Es correcto: quiero la regla con ese valor";
+export const UNKNOWN_VALUES_REQUIRED_HINT = "Para continuar, marque antes que quiere la regla con un valor que no aparece en sus documentos.";
 export const BODY_LABEL = "Texto completo del correo";
 export const CURRENT_TEXT_LABEL = "Texto actual";
 export const NEW_TEXT_LABEL = "Texto propuesto por la IA";
@@ -1049,6 +1056,18 @@ export function otherDocumentsIntro(total: number, shown: number): string {
   const rest = total > shown ? ` (se enseñan ${shown})` : "";
   const where = total === 1 ? "que no está en este correo ni en su hilo" : "que no están en este correo ni en su hilo";
   return `${base}${rest} ${where}. Compruebe que deben ir en la respuesta.`;
+}
+
+/** ¿Avisa la tarjeta de que la persona no nombró el documento (D267)? Solo si la aplicación lo dice expresamente. */
+export function proposalIsUnnamed(summary: Record<string, any> | null | undefined): boolean {
+  return summary?.named_by_person === false;
+}
+
+/** Los valores de condición de una regla que no aparecen en sus documentos (D268), con su rótulo. */
+export function unknownRuleValues(summary: Record<string, any> | null | undefined): string[] {
+  const labels: Record<string, string> = { supplier: "Proveedor", sender: "Remitente", sender_domain: "Dominio del remitente" };
+  const raw = Array.isArray(summary?.unknown_values) ? summary!.unknown_values : [];
+  return raw.filter((k: unknown): k is string => typeof k === "string").map((k: string) => labels[k] ?? k);
 }
 
 const trimmedReason = (error: unknown): string => String(error ?? "").trim().replace(/[.\s]+$/, "");

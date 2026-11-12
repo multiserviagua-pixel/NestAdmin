@@ -568,6 +568,19 @@ impl Store {
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
+    /// Tareas (distintas de `except`) cuyo texto indexado contiene `term`, sin distinguir
+    /// mayúsculas. Solo lectura y sin IA: sirve para saber si un identificador fiscal escrito en un
+    /// borrador es de otro documento (D266).
+    pub fn index_tasks_mentioning(&self, term: &str, except: Option<i64>) -> Result<Vec<i64>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT task_id FROM search_index
+             WHERE instr(upper(body), upper(?1)) > 0 AND (?2 IS NULL OR task_id <> ?2)
+             ORDER BY task_id",
+        )?;
+        let rows = stmt.query_map(params![term, except], |r| r.get(0))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
     /// Fila del índice de una tarea, si existe.
     pub fn indexed_document(&self, task_id: i64) -> Result<Option<SearchDoc>> {
         let doc = self

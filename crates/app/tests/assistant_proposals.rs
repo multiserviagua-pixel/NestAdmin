@@ -14,7 +14,9 @@ use nestadmin_ai::assistant::{notice_text, Level, Notice, DATA_CLOSE, DATA_OPEN,
 use nestadmin_ai::{
     AiError, GenerateRequest, GenerateResult, Provider, ProviderKind, Task as AiTask, Usage,
 };
-use nestadmin_app::assistant::proposals::{Effect, Outcome as ReceiptOutcome, ProposalCard};
+use nestadmin_app::assistant::proposals::{
+    Confirmations, Effect, Outcome as ReceiptOutcome, ProposalCard,
+};
 use nestadmin_app::assistant::{composed_answer, AssistantTurn, Outcome};
 use nestadmin_app::{App, AppError, AppPaths, EMAIL};
 use nestadmin_core::{AuditEntry, Task, TaskState};
@@ -261,7 +263,19 @@ fn doc(id: i64) -> Value {
 
 /// Lo que pide la persona en los turnos de estas pruebas: abre las clases de acción que usan (D263).
 const ASKED: &str =
-    "Prepare lo que le pido: apruebe la tarea, cambie el borrador, cree una regla nueva, consulte el correo, cambie el límite a 50, renombre la cuenta e importe estos archivos";
+    "Prepare todas las acciones que le pido: apruebe la tarea, cambie el borrador, cree una regla nueva, consulte el correo, cambie el límite a 50, renombre la cuenta e importe estos archivos";
+
+/// Las casillas de las pruebas antiguas: importes y datos de otros documentos como se indiquen; el
+/// documento no nombrado (D267) y los valores desconocidos (D268) ya marcados, porque esas
+/// pruebas no hablan de ellos.
+fn boxes(amounts: bool, other_documents: bool) -> Confirmations {
+    Confirmations {
+        amounts_checked: amounts,
+        other_documents_checked: other_documents,
+        unnamed_checked: true,
+        unknown_values_checked: true,
+    }
+}
 
 fn ask(w: &mut World, conversation: Option<i64>, text: &str, view: &str) -> AssistantTurn {
     let job = w
@@ -505,7 +519,7 @@ fn confirming_a_mail_approval_sends_once_with_origin_chat_and_human_authorizatio
         .iter()
         .all(|e| e.action == "assistant_proposal" && e.status == "created"));
 
-    let receipt = w.app.proposal_confirm(id, false, false).unwrap();
+    let receipt = w.app.proposal_confirm(id, boxes(false, false)).unwrap();
     assert_eq!(w.sent(), sent + 1);
     assert_eq!(receipt.task_state.as_deref(), Some("completed"));
     assert_eq!(receipt.effect, Effect::SendMail);
@@ -538,7 +552,7 @@ fn confirming_a_mail_approval_sends_once_with_origin_chat_and_human_authorizatio
     );
 
     // Confirmar otra vez devuelve el mismo recibo y sigue habiendo un solo envío.
-    let again = w.app.proposal_confirm(id, false, false).unwrap();
+    let again = w.app.proposal_confirm(id, boxes(false, false)).unwrap();
     assert_eq!(again, receipt);
     assert_eq!(w.sent(), sent + 1);
     assert_eq!(
@@ -560,7 +574,7 @@ fn confirming_an_invoice_approval_registers_once_with_origin_chat() {
     let id = turn.proposals[0].id;
     let records = w.records();
 
-    let receipt = w.app.proposal_confirm(id, false, false).unwrap();
+    let receipt = w.app.proposal_confirm(id, boxes(false, false)).unwrap();
     assert_eq!(w.records(), records + 1);
     assert_eq!(receipt.effect, Effect::RegisterInvoice);
     assert_eq!(w.task(inv).state, TaskState::Completed);
@@ -574,7 +588,7 @@ fn confirming_an_invoice_approval_registers_once_with_origin_chat() {
         assert_eq!(e.origin.as_deref(), Some("chat"));
         assert_eq!(e.authorization.as_deref(), Some("aprobación"));
     }
-    let again = w.app.proposal_confirm(id, false, false).unwrap();
+    let again = w.app.proposal_confirm(id, boxes(false, false)).unwrap();
     assert_eq!(again, receipt);
     assert_eq!(w.records(), records + 1);
 }
@@ -610,12 +624,15 @@ fn a_cut_between_executing_and_recording_never_duplicates_and_ends_confirmed() {
         w.sql(&format!(
             "UPDATE assistant_proposals SET status = 'executing' WHERE id = {id}"
         ));
-        let receipt = w.app.proposal_confirm(id, false, false).unwrap();
+        let receipt = w.app.proposal_confirm(id, boxes(false, false)).unwrap();
         assert!(receipt.reconciled, "{what}");
         assert_eq!(receipt.task_state.as_deref(), Some("completed"));
         assert_eq!(effects(&w), before + 1, "{what}: sin duplicar");
         assert_eq!(w.statuses()[0].1, "confirmed");
-        assert_eq!(w.app.proposal_confirm(id, false, false).unwrap(), receipt);
+        assert_eq!(
+            w.app.proposal_confirm(id, boxes(false, false)).unwrap(),
+            receipt
+        );
         assert_eq!(effects(&w), before + 1);
     }
     for what in ["invoice", "mail"] {
@@ -645,11 +662,14 @@ fn a_cut_between_executing_and_recording_never_duplicates_and_ends_confirmed() {
         w.sql(&format!(
             "UPDATE assistant_proposals SET status = 'executing' WHERE id = {id}"
         ));
-        let receipt = w.app.proposal_confirm(id, false, false).unwrap();
+        let receipt = w.app.proposal_confirm(id, boxes(false, false)).unwrap();
         assert!(!receipt.reconciled, "{what}");
         assert_eq!(effects(&w), before + 1, "{what}");
         assert_eq!(w.statuses()[0].1, "confirmed");
-        assert_eq!(w.app.proposal_confirm(id, false, false).unwrap(), receipt);
+        assert_eq!(
+            w.app.proposal_confirm(id, boxes(false, false)).unwrap(),
+            receipt
+        );
         assert_eq!(effects(&w), before + 1);
         let key = if what == "invoice" {
             "register_invoice"
@@ -694,7 +714,7 @@ fn a_changed_version_expired_and_dismissed_proposals_are_not_confirmed() {
         .unwrap();
     let error = w
         .app
-        .proposal_confirm(approve_id, false, false)
+        .proposal_confirm(approve_id, boxes(false, false))
         .unwrap_err();
     assert!(
         matches!(
@@ -713,7 +733,7 @@ fn a_changed_version_expired_and_dismissed_proposals_are_not_confirmed() {
     assert_eq!(
         code(
             &w.app
-                .proposal_confirm(approve_id, false, false)
+                .proposal_confirm(approve_id, boxes(false, false))
                 .unwrap_err()
         ),
         "stale_version"
@@ -722,7 +742,11 @@ fn a_changed_version_expired_and_dismissed_proposals_are_not_confirmed() {
     // Todas las pendientes de esa tarea quedaron obsoletas al cambiar la versión.
     assert!(cards.iter().all(|c| c.status == "stale"), "{cards:?}");
     assert_eq!(
-        code(&w.app.proposal_confirm(reject_id, false, false).unwrap_err()),
+        code(
+            &w.app
+                .proposal_confirm(reject_id, boxes(false, false))
+                .unwrap_err()
+        ),
         "stale_version"
     );
     assert_eq!(w.task(mail).state, TaskState::AwaitingReview);
@@ -749,7 +773,11 @@ fn a_changed_version_expired_and_dismissed_proposals_are_not_confirmed() {
         "expired"
     );
     assert_eq!(
-        code(&w.app.proposal_confirm(fresh, false, false).unwrap_err()),
+        code(
+            &w.app
+                .proposal_confirm(fresh, boxes(false, false))
+                .unwrap_err()
+        ),
         "expired"
     );
     // Una pendiente cuya hora pasó entre dos lecturas también caduca al confirmar.
@@ -766,7 +794,11 @@ fn a_changed_version_expired_and_dismissed_proposals_are_not_confirmed() {
         "UPDATE assistant_proposals SET expires_at = 1 WHERE id = {late}"
     ));
     assert_eq!(
-        code(&w.app.proposal_confirm(late, false, false).unwrap_err()),
+        code(
+            &w.app
+                .proposal_confirm(late, boxes(false, false))
+                .unwrap_err()
+        ),
         "expired"
     );
     assert_eq!(
@@ -795,7 +827,7 @@ fn a_changed_version_expired_and_dismissed_proposals_are_not_confirmed() {
     assert_eq!(
         code(
             &w.app
-                .proposal_confirm(third.proposals[0].id, false, false)
+                .proposal_confirm(third.proposals[0].id, boxes(false, false))
                 .unwrap_err()
         ),
         "rejected"
@@ -804,7 +836,11 @@ fn a_changed_version_expired_and_dismissed_proposals_are_not_confirmed() {
     assert_eq!(w.sent(), sent);
     // Una confirmada no se descarta.
     assert_eq!(
-        code(&w.app.proposal_confirm(9_999, false, false).unwrap_err()),
+        code(
+            &w.app
+                .proposal_confirm(9_999, boxes(false, false))
+                .unwrap_err()
+        ),
         "not_found"
     );
 }
@@ -819,7 +855,7 @@ fn a_doubtful_invoice_needs_the_amount_confirmation_and_stays_pending_without_it
     let actions = w.count("SELECT count(*) FROM actions");
 
     for ack in [false, false] {
-        let error = w.app.proposal_confirm(id, ack, false).unwrap_err();
+        let error = w.app.proposal_confirm(id, boxes(ack, false)).unwrap_err();
         assert!(matches!(error, AppError::AmountAckRequired), "{error}");
     }
     assert_eq!(w.records(), records, "sin registro");
@@ -831,14 +867,17 @@ fn a_doubtful_invoice_needs_the_amount_confirmation_and_stays_pending_without_it
     );
     assert_eq!(w.task(dud).state, TaskState::AwaitingReview);
 
-    let receipt = w.app.proposal_confirm(id, true, false).unwrap();
+    let receipt = w.app.proposal_confirm(id, boxes(true, false)).unwrap();
     assert_eq!(
         w.records(),
         records + 1,
         "con la casilla, se registra una vez"
     );
     assert_eq!(receipt.task_state.as_deref(), Some("completed"));
-    assert_eq!(w.app.proposal_confirm(id, true, false).unwrap(), receipt);
+    assert_eq!(
+        w.app.proposal_confirm(id, boxes(true, false)).unwrap(),
+        receipt
+    );
     assert_eq!(w.records(), records + 1);
 }
 
@@ -858,13 +897,13 @@ fn a_precondition_that_no_longer_holds_never_leaves_the_proposal_executing() {
     // lo que mostraba la tarjeta ya no es lo que hay: no se ejecuta nada.
     w.app.approve(mail, 1).unwrap();
     let sent = w.sent();
-    let error = w.app.proposal_confirm(id, false, false).unwrap_err();
+    let error = w.app.proposal_confirm(id, boxes(false, false)).unwrap_err();
     assert_eq!(code(&error), "stale", "{error}");
     assert_eq!(w.statuses()[0].1, "stale");
     assert_eq!(w.sent(), sent);
     assert_eq!(w.task(mail).state, TaskState::Completed);
     assert_eq!(
-        code(&w.app.proposal_confirm(id, false, false).unwrap_err()),
+        code(&w.app.proposal_confirm(id, boxes(false, false)).unwrap_err()),
         "stale"
     );
     assert_eq!(w.app.proposal_dismiss(id).unwrap().status, "rejected");
@@ -901,7 +940,10 @@ fn confirming_a_draft_edit_only_saves_a_new_version_and_never_approves() {
     assert_eq!(edit.effect, Effect::NoEffect);
     let sent = w.sent();
 
-    let receipt = w.app.proposal_confirm(edit.id, false, false).unwrap();
+    let receipt = w
+        .app
+        .proposal_confirm(edit.id, boxes(false, false))
+        .unwrap();
     assert_eq!(receipt.result["new_version"], 2);
     assert_eq!(w.sent(), sent, "editar no envía");
     let task = w.task(mail);
@@ -922,7 +964,7 @@ fn confirming_a_draft_edit_only_saves_a_new_version_and_never_approves() {
     );
     assert!(matches!(
         w.app
-            .proposal_confirm(approve_id, false, false)
+            .proposal_confirm(approve_id, boxes(false, false))
             .unwrap_err(),
         AppError::StaleVersion {
             approved: 1,
@@ -1273,16 +1315,11 @@ fn deleting_the_conversation_deletes_its_proposals_and_the_audit_has_no_text() {
         approve(mail),
         answer(&format!("{SENTINEL_MODEL} He preparado dos propuestas.")),
     ]);
-    let turn = ask(
-        &mut w,
-        None,
-        "cambie el borrador y apruebe la tarea",
-        "review",
-    );
+    let turn = ask(&mut w, None, "cambie y apruebe", "review");
     let conversation = turn.conversation_id.unwrap();
     assert_eq!(turn.proposals.len(), 2);
     let edit = card_of(&turn, "edit_draft").id;
-    w.app.proposal_confirm(edit, false, false).unwrap();
+    w.app.proposal_confirm(edit, boxes(false, false)).unwrap();
     w.app
         .proposal_dismiss(card_of(&turn, "approve").id)
         .unwrap();
@@ -1326,7 +1363,11 @@ fn deleting_the_conversation_deletes_its_proposals_and_the_audit_has_no_text() {
     assert_eq!(w.statuses().len(), 0);
     assert_eq!(w.count("SELECT count(*) FROM assistant_proposals"), 0);
     assert_eq!(
-        code(&w.app.proposal_confirm(edit, false, false).unwrap_err()),
+        code(
+            &w.app
+                .proposal_confirm(edit, boxes(false, false))
+                .unwrap_err()
+        ),
         "not_found"
     );
 }
@@ -1509,7 +1550,7 @@ fn approve_reaches_approve_reviewed_with_the_seen_version() {
     let turn = propose(&mut w, None, &[mail], vec![approve(mail)], "review");
     let receipt = w
         .app
-        .proposal_confirm(turn.proposals[0].id, false, false)
+        .proposal_confirm(turn.proposals[0].id, boxes(false, false))
         .unwrap();
     assert_eq!(
         (receipt.kind.as_str(), receipt.result["version"].clone()),
@@ -1535,7 +1576,7 @@ fn reject_cancels_the_task() {
     assert_eq!(turn.proposals[0].summary["type"], "reject");
     let (records, sent) = (w.records(), w.sent());
     w.app
-        .proposal_confirm(turn.proposals[0].id, false, false)
+        .proposal_confirm(turn.proposals[0].id, boxes(false, false))
         .unwrap();
     assert_eq!(w.task(inv).state, TaskState::Cancelled);
     assert_eq!(w.records(), records);
@@ -1565,7 +1606,7 @@ fn retry_requeues_a_failed_task() {
     // Reintentar solo vale para una tarea fallida; el aprobar sobre una fallida no se propone.
     assert_eq!(turn.proposals[0].summary["error_code"], "pdf_unavailable");
     w.app
-        .proposal_confirm(turn.proposals[0].id, false, false)
+        .proposal_confirm(turn.proposals[0].id, boxes(false, false))
         .unwrap();
     assert_eq!(
         w.app
@@ -1600,7 +1641,7 @@ fn archive_closes_a_mail_without_sending_and_a_mail_with_an_attempt_is_not_archi
     );
     let sent = w.sent();
     w.app
-        .proposal_confirm(turn.proposals[0].id, false, false)
+        .proposal_confirm(turn.proposals[0].id, boxes(false, false))
         .unwrap();
     let task = w.task(mail);
     assert_eq!(task.state, TaskState::Completed);
@@ -1655,7 +1696,7 @@ fn confirm_not_sent_creates_a_new_version_that_needs_approval() {
     assert_eq!(turn.proposals[0].summary["recovery"], "unconfirmed_attempt");
     let receipt = w
         .app
-        .proposal_confirm(turn.proposals[0].id, false, false)
+        .proposal_confirm(turn.proposals[0].id, boxes(false, false))
         .unwrap();
     assert_eq!(receipt.result["new_version"], 2);
     assert_eq!(w.version(mail), 2);
@@ -1677,7 +1718,7 @@ fn fetch_mail_limit_rename_and_sender_preference_reach_their_app_methods() {
     let tasks = w.app.tasks().unwrap().len();
     let receipt = w
         .app
-        .proposal_confirm(turn.proposals[0].id, false, false)
+        .proposal_confirm(turn.proposals[0].id, boxes(false, false))
         .unwrap();
     assert!(receipt.result["added"].as_u64().unwrap() > 0);
     assert!(w.app.tasks().unwrap().len() > tasks);
@@ -1689,7 +1730,7 @@ fn fetch_mail_limit_rename_and_sender_preference_reach_their_app_methods() {
     assert_eq!(turn.proposals[0].summary["current"], json!(current));
     assert_eq!(turn.proposals[0].summary["new"], 37);
     w.app
-        .proposal_confirm(turn.proposals[0].id, false, false)
+        .proposal_confirm(turn.proposals[0].id, boxes(false, false))
         .unwrap();
     assert_eq!(w.app.mail_accounts().limit, 37);
     // Fuera de rango, ni siquiera es un paso válido.
@@ -1714,7 +1755,7 @@ fn fetch_mail_limit_rename_and_sender_preference_reach_their_app_methods() {
     let before = w.app.mail_accounts().accounts[0].label.clone();
     assert_eq!(turn.proposals[0].summary["current_label"], json!(before));
     w.app
-        .proposal_confirm(turn.proposals[0].id, false, false)
+        .proposal_confirm(turn.proposals[0].id, boxes(false, false))
         .unwrap();
     assert_eq!(w.app.mail_accounts().accounts[0].label, "Oficina principal");
     // Etiquetas de más de 60 caracteres no son un paso válido.
@@ -1754,7 +1795,7 @@ fn fetch_mail_limit_rename_and_sender_preference_reach_their_app_methods() {
     );
     assert!(turn.proposals[0].summary["current"].is_null());
     w.app
-        .proposal_confirm(turn.proposals[0].id, false, false)
+        .proposal_confirm(turn.proposals[0].id, boxes(false, false))
         .unwrap();
     let prefs = w.app.sender_preferences().unwrap();
     assert!(prefs
@@ -1828,7 +1869,7 @@ fn scenario_a_an_action_done_on_screen_makes_the_other_cards_stale_not_stuck() {
     assert!(cards.iter().all(|c| c.status == "stale"), "{cards:?}");
     // Confirmar la de rechazo no ejecuta nada y no deja `executing`.
     for id in [reject_id, approve_id, reject_id] {
-        let error = w.app.proposal_confirm(id, false, false).unwrap_err();
+        let error = w.app.proposal_confirm(id, boxes(false, false)).unwrap_err();
         assert!(matches!(code(&error), "stale" | "stale_version"), "{error}");
     }
     assert_eq!(w.sent(), sent, "ningún envío más");
@@ -1866,7 +1907,7 @@ fn scenario_a_with_retry_the_same_task_retried_on_screen_is_not_cancelled_by_the
     // La persona reintenta por la pantalla; la tarjeta de rechazo ya no describe la tarea.
     w.app.retry(failed.id).unwrap();
     for id in [reject_id, retry_id] {
-        let error = w.app.proposal_confirm(id, false, false).unwrap_err();
+        let error = w.app.proposal_confirm(id, boxes(false, false)).unwrap_err();
         assert_eq!(code(&error), "stale", "{error}");
         assert_ne!(status_of(&w, id), "executing");
     }
@@ -1905,7 +1946,7 @@ fn scenario_b_a_failed_task_back_in_review_with_the_same_version_does_not_get_re
 
     let cards = w.app.proposals(turn.conversation_id.unwrap()).unwrap();
     assert_eq!(cards[0].status, "stale", "{cards:?}");
-    let error = w.app.proposal_confirm(id, false, false).unwrap_err();
+    let error = w.app.proposal_confirm(id, boxes(false, false)).unwrap_err();
     assert_eq!(code(&error), "stale", "{error}");
     assert_eq!(
         w.task(mail).state,
@@ -1989,7 +2030,9 @@ fn the_draft_flags_of_the_cards_follow_the_current_body() {
     // Confirmada la edición, el borrador guardado ya no lleva las marcas del anterior y la tarjeta
     // de aprobación que se prepare después tampoco.
     let edit_id = card_of(&turn, "edit_draft").id;
-    w.app.proposal_confirm(edit_id, false, false).unwrap();
+    w.app
+        .proposal_confirm(edit_id, boxes(false, false))
+        .unwrap();
     assert_eq!(w.task(mail).result.unwrap()["draft_flags"], json!([]));
     let next = propose(
         &mut w,
@@ -2014,7 +2057,7 @@ fn an_approval_that_does_not_send_is_not_done_and_leaves_the_task_available() {
         .simulators()
         .0
         .set_failure(Some(nestadmin_simulators::FailureMode::Unavailable));
-    let receipt = w.app.proposal_confirm(id, false, false).unwrap();
+    let receipt = w.app.proposal_confirm(id, boxes(false, false)).unwrap();
     w.app.simulators().0.set_failure(None);
     assert_eq!(receipt.outcome, ReceiptOutcome::NotDone);
     assert_eq!(receipt.reason.as_deref(), Some("action_failed"));
@@ -2030,7 +2073,7 @@ fn an_approval_that_does_not_send_is_not_done_and_leaves_the_task_available() {
     assert_eq!(cards[0].status, "failed");
     assert_eq!(cards[0].receipt.as_ref(), Some(&receipt));
     assert_eq!(
-        code(&w.app.proposal_confirm(id, false, false).unwrap_err()),
+        code(&w.app.proposal_confirm(id, boxes(false, false)).unwrap_err()),
         "failed"
     );
     // La tarea sigue disponible: se reintenta y se envía por la vía normal, una sola vez.
@@ -2061,7 +2104,7 @@ fn a_cut_after_the_action_ends_confirmed_without_duplicates_for_every_task_kind(
     w.sql(&format!(
         "UPDATE assistant_proposals SET status = 'executing' WHERE id = {id}"
     ));
-    let receipt = w.app.proposal_confirm(id, false, false).unwrap();
+    let receipt = w.app.proposal_confirm(id, boxes(false, false)).unwrap();
     assert!(receipt.reconciled);
     assert_eq!(receipt.outcome, ReceiptOutcome::Done);
     assert_eq!(w.version(mail), 2, "sin una tercera versión");
@@ -2069,7 +2112,10 @@ fn a_cut_after_the_action_ends_confirmed_without_duplicates_for_every_task_kind(
         w.count("SELECT count(*) FROM rule_signals WHERE kind = 'edited'"),
         1
     );
-    assert_eq!(w.app.proposal_confirm(id, false, false).unwrap(), receipt);
+    assert_eq!(
+        w.app.proposal_confirm(id, boxes(false, false)).unwrap(),
+        receipt
+    );
 
     // Confirmar que no se envió.
     let mut w = world();
@@ -2092,7 +2138,7 @@ fn a_cut_after_the_action_ends_confirmed_without_duplicates_for_every_task_kind(
     w.sql(&format!(
         "UPDATE assistant_proposals SET status = 'executing' WHERE id = {id}"
     ));
-    let receipt = w.app.proposal_confirm(id, false, false).unwrap();
+    let receipt = w.app.proposal_confirm(id, boxes(false, false)).unwrap();
     assert!(receipt.reconciled);
     assert_eq!(w.version(mail), 2, "sin una tercera versión");
     assert_eq!(w.sent(), 0);
@@ -2112,7 +2158,7 @@ fn a_cut_after_the_action_ends_confirmed_without_duplicates_for_every_task_kind(
     w.sql(&format!(
         "UPDATE assistant_proposals SET status = 'executing' WHERE id = {id}"
     ));
-    let receipt = w.app.proposal_confirm(id, false, false).unwrap();
+    let receipt = w.app.proposal_confirm(id, boxes(false, false)).unwrap();
     assert!(receipt.reconciled);
     assert_eq!(
         w.count("SELECT count(*) FROM rule_signals WHERE kind = 'rejected'"),
@@ -2135,7 +2181,7 @@ fn a_cut_after_the_action_ends_confirmed_without_duplicates_for_every_task_kind(
     w.sql(&format!(
         "UPDATE assistant_proposals SET status = 'executing' WHERE id = {id}"
     ));
-    let receipt = w.app.proposal_confirm(id, false, false).unwrap();
+    let receipt = w.app.proposal_confirm(id, boxes(false, false)).unwrap();
     assert!(receipt.reconciled);
     assert_eq!(w.task(failed.id).state, TaskState::Queued);
 }
@@ -2172,7 +2218,7 @@ fn a_cut_with_the_action_still_pending_in_the_connector_sends_once_and_gives_a_c
              UPDATE tasks SET state = 'awaiting_review' WHERE id = {task};
              UPDATE assistant_proposals SET status = 'executing' WHERE id = {id};"
         ));
-        let receipt = w.app.proposal_confirm(id, false, false).unwrap();
+        let receipt = w.app.proposal_confirm(id, boxes(false, false)).unwrap();
         assert_eq!(receipt.outcome, ReceiptOutcome::Done, "{what}");
         assert_eq!(receipt.task_state.as_deref(), Some("completed"), "{what}");
         assert_eq!(effects(&w), before + 1, "{what}: sin duplicado");
@@ -2199,7 +2245,7 @@ fn an_executing_proposal_always_resolves_failed_dismissed_or_expired() {
         "UPDATE assistant_proposals SET status = 'executing' WHERE id = {id}"
     ));
     // Una tarea cancelada no es «reintentada»: no se da por reconciliada ni queda `executing`.
-    let error = w.app.proposal_confirm(id, false, false).unwrap_err();
+    let error = w.app.proposal_confirm(id, boxes(false, false)).unwrap_err();
     assert!(
         !matches!(error, AppError::Proposal { code: "busy", .. }),
         "{error}"
@@ -2460,10 +2506,10 @@ fn a_proposal_the_person_did_not_ask_for_is_never_created_even_if_the_model_emit
     assert!(turn.proposals.is_empty());
     assert!(w.statuses().is_empty(), "no se guarda ninguna propuesta");
     assert_eq!(w.sent(), sent);
-    // El paso del modelo fue una salida no válida (`tool_not_offered`) y el aviso lo dice.
+    // El paso del modelo no cuenta como salida no válida: recibe un aviso de la aplicación (D263).
     let content = last_request(&w).content;
     assert!(
-        content.contains("la herramienta propose_approve no está disponible en esta consulta"),
+        content.contains("La persona no ha pedido esa acción en esta consulta"),
         "{content}"
     );
     // Ni las instrucciones de la primera llamada ni las siguientes nombran herramientas de propuesta,
@@ -2683,16 +2729,22 @@ fn a_draft_with_data_from_another_invoice_carries_a_notice_and_needs_the_checkbo
 
     // Sin la casilla: error cerrado y la propuesta sigue pendiente, sin cambiar el borrador.
     let before = w.version(mail);
-    let error = w.app.proposal_confirm(card.id, false, false).unwrap_err();
+    let error = w
+        .app
+        .proposal_confirm(card.id, boxes(false, false))
+        .unwrap_err();
     assert_eq!(code(&error), "other_documents_ack_required", "{error}");
     assert_eq!(w.statuses().last().unwrap().1, "pending");
     assert_eq!(w.version(mail), before);
     // La casilla de importes no vale para esto.
-    let error = w.app.proposal_confirm(card.id, true, false).unwrap_err();
+    let error = w
+        .app
+        .proposal_confirm(card.id, boxes(true, false))
+        .unwrap_err();
     assert_eq!(code(&error), "other_documents_ack_required");
     // Con la casilla: se guarda como versión nueva y no aprueba ni envía nada.
     let sent = w.sent();
-    let receipt = w.app.proposal_confirm(card.id, false, true).unwrap();
+    let receipt = w.app.proposal_confirm(card.id, boxes(false, true)).unwrap();
     assert_eq!(receipt.outcome, ReceiptOutcome::Done);
     assert_eq!(w.version(mail), before + 1);
     assert_eq!(w.sent(), sent);
@@ -2715,7 +2767,9 @@ fn a_draft_without_data_from_other_documents_has_no_notice_and_confirms_without_
     let card = card_of(&turn, "edit_draft");
     assert_eq!(card.summary["other_documents"], json!([]));
     assert_eq!(card.summary["other_documents_total"], json!(0));
-    w.app.proposal_confirm(card.id, false, false).unwrap();
+    w.app
+        .proposal_confirm(card.id, boxes(false, false))
+        .unwrap();
 }
 
 #[test]
@@ -2840,11 +2894,14 @@ fn approving_a_mail_whose_saved_draft_carries_other_documents_data_needs_the_che
     let card = card_of(&turn, "approve");
     assert_eq!(card.summary["other_documents_total"], json!(2));
     let sent = w.sent();
-    let error = w.app.proposal_confirm(card.id, false, false).unwrap_err();
+    let error = w
+        .app
+        .proposal_confirm(card.id, boxes(false, false))
+        .unwrap_err();
     assert_eq!(code(&error), "other_documents_ack_required");
     assert_eq!(w.sent(), sent, "sin la casilla no se envía nada");
     assert_eq!(w.statuses().last().unwrap().1, "pending");
-    w.app.proposal_confirm(card.id, false, true).unwrap();
+    w.app.proposal_confirm(card.id, boxes(false, true)).unwrap();
     assert_eq!(w.sent(), sent + 1);
 }
 
@@ -2861,5 +2918,509 @@ fn approving_a_mail_whose_draft_has_no_foreign_data_has_no_notice() {
     let turn = propose(&mut w, None, &[mail], vec![approve(mail)], "review");
     let card = card_of(&turn, "approve");
     assert_eq!(card.summary["other_documents_total"], json!(0));
-    w.app.proposal_confirm(card.id, false, false).unwrap();
+    w.app
+        .proposal_confirm(card.id, boxes(false, false))
+        .unwrap();
+}
+
+// ======================================================================================
+// Revisión de E6: turno anterior, aviso de insistencia, defensa en profundidad, D267 y D268
+// ======================================================================================
+
+/// Un turno con la pregunta indicada: lee las tareas y propone.
+fn propose_asking(
+    w: &mut World,
+    conversation: Option<i64>,
+    question: &str,
+    reads: &[i64],
+    proposals: Vec<Value>,
+) -> AssistantTurn {
+    let mut steps: Vec<Value> = reads
+        .iter()
+        .map(|id| tool("get_document", json!({ "ref": doc(*id) })))
+        .collect();
+    steps.extend(proposals);
+    steps.push(answer("Preparado."));
+    w.ext.turn(steps);
+    ask(w, conversation, question, "review")
+}
+
+/// Una factura con número, proveedor e identificador fiscal a medida.
+fn invoice_with(w: &mut World, supplier: &str, number: &str, nif: &str, file: &str) -> i64 {
+    let text = json!({
+        "supplier": supplier, "invoice_number": number, "date": "2026-10-05", "nif": nif,
+        "subtotal": "100.00", "tax": "21.00", "total": "121.00", "moneda": "EUR",
+    })
+    .to_string();
+    seed_invoice(&mut w.app, file, &text)
+}
+
+#[test]
+fn a_read_question_after_a_created_card_inherits_nothing_even_with_a_hostile_mail() {
+    let mut w = world();
+    let mail = first_mail(&mut w);
+    let first = propose_asking(&mut w, None, "Apruébala", &[mail], vec![approve(mail)]);
+    assert_eq!(first.proposals.len(), 1);
+    let conversation = first.conversation_id.unwrap();
+    // Una pregunta corta de solo lectura en la misma conversación: nada heredado.
+    let second = propose_asking(
+        &mut w,
+        Some(conversation),
+        "Resume el correo de Gamma",
+        &[mail],
+        vec![
+            tool("propose_archive", json!({ "ref": doc(mail) })),
+            approve(mail),
+        ],
+    );
+    assert!(second.proposals.is_empty(), "{second:?}");
+    assert_eq!(w.statuses().len(), 1, "solo la tarjeta del primer turno");
+}
+
+#[test]
+fn only_a_question_the_assistant_asked_lets_a_short_reply_inherit_the_open_classes() {
+    let mut w = world();
+    let mail = first_mail(&mut w);
+    w.ext.turn(vec![answer("¿Cuál de las dos?")]);
+    let first = ask(&mut w, None, "Apruebe la tarea", "review");
+    let conversation = first.conversation_id.unwrap();
+    // Lo guardado lleva las clases que quedaron abiertas sin usar.
+    let saved = w
+        .app
+        .assistant_conversation(Some(conversation))
+        .unwrap()
+        .unwrap();
+    let reply = saved
+        .turns
+        .iter()
+        .rev()
+        .find(|t| t.role == "assistant")
+        .unwrap();
+    assert_eq!(reply.meta.open_actions, vec!["task".to_owned()]);
+    let second = propose_asking(
+        &mut w,
+        Some(conversation),
+        "la del correo",
+        &[mail],
+        vec![approve(mail)],
+    );
+    assert_eq!(second.proposals.len(), 1, "{second:?}");
+    // Una respuesta sin pregunta no deja nada que heredar: la aplicación no adivina.
+    w.ext.turn(vec![answer("Hay una tarea pendiente.")]);
+    let plain = ask(&mut w, None, "Apruebe la tarea", "review");
+    let reply = propose_asking(
+        &mut w,
+        plain.conversation_id,
+        "la del correo",
+        &[mail],
+        vec![approve(mail)],
+    );
+    assert!(reply.proposals.is_empty(), "{reply:?}");
+    // Una respuesta larga tampoco hereda.
+    w.ext.turn(vec![answer("¿Cuál de las dos?")]);
+    let ask_again = ask(&mut w, None, "Apruebe la tarea", "review");
+    let long = propose_asking(
+        &mut w,
+        ask_again.conversation_id,
+        "la del correo que llegó la semana pasada de logística con el cambio de horario",
+        &[mail],
+        vec![approve(mail)],
+    );
+    assert!(long.proposals.is_empty(), "{long:?}");
+}
+
+#[test]
+fn insisting_on_a_proposal_that_was_not_asked_for_gets_a_notice_and_the_turn_ends_answered() {
+    let mut w = world();
+    let mail = first_mail(&mut w);
+    w.ext.turn(vec![
+        tool("get_document", json!({ "ref": doc(mail) })),
+        approve(mail),
+        tool("propose_archive", json!({ "ref": doc(mail) })),
+        answer("No he preparado nada: dígame si quiere que apruebe algo."),
+    ]);
+    let turn = ask(&mut w, None, "Dime de qué trata el correo", "review");
+    assert_eq!(turn.outcome, Outcome::Answered, "{turn:?}");
+    assert!(turn.proposals.is_empty());
+    assert!(w.statuses().is_empty());
+    let content = last_request(&w).content;
+    assert_eq!(
+        content
+            .matches("La persona no ha pedido esa acción")
+            .count(),
+        2,
+        "{content}"
+    );
+    assert!(!content.contains("salida no válida"));
+    // Pasado el tope, la insistencia sí cuenta como salida no válida y acaba el turno.
+    w.ext.turn(vec![
+        approve(mail),
+        approve(mail),
+        approve(mail),
+        approve(mail),
+    ]);
+    let stuck = ask(&mut w, None, "Dime de qué trata el correo", "review");
+    assert_eq!(stuck.outcome, Outcome::Error, "{stuck:?}");
+    assert!(stuck.proposals.is_empty());
+}
+
+#[test]
+fn the_class_is_checked_again_when_the_proposal_is_created() {
+    use nestadmin_app::assistant::tools::ToolCall;
+    let mut w = world();
+    let mail = first_mail(&mut w);
+    // Un turno abierto sin ninguna clase de acción: aunque algo llame a la herramienta de
+    // propuesta sin pasar por el filtro del bucle, no se crea nada.
+    let job = w
+        .app
+        .begin_assistant_turn(None, "Dime de qué trata el correo", "review")
+        .unwrap();
+    let read = ToolCall {
+        name: "get_document".to_owned(),
+        args: json!({ "ref": doc(mail) }).as_object().unwrap().clone(),
+        external: false,
+    };
+    w.app.assistant_tool(&read);
+    let call = ToolCall {
+        name: "propose_approve".to_owned(),
+        args: json!({ "ref": doc(mail) }).as_object().unwrap().clone(),
+        external: false,
+    };
+    let out = w.app.assistant_tool(&call);
+    assert_eq!(out.value["error"], "not_requested", "{}", out.value);
+    assert!(w.statuses().is_empty());
+    drop(job);
+}
+
+#[test]
+fn a_card_on_a_document_the_person_did_not_name_needs_its_own_checkbox() {
+    let mut w = world();
+    let alfa = invoice_with(
+        &mut w,
+        "Alfa Ficticia S.L.",
+        "FA-12",
+        "B11111111",
+        "alfa.txt",
+    );
+    let beta = invoice_with(
+        &mut w,
+        "Beta Ficticia S.L.",
+        "FB-22",
+        "B22222222",
+        "beta.txt",
+    );
+    // La persona nombra a Alfa y el documento hostil desvía a Beta.
+    let turn = propose_asking(
+        &mut w,
+        None,
+        "Aprueba la factura FA-12",
+        &[alfa, beta],
+        vec![approve(beta)],
+    );
+    let card = card_of(&turn, "approve");
+    assert_eq!(card.summary["named_by_person"], json!(false));
+    let error = w
+        .app
+        .proposal_confirm(card.id, Confirmations::default())
+        .unwrap_err();
+    assert_eq!(code(&error), "unnamed_ack_required", "{error}");
+    assert_eq!(w.statuses().last().unwrap().1, "pending");
+    assert_eq!(w.task(beta).state, TaskState::AwaitingReview);
+    // La casilla de importes no vale para esto.
+    let error = w
+        .app
+        .proposal_confirm(
+            card.id,
+            Confirmations {
+                amounts_checked: true,
+                ..Default::default()
+            },
+        )
+        .unwrap_err();
+    assert_eq!(code(&error), "unnamed_ack_required");
+    w.app
+        .proposal_confirm(
+            card.id,
+            Confirmations {
+                unnamed_checked: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    // La que sí nombró no pide casilla.
+    let turn = propose_asking(
+        &mut w,
+        None,
+        "Aprueba la factura FA-12",
+        &[alfa],
+        vec![approve(alfa)],
+    );
+    let named = card_of(&turn, "approve");
+    assert_eq!(named.summary["named_by_person"], json!(true));
+    w.app
+        .proposal_confirm(named.id, Confirmations::default())
+        .unwrap();
+}
+
+#[test]
+fn the_person_naming_rule_looks_at_number_file_supplier_sender_and_subject_words() {
+    let mut w = world();
+    let alfa = invoice_with(
+        &mut w,
+        "Alfa Ficticia S.L.",
+        "FA-12",
+        "B11111111",
+        "factura-alfa.txt",
+    );
+    for (question, named) in [
+        ("Aprueba la factura FA-12", true),
+        ("Aprueba la FA 12", true),
+        ("Aprueba la fa12", true),
+        ("Aprueba la de Alfa Ficticia", true),
+        ("Aprueba factura-alfa.txt", true),
+        ("Aprueba factura-alfa", true),
+        ("Aprueba la de Beta", false),
+        ("Apruébala", false),
+        ("Aprueba la factura", false),
+    ] {
+        let turn = propose_asking(&mut w, None, question, &[alfa], vec![approve(alfa)]);
+        let card = card_of(&turn, "approve");
+        assert_eq!(card.summary["named_by_person"], json!(named), "{question}");
+        w.app.proposal_dismiss(card.id).unwrap();
+    }
+    // Una respuesta corta a una aclaración cuenta con el turno anterior de la persona.
+    w.ext.turn(vec![answer("¿Cuál de ellas?")]);
+    let first = ask(&mut w, None, "Aprueba la factura FA-12", "review");
+    let turn = propose_asking(
+        &mut w,
+        first.conversation_id,
+        "esa",
+        &[alfa],
+        vec![approve(alfa)],
+    );
+    assert_eq!(
+        card_of(&turn, "approve").summary["named_by_person"],
+        json!(true)
+    );
+}
+
+#[test]
+fn only_one_task_proposal_per_turn_unless_the_person_asks_for_several() {
+    let mut w = world();
+    let alfa = invoice_with(
+        &mut w,
+        "Alfa Ficticia S.L.",
+        "FA-12",
+        "B11111111",
+        "alfa.txt",
+    );
+    let beta = invoice_with(
+        &mut w,
+        "Beta Ficticia S.L.",
+        "FB-22",
+        "B22222222",
+        "beta.txt",
+    );
+    let both = vec![approve(alfa), approve(beta)];
+    // Nombra una y el documento desvía a la otra: la segunda no se crea.
+    let one = propose_asking(
+        &mut w,
+        None,
+        "Aprueba la factura FA-12",
+        &[alfa, beta],
+        both.clone(),
+    );
+    assert_eq!(one.proposals.len(), 1);
+    assert_eq!(one.proposals[0].task_id, Some(alfa));
+    assert!(last_request(&w).content.contains("one_task_per_turn"));
+    // Nombra las dos, o pide todas: se crean las dos.
+    for question in ["Aprueba la FA-12 y la FB-22", "Aprueba todas las facturas"] {
+        let turn = propose_asking(&mut w, None, question, &[alfa, beta], both.clone());
+        assert_eq!(turn.proposals.len(), 2, "{question}");
+        for card in &turn.proposals {
+            w.app.proposal_dismiss(card.id).unwrap();
+        }
+    }
+}
+
+fn mentions(card: &ProposalCard, kind: &str, value: &str) -> bool {
+    card.summary["other_documents"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|i| {
+            i["kind"] == kind
+                && i["value"]
+                    .as_str()
+                    .is_some_and(|v| v.eq_ignore_ascii_case(value))
+        })
+}
+
+#[test]
+fn other_documents_are_compared_without_format_legal_form_and_with_domains_and_tax_ids() {
+    let mut w = world();
+    let mail = first_mail(&mut w);
+    invoice_with(
+        &mut w,
+        "Suministros Ficticios S.L.",
+        "FA-2026-012",
+        "B24681357",
+        "factura-sum.txt",
+    );
+    // Otro formato del número (separadores, guion Unicode, compacto) y el proveedor sin la forma jurídica.
+    for body in [
+        "Gracias. Su factura FA 2026 012 sigue pendiente.",
+        "Gracias. Su factura FA\u{2011}2026\u{2011}012 sigue pendiente.",
+        "Gracias. Su factura FA2026012 sigue pendiente.",
+    ] {
+        let turn = edit_draft_turn(&mut w, mail, body);
+        let card = card_of(&turn, "edit_draft");
+        assert!(
+            mentions(&card, "invoice_number", "FA-2026-012"),
+            "{body}: {:?}",
+            card.summary
+        );
+        w.app.proposal_dismiss(card.id).unwrap();
+    }
+    let turn = edit_draft_turn(
+        &mut w,
+        mail,
+        "Gracias. Hablamos con Suministros Ficticios SA mañana.",
+    );
+    assert!(mentions(
+        &card_of(&turn, "edit_draft"),
+        "party",
+        "Suministros Ficticios S.L."
+    ));
+    // El NIF de otro proveedor.
+    let turn = edit_draft_turn(&mut w, mail, "Gracias. Su NIF B24681357 consta.");
+    assert!(mentions(
+        &card_of(&turn, "edit_draft"),
+        "tax_id",
+        "B24681357"
+    ));
+    // El dominio de otro remitente.
+    let from = w
+        .app
+        .tasks()
+        .unwrap()
+        .into_iter()
+        .filter(|t| t.kind == EMAIL && t.id != mail)
+        .filter_map(|t| t.result)
+        .find_map(|r| {
+            r["message"]["from"]
+                .as_str()
+                .filter(|f| f.contains('@'))
+                .map(str::to_owned)
+        })
+        .expect("otro correo con remitente");
+    let domain = from
+        .rsplit_once('@')
+        .unwrap()
+        .1
+        .trim_end_matches('>')
+        .to_owned();
+    let turn = edit_draft_turn(
+        &mut w,
+        mail,
+        &format!("Gracias. Escribimos a alguien de {domain}."),
+    );
+    // Un dominio nuevo en el borrador ya lo rechaza la comprobación de contactos nuevos (D185): no
+    // llega a ser tarjeta, así que el aviso de otros documentos no tiene que cubrirlo.
+    assert!(turn.proposals.is_empty(), "{:?}", turn.proposals);
+}
+
+#[test]
+fn what_belongs_to_the_same_thread_or_sender_is_not_foreign() {
+    let mut w = world();
+    let mail = first_mail(&mut w);
+    invoice_with(
+        &mut w,
+        "Suministros Ficticios S.L.",
+        "FA-2026-012",
+        "B24681357",
+        "factura-sum.txt",
+    );
+    let body = "Gracias. Su factura FA-2026-012 sigue pendiente.";
+    let turn = edit_draft_turn(&mut w, mail, body);
+    let card = card_of(&turn, "edit_draft");
+    assert_eq!(card.summary["other_documents_total"], json!(1));
+    w.app.proposal_dismiss(card.id).unwrap();
+    // Otro correo del mismo hilo, anterior, que ya citaba esa factura.
+    let earlier = w
+        .app
+        .tasks()
+        .unwrap()
+        .into_iter()
+        .find(|t| t.kind == EMAIL && t.id != mail)
+        .unwrap()
+        .id;
+    w.sql(&format!(
+        "UPDATE tasks SET result = json_set(result, '$.message.thread_key', 'HILO-1') WHERE id IN ({mail}, {earlier});
+         UPDATE search_index SET body = body || ' Le enviamos la factura FA-2026-012.' WHERE task_id = {earlier};"
+    ));
+    let turn = edit_draft_turn(&mut w, mail, body);
+    assert_eq!(
+        card_of(&turn, "edit_draft").summary["other_documents_total"],
+        json!(0)
+    );
+}
+
+#[test]
+fn a_rule_value_that_is_not_in_the_documents_needs_its_checkbox_but_is_not_refused() {
+    let mut w = world();
+    invoice_with(
+        &mut w,
+        "Suministros Ficticios S.L.",
+        "FA-12",
+        "B24681357",
+        "factura-sum.txt",
+    );
+    let make = |w: &mut World, supplier: &str| {
+        w.ext.turn(vec![
+            tool(
+                "propose_create_rule",
+                json!({ "action": "register_invoice", "supplier": supplier }),
+            ),
+            answer("Preparada."),
+        ]);
+        ask(
+            w,
+            None,
+            "Cree una regla para registrar las facturas de ese proveedor",
+            "rules",
+        )
+    };
+    // Un proveedor nuevo: la tarjeta lo dice y la casilla lo desbloquea.
+    let unknown = make(&mut w, "Zeta Nueva SL");
+    let card = card_of(&unknown, "create_rule");
+    assert_eq!(card.summary["unknown_values"], json!(["supplier"]));
+    let error = w
+        .app
+        .proposal_confirm(card.id, Confirmations::default())
+        .unwrap_err();
+    assert_eq!(code(&error), "unknown_values_ack_required", "{error}");
+    assert_eq!(w.statuses().last().unwrap().1, "pending");
+    let receipt = w
+        .app
+        .proposal_confirm(
+            card.id,
+            Confirmations {
+                unknown_values_checked: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(receipt.outcome, ReceiptOutcome::Done);
+    // Uno que sí aparece (también sin la forma jurídica y con otra grafía): sin aviso.
+    for supplier in [
+        "Suministros Ficticios SL",
+        "suministros ficticios",
+        "Suministros Ficticios S.L.",
+    ] {
+        let known = make(&mut w, supplier);
+        let card = card_of(&known, "create_rule");
+        assert_eq!(card.summary["unknown_values"], json!([]), "{supplier}");
+        w.app.proposal_dismiss(card.id).unwrap();
+    }
 }

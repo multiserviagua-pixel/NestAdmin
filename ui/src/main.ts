@@ -325,6 +325,15 @@ import {
   AMOUNTS_CHECKED_LABEL,
   AMOUNTS_REQUIRED_HINT,
   OTHER_DOCUMENTS_CHECKED_LABEL,
+  UNNAMED_CHECKED_LABEL,
+  UNNAMED_REQUIRED_HINT,
+  UNNAMED_TEXT,
+  UNNAMED_TITLE,
+  UNKNOWN_VALUES_CHECKED_LABEL,
+  UNKNOWN_VALUES_REQUIRED_HINT,
+  UNKNOWN_VALUES_TITLE,
+  proposalIsUnnamed,
+  unknownRuleValues,
   OTHER_DOCUMENTS_REQUIRED_HINT,
   OTHER_DOCUMENTS_TITLE,
   linksRemovedText,
@@ -595,7 +604,7 @@ const state = {
     // «Ver lo enviado»: vista del propio panel con «Volver»; guarda el desplazamiento al que volver.
     sent: null as null | { turnId: number; calls: AssistantSentCall[] | null; error: string | null; scroll: number },
     // E3 (D185): estado de pantalla de cada tarjeta de propuesta (casilla de importes, ejecución en curso, aviso).
-    proposalUi: {} as Record<number, { checked: boolean; checkedOther: boolean; busy: boolean; note: string | null }>,
+    proposalUi: {} as Record<number, { checked: boolean; checkedOther: boolean; checkedUnnamed: boolean; checkedUnknown: boolean; busy: boolean; note: string | null }>,
   },
   // Opción del asistente en Configuración (D183).
   assistantConsent: null as AssistantConsentView | null,
@@ -7267,7 +7276,7 @@ function chatCard(hit: SearchHit, key: string): HTMLElement {
 const propKey = (id: number, part: string) => `chat:prop:${id}:${part}`;
 
 function proposalUi(id: number) {
-  return (state.chat.proposalUi[id] ??= { checked: false, checkedOther: false, busy: false, note: null });
+  return (state.chat.proposalUi[id] ??= { checked: false, checkedOther: false, checkedUnnamed: false, checkedUnknown: false, busy: false, note: null });
 }
 
 function proposalById(id: number): ProposalCard | null {
@@ -7313,7 +7322,9 @@ async function confirmProposal(card: ProposalCard) {
   if (ui.busy || !proposalIsOpen(card.status)) return;
   const ack = proposalNeedsAck(card);
   const otherAck = proposalNeedsOtherAck(card);
-  if ((ack && !ui.checked) || (otherAck && !ui.checkedOther)) return;
+  const unnamedAck = proposalIsUnnamed(card.summary);
+  const unknownAck = unknownRuleValues(card.summary).length > 0;
+  if ((ack && !ui.checked) || (otherAck && !ui.checkedOther) || (unnamedAck && !ui.checkedUnnamed) || (unknownAck && !ui.checkedUnknown)) return;
   ui.busy = true;
   ui.note = null;
   // El foco pasa al estado de la propia tarjeta (no al botón): quien usa el teclado no pierde su sitio.
@@ -7322,7 +7333,12 @@ async function confirmProposal(card: ProposalCard) {
   let confirmed = false;
   let cancelled = false;
   try {
-    const receipt = await api.proposalConfirm(card.id, ack ? ui.checked : undefined, otherAck ? ui.checkedOther : undefined);
+    const receipt = await api.proposalConfirm(card.id, {
+      amountsChecked: ack ? ui.checked : undefined,
+      otherDocumentsChecked: otherAck ? ui.checkedOther : undefined,
+      unnamedChecked: unnamedAck ? ui.checkedUnnamed : undefined,
+      unknownValuesChecked: unknownAck ? ui.checkedUnknown : undefined,
+    });
     // Con el resultado real: si la acción no se hizo, la tarjeta queda `failed` con su motivo.
     card.status = receipt.outcome === "not_done" ? "failed" : "confirmed";
     card.receipt = receipt;
@@ -7525,6 +7541,49 @@ function proposalRuleDetail(s: Record<string, any>, editing: boolean): Child[] {
   ].flat() as Child[];
 }
 
+/** Casilla de una tarjeta con su aviso destacado (D267, D268); `null` si no hay aviso o la tarjeta ya no está abierta. */
+function proposalAckBox(card: ProposalCard, part: string, title: string, lines: string[], label: string, checked: boolean, busy: boolean, set: (v: boolean) => void): HTMLElement {
+  const id = `chat-prop-${part}-${card.id}`;
+  const open = proposalIsOpen(card.status);
+  return h(
+    "div",
+    { class: "amount-review proposal-other-documents", role: "group", "aria-label": title },
+    h("strong", {}, title),
+    ...lines.map((line) => h("p", {}, line)),
+    open
+      ? h(
+          "label",
+          { class: "confirm", for: id },
+          h("input", {
+            type: "checkbox",
+            id,
+            "data-focus-key": propKey(card.id, `${part}-ack`),
+            ...(checked ? { checked: "" } : {}),
+            ...(busy ? { disabled: "" } : {}),
+            onchange: (e: Event) => {
+              set((e.target as HTMLInputElement).checked);
+              renderChat();
+            },
+          }),
+          ` ${label}`,
+        )
+      : null,
+  );
+}
+
+/** Avisos de una tarjeta que no vienen del tipo de propuesta: documento no nombrado y valores de regla desconocidos. */
+function proposalGeneralAcks(card: ProposalCard, ui: { checkedUnnamed: boolean; checkedUnknown: boolean; busy: boolean }): Array<HTMLElement | null> {
+  const unknown = unknownRuleValues(card.summary);
+  return [
+    proposalIsUnnamed(card.summary)
+      ? proposalAckBox(card, "unnamed", UNNAMED_TITLE, [UNNAMED_TEXT], UNNAMED_CHECKED_LABEL, ui.checkedUnnamed, ui.busy, (v) => (proposalUi(card.id).checkedUnnamed = v))
+      : null,
+    unknown.length
+      ? proposalAckBox(card, "unknown", UNKNOWN_VALUES_TITLE, [`${unknown.join(", ")}: no aparece en ninguno de los documentos de este equipo. Si espera un proveedor o un remitente nuevo, puede continuar.`], UNKNOWN_VALUES_CHECKED_LABEL, ui.checkedUnknown, ui.busy, (v) => (proposalUi(card.id).checkedUnknown = v))
+      : null,
+  ];
+}
+
 function proposalDetail(card: ProposalCard, ui: { checked: boolean; checkedOther: boolean; busy: boolean }): Child[] {
   const s = card.summary ?? {};
   switch (s.type) {
@@ -7606,6 +7665,10 @@ function proposalCard(card: ProposalCard): HTMLElement {
   const needsAck = proposalNeedsAck(card);
   const blockedByAck = needsAck && !ui.checked;
   const blockedByOther = proposalNeedsOtherAck(card) && !ui.checkedOther;
+  const blockedByUnnamed = proposalIsUnnamed(card.summary) && !ui.checkedUnnamed;
+  const blockedByUnknown = unknownRuleValues(card.summary).length > 0 && !ui.checkedUnknown;
+  const blocked = blockedByAck || blockedByOther || blockedByUnnamed || blockedByUnknown;
+  const blockedHint = blockedByUnnamed ? UNNAMED_REQUIRED_HINT : blockedByAck ? AMOUNTS_REQUIRED_HINT : blockedByOther ? OTHER_DOCUMENTS_REQUIRED_HINT : UNKNOWN_VALUES_REQUIRED_HINT;
   const final = proposalFinalText(card);
   const receipt = proposalReceiptLines(card);
   const rulesNotice = proposalRulesText(card.kind, card.effect, card.summary ?? {});
@@ -7626,10 +7689,11 @@ function proposalCard(card: ProposalCard): HTMLElement {
     { class: `proposal-card status-${card.status}`, role: "region", "aria-label": heading, "aria-busy": String(ui.busy) },
     h("div", { class: "proposal-head" }, h("h4", {}, heading), statusChip(proposalStatusLabel(card.status), card.status === "confirmed" ? "ok" : open ? "warn" : "neutral")),
     open ? h("p", { class: "proposal-fixed" }, PROPOSAL_NOTHING_DONE) : null,
+    ...proposalGeneralAcks(card, ui),
     ...proposalDetail(card, ui),
     open ? h("p", { class: "proposal-effect" }, proposalEffectText(card.kind, card.effect, card.summary ?? {})) : null,
     open && rulesNotice ? h("p", { class: "notice warn proposal-notice" }, rulesNotice) : null,
-    open && (blockedByAck || blockedByOther) ? h("p", { class: "meta", id: hintId }, blockedByAck ? AMOUNTS_REQUIRED_HINT : OTHER_DOCUMENTS_REQUIRED_HINT) : null,
+    open && blocked ? h("p", { class: "meta", id: hintId }, blockedHint) : null,
     open
       ? h(
           "div",
@@ -7641,8 +7705,8 @@ function proposalCard(card: ProposalCard): HTMLElement {
               ...(tone === "plain" ? {} : { class: tone }),
               "data-focus-key": propKey(card.id, "confirm"),
               "aria-label": proposalButtonName(card),
-              ...(blockedByAck || blockedByOther ? { "aria-describedby": hintId } : {}),
-              disabled: ui.busy || blockedByAck || blockedByOther,
+              ...(blocked ? { "aria-describedby": hintId } : {}),
+              disabled: ui.busy || blocked,
               onclick: () => void confirmProposal(card),
             },
             proposalVerb(card.kind, card.effect),

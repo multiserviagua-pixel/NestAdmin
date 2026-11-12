@@ -375,6 +375,14 @@ impl Actions {
         self.0 == 0
     }
 
+    /// Las clases por su nombre (`task`, `draft`…); un nombre desconocido se ignora.
+    pub fn from_names<S: AsRef<str>>(names: &[S]) -> Self {
+        ActionClass::ALL
+            .into_iter()
+            .filter(|c| names.iter().any(|n| n.as_ref() == c.name()))
+            .fold(Self::NONE, Self::with)
+    }
+
     pub fn classes(self) -> Vec<ActionClass> {
         ActionClass::ALL
             .into_iter()
@@ -389,40 +397,56 @@ impl Actions {
     }
 }
 
-/// Palabras de la persona partidas en palabras sin tildes ni mayúsculas. Las raíces se comparan
-/// con palabras enteras o con su comienzo, nunca con un trozo cualquiera del texto.
+/// Palabras de la persona partidas en palabras sin tildes ni mayúsculas. Un verbo se compara con
+/// palabras enteras (nunca con un comienzo cualquiera: «aprobaron» no es «aprobar»).
 struct Said {
     tokens: Vec<String>,
     joined: String,
+    /// El texto original llevaba un signo de interrogación.
+    question_mark: bool,
 }
 
-/// Pronombres que se pegan al imperativo («apruébala», «mándamelo»).
+/// Pronombres que se pegan al verbo («apruébala», «mándamelo», «envíasela»).
 const CLITICS: &[&str] = &[
-    "", "la", "lo", "las", "los", "me", "nos", "le", "les", "melo", "mela", "melos", "melas",
+    "", "la", "lo", "las", "los", "me", "nos", "le", "les", "se", "melo", "mela", "melos", "melas",
+    "sela", "selo", "selas", "selos",
 ];
 
-/// Palabras tras las que un verbo en «-a» es el presente de otra persona («quién envía», «cuando
-/// manda», «la archiva»), no una orden a quien lee.
-const NOT_A_COMMAND_AFTER: &[&str] = &[
-    "quien", "quienes", "que", "cuando", "donde", "como", "cual", "cuales", "si", "porque", "el",
-    "la", "los", "las", "un", "una", "su", "sus", "mi", "mis", "este", "esta", "ese", "esa", "del",
-    "al",
+/// Una palabra anterior en la frase que quita a un verbo sin pronombre su sentido de orden:
+/// «quién envía», «por aprobar», «no registre», «hay que responder», «cómo se registra».
+const BEFORE_BLOCKS: &[&str] = &[
+    "se", "no", "nunca", "ni", "por", "porque", "quex", "como", "cuando", "cuantas", "cuantos",
+    "cual", "cuales", "quien", "quienes", "donde", "hay",
 ];
 
-/// Quita lo que la persona escribe entre comillas («…», “…”, "…"): es la cita de un asunto, un
-/// nombre de archivo o un texto de un documento, no sus palabras. Una comilla sin pareja no quita
-/// nada.
+/// La palabra inmediatamente anterior que lo vuelve un sustantivo o el presente de otra persona
+/// («la archiva», «su manda», «el envía»).
+const ARTICLES: &[&str] = &[
+    "el", "la", "los", "las", "lo", "un", "una", "su", "sus", "mi", "mis", "este", "esta", "ese",
+    "esa", "del", "al",
+];
+
+/// Comillas de apertura y su cierre. Lo que va entre ellas es una cita de un documento, no
+/// palabras de la persona. Una comilla sin pareja no quita nada: el texto cuenta como suyo.
+const QUOTES: &[(char, char)] = &[
+    ('«', '»'),
+    ('“', '”'),
+    ('„', '“'),
+    ('‘', '’'),
+    ('‹', '›'),
+    ('"', '"'),
+    ('\'', '\''),
+];
+
 fn without_quotes(text: &str) -> String {
     let chars: Vec<char> = text.chars().collect();
     let mut out = String::with_capacity(text.len());
     let mut i = 0;
     while i < chars.len() {
-        let close = match chars[i] {
-            '«' => Some('»'),
-            '“' => Some('”'),
-            '"' => Some('"'),
-            _ => None,
-        };
+        let close = QUOTES
+            .iter()
+            .find(|(open, _)| *open == chars[i])
+            .map(|q| q.1);
         if let Some(close) = close {
             if let Some(end) = chars[i + 1..].iter().position(|c| *c == close) {
                 out.push(' ');
@@ -438,16 +462,51 @@ fn without_quotes(text: &str) -> String {
 
 impl Said {
     fn new(text: &str) -> Self {
-        let tokens: Vec<String> = plain(&without_quotes(text))
+        // «Qué» interrogativo (con tilde) se distingue de «que» conjunción: «¿qué hay por aprobar?»
+        // frente a «quiero que apruebe».
+        let marked = without_quotes(text).to_lowercase().replace("qué", "quex");
+        let plain_text = plain(&marked).replace("por favor", " ");
+        let tokens: Vec<String> = plain_text
             .split(|c: char| !c.is_alphanumeric())
             .filter(|t| !t.is_empty())
             .map(str::to_owned)
             .collect();
         let joined = format!(" {} ", tokens.join(" "));
-        Self { tokens, joined }
+        Self {
+            tokens,
+            joined,
+            question_mark: text.contains('?'),
+        }
     }
 
-    /// Alguna palabra empieza por una de estas raíces (infinitivos y formas con terminación libre).
+    /// Alguna palabra es una de estas formas (infinitivo, imperativo o subjuntivo de usted), sola o
+    /// con pronombres pegados. Con pronombre es una orden sin duda («apruébala», «aprobarla»);
+    /// sola, solo si nada antes la anula («quién envía», «por aprobar», «no registre»).
+    fn verbs(&self, forms: &[&str]) -> bool {
+        self.tokens.iter().enumerate().any(|(k, t)| {
+            forms.iter().any(|f| {
+                let Some(rest) = t.strip_prefix(f) else {
+                    return false;
+                };
+                if !CLITICS.contains(&rest) {
+                    return false;
+                }
+                !rest.is_empty()
+                    || (!self.tokens[..k]
+                        .iter()
+                        .any(|b| BEFORE_BLOCKS.contains(&b.as_str()))
+                        && !(k > 0 && ARTICLES.contains(&self.tokens[k - 1].as_str())))
+            })
+        })
+    }
+
+    /// Formas de segunda persona («aprueba**s**», «registre**s**»): se dirigen a quien lee y no
+    /// necesitan comprobar nada más.
+    fn you(&self, forms: &[&str]) -> bool {
+        self.tokens.iter().any(|t| forms.contains(&t.as_str()))
+    }
+
+    /// Alguna palabra empieza por una de estas raíces (adjetivos y sustantivos, no verbos).
     fn prefix(&self, roots: &[&str]) -> bool {
         self.tokens
             .iter()
@@ -459,19 +518,6 @@ impl Said {
         self.tokens.iter().any(|t| words.contains(&t.as_str()))
     }
 
-    /// Alguna palabra es una de estas formas de imperativo o subjuntivo, sola o con pronombres
-    /// pegados. No acepta participios («registrada») ni sustantivos («registro»).
-    fn command(&self, forms: &[&str]) -> bool {
-        self.tokens.iter().enumerate().any(|(k, t)| {
-            let after_subject = k > 0 && NOT_A_COMMAND_AFTER.contains(&self.tokens[k - 1].as_str());
-            !after_subject
-                && forms.iter().any(|f| {
-                    t.strip_prefix(f)
-                        .is_some_and(|rest| CLITICS.contains(&rest))
-                })
-        })
-    }
-
     /// Alguna de estas frases, entre palabras enteras.
     fn phrase(&self, phrases: &[&str]) -> bool {
         phrases
@@ -479,14 +525,13 @@ impl Said {
             .any(|p| self.joined.contains(&format!(" {p} ")))
     }
 
-    fn has_number(&self) -> bool {
-        self.tokens
-            .iter()
-            .any(|t| !t.is_empty() && t.bytes().all(|b| b.is_ascii_digit()))
+    /// Una pregunta sobre lo ocurrido («¿por qué no se envió?»): no pide nada.
+    fn asks_why(&self) -> bool {
+        self.question_mark || self.phrase(&["por que"]) || self.exact(&["porque"])
     }
 }
 
-/// Verbos de cambio, comunes a varias clases (imperativo y subjuntivo).
+/// Verbos de cambio (imperativo y subjuntivo de usted).
 const CHANGE_FORMS: &[&str] = &[
     "cambia",
     "cambie",
@@ -539,9 +584,26 @@ const CHANGE_ROOTS: &[&str] = &[
     "reemplazar",
     "agregar",
 ];
+const CHANGE_YOU: &[&str] = &[
+    "cambias",
+    "editas",
+    "modificas",
+    "ajustas",
+    "pones",
+    "cambies",
+    "edites",
+    "modifiques",
+    "ajustes",
+    "pongas",
+];
 
-fn asks_task(w: &Said) -> bool {
-    w.prefix(&[
+fn change(w: &Said) -> bool {
+    w.verbs(CHANGE_FORMS) || w.verbs(CHANGE_ROOTS) || w.you(CHANGE_YOU)
+}
+
+/// Decidir una tarea: lo que se le ordena a la aplicación sobre un documento o correo.
+fn task_command(w: &Said) -> bool {
+    w.verbs(&[
         "aprobar",
         "registrar",
         "enviar",
@@ -552,7 +614,7 @@ fn asks_task(w: &Said) -> bool {
         "reintentar",
         "reprocesar",
         "contabilizar",
-    ]) || w.command(&[
+        "validar",
         "aprueba",
         "apruebe",
         "registra",
@@ -572,28 +634,82 @@ fn asks_task(w: &Said) -> bool {
         "reprocesa",
         "contabiliza",
         "contabilice",
-    ]) || w.phrase(&[
-        "no se envio",
-        "no se ha enviado",
-        "no se mando",
-        "no se registro",
-        "no se ha registrado",
-        "no llego a enviarse",
-        "como no enviado",
-        "como no enviada",
-        "como no registrado",
-        "como no registrada",
-        "vuelve a intentar",
-        "volver a intentar",
-        "intentalo de nuevo",
-        "intentalo otra vez",
-        "vuelve a procesar",
-        "volver a procesar",
+        "valida",
+        "valide",
+    ]) || w.you(&[
+        "apruebas",
+        "registras",
+        "envias",
+        "mandas",
+        "rechazas",
+        "descartas",
+        "archivas",
+        "reintentas",
+        "validas",
+        "contabilizas",
+        "apruebes",
+        "registres",
+        "envies",
+        "mandes",
+        "rechaces",
+        "descartes",
+        "archives",
+        "reintentes",
+        "valides",
+        "contabilices",
     ])
 }
 
-fn asks_draft(w: &Said) -> bool {
-    w.command(&[
+fn asks_task(w: &Said) -> bool {
+    task_command(w)
+        // «Prepara la aprobación del correo»: se prepara la propia acción.
+        || (w.verbs(&["prepara", "prepare", "preparar"])
+            && w.exact(&["aprobacion", "registro", "envio", "rechazo", "reintento"]))
+        || w.phrase(&[
+            "dale el visto bueno",
+            "dar el visto bueno",
+            "da el visto bueno",
+            "dale visto bueno",
+            "dalo por bueno",
+            "dala por buena",
+        ])
+        // Lo ocurrido, dicho sin pregunta: «esta no se envió».
+        || (!w.asks_why()
+            && w.phrase(&[
+                "no se envio",
+                "no se ha enviado",
+                "no se mando",
+                "no se registro",
+                "no se ha registrado",
+                "no llego a enviarse",
+                "como no enviado",
+                "como no enviada",
+                "como no registrado",
+                "como no registrada",
+            ]))
+        || (!w.asks_why()
+            && w.phrase(&[
+                "vuelve a intentar",
+                "volver a intentar",
+                "intentalo de nuevo",
+                "intentalo otra vez",
+                "vuelve a procesar",
+                "volver a procesar",
+            ]))
+}
+
+/// Las órdenes de redactar o contestar, que bastan por sí solas.
+fn draft_command(w: &Said) -> bool {
+    w.verbs(&[
+        "reescribir",
+        "redactar",
+        "reformular",
+        "corregir",
+        "responder",
+        "contestar",
+        "acortar",
+        "alargar",
+        "suavizar",
         "reescribe",
         "reescriba",
         "redacta",
@@ -607,24 +723,73 @@ fn asks_draft(w: &Said) -> bool {
         "contesta",
         "conteste",
         "propon",
+        "proponga",
         "mejora",
         "mejore",
         "acorta",
         "acorte",
         "alarga",
+        "alargue",
         "suaviza",
-    ]) || w.prefix(&[
-        "reescribir",
-        "redactar",
-        "reformular",
-        "corregir",
-        "responder",
-        "contestar",
-        "acortar",
-        "alargar",
-        "suavizar",
-    ]) || (w.exact(&["borrador", "borradores"])
-        && (w.command(CHANGE_FORMS) || w.prefix(CHANGE_ROOTS)))
+        "suavice",
+    ]) || w.you(&[
+        "reescribes",
+        "redactas",
+        "reformulas",
+        "corriges",
+        "respondes",
+        "contestas",
+        "mejoras",
+        "acortas",
+        "reescribas",
+        "redactes",
+        "corrijas",
+        "respondas",
+        "contestes",
+        "mejores",
+    ])
+}
+
+/// Palabras que nombran el texto de una respuesta.
+const DRAFT_NOUNS: &[&str] = &[
+    "borrador",
+    "borradores",
+    "respuesta",
+    "respuestas",
+    "texto",
+    "mensaje",
+    "contestacion",
+];
+
+fn asks_draft(w: &Said) -> bool {
+    // «Cámbialo y apruébalo», «cambie y apruebe»: un verbo de cambio (con o sin pronombre) en la
+    // misma petición que decide una tarea abre también el borrador, porque lo que se cambia es lo
+    // que se va a decidir. «Cámbialo» solo no dice qué cambia y no abre nada.
+    let change_it = w.verbs(&[
+        "cambia",
+        "cambie",
+        "edita",
+        "edite",
+        "modifica",
+        "modifique",
+        "corrige",
+        "corrija",
+        "reescribe",
+        "reescriba",
+        "ajusta",
+        "ajuste",
+        "mejora",
+        "mejore",
+    ]);
+    draft_command(w)
+        || (w.exact(DRAFT_NOUNS) && change(w))
+        // «Escribe una respuesta a Beta», «redacta un correo».
+        || (w.verbs(&["escribe", "escriba", "escribir"])
+            && w.exact(&["respuesta", "borrador", "correo", "mensaje", "contestacion", "email"]))
+        // «Dile a Alfa que…», «añade al correo que…».
+        || w.phrase(&["dile a", "dile que", "diles a", "digale a", "digale que"])
+        || (w.phrase(&["al correo que", "al mensaje que", "a la respuesta que"]) && change(w))
+        || (change_it && task_command(w))
         || w.phrase(&[
             "mas formal",
             "mas corto",
@@ -640,7 +805,28 @@ fn asks_draft(w: &Said) -> bool {
 
 fn asks_rules(w: &Said) -> bool {
     let noun = w.exact(&["regla", "reglas", "sugerencia", "sugerencias"]);
-    let verb = w.command(&[
+    let verb = w.verbs(&[
+        "crear",
+        "cambiar",
+        "editar",
+        "modificar",
+        "ajustar",
+        "estrechar",
+        "ampliar",
+        "acotar",
+        "preparar",
+        "generar",
+        "configurar",
+        "establecer",
+        "añadir",
+        "aceptar",
+        "descartar",
+        "ignorar",
+        "eliminar",
+        "borrar",
+        "poner",
+        "hacer",
+        "proponer",
         "crea",
         "cree",
         "cambia",
@@ -678,41 +864,21 @@ fn asks_rules(w: &Said) -> bool {
         "pon",
         "haz",
         "propon",
-    ]) || w.prefix(&[
-        "crear",
-        "cambiar",
-        "editar",
-        "modificar",
-        "ajustar",
-        "estrechar",
-        "ampliar",
-        "acotar",
-        "preparar",
-        "generar",
-        "configurar",
-        "establecer",
-        "añadir",
-        "aceptar",
-        "descartar",
-        "ignorar",
-        "eliminar",
-        "borrar",
-        "poner",
-        "hacer",
-        "proponer",
-    ]);
+    ]) || w.you(&["creas", "aceptas", "descartas", "cambias", "creas"]);
+    // «Siempre», «cada vez que» y «automáticamente» solo piden una regla junto a una orden
+    // («registra siempre las de Alfa»); solos, «¿siempre llegan tarde?» es una pregunta.
+    let standing = w.exact(&["siempre", "automaticamente"]) || w.phrase(&["cada vez que"]);
+    let order = task_command(w) || draft_command(w);
     (noun && verb)
-        || w.exact(&["siempre", "automaticamente"])
-        || w.command(&["automatiza", "automatice"])
+        || (standing && order)
+        || w.verbs(&["automatiza", "automatice"])
+        // «Quiero que las de Alfa se registren solas».
+        || ((w.phrase(&["quiero que", "necesito que", "quisiera que"]))
+            && w.exact(&["solas", "solos", "automaticamente", "siempre"]))
         || w.phrase(&[
-            "quiero automatizar",
-            "quisiera automatizar",
-            "puedes automatizar",
-            "podrias automatizar",
             "a partir de ahora",
             "de ahora en adelante",
             "en adelante",
-            "cada vez que",
             "no volver a proponer",
             "no vuelvas a proponer",
             "no me vuelvas a proponer",
@@ -723,6 +889,10 @@ fn asks_rules(w: &Said) -> bool {
             "quisiera una regla",
             "nueva regla",
             "otra regla",
+            "quiero automatizar",
+            "quisiera automatizar",
+            "puedes automatizar",
+            "podrias automatizar",
         ])
 }
 
@@ -731,8 +901,18 @@ fn asks_mail(w: &Said) -> bool {
         "correo", "correos", "buzon", "buzones", "bandeja", "email", "emails", "mensajes",
         "cuenta", "cuentas",
     ]);
+    // «Consulta/revisa el correo», «mira si hay correo nuevo»: consultar el correo.
     let fetch = mail_noun
-        && (w.command(&[
+        && (w.verbs(&[
+            "consultar",
+            "traer",
+            "descargar",
+            "recoger",
+            "actualizar",
+            "sincronizar",
+            "revisar",
+            "mirar",
+            "comprobar",
             "consulta",
             "consulte",
             "trae",
@@ -745,22 +925,39 @@ fn asks_mail(w: &Said) -> bool {
             "actualice",
             "sincroniza",
             "sincronice",
-        ]) || w.prefix(&[
-            "consultar",
-            "traer",
-            "descargar",
-            "recoger",
-            "actualizar",
-            "sincronizar",
+            "revisa",
+            "revise",
+            "mira",
+            "mire",
+            "comprueba",
+            "compruebe",
+        ]) || w.you(&[
+            "consultas",
+            "traes",
+            "descargas",
+            "revisas",
+            "miras",
+            "compruebas",
         ]));
-    let change = w.command(CHANGE_FORMS) || w.prefix(CHANGE_ROOTS);
-    let limit = w.exact(&["limite", "limites"]) && (change || w.has_number());
+    let limit = w.exact(&["limite", "limites"]) && change(w);
     let rename = w.prefix(&["renombr"])
-        || (w.exact(&["nombre", "etiqueta"]) && w.exact(&["cuenta", "cuentas", "buzon"]) && change);
+        || (w.exact(&["nombre", "etiqueta"])
+            && w.exact(&["cuenta", "cuentas", "buzon"])
+            && change(w));
     let route = (w.prefix(&["informativ"])
         || w.phrase(&["a pendientes", "a revision"])
         || w.exact(&["remitente", "remitentes", "dominio"]))
-        && (w.command(&[
+        && (w.verbs(&[
+            "marcar",
+            "pasar",
+            "mover",
+            "tratar",
+            "clasificar",
+            "considerar",
+            "poner",
+            "dejar",
+            "mandar",
+            "enviar",
             "marca",
             "marque",
             "pasa",
@@ -780,17 +977,6 @@ fn asks_mail(w: &Said) -> bool {
             "mande",
             "envia",
             "envie",
-        ]) || w.prefix(&[
-            "marcar",
-            "pasar",
-            "mover",
-            "tratar",
-            "clasificar",
-            "considerar",
-            "poner",
-            "dejar",
-            "mandar",
-            "enviar",
         ]));
     fetch || limit || rename || route
 }
@@ -801,7 +987,7 @@ fn asks_mail(w: &Said) -> bool {
 fn importe_as_verb(w: &Said) -> bool {
     w.tokens.iter().enumerate().any(|(k, t)| {
         t == "importe"
-            && (k == 0 || !NOT_A_COMMAND_AFTER.contains(&w.tokens[k - 1].as_str()))
+            && (k == 0 || !ARTICLES.contains(&w.tokens[k - 1].as_str()))
             && w.tokens.get(k + 1).is_some_and(|next| {
                 [
                     "este",
@@ -838,9 +1024,14 @@ fn importe_as_verb(w: &Said) -> bool {
 }
 
 fn asks_import(w: &Said) -> bool {
-    // «importe» (la cantidad) no es una orden salvo en `importe_as_verb`.
     let verb = importe_as_verb(w)
-        || w.command(&[
+        || w.verbs(&[
+            "importar",
+            "subir",
+            "añadir",
+            "cargar",
+            "agregar",
+            "incorporar",
             "importa",
             "sube",
             "suba",
@@ -854,61 +1045,82 @@ fn asks_import(w: &Said) -> bool {
             "incorpore",
             "adjunta",
             "adjunte",
-        ])
-        || w.prefix(&[
-            "importar",
-            "subir",
-            "añadir",
-            "cargar",
-            "agregar",
-            "incorporar",
         ]);
-    verb && w.exact(&[
-        "archivo",
-        "archivos",
-        "fichero",
-        "ficheros",
-        "documento",
-        "documentos",
-        "factura",
-        "facturas",
-        "pdf",
-        "pdfs",
-        "imagen",
-        "imagenes",
-        "foto",
-        "fotos",
-        "escaneo",
-        "escaneos",
-        "recibo",
-        "recibos",
-        "adjunto",
-        "adjuntos",
-    ])
+    (verb
+        && w.exact(&[
+            "archivo",
+            "archivos",
+            "fichero",
+            "ficheros",
+            "documento",
+            "documentos",
+            "factura",
+            "facturas",
+            "pdf",
+            "pdfs",
+            "imagen",
+            "imagenes",
+            "foto",
+            "fotos",
+            "escaneo",
+            "escaneos",
+            "recibo",
+            "recibos",
+            "adjunto",
+            "adjuntos",
+        ]))
+        || w.phrase(&[
+            "quiero importar",
+            "necesito importar",
+            "quisiera importar",
+            "quiero subir",
+            "quiero cargar",
+        ])
 }
 
-/// Clases de acción que piden las palabras de la persona (D263): la pregunta actual y, para
-/// poder contestar a una aclaración del asistente, el turno anterior DE LA PERSONA en la misma
-/// conversación. Nunca el texto de documentos, de herramientas ni de respuestas del asistente:
-/// quien llama pasa solo lo que escribió la persona y la aplicación guardó. Las preguntas de solo
-/// lectura («dime de qué trata», «resume», «¿cuánto suma?») no abren ninguna clase.
-pub fn requested_actions(question: &str, previous_user_turn: Option<&str>) -> Actions {
+/// Clases de acción que piden las palabras de la persona en ESTA pregunta (D263). Nunca el texto
+/// de documentos, de herramientas ni de respuestas del asistente: lo que la persona cita entre
+/// comillas tampoco cuenta. Las preguntas de solo lectura («dime de qué trata», «resume»,
+/// «¿cuánto suma?», «¿por qué no se envió?») no abren ninguna clase.
+pub fn requested_actions(question: &str) -> Actions {
+    let said = Said::new(question);
     let mut actions = Actions::NONE;
-    for text in std::iter::once(question).chain(previous_user_turn) {
-        let said = Said::new(text);
-        for (class, asked) in [
-            (ActionClass::Task, asks_task(&said)),
-            (ActionClass::Draft, asks_draft(&said)),
-            (ActionClass::Rules, asks_rules(&said)),
-            (ActionClass::Mail, asks_mail(&said)),
-            (ActionClass::Import, asks_import(&said)),
-        ] {
-            if asked {
-                actions = actions.with(class);
-            }
+    for (class, asked) in [
+        (ActionClass::Task, asks_task(&said)),
+        (ActionClass::Draft, asks_draft(&said)),
+        (ActionClass::Rules, asks_rules(&said)),
+        (ActionClass::Mail, asks_mail(&said)),
+        (ActionClass::Import, asks_import(&said)),
+    ] {
+        if asked {
+            actions = actions.with(class);
         }
     }
     actions
+}
+
+/// Palabras como mucho de una respuesta corta a una aclaración.
+pub const MAX_CLARIFICATION_WORDS: usize = 8;
+
+/// Clases abiertas en un turno: las de la pregunta y, solo si esta responde a una aclaración,
+/// las `inherited` del turno anterior (D263). Hereda únicamente si la pregunta es corta (hasta
+/// [`MAX_CLARIFICATION_WORDS`] palabras) y no abre ninguna clase por sí misma. Quien llama pasa
+/// `inherited` vacío salvo que la última respuesta del asistente fuera una pregunta contestada
+/// (`answered`), sin propuestas creadas, y las clases que dejó abiertas sin usar.
+pub fn actions_for_turn(question: &str, inherited: Actions) -> Actions {
+    let own = requested_actions(question);
+    if !own.is_empty() {
+        return own;
+    }
+    let words = question
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|t| !t.is_empty())
+        .count();
+    if words <= MAX_CLARIFICATION_WORDS {
+        inherited
+    } else {
+        Actions::NONE
+    }
 }
 
 /// Herramientas que se ofrecen en un turno: las de los bloques de la vista y la pregunta, y de
@@ -935,47 +1147,146 @@ fn is_internal_ref(target: &str) -> bool {
     })
 }
 
-/// Longitud en caracteres de la dirección web que empieza en `i` (`http://`, `https://`, `ftp://`
-/// o `www.`), sin la puntuación final; `None` si no empieza ahí una.
-fn url_at(chars: &[char], i: usize) -> Option<usize> {
-    if i > 0 {
-        let prev = chars[i - 1];
-        if prev.is_alphanumeric() || "@./-_%=".contains(prev) {
-            return None;
-        }
-    }
-    let starts = |s: &str| {
-        s.chars().enumerate().all(|(k, c)| {
-            chars
-                .get(i + k)
-                .is_some_and(|x| x.to_ascii_lowercase() == c)
+/// Texto sin caracteres de formato ni invisibles y con la anchura completa pasada a normal, para
+/// que una dirección escrita con ellos no se escape del limpiador.
+fn normalize_for_links(text: &str) -> String {
+    text.chars()
+        .filter(|c| !is_format_char(*c))
+        .map(|c| match c as u32 {
+            0xFF01..=0xFF5E => char::from_u32(c as u32 - 0xFEE0).unwrap_or(c),
+            0x3002 | 0xFF61 => '.',
+            0x3000 => ' ',
+            _ => c,
         })
-    };
-    let head = if starts("https://") {
-        8
-    } else if starts("http://") {
-        7
-    } else if starts("ftp://") {
-        6
-    } else if starts("www.") {
-        4
-    } else {
-        return None;
-    };
-    if !chars.get(i + head).is_some_and(|c| c.is_alphanumeric()) {
-        return None;
-    }
-    let mut end = i + head;
+        .collect()
+}
+
+fn lower_at(chars: &[char], i: usize, s: &str) -> bool {
+    s.chars().enumerate().all(|(k, c)| {
+        chars
+            .get(i + k)
+            .is_some_and(|x| x.to_ascii_lowercase() == c)
+    })
+}
+
+/// Fin (índice) de la dirección que empieza en `i` y a la que no se le exige nada de lo anterior:
+/// sin espacios, `<`, `>`, comillas ni acentos graves, y sin la puntuación final.
+fn url_end(chars: &[char], start: usize, min_end: usize) -> usize {
+    let mut end = min_end;
     while chars
         .get(end)
         .is_some_and(|c| !c.is_whitespace() && !matches!(c, '<' | '>' | '"' | '`'))
     {
         end += 1;
     }
-    while end > i + head && ".,;:!?)]}'»”".contains(chars[end - 1]) {
+    while end > min_end && ".,;:!?)]}'»”".contains(chars[end - 1]) {
+        // Un `)` que cierra un `(` de la propia dirección (`alert(1)`) forma parte de ella.
+        if chars[end - 1] == ')' {
+            let slice = &chars[start..end];
+            let open = slice.iter().filter(|c| **c == '(').count();
+            let close = slice.iter().filter(|c| **c == ')').count();
+            if close <= open {
+                break;
+            }
+        }
         end -= 1;
     }
-    Some(end - i)
+    end.max(start)
+}
+
+/// Dominio `etiqueta.tld` (con la `tld` de letras) que empieza en `i`: devuelve dónde acaba.
+fn domain_at(chars: &[char], i: usize) -> Option<usize> {
+    let mut j = i;
+    let mut dots = 0;
+    let mut last_label_start = i;
+    while let Some(c) = chars.get(j) {
+        if c.is_ascii_alphanumeric() || *c == '-' {
+            j += 1;
+        } else if *c == '.'
+            && j > last_label_start
+            && chars.get(j + 1).is_some_and(|n| n.is_ascii_alphanumeric())
+        {
+            dots += 1;
+            j += 1;
+            last_label_start = j;
+        } else {
+            break;
+        }
+    }
+    let tld = &chars[last_label_start..j];
+    (dots >= 1 && tld.len() >= 2 && tld.iter().all(char::is_ascii_alphabetic)).then_some(j)
+}
+
+/// Cuatro grupos de cifras (`10.0.0.1`) que empiezan en `i`: devuelve dónde acaban.
+fn ip_at(chars: &[char], i: usize) -> Option<usize> {
+    let mut j = i;
+    for group in 0..4 {
+        let start = j;
+        while chars.get(j).is_some_and(char::is_ascii_digit) {
+            j += 1;
+        }
+        if j == start || j - start > 3 {
+            return None;
+        }
+        if group < 3 {
+            if chars.get(j) != Some(&'.') {
+                return None;
+            }
+            j += 1;
+        }
+    }
+    Some(j)
+}
+
+/// Longitud en caracteres de la dirección que empieza en `i`, sin la puntuación final; `None` si
+/// no empieza ahí una. Son direcciones: los esquemas `http(s)://`, `hxxp(s)://`, `ftp://`,
+/// `file:`, `data:`, `javascript:` y `mailto:`; `www.`; y un dominio o una IP seguidos de una
+/// ruta (`/…`), de una consulta (`?…`) o de un puerto (`:80`). Un esquema se retira esté donde
+/// esté, también pegado a otra palabra (`xhttps://…`, `dato=https://…`): quien escribe una
+/// dirección para esconderla no deja espacio. Un dominio solo (`proveedor.example`) o una
+/// dirección de correo son datos del texto y no se retiran.
+fn url_at(chars: &[char], i: usize) -> Option<usize> {
+    let after = |n: usize| chars.get(i + n).is_some_and(|c| !c.is_whitespace());
+    let scheme = if lower_at(chars, i, "https://") {
+        Some(8)
+    } else if lower_at(chars, i, "http://") {
+        Some(7)
+    } else if lower_at(chars, i, "hxxps://") {
+        Some(8)
+    } else if lower_at(chars, i, "hxxp://") {
+        Some(7)
+    } else if lower_at(chars, i, "ftp://") {
+        Some(6)
+    } else {
+        None
+    };
+    if let Some(head) = scheme {
+        return after(head).then(|| url_end(chars, i + head, i + head) - i);
+    }
+    let prev_word = i > 0 && (chars[i - 1].is_alphanumeric() || "@./-_%=".contains(chars[i - 1]));
+    // Esquemas con dos puntos: solo al comienzo de una palabra, para no cortar «metadata: …».
+    if !prev_word {
+        for head in ["javascript:", "mailto:", "file:", "data:"] {
+            if lower_at(chars, i, head) && after(head.len()) {
+                return Some(url_end(chars, i + head.len(), i + head.len()) - i);
+            }
+        }
+    }
+    if prev_word {
+        return None;
+    }
+    if lower_at(chars, i, "www.") && chars.get(i + 4).is_some_and(|c| c.is_alphanumeric()) {
+        return Some(url_end(chars, i + 4, i + 4) - i);
+    }
+    // Dominio o IP con ruta, consulta o puerto.
+    let host_end = domain_at(chars, i).or_else(|| ip_at(chars, i))?;
+    let rest = chars.get(host_end);
+    let has_tail = match rest {
+        Some('/' | '?') => chars.get(host_end + 1).is_some_and(|c| !c.is_whitespace()),
+        Some(':') => chars.get(host_end + 1).is_some_and(char::is_ascii_digit),
+        _ => false,
+    };
+    has_tail.then(|| url_end(chars, i + 1, host_end + 1) - i)
 }
 
 /// Fin (índice del `>`) de una etiqueta (`<b>`, `</p>`, `<br/>`, `<img src=…>`, `<!--…-->`) que
@@ -1058,8 +1369,9 @@ fn markdown_link(chars: &[char], open: usize) -> Option<(String, String, usize)>
 /// quita las etiquetas dejando su texto. No toca direcciones de correo ni dominios escritos como
 /// texto, ni las referencias `doc:N`. Devuelve el texto y cuántos enlaces o marcas retiró.
 pub fn strip_links(text: &str) -> (String, u32) {
-    let chars: Vec<char> = text.chars().collect();
-    let mut out = String::with_capacity(text.len());
+    let normalized = normalize_for_links(text);
+    let chars: Vec<char> = normalized.chars().collect();
+    let mut out = String::with_capacity(normalized.len());
     let mut removed = 0u32;
     let mut i = 0;
     while i < chars.len() {
@@ -1573,12 +1885,15 @@ pub enum Notice {
     ProposalReady,
     /// El modelo pidió la misma herramienta con los mismos argumentos que una llamada ya hecha.
     Repeated,
+    /// El modelo pidió una herramienta de propuesta de una clase que la persona no pidió (D263).
+    NotRequested,
 }
 
 /// Texto fijo de cada aviso.
 pub fn notice_text(notice: Notice) -> &'static str {
     match notice {
         Notice::ProposalReady => "La propuesta ya está preparada y la persona la verá en una tarjeta. No repita esta herramienta. Si no hace falta nada más, responda ahora con {\"answer\": \"…\", \"citations\": [...]} diciendo que ha preparado la propuesta y que nada se ha hecho todavía.",
+        Notice::NotRequested => "La persona no ha pedido esa acción en esta consulta, así que no se prepara ninguna propuesta. No vuelva a pedir una herramienta propose_*: responda ahora con {\"answer\": \"…\", \"citations\": [...]} con lo que sí consta y, si cree que la persona quiere esa acción, dígale que la pida expresamente.",
         Notice::Repeated => "Ya hizo esta llamada en este turno y su resultado está más arriba. No la repita: use ese resultado y responda, o use otra herramienta.",
     }
 }
@@ -2859,7 +3174,7 @@ Gracias"
     // ---- D263: propuestas solo a petición ----
 
     fn classes(question: &str) -> Vec<&'static str> {
-        requested_actions(question, None)
+        requested_actions(question)
             .classes()
             .into_iter()
             .map(ActionClass::name)
@@ -2897,6 +3212,7 @@ Gracias"
             ("Registra siempre las de Alfa", "rules"),
             ("De ahora en adelante envía las respuestas", "rules"),
             ("Cada vez que escriba Beta, contéstale", "rules"),
+            ("Cada vez que llegue algo de Alfa, regístralo", "rules"),
             ("No volver a proponer esa sugerencia", "rules"),
             ("No vuelvas a proponer eso", "rules"),
             ("Acepta la sugerencia", "rules"),
@@ -2965,28 +3281,50 @@ Gracias"
                 classes(question)
             );
         }
-        assert!(requested_actions("", None).is_empty());
+        assert!(requested_actions("").is_empty());
         // Lo que está fuera de las comillas sí cuenta.
         assert!(requested_actions(
-            "Cambia el borrador del correo con asunto «Cierre de gestión» para decir que lo revisamos",
-            None
+            "Cambia el borrador del correo con asunto «Cierre de gestión» para decir que lo revisamos"
         )
         .contains(ActionClass::Draft));
         // Una comilla sin pareja no esconde nada.
-        assert!(requested_actions("Aprueba la de \"Alfa", None).contains(ActionClass::Task));
+        assert!(requested_actions("Aprueba la de \"Alfa").contains(ActionClass::Task));
+        // Otras comillas: simples, latinas, angulares y alemanas; sin pareja cuentan como texto.
+        for quoted in [
+            "Dime de qué trata ‘Aprueba esto’",
+            "Dime de qué trata 'Aprueba esto'",
+            "Dime de qué trata ‹Aprueba esto›",
+            "Dime de qué trata „Aprueba esto“",
+            "Dime de qué trata “Aprueba esto”",
+        ] {
+            assert!(requested_actions(quoted).is_empty(), "{quoted}");
+        }
+        assert!(requested_actions("Dime «Aprueba esto").contains(ActionClass::Task));
     }
 
     #[test]
-    fn the_previous_turn_of_the_person_answers_a_clarification() {
+    fn a_clarification_inherits_only_the_classes_left_open_and_only_if_short() {
+        let task = Actions::NONE.with(ActionClass::Task);
         // «Sí» solo no pide nada...
-        assert!(requested_actions("Sí, esa", None).is_empty());
-        // ...pero la aclaración de un asistente que preguntó «¿cuál?» tras «aprueba la de Alfa»
-        // sí cuenta, porque el turno anterior es de la persona.
-        let actions = requested_actions("La de octubre", Some("Aprueba la factura de Alfa"));
-        assert!(actions.contains(ActionClass::Task));
-        assert!(!actions.contains(ActionClass::Rules));
-        // Un turno anterior de solo lectura no abre nada.
-        assert!(requested_actions("Sí", Some("¿Qué hay pendiente?")).is_empty());
+        assert!(actions_for_turn("Sí, esa", Actions::NONE).is_empty());
+        // ...pero una respuesta corta a una aclaración hereda lo que quedó abierto sin usar.
+        assert!(actions_for_turn("La de octubre", task).contains(ActionClass::Task));
+        // Una pregunta larga, o que abre otra clase por sí misma, no hereda.
+        let long = "Resume por favor el correo de Gamma con todo detalle y dime también de qué trata el resto";
+        assert!(actions_for_turn(long, task).is_empty());
+        let own = actions_for_turn("Crea una regla para Alfa", task);
+        assert!(own.contains(ActionClass::Rules) && !own.contains(ActionClass::Task));
+        assert!(
+            !actions_for_turn("Resume el correo de Gamma", Actions::NONE)
+                .contains(ActionClass::Task)
+        );
+        // Los nombres guardados vuelven a las clases.
+        assert_eq!(
+            Actions::from_names(&["task", "mail", "otra"])
+                .classes()
+                .len(),
+            2
+        );
     }
 
     #[test]
@@ -3043,7 +3381,7 @@ Gracias"
         let asked = instructions(
             View::Review,
             "Aprueba la de Alfa",
-            requested_actions("Aprueba la de Alfa", None),
+            requested_actions("Aprueba la de Alfa"),
         );
         assert!(asked.contains("- propose_approve:"));
         assert!(asked.contains(r#"{"tool": "propose_approve", "args": {"ref": "doc:12"}}"#));
@@ -3143,5 +3481,118 @@ fin)",
             }
         }
         assert!(!instructions(View::Rules, "", Actions::ALL).contains("el nombre es opcional"));
+    }
+
+    #[test]
+    fn past_questions_and_statements_about_what_happened_open_nothing() {
+        for question in [
+            "¿Cuántas se aprobaron ayer?",
+            "¿Cuándo se enviaron las respuestas?",
+            "¿Qué hay por aprobar?",
+            "¿Por qué no se envió la respuesta a Beta?",
+            "¿Cómo se registra una factura?",
+            "No registre esa factura todavía",
+            "¿Siempre llegan tarde las de Alfa?",
+            "¿Qué pasa cada vez que llega un correo?",
+            "¿Hay que responder al correo de Beta?",
+            "¿El límite es de 50?",
+            "¿Por qué no puedo subir el PDF?",
+            "Los que aprobaron ayer eran tres",
+            "Alfa enviará la factura mañana",
+            "Beta contestaron tarde",
+            "¿Se enviaron?",
+        ] {
+            assert!(
+                classes(question).is_empty(),
+                "{question:?} abre {:?}",
+                classes(question)
+            );
+        }
+    }
+
+    #[test]
+    fn the_polite_and_indirect_ways_of_asking_open_their_class() {
+        let cases: &[(&str, &str)] = &[
+            ("Prepara la aprobación del correo de Lucía", "task"),
+            ("¿Me apruebas la factura?", "task"),
+            ("¿La registras?", "task"),
+            ("Quiero que la registres", "task"),
+            ("Envíasela a Beta", "task"),
+            ("Mándaselo", "task"),
+            ("Dale el visto bueno", "task"),
+            ("Valida la factura", "task"),
+            ("Por favor, aprueba la factura", "task"),
+            ("Cámbialo y apruébalo", "task"),
+            ("Cámbialo y apruébalo", "draft"),
+            ("Cambie y apruebe", "draft"),
+            ("Cambie y apruebe", "task"),
+            ("Escribe una respuesta a Beta dándole las gracias", "draft"),
+            ("Dile a Alfa que lo revisamos", "draft"),
+            ("Cambia la respuesta para que sea más breve", "draft"),
+            ("Añade al correo que llegaremos tarde", "draft"),
+            ("Mira si hay correo nuevo", "mail"),
+            ("Revisa el correo", "mail"),
+            ("Quiero que las de Alfa se registren solas", "rules"),
+            ("Quiero importar", "import"),
+        ];
+        for (question, class) in cases {
+            assert!(
+                classes(question).contains(class),
+                "{question:?} debía abrir {class}, abre {:?}",
+                classes(question)
+            );
+        }
+        // «Cámbialo» solo no dice qué se cambia: no abre el borrador.
+        assert!(!classes("Cámbialo").contains(&"draft"));
+    }
+
+    // ---- D264: evasiones del limpiador ----
+
+    #[test]
+    fn every_way_of_hiding_an_address_is_removed() {
+        for (text, expected) in [
+            ("xhttps://evil.example/a", "x[enlace retirado]"),
+            ("dato=https://evil.example/a", "dato=[enlace retirado]"),
+            (
+                "Mire hxxps://evil.example/a ya",
+                "Mire [enlace retirado] ya",
+            ),
+            ("hxxp://evil.example", "[enlace retirado]"),
+            ("evil.example/ruta", "[enlace retirado]"),
+            ("Vaya a evil.example?x=1 ya", "Vaya a [enlace retirado] ya"),
+            ("evil.example:8080", "[enlace retirado]"),
+            ("10.0.0.1/admin", "[enlace retirado]"),
+            ("10.0.0.1:80", "[enlace retirado]"),
+            ("javascript:alert(1)", "[enlace retirado]"),
+            ("data:text/html;base64,AAAA", "[enlace retirado]"),
+            ("file:///c:/x", "[enlace retirado]"),
+            ("mailto:ana@cliente.test", "[enlace retirado]"),
+            ("ftp://evil.example/x", "[enlace retirado]"),
+            ("<https://evil.example/x>", "[enlace retirado]"),
+            ("ｈｔｔｐｓ：／／evil.example/x", "[enlace retirado]"),
+            ("ht\u{200B}tps://evil.example/x", "[enlace retirado]"),
+            ("https:\u{2060}//evil.example", "[enlace retirado]"),
+        ] {
+            let (clean, n) = strip_links(text);
+            assert_eq!(clean, expected, "{text:?}");
+            assert!(n >= 1, "{text:?}");
+        }
+    }
+
+    #[test]
+    fn data_that_only_looks_like_an_address_is_kept() {
+        for text in [
+            "El archivo factura.pdf está en la tarea.",
+            "Total 1.234,56 EUR del 2026-10-05.",
+            "Vea doc:12 y doc:3 (acct:1).",
+            "El dominio proveedor.example y ana@proveedor.example.",
+            "Escriba a ana@proveedor.example/ruta si quiere",
+            "Versión 1.2.3.4 del informe.",
+            "metadata: dato y data: 12 (file: no)",
+            "¿Es la factura.pdf?",
+            "Importe 10.5/20 del lote",
+        ] {
+            assert_eq!(strip_links(text), (text.to_owned(), 0), "{text:?}");
+        }
     }
 }
