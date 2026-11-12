@@ -73,6 +73,24 @@ Plan por etapas; cada una acaba con `cargo fmt`, clippy, `cargo test --workspace
 
 Para después: búsqueda semántica con vectores calculados en el equipo, transmisión por partes, herramientas nativas del proveedor, y venta y Verifactu cuando tengan comandos en la ventana. Orden de recorte si hace falta: habilidades por vista (D190), E4 y «Ver lo enviado»; el índice con la búsqueda del chat (E1) y la compuerta de confirmación (D185) no se recortan.
 
+## Verifactu como producto vendible (T18b, D271–D286)
+
+Plan por etapas (cambio de alcance del 2026-11-12, R35–R38); cada una acaba con `cargo fmt --all --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace`, `npm test` y `npm run build` en `ui/` si toca la interfaz, y `python scripts/check.py`, con sus pruebas propias (D197) y un commit local. La prueba manual va sobre `tauri dev` con certificados y datos sintéticos; el instalador solo se construye para la versión final o si el usuario lo pide. `arquitecto` revisa B2, D1, C1 y D2. Los nombres concretos de comandos y tablas de [contratos](contratos.md) se pueden ajustar al implementar.
+
+1. **A** (hecha) Especificaciones y skills: `numeracion.md` (bloque D271–D300 en esta rama), decisiones D271–D286, R35–R38 y ampliación de R09 y R18, contratos previstos, trazabilidad (T09b, T18b–T18g), `PLAN.md` y las skills `revisar-cumplimiento-verifactu`, `certificados-de-prueba`, `nueva-version-sif` y `ensayo-preproduccion-verifactu`.
+2. **B1** `crates/certs`: validación pura y multiplataforma de certificados (tipo, vigencia, `clientAuth`, NIF del titular y del representado, avisos de caducidad) con certificados de `rcgen` (T18c).
+3. **B2** CNG, PFX (también antiguo) y DPAPI con `cfg(windows)`: archivo DPAPI con entropía, `zeroize`, `rustls-cng` fijado, `cargo tree -i aws-lc-rs` vacío (T09b, T18c). Revisión del arquitecto.
+4. **B3** Trait `SoapTransport` con TLS mutuo, simulador con TLS mutuo, caída a TLS 1.2 y endpoints constantes (T18d).
+5. **D1** Intentos sin envío (D280), clasificación de `Fault` (D281), `Incidencia` al abrir el lote (D282) y `Representante` (D283) (T18d). Revisión del arquitecto.
+6. **C1** Perfiles de datos y traslado de la base actual al perfil de pruebas, con pruebas de corte en cada paso (D271, D272, D275; T18g). Revisión del arquitecto.
+7. **C2** Registro de obligados, base por obligado y bomba sobre todos (D273, D274; T18f).
+8. **D2** Productor y declaración compilados, barrera, permanencia, fechas y reloj (D276, D277, D284; T18e). Revisión del arquitecto.
+9. **D3** Exportación por obligado y periodo, catálogo de errores y avisos de caducidad (D286, D278; T18e).
+10. **E1–E3** Interfaz (obligados, certificados, asistente sin certificado, barrera, «Acerca de», perfil de pruebas), recorrido por IPC y prueba en `tauri dev` con evidencia en `evidence/`.
+11. **F** Preproducción preparada: característica de red real desactivada por defecto (D285) y guion en la skill `ensayo-preproduccion-verifactu`; el ensayo real (T18b) se ejecuta solo en la versión final o cuando el usuario lo pida.
+
+Pendiente del usuario o del productor, fuera del código: la dirección y el lugar de firma de la declaración, el certificado del fabricante para el ensayo, el convenio de colaboración social si se ofrece remisión por la gestoría y la revisión fiscal externa.
+
 ## Puertas de entrega
 
 Una entrega solo cumple el plan cuando todos los requisitos aplicables de la matriz tienen evidencia satisfactoria, incluida la ejecución de Windows y la medición en hardware equivalente. Fallos, casos omitidos, credenciales o hardware no disponibles deben declararse como pendientes. La comparación de modelos comunica mediciones observadas, no una precisión garantizada.
