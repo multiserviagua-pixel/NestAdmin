@@ -1,0 +1,591 @@
+{
+  "rechazo": {
+    "fecha": "2026-11-12T08:58:38.037Z",
+    "entorno": "simulador",
+    "empresa": null,
+    "cliente": 1,
+    "factura1": {
+      "id": 1,
+      "numero": "F-2026-0001",
+      "msEmitir": 22
+    },
+    "trasRechazo": {
+      "entorno": "simulador",
+      "pendientes": 0,
+      "enviando": 0,
+      "rechazados": 1,
+      "parado": false,
+      "espera_s": 57,
+      "ultimoLote": {
+        "id": 1,
+        "environment": "simulador",
+        "record_count": 1,
+        "started_at": 1794473919000,
+        "attempts": 1,
+        "outcome": "responded",
+        "send_state": "Incorrecto",
+        "error_code": null,
+        "error_description": null,
+        "wait_seconds": 60,
+        "csv": null,
+        "finished_at": 1794473919000
+      },
+      "registros": [
+        {
+          "id": 1,
+          "record_id": 1,
+          "document_id": 1,
+          "kind": "alta",
+          "invoice_number": "F-2026-0001",
+          "issue_date": "12-11-2026",
+          "status": "rejected",
+          "aeat_code": 1100,
+          "aeat_description": "Rechazo simulado",
+          "duplicate": false,
+          "batch_id": 1,
+          "subsanation_record_id": null,
+          "environment": "simulador"
+        }
+      ],
+      "esperadoMs": 3030
+    },
+    "textoRechazo": "Faltan componentes de OCR del paquete. Reinstale NestAdmin para recuperarlos; mientras tanto no se podrán leer documentos escaneados.\nFalta configurar la IA: confirme el destino de los datos en Configuración. Las tareas esperan en la cola.\nIr a Configuración\nVentas\nDocumentos\nClientes\nProductos\nEmpresa\nRecurrentes\nAlbaranes recibidos\nRegistros Verifactu\nRegistros Verifactu\n\nLos registros no se pueden editar ni borrar. Se crean al emitir o anular una factura y se remiten solos al simulador de este equipo, no a la AEAT; aquí se ve cómo va cada uno.\n\nCadena íntegra: 1 registro verificado\nSimulador local: no se envía nada a la AEAT — Entorno de pruebas: nada de esto llega a la AEAT y las facturas emitidas aquí llevan para siempre el QR de pruebas.\nÚltimo lote: 12/11/26, 9:58. Lote 1 (1 registro): la AEAT respondió. Estado del envío: Incorrecto.\nSiguiente envío: 12/11/26, 9:59 (faltan 55 s)\nPendientes: No hay registros pendientes de remitir; 1 rechazado sin subsanar.\nRemitir ahora\nActualizar estado\nN.º\tTipo\tFactura\tFecha\tTotal\tEstado AEAT\tHuella\tDetalle\n1\tAlta\tF-2026-0001\t12-11-2026\t108,90 €\t\nRechazado\n\nCódigo 1100: Rechazo simulado\n\nSubsanar\n\t003F4434E4D1AB7F…\t\nVer registro 1",
+    "subsanar": true,
+    "confirmaciones": [
+      "Va a subsanar el alta de la factura F-2026-0001 (registro 1), rechazada por la AEAT. Código 1100: Rechazo simulado.\n\nSe crea un registro nuevo de subsanación con los mismos datos, encadenado como cualquier otro, y se remite a la AEAT; el registro rechazado queda como estaba. Si el problema eran los datos de la factura, subsanar no los corrige: la vía es una factura rectificativa.\n\n¿Subsanar?"
+    ],
+    "avisosSubsanar": [
+      "Se creó el registro 2 de subsanación; se remitirá a la AEAT en el siguiente envío.",
+      "Cadena íntegra: 2 registros verificados",
+      "Simulador local: no se envía nada a la AEAT — Entorno de pruebas: nada de esto llega a la AEAT y las facturas emitidas aquí llevan para siempre el QR de pruebas."
+    ],
+    "remitirEnEspera": {
+      "boton": true,
+      "avisos": [
+        "Se creó el registro 2 de subsanación; se remitirá a la AEAT en el siguiente envío.",
+        "Cadena íntegra: 2 registros verificados",
+        "Simulador local: no se envía nada a la AEAT — Entorno de pruebas: nada de esto llega a la AEAT y las facturas emitidas aquí llevan para siempre el QR de pruebas.",
+        "Todavía no toca enviar: la AEAT pide una espera entre lotes y faltan 51 s."
+      ],
+      "estado": {
+        "entorno": "simulador",
+        "pendientes": 1,
+        "enviando": 0,
+        "rechazados": 0,
+        "parado": false,
+        "espera_s": 49,
+        "ultimoLote": {
+          "id": 1,
+          "environment": "simulador",
+          "record_count": 1,
+          "started_at": 1794473919000,
+          "attempts": 1,
+          "outcome": "responded",
+          "send_state": "Incorrecto",
+          "error_code": null,
+          "error_description": null,
+          "wait_seconds": 60,
+          "csv": null,
+          "finished_at": 1794473919000
+        },
+        "registros": [
+          {
+            "id": 1,
+            "record_id": 1,
+            "document_id": 1,
+            "kind": "alta",
+            "invoice_number": "F-2026-0001",
+            "issue_date": "12-11-2026",
+            "status": "subsanated",
+            "aeat_code": 1100,
+            "aeat_description": "Rechazo simulado",
+            "duplicate": false,
+            "batch_id": 1,
+            "subsanation_record_id": 2,
+            "environment": "simulador"
+          },
+          {
+            "id": 2,
+            "record_id": 2,
+            "document_id": 1,
+            "kind": "alta",
+            "invoice_number": "F-2026-0001",
+            "issue_date": "12-11-2026",
+            "status": "pending",
+            "aeat_code": null,
+            "aeat_description": null,
+            "duplicate": false,
+            "batch_id": null,
+            "subsanation_record_id": null,
+            "environment": "simulador"
+          }
+        ]
+      }
+    },
+    "trasSubsanar": {
+      "entorno": "simulador",
+      "pendientes": 0,
+      "enviando": 0,
+      "rechazados": 0,
+      "parado": false,
+      "espera_s": 57,
+      "ultimoLote": {
+        "id": 2,
+        "environment": "simulador",
+        "record_count": 1,
+        "started_at": 1794473982000,
+        "attempts": 1,
+        "outcome": "responded",
+        "send_state": "Correcto",
+        "error_code": null,
+        "error_description": null,
+        "wait_seconds": 60,
+        "csv": "CSVSIM0000000002",
+        "finished_at": 1794473982000
+      },
+      "registros": [
+        {
+          "id": 1,
+          "record_id": 1,
+          "document_id": 1,
+          "kind": "alta",
+          "invoice_number": "F-2026-0001",
+          "issue_date": "12-11-2026",
+          "status": "subsanated",
+          "aeat_code": 1100,
+          "aeat_description": "Rechazo simulado",
+          "duplicate": false,
+          "batch_id": 1,
+          "subsanation_record_id": 2,
+          "environment": "simulador"
+        },
+        {
+          "id": 2,
+          "record_id": 2,
+          "document_id": 1,
+          "kind": "alta",
+          "invoice_number": "F-2026-0001",
+          "issue_date": "12-11-2026",
+          "status": "accepted",
+          "aeat_code": null,
+          "aeat_description": null,
+          "duplicate": false,
+          "batch_id": 2,
+          "subsanation_record_id": null,
+          "environment": "simulador"
+        }
+      ],
+      "esperadoMs": 54263
+    },
+    "textoAceptado": "Faltan componentes de OCR del paquete. Reinstale NestAdmin para recuperarlos; mientras tanto no se podrán leer documentos escaneados.\nFalta configurar la IA: confirme el destino de los datos en Configuración. Las tareas esperan en la cola.\nIr a Configuración\nVentas\nDocumentos\nClientes\nProductos\nEmpresa\nRecurrentes\nAlbaranes recibidos\nRegistros Verifactu\nRegistros Verifactu\n\nLos registros no se pueden editar ni borrar. Se crean al emitir o anular una factura y se remiten solos al simulador de este equipo, no a la AEAT; aquí se ve cómo va cada uno.\n\nCadena íntegra: 2 registros verificados\nSimulador local: no se envía nada a la AEAT — Entorno de pruebas: nada de esto llega a la AEAT y las facturas emitidas aquí llevan para siempre el QR de pruebas.\nÚltimo lote: 12/11/26, 9:59. Lote 2 (1 registro): la AEAT respondió. Estado del envío: Correcto. CSV: CSVSIM0000000002.\nSiguiente envío: 12/11/26, 10:00 (faltan 54 s)\nPendientes: No hay registros pendientes de remitir.\nRemitir ahora\nActualizar estado\nN.º\tTipo\tFactura\tFecha\tTotal\tEstado AEAT\tHuella\tDetalle\n1\tAlta\tF-2026-0001\t12-11-2026\t108,90 €\t\nSubsanado\n\nRechazo previo: Código 1100: Rechazo simulado. Lo subsana el registro 2.\n\n\t003F4434E4D1AB7F…\t\nVer registro 1\n\n2\tAlta (subsanación del registro 1)\tF-2026-0001\t12-11-2026\t108,90 €\t\nAceptado\n\tD9C796889C184A00…\t\nVer registro 2",
+    "factura2": {
+      "id": 2,
+      "numero": "F-2026-0002",
+      "msEmitir": 8
+    },
+    "anular": {
+      "id": 2,
+      "kind": "invoice",
+      "status": "voided",
+      "series_year": 2026,
+      "sequence": 2,
+      "revision": 1,
+      "number": "F-2026-0002",
+      "superseded_by": null,
+      "customer_id": 1,
+      "issue_date": "2026-11-12",
+      "operation_date": null,
+      "due_date": "2026-12-10",
+      "withholding_percent": null,
+      "currency": "EUR",
+      "issuer": {
+        "party": {
+          "name": "Taller Sintético de Pruebas, S.L.",
+          "tax_id": "B12345674",
+          "address": "Calle Ficticia 1, 28000 Madrid"
+        },
+        "email": "facturas@ejemplo.test",
+        "iban": "ES9121000418450200051332",
+        "logo_sha256": null,
+        "letterhead_sha256": null,
+        "letterhead_margins": null
+      },
+      "recipient": {
+        "name": "Alfa Suministros S.A.",
+        "tax_id": "A58818501",
+        "address": "Avenida Inventada 2, Sevilla"
+      },
+      "totals": {
+        "currency": "EUR",
+        "line_amounts": [
+          "300.00"
+        ],
+        "breakdown": [
+          {
+            "tax_percent": "21",
+            "qualification": null,
+            "descriptions": [],
+            "base": "300.00",
+            "tax": "63.00"
+          }
+        ],
+        "base_total": "300.00",
+        "tax_total": "63.00",
+        "total": "363.00",
+        "withholding": "0.00",
+        "amount_due": "363.00"
+      },
+      "lines": [
+        {
+          "description": "Instalación sintética",
+          "quantity": "1",
+          "unit_price": "300",
+          "discount": "0",
+          "tax_percent": "21",
+          "exemption": null,
+          "amount": "300.00",
+          "product_id": null
+        }
+      ],
+      "rectifies_id": null,
+      "rectification": null,
+      "recipient_requested_tax_id": false,
+      "art_4_2_declared": false,
+      "recurring_template_id": null,
+      "recurring_period": null,
+      "created_at": 1794473988810,
+      "updated_at": 1794473988826
+    },
+    "trasAnular": {
+      "entorno": "simulador",
+      "pendientes": 0,
+      "enviando": 0,
+      "rechazados": 0,
+      "parado": false,
+      "espera_s": 58,
+      "ultimoLote": {
+        "id": 4,
+        "environment": "simulador",
+        "record_count": 1,
+        "started_at": 1794474107000,
+        "attempts": 1,
+        "outcome": "responded",
+        "send_state": "Correcto",
+        "error_code": null,
+        "error_description": null,
+        "wait_seconds": 60,
+        "csv": "CSVSIM0000000004",
+        "finished_at": 1794474107000
+      },
+      "registros": [
+        {
+          "id": 1,
+          "record_id": 1,
+          "document_id": 1,
+          "kind": "alta",
+          "invoice_number": "F-2026-0001",
+          "issue_date": "12-11-2026",
+          "status": "subsanated",
+          "aeat_code": 1100,
+          "aeat_description": "Rechazo simulado",
+          "duplicate": false,
+          "batch_id": 1,
+          "subsanation_record_id": 2,
+          "environment": "simulador"
+        },
+        {
+          "id": 2,
+          "record_id": 2,
+          "document_id": 1,
+          "kind": "alta",
+          "invoice_number": "F-2026-0001",
+          "issue_date": "12-11-2026",
+          "status": "accepted",
+          "aeat_code": null,
+          "aeat_description": null,
+          "duplicate": false,
+          "batch_id": 2,
+          "subsanation_record_id": null,
+          "environment": "simulador"
+        },
+        {
+          "id": 3,
+          "record_id": 3,
+          "document_id": 2,
+          "kind": "alta",
+          "invoice_number": "F-2026-0002",
+          "issue_date": "12-11-2026",
+          "status": "accepted",
+          "aeat_code": null,
+          "aeat_description": null,
+          "duplicate": false,
+          "batch_id": 3,
+          "subsanation_record_id": null,
+          "environment": "simulador"
+        },
+        {
+          "id": 4,
+          "record_id": 4,
+          "document_id": 2,
+          "kind": "anulacion",
+          "invoice_number": "F-2026-0002",
+          "issue_date": "12-11-2026",
+          "status": "accepted",
+          "aeat_code": null,
+          "aeat_description": null,
+          "duplicate": false,
+          "batch_id": 4,
+          "subsanation_record_id": null,
+          "environment": "simulador"
+        }
+      ],
+      "esperadoMs": 120582
+    },
+    "textoFinal": "Faltan componentes de OCR del paquete. Reinstale NestAdmin para recuperarlos; mientras tanto no se podrán leer documentos escaneados.\nFalta configurar la IA: confirme el destino de los datos en Configuración. Las tareas esperan en la cola.\nIr a Configuración\nVentas\nDocumentos\nClientes\nProductos\nEmpresa\nRecurrentes\nAlbaranes recibidos\nRegistros Verifactu\nRegistros Verifactu\n\nLos registros no se pueden editar ni borrar. Se crean al emitir o anular una factura y se remiten solos al simulador de este equipo, no a la AEAT; aquí se ve cómo va cada uno.\n\nCadena íntegra: 4 registros verificados\nSimulador local: no se envía nada a la AEAT — Entorno de pruebas: nada de esto llega a la AEAT y las facturas emitidas aquí llevan para siempre el QR de pruebas.\nÚltimo lote: 12/11/26, 10:01. Lote 4 (1 registro): la AEAT respondió. Estado del envío: Correcto. CSV: CSVSIM0000000004.\nSiguiente envío: 12/11/26, 10:02 (faltan 56 s)\nPendientes: No hay registros pendientes de remitir.\nRemitir ahora\nActualizar estado\nN.º\tTipo\tFactura\tFecha\tTotal\tEstado AEAT\tHuella\tDetalle\n1\tAlta\tF-2026-0001\t12-11-2026\t108,90 €\t\nSubsanado\n\nRechazo previo: Código 1100: Rechazo simulado. Lo subsana el registro 2.\n\n\t003F4434E4D1AB7F…\t\nVer registro 1\n\n2\tAlta (subsanación del registro 1)\tF-2026-0001\t12-11-2026\t108,90 €\t\nAceptado\n\tD9C796889C184A00…\t\nVer registro 2\n\n3\tAlta\tF-2026-0002\t12-11-2026\t363,00 €\t\nAceptado\n\t62307BB08EAA3034…\t\nVer registro 3\n\n4\tAnulación\tF-2026-0002\t12-11-2026\t—\t\nAceptado\n\t50667127DB4330F1…\t\nVer registro 4",
+    "configuracion": {
+      "texto": "Verifactu\n\nA dónde se remiten los registros de facturación. Hoy solo funciona el simulador local: no se envía nada a la AEAT. La remisión real llegará con el certificado y la declaración responsable.\n\nSimulador local: no se envía nada a la AEAT\n\nSimulador local\nPreproducción de la AEAT — Llegará con el certificado y la declaración responsable (T18b): todavía no se puede elegir.\nProducción de la AEAT — Llegará con el certificado y la declaración responsable (T18b): todavía no se puede elegir.\n\nNo se envía nada a la AEAT: un simulador en este equipo hace de servidor. Las facturas emitidas con él llevan para siempre el QR de pruebas.",
+      "opciones": [
+        {
+          "valor": "simulador",
+          "desactivada": false,
+          "elegida": true
+        },
+        {
+          "valor": "preproduccion",
+          "desactivada": true,
+          "elegida": false
+        },
+        {
+          "valor": "produccion",
+          "desactivada": true,
+          "elegida": false
+        }
+      ]
+    },
+    "cambiarAPreproduccion": "ERROR [environment_unavailable] environment_unavailable: el entorno «preproduccion» no está disponible todavía: la remisión real a la AEAT (certificado y declaración responsable) llega más adelante; hoy solo funciona el simulador",
+    "cambiarAProduccion": "ERROR [environment_unavailable] environment_unavailable: el entorno «produccion» no está disponible todavía: la remisión real a la AEAT (certificado y declaración responsable) llega más adelante; hoy solo funciona el simulador",
+    "entornoDespues": "simulador"
+  },
+  "sin-red": {
+    "fecha": "2026-11-12T09:07:17.598Z",
+    "factura3": {
+      "id": 3,
+      "numero": "F-2026-0003",
+      "msEmitir": 8
+    },
+    "estado": {
+      "entorno": "simulador",
+      "pendientes": 0,
+      "enviando": 1,
+      "rechazados": 0,
+      "parado": false,
+      "espera_s": 48,
+      "ultimoLote": {
+        "id": 5,
+        "environment": "simulador",
+        "record_count": 1,
+        "started_at": 1794474438000,
+        "attempts": 1,
+        "outcome": null,
+        "send_state": null,
+        "error_code": null,
+        "error_description": null,
+        "wait_seconds": null,
+        "csv": null,
+        "finished_at": null
+      },
+      "registros": [
+        {
+          "id": 1,
+          "record_id": 1,
+          "document_id": 1,
+          "kind": "alta",
+          "invoice_number": "F-2026-0001",
+          "issue_date": "12-11-2026",
+          "status": "subsanated",
+          "aeat_code": 1100,
+          "aeat_description": "Rechazo simulado",
+          "duplicate": false,
+          "batch_id": 1,
+          "subsanation_record_id": 2,
+          "environment": "simulador"
+        },
+        {
+          "id": 2,
+          "record_id": 2,
+          "document_id": 1,
+          "kind": "alta",
+          "invoice_number": "F-2026-0001",
+          "issue_date": "12-11-2026",
+          "status": "accepted",
+          "aeat_code": null,
+          "aeat_description": null,
+          "duplicate": false,
+          "batch_id": 2,
+          "subsanation_record_id": null,
+          "environment": "simulador"
+        },
+        {
+          "id": 3,
+          "record_id": 3,
+          "document_id": 2,
+          "kind": "alta",
+          "invoice_number": "F-2026-0002",
+          "issue_date": "12-11-2026",
+          "status": "accepted",
+          "aeat_code": null,
+          "aeat_description": null,
+          "duplicate": false,
+          "batch_id": 3,
+          "subsanation_record_id": null,
+          "environment": "simulador"
+        },
+        {
+          "id": 4,
+          "record_id": 4,
+          "document_id": 2,
+          "kind": "anulacion",
+          "invoice_number": "F-2026-0002",
+          "issue_date": "12-11-2026",
+          "status": "accepted",
+          "aeat_code": null,
+          "aeat_description": null,
+          "duplicate": false,
+          "batch_id": 4,
+          "subsanation_record_id": null,
+          "environment": "simulador"
+        },
+        {
+          "id": 5,
+          "record_id": 5,
+          "document_id": 3,
+          "kind": "alta",
+          "invoice_number": "F-2026-0003",
+          "issue_date": "12-11-2026",
+          "status": "sending",
+          "aeat_code": null,
+          "aeat_description": null,
+          "duplicate": false,
+          "batch_id": 5,
+          "subsanation_record_id": null,
+          "environment": "simulador"
+        }
+      ]
+    },
+    "remitir": {
+      "boton": true,
+      "avisos": [
+        "Cadena íntegra: 5 registros verificados",
+        "Simulador local: no se envía nada a la AEAT — Entorno de pruebas: nada de esto llega a la AEAT y las facturas emitidas aquí llevan para siempre el QR de pruebas.",
+        "Último error de la remisión [unavailable]: sin red (simulado). Se vuelve a intentar sola tras la espera; «Remitir ahora» lo intenta ya.",
+        "Todavía no toca enviar: la AEAT pide una espera entre lotes y faltan 46 s."
+      ]
+    },
+    "texto": "Faltan componentes de OCR del paquete. Reinstale NestAdmin para recuperarlos; mientras tanto no se podrán leer documentos escaneados.\nFalta configurar la IA: confirme el destino de los datos en Configuración. Las tareas esperan en la cola.\nIr a Configuración\nVentas\nDocumentos\nClientes\nProductos\nEmpresa\nRecurrentes\nAlbaranes recibidos\nRegistros Verifactu\nRegistros Verifactu\n\nLos registros no se pueden editar ni borrar. Se crean al emitir o anular una factura y se remiten solos al simulador de este equipo, no a la AEAT; aquí se ve cómo va cada uno.\n\nCadena íntegra: 5 registros verificados\nSimulador local: no se envía nada a la AEAT — Entorno de pruebas: nada de esto llega a la AEAT y las facturas emitidas aquí llevan para siempre el QR de pruebas.\nÚltimo error de la remisión [unavailable]: sin red (simulado). Se vuelve a intentar sola tras la espera; «Remitir ahora» lo intenta ya.\nÚltimo lote: 12/11/26, 10:07. Lote 5 (1 registro) sin respuesta tras 1 intento: se reenviará igual, sin duplicar nada.\nSiguiente envío: 12/11/26, 10:08 (faltan 39 s)\nPendientes: No hay registros pendientes de remitir; 1 en envío.\nRemitir ahora\nActualizar estado\nN.º\tTipo\tFactura\tFecha\tTotal\tEstado AEAT\tHuella\tDetalle\n1\tAlta\tF-2026-0001\t12-11-2026\t108,90 €\t\nSubsanado\n\nRechazo previo: Código 1100: Rechazo simulado. Lo subsana el registro 2.\n\n\t003F4434E4D1AB7F…\t\nVer registro 1\n\n2\tAlta (subsanación del registro 1)\tF-2026-0001\t12-11-2026\t108,90 €\t\nAceptado\n\tD9C796889C184A00…\t\nVer registro 2\n\n3\tAlta\tF-2026-0002\t12-11-2026\t363,00 €\t\nAceptado\n\t62307BB08EAA3034…\t\nVer registro 3\n\n4\tAnulación\tF-2026-0002\t12-11-2026\t—\t\nAceptado\n\t50667127DB4330F1…\t\nVer registro 4\n\n5\tAlta\tF-2026-0003\t12-11-2026\t96,80 €\t\nEn envío\n\nEstá en un lote en curso; si no hay respuesta se reenvía igual, sin duplicarlo.\n\n\t471DE174D58D990D…\t\nVer registro 5"
+  },
+  "reanudar": {
+    "fecha": "2026-11-12T09:08:09.346Z",
+    "estado": {
+      "entorno": "simulador",
+      "pendientes": 0,
+      "enviando": 0,
+      "rechazados": 0,
+      "parado": false,
+      "espera_s": 58,
+      "ultimoLote": {
+        "id": 5,
+        "environment": "simulador",
+        "record_count": 1,
+        "started_at": 1794474438000,
+        "attempts": 2,
+        "outcome": "responded",
+        "send_state": "Correcto",
+        "error_code": null,
+        "error_description": null,
+        "wait_seconds": 60,
+        "csv": "CSVSIM0000000004",
+        "finished_at": 1794474500000
+      },
+      "registros": [
+        {
+          "id": 1,
+          "record_id": 1,
+          "document_id": 1,
+          "kind": "alta",
+          "invoice_number": "F-2026-0001",
+          "issue_date": "12-11-2026",
+          "status": "subsanated",
+          "aeat_code": 1100,
+          "aeat_description": "Rechazo simulado",
+          "duplicate": false,
+          "batch_id": 1,
+          "subsanation_record_id": 2,
+          "environment": "simulador"
+        },
+        {
+          "id": 2,
+          "record_id": 2,
+          "document_id": 1,
+          "kind": "alta",
+          "invoice_number": "F-2026-0001",
+          "issue_date": "12-11-2026",
+          "status": "accepted",
+          "aeat_code": null,
+          "aeat_description": null,
+          "duplicate": false,
+          "batch_id": 2,
+          "subsanation_record_id": null,
+          "environment": "simulador"
+        },
+        {
+          "id": 3,
+          "record_id": 3,
+          "document_id": 2,
+          "kind": "alta",
+          "invoice_number": "F-2026-0002",
+          "issue_date": "12-11-2026",
+          "status": "accepted",
+          "aeat_code": null,
+          "aeat_description": null,
+          "duplicate": false,
+          "batch_id": 3,
+          "subsanation_record_id": null,
+          "environment": "simulador"
+        },
+        {
+          "id": 4,
+          "record_id": 4,
+          "document_id": 2,
+          "kind": "anulacion",
+          "invoice_number": "F-2026-0002",
+          "issue_date": "12-11-2026",
+          "status": "accepted",
+          "aeat_code": null,
+          "aeat_description": null,
+          "duplicate": false,
+          "batch_id": 4,
+          "subsanation_record_id": null,
+          "environment": "simulador"
+        },
+        {
+          "id": 5,
+          "record_id": 5,
+          "document_id": 3,
+          "kind": "alta",
+          "invoice_number": "F-2026-0003",
+          "issue_date": "12-11-2026",
+          "status": "accepted",
+          "aeat_code": null,
+          "aeat_description": null,
+          "duplicate": false,
+          "batch_id": 5,
+          "subsanation_record_id": null,
+          "environment": "simulador"
+        }
+      ],
+      "esperadoMs": 12064
+    },
+    "texto": "Faltan componentes de OCR del paquete. Reinstale NestAdmin para recuperarlos; mientras tanto no se podrán leer documentos escaneados.\nFalta configurar la IA: confirme el destino de los datos en Configuración. Las tareas esperan en la cola.\nIr a Configuración\nVentas\nDocumentos\nClientes\nProductos\nEmpresa\nRecurrentes\nAlbaranes recibidos\nRegistros Verifactu\nRegistros Verifactu\n\nLos registros no se pueden editar ni borrar. Se crean al emitir o anular una factura y se remiten solos al simulador de este equipo, no a la AEAT; aquí se ve cómo va cada uno.\n\nCadena íntegra: 5 registros verificados\nSimulador local: no se envía nada a la AEAT — Entorno de pruebas: nada de esto llega a la AEAT y las facturas emitidas aquí llevan para siempre el QR de pruebas.\nÚltimo lote: 12/11/26, 10:08. Lote 5 (1 registro): la AEAT respondió. Estado del envío: Correcto. CSV: CSVSIM0000000004.\nSiguiente envío: 12/11/26, 10:09 (faltan 56 s)\nPendientes: No hay registros pendientes de remitir.\nRemitir ahora\nActualizar estado\nN.º\tTipo\tFactura\tFecha\tTotal\tEstado AEAT\tHuella\tDetalle\n1\tAlta\tF-2026-0001\t12-11-2026\t108,90 €\t\nSubsanado\n\nRechazo previo: Código 1100: Rechazo simulado. Lo subsana el registro 2.\n\n\t003F4434E4D1AB7F…\t\nVer registro 1\n\n2\tAlta (subsanación del registro 1)\tF-2026-0001\t12-11-2026\t108,90 €\t\nAceptado\n\tD9C796889C184A00…\t\nVer registro 2\n\n3\tAlta\tF-2026-0002\t12-11-2026\t363,00 €\t\nAceptado\n\t62307BB08EAA3034…\t\nVer registro 3\n\n4\tAnulación\tF-2026-0002\t12-11-2026\t—\t\nAceptado\n\t50667127DB4330F1…\t\nVer registro 4\n\n5\tAlta\tF-2026-0003\t12-11-2026\t96,80 €\t\nAceptado\n\t471DE174D58D990D…\t\nVer registro 5",
+    "tareas": "Faltan componentes de OCR del paquete. Reinstale NestAdmin para recuperarlos; mientras tanto no se podrán leer documentos escaneados.\nFalta configurar la IA: confirme el destino de los datos en Configuración. Las tareas esperan en la cola.\nIr a Configuración\nTareas\nLista\nTablero\nPlantillas\nEn cola 0\nEn curso 0\nEn revisión 0\nCon error 0\n+\nCerradas 5"
+  }
+}
