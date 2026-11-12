@@ -25,6 +25,8 @@ pub const BEFORE_VALID_MS: i64 = 1_700_000_000_000; // 2023
 pub struct Material {
     pub pfx: Vec<u8>,
     pub cert_der: Vec<u8>,
+    /// Raíz de la que cuelga la cadena (para que un servidor de pruebas la acepte).
+    pub ca_der: Vec<u8>,
 }
 
 fn utf8(s: &str) -> DnValue {
@@ -88,7 +90,11 @@ pub fn modern(password: &str) -> Material {
         .writer(password)
         .write()
         .unwrap();
-    Material { pfx, cert_der }
+    Material {
+        pfx,
+        cert_der,
+        ca_der: ca,
+    }
 }
 
 /// PFX antiguo: 3DES con SHA-1 y MAC HMAC-SHA1, como los que exportaban Windows y los
@@ -101,7 +107,11 @@ pub fn legacy_3des(password: &str) -> Material {
         .mac_algorithm(MacAlgorithm::HmacSha1)
         .write()
         .unwrap();
-    Material { pfx, cert_der }
+    Material {
+        pfx,
+        cert_der,
+        ca_der: ca,
+    }
 }
 
 /// PFX sin clave privada: solo un certificado.
@@ -179,6 +189,7 @@ pub fn three_levels(password: &str) -> Material {
     Material {
         pfx: store.writer(password).write().unwrap(),
         cert_der,
+        ca_der: root_der,
     }
 }
 

@@ -6,22 +6,38 @@ edition.workspace = true
 license.workspace = true
 publish.workspace = true
 
+[features]
+default = []
+# Red real de la AEAT (D285): sin ella, pedir el transporte de preproducción o producción da
+# `network_disabled` y nunca se abre un socket. Desactivada por defecto.
+aeat-red = ["dep:webpki-roots"]
+# Constructor del transporte con un destino inyectado (solo para pruebas; el escritorio no lo
+# activa). Permite apuntar el TLS mutuo a un simulador en 127.0.0.1.
+test-support = []
+
 [dependencies]
 # Reutiliza la validación de NIF, NIE y CIF del núcleo de venta (D80) en vez de duplicarla.
 nestadmin-sales = { path = "../sales" }
 serde = { version = "1", features = ["derive"] }
 sha2 = "0.10"
 thiserror = "2"
+# TLS mutuo (D279): solo el backend `ring`, nunca `aws-lc-rs`.
+rustls = { version = "0.23", default-features = false, features = ["std", "ring", "tls12"] }
+# Raíces de confianza de la red real: solo con la característica `aeat-red`.
+webpki-roots = { version = "1", optional = true }
 x509-parser = "=0.18.1"
 zeroize = "1"
 
 [target.'cfg(windows)'.dependencies]
 # Puente CNG de rustls (D279): la clave del almacén no sale de Windows. Sin `aws-lc-rs`.
 rustls-cng = { version = "=0.7.1", default-features = false }
-rustls = { version = "0.23", default-features = false, features = ["std"] }
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security_Cryptography"] }
 
 [dev-dependencies]
+# Autorreferencia: las pruebas activan `test-support` sin que lo vea ninguna otra compilación.
+nestadmin-certs = { path = ".", features = ["test-support"] }
+# Respuestas del simulador de la AEAT detrás del servidor TLS mutuo de las pruebas.
+nestadmin-verifactu = { path = "../verifactu" }
 # Solo con el backend `ring`: nada de `aws-lc-rs` (D279). Certificados sintéticos en tiempo de ejecución.
 rcgen = { version = "0.14", default-features = false, features = ["ring", "pem"] }
 p12-keystore = "0.4"

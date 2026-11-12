@@ -52,19 +52,31 @@ Para los OID que `rcgen` no trae con nombre (`organizationIdentifier`, 2.5.4.97,
 
 ## Simulador con TLS mutuo
 
-Objetivo (B3, D279, D285): ejercitar el transporte real (`SoapTransport` con `rustls`) contra un servidor en 127.0.0.1 que **exige certificado cliente**, sin red externa.
+Implementado en B3 (D279, D285). Ejercita el transporte real (`MutualTlsTransport`, `rustls` con `ring`) contra un servidor en 127.0.0.1 que **exige certificado cliente**, sin red externa. Vive en `crates/certs/tests/mtls_support/mod.rs`; cada archivo de pruebas lo importa con `mod mtls_support;` (como `pfx_support`).
 
-1. Genere una CA de pruebas y, con ella, el certificado del servidor (SAN `127.0.0.1` y `localhost`) y los certificados cliente de la tabla anterior.
-2. Levante el simulador de `crates/verifactu` (`SimuladorAeat`, el mismo de E5) detrás de un `rustls::ServerConfig` con `WebPkiClientVerifier` construido sobre la CA de pruebas; escucha en un puerto libre de 127.0.0.1.
-3. El cliente (`rustls::ClientConfig` con `builder_with_provider(ring)`) confía en la CA de pruebas **solo en el código de la prueba**; las raíces de `webpki-roots` y los endpoints constantes de producción no se tocan. Los endpoints constantes no son configurables: el punto de entrada de pruebas es un constructor de transporte con `cfg(test)` o `cfg(debug_assertions)` que recibe el destino, igual que `set_verifactu_endpoint` en E5 (D261).
-4. El simulador registra solo el **tipo** del certificado cliente y el endpoint por el que entró (personal o sello); no guarda su contenido, su NIF ni su nombre.
-5. Casos mínimos: certificado válido (acepta), sin certificado cliente (el saludo falla: `certificate_missing`), certificado de otra CA (`certificate_rejected`), sello hacia el endpoint de sello y persona física hacia el personal, titular no autorizado (el simulador devuelve el `Fault` 4112 y la remisión del obligado se para: `authorization_rejected`), y un firmante falso que solo ofrece PKCS#1 v1.5 para ejercitar la caída a TLS 1.2 (D279).
-6. Un intento que falla antes de escribir el cuerpo no cuenta como envío: compruebe que un lote con un 3000 posterior no se da por aceptado (D280).
+```rust
+let ca = new_ca("AC PRUEBA SINTETICA");                       // CA sintética de rcgen
+let server = MtlsServer::start(&ca.der, server_cert(&ca, &["localhost"]), Behavior::Proxy);
+let creds = client_cert(&ca, Kind::PersonaFisica).credentials(); // o Kind::Sello
+let transport = server.transport("localhost", &ca.der);       // MutualTlsTransport::for_test
+let report = transport.send(endpoint, b"<x/>", &creds, TlsPreference::Auto);
+let seen = server.seen();   // tipos de certificado cliente, TLS 1.3 o 1.2, cuerpos recibidos
+```
+
+- `MtlsServer::start(client_ca, (cert_servidor, clave_pkcs8), comportamiento)` levanta un hilo con `rustls::ServerConfig` y `WebPkiClientVerifier` sobre la CA dada, en `127.0.0.1:0`, y sirve las respuestas de `SimuladorAeat` (`server.simulator`; `estado().fallo_http_siguiente`, `perder_siguiente_respuesta`, etc.). Comportamientos: `Proxy` (respuesta del simulador), `CloseAfterRequest` (lee el cuerpo y cierra), `Hang` (lee y no contesta) y `Raw(bytes)` (respuesta literal: `chunked`, tamaño, basura).
+- El destino se inyecta con `MutualTlsTransport::for_test(TestTarget { addr, server_name, roots_der })`, que solo existe con la característica `test-support` (las pruebas del crate la activan como autodependencia de desarrollo; el escritorio no). Los endpoints constantes y la red real (`aeat-red`) no se tocan.
+- El servidor registra solo el **tipo** del certificado cliente (`inspect`), la versión de TLS y los cuerpos recibidos; nunca su contenido, NIF ni nombre. `seen.requests` vacío prueba que el cuerpo nunca llegó (D280).
+- Certificado de otra CA: `new_ca("OTRA")` y `client_cert(&otra, ..)`; sin certificado: `ClientCredentials::new(vec![], clave)`; nombre que no coincide: `server.transport("otro.example.invalid", ..)`; puerto cerrado: `closed_port()`.
+- Firmante falso que solo ofrece PKCS#1 v1.5: `Pkcs1Only(Arc<dyn SigningKey>)` envolviendo la clave de `rsa_client_cert(&ca, kind)`, que genera la clave RSA con `openssl genrsa -traditional` (ring no genera RSA). Sin `openssl` la prueba imprime `NO EJECUTADA` y no falla; con `NESTADMIN_REQUIRE_OPENSSL=1` falla. Ejercita la caída a TLS 1.2 y `needs_tls12`.
+- Con una clave de Windows: `transport_windows_pfx.rs` importa un PFX sintético con `import_pfx`, obtiene el firmante con `acquire` y lo pasa con `ClientCredentials::from(&signer)` (la CA del PFX está en `Material::ca_der`).
+- Pendiente de D1 (no de B3): titular no autorizado (el simulador devuelve el `Fault` 4112 y la remisión del obligado se para: `authorization_rejected`) y un lote con un 3000 posterior tras un intento sin envío (D280), que dependen de la integración con la bomba.
 
 Comandos habituales (ajuste los nombres de las pruebas al implementar):
 
 ```
 cargo test -p nestadmin-certs
+cargo test -p nestadmin-certs --features aeat-red --test transport_endpoints
+cargo clippy -p nestadmin-certs --all-targets --features aeat-red -- -D warnings
 cargo test -p nestadmin-verifactu
 cargo test -p nestadmin-app --test sales_remission
 cargo tree -i aws-lc-rs

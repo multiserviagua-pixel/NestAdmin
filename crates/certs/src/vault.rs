@@ -169,6 +169,60 @@ pub fn remove_pfx(reference: &str, store_dir: &Path) -> Result<(), PfxError> {
     }
 }
 
+/// Qué borró [`cleanup_vault`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct VaultCleanup {
+    /// Temporales `<referencia>.tmp` de escrituras interrumpidas.
+    pub tmp_removed: usize,
+    /// Archivos `<referencia>.bin` cuya referencia no estaba en `keep`.
+    pub bin_removed: usize,
+}
+
+/// Limpia el almacén de PFX: borra los `.tmp` (escrituras interrumpidas) y los `.bin` cuya
+/// referencia no está en `keep`. **Nunca borra** un `.bin` cuya referencia esté en `keep`, ni
+/// ningún archivo cuyo nombre no sea exactamente `<32 hex en minúscula>.tmp` o `.bin`. Una
+/// carpeta inexistente no es un error. Llamar al arrancar o cuando no haya una importación en
+/// curso (un `.tmp` vivo sería de esa importación). Los fallos de borrado se cuentan como
+/// `Storage` al final, después de intentar el resto.
+pub fn cleanup_vault(store_dir: &Path, keep: &[&str]) -> Result<VaultCleanup, PfxError> {
+    let entries = match fs::read_dir(store_dir) {
+        Ok(e) => e,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(VaultCleanup::default()),
+        Err(_) => return Err(PfxError::Storage),
+    };
+    let mut report = VaultCleanup::default();
+    let mut failed = false;
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        let Some((stem, ext)) = name.rsplit_once('.') else {
+            continue;
+        };
+        if !valid_reference(stem) || !entry.file_type().is_ok_and(|t| t.is_file()) {
+            continue;
+        }
+        let remove = match ext {
+            "tmp" => true,
+            "bin" => !keep.contains(&stem),
+            _ => false,
+        };
+        if !remove {
+            continue;
+        }
+        match fs::remove_file(entry.path()) {
+            Ok(()) if ext == "tmp" => report.tmp_removed += 1,
+            Ok(()) => report.bin_removed += 1,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => failed = true,
+        }
+    }
+    if failed {
+        Err(PfxError::Storage)
+    } else {
+        Ok(report)
+    }
+}
+
 /// Lee y descifra un PFX custodiado. `None` si no existe, la cabecera no es la esperada, el
 /// archivo está manipulado o DPAPI no lo descifra (otro usuario o entropía distinta).
 pub(crate) fn load(reference: &str, store_dir: &Path, entropy: &[u8]) -> Option<PfxSecret> {
