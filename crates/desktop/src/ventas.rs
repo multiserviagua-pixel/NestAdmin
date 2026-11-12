@@ -28,7 +28,7 @@ use std::str::FromStr;
 use std::sync::MutexGuard;
 
 use nestadmin_app::accounts::AccountView;
-use nestadmin_app::remission::{PumpReport, PumpStart, VerifactuStatusView};
+use nestadmin_app::remission::{PumpReport, VerifactuStatusView};
 use nestadmin_app::{App, AppError, AppResult};
 use nestadmin_core::sales::{
     ChainStatus, Company, Customer, CustomerData, DraftInput, DraftLine, IssuerSnapshot,
@@ -1363,24 +1363,25 @@ fn verifactu_status(shared: State<'_, SharedState>) -> CmdResult<VerifactuStatus
     sale(lock(&shared)?.verifactu_status())
 }
 
-/// «Remitir ahora»: una pasada manual de la remisión (D250). La llamada de red se hace sin el
-/// cerrojo de la aplicación y fuera del hilo de la ventana, igual que el tick (`resume_verifactu`).
+/// «Remitir ahora»: una pasada manual de la remisión (D250). La obtención del certificado y la
+/// llamada de red se hacen sin el cerrojo de la aplicación y fuera del hilo de la ventana, igual
+/// que el tick (`resume_verifactu`). Si el certificado pide un PIN o una confirmación, Windows
+/// muestra su diálogo solo aquí, nunca en el tick (D280). `declared_fixed`: el usuario declara
+/// que ya arregló la autorización y la remisión parada por un `Fault` de autorización se
+/// reanuda (D281).
 #[tauri::command]
-async fn verifactu_submit_now(shared: State<'_, SharedState>) -> CmdResult<PumpReport> {
+async fn verifactu_submit_now(
+    shared: State<'_, SharedState>,
+    declared_fixed: Option<bool>,
+) -> CmdResult<PumpReport> {
     let worker = std::sync::Arc::clone(shared.inner());
     tauri::async_runtime::spawn_blocking(move || {
-        let start = worker
-            .app()
-            .map_err(|e| coded("storage", e))
-            .and_then(|mut app| sale(app.verifactu_pump_begin(true)))?;
-        match start {
-            PumpStart::Idle(report) => Ok(report),
-            PumpStart::Job(job) => {
-                let sent = job.run();
-                let mut app = worker.app().map_err(|e| coded("storage", e))?;
-                sale(app.verifactu_pump_finish(sent))
-            }
-        }
+        crate::drive_verifactu_pump(&worker, true, declared_fixed.unwrap_or(false)).map_err(
+            |error| match error {
+                crate::PumpDriveError::Lock(text) => coded("storage", text),
+                crate::PumpDriveError::App(error) => coded(error.code(), &error),
+            },
+        )
     })
     .await
     .map_err(|e| coded("storage", e))?

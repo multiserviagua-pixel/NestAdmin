@@ -17,6 +17,11 @@
 //! si esa anulación estuvo en un lote suyo sin resultado (ajuste 2 de la etapa E5). Se puede
 //! sembrar con registros ya aceptados ([`SimuladorAeat::sembrar`]) para que, tras reabrir la
 //! aplicación, no dé falsos rechazos de anulación (3002) por haber perdido su memoria.
+//! `Fault` forzado ([`Estado::fallo_soap_siguiente`], D281): la siguiente petición recibe el `Fault`
+//! con el código dado sin procesarse (4112 de autorización, 4108 técnico...). Si la cabecera
+//! trae `Representante`, su NIF debe estar bien formado (`Fault` 4117 si no, D283). La aplicación
+//! los activa con `NESTADMIN_VERIFACTU_SIM` (`fault-autorizacion`, `fault-tecnico`), solo en
+//! compilación de depuración.
 //! Documentación técnica citada: ver `FUENTES.md` (validaciones y errores 1.2.2, servicio web
 //! 1.0.3).
 

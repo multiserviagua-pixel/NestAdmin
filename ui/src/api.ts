@@ -445,7 +445,7 @@ export const api = {
   /** Remisión a la AEAT (E5): estado de cada registro, último lote, espera y pendientes. */
   verifactuStatus: () => invoke<VerifactuStatusView>("verifactu_status"),
   /** «Remitir ahora»: una pasada manual; respeta la espera entre lotes. */
-  verifactuSubmitNow: () => invoke<VerifactuPumpReport>("verifactu_submit_now"),
+  verifactuSubmitNow: (declaredFixed?: boolean) => invoke<VerifactuPumpReport>("verifactu_submit_now", declaredFixed === undefined ? {} : { declaredFixed }),
   /** Crea un registro nuevo de subsanación de uno rechazado (D253); repetirlo no crea otro. */
   verifactuSubsanate: (recordId: number) => invoke<VerifactuSubsanation>("verifactu_subsanate", { recordId }),
   verifactuEnvironment: () => invoke<VerifactuEnvironment>("verifactu_environment"),

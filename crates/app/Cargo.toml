@@ -7,6 +7,9 @@ license.workspace = true
 publish.workspace = true
 
 [features]
+# Red real de la AEAT (D285): reenvía la característica de `nestadmin-certs`. Sin ella, la
+# remisión a preproducción y producción da `network_disabled` y nunca abre un socket.
+aeat-red = ["nestadmin-certs/aeat-red"]
 # Canal de las versiones de prueba (D133, D134): el afinado de sugerencias con IA (y, en E5, la
 # primera lectura de la bandeja) solo se hace bajo demanda, tras mostrar a qué proveedor se envía
 # y qué datos. Sin esta feature (versión final) se hace por lotes.
@@ -14,6 +17,7 @@ lectura-bajo-demanda = []
 
 [dependencies]
 nestadmin-ai = { path = "../ai" }
+nestadmin-certs = { path = "../certs" }
 nestadmin-core = { path = "../core" }
 nestadmin-documents = { path = "../documents" }
 nestadmin-extract = { path = "../extract" }
@@ -28,13 +32,12 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
 thiserror = "2"
-# Cliente HTTP del envío de la remisión Verifactu al simulador (D255); la misma versión y
-# características que ai, mail y setup (Cargo.lock la fija: 3.5.1), sin cambiar el inventario.
-ureq = { version = "3", default-features = false, features = ["rustls"] }
 
 [dev-dependencies]
 base64 = "0.23"
 pdfium-render = { version = "=0.9.5", default-features = false, features = ["pdfium_8125", "image_025", "thread_safe"] }
+rcgen = { version = "0.14", default-features = false, features = ["ring", "pem"] }
 rusqlite = { version = "0.41", features = ["bundled"] }
+rustls = { version = "0.23", default-features = false, features = ["std", "ring", "tls12"] }
 tempfile = "3"
 url = "2"

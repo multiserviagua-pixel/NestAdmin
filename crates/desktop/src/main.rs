@@ -42,7 +42,7 @@ use nestadmin_app::profile::{
 use nestadmin_app::refine::{
     ConsentView, RefineExpectation, RefineMode, RefinePreview, RefineTrigger, RefinementView,
 };
-use nestadmin_app::remission::PumpStart;
+use nestadmin_app::remission::{PumpReport, PumpStart};
 use nestadmin_app::rules::RuleFinding;
 use nestadmin_app::search::{extract_for_index, QuestionAnswer, INDEX_BATCH};
 use nestadmin_app::suggest::{RuleSeed, SeenInvoice, Suggestions, ThresholdSettings};
@@ -2374,33 +2374,87 @@ fn resume_initial_reads<R: Runtime>(shared: &SharedState, handle: &AppHandle<R>)
     }
 }
 
-/// Tick de la remisión Verifactu (E5, D250): cada vez que la cola queda ociosa (cada pocos
-/// segundos) reenvía el lote abierto o remite los pendientes cuando ya pasó la espera. La
-/// llamada de red se hace sin el cerrojo de la aplicación. Devuelve si hizo una remisión; un
-/// error solo se muestra, no detiene la cola.
-fn resume_verifactu<R: Runtime>(shared: &SharedState, handle: &AppHandle<R>) -> bool {
-    let start = match shared.app() {
-        Ok(mut app) => app.verifactu_pump_begin(false),
-        Err(_) => return false,
-    };
-    let job = match start {
-        Ok(PumpStart::Job(job)) => job,
-        Ok(PumpStart::Idle(_)) => return false,
-        Err(error) => {
-            eprintln!("no se pudo preparar la remisión de Verifactu: {error}");
-            return false;
+/// Por qué no se pudo completar una pasada de la remisión.
+pub(crate) enum PumpDriveError {
+    /// El estado interno no está disponible.
+    Lock(String),
+    App(nestadmin_app::AppError),
+}
+
+impl std::fmt::Display for PumpDriveError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            PumpDriveError::Lock(text) => f.write_str(text),
+            PumpDriveError::App(error) => write!(f, "{error}"),
         }
-    };
-    let sent = job.run();
-    let finished = match shared.app() {
-        Ok(mut app) => app.verifactu_pump_finish(sent),
-        Err(_) => return false,
-    };
-    if let Err(error) = finished {
-        eprintln!("no se pudo guardar el resultado de la remisión: {error}");
     }
-    changed(handle);
-    true
+}
+
+/// Una pasada completa de la remisión Verifactu (D250, D280). La decisión y el guardado se hacen
+/// con el cerrojo de la aplicación; la obtención del certificado (que puede tardar, con una
+/// tarjeta o un proveedor en la nube) y la llamada de red, sin él. Con `declared_fixed` (solo
+/// «Remitir ahora») el usuario declara antes que ya arregló la autorización y la remisión
+/// parada por un `Fault` de autorización se reanuda (D281).
+pub(crate) fn drive_verifactu_pump(
+    shared: &Shared,
+    manual: bool,
+    declared_fixed: bool,
+) -> Result<PumpReport, PumpDriveError> {
+    use PumpDriveError::{App, Lock};
+    let mut start = {
+        let mut app = shared.app().map_err(Lock)?;
+        if declared_fixed {
+            app.verifactu_declare_authorization_fixed().map_err(App)?;
+        }
+        app.verifactu_pump_begin(manual).map_err(App)?
+    };
+    loop {
+        match start {
+            PumpStart::Idle(report) => return Ok(report),
+            PumpStart::Credentials(job) => {
+                let fetched = job.run();
+                start = shared
+                    .app()
+                    .map_err(Lock)?
+                    .verifactu_pump_attempt(fetched)
+                    .map_err(App)?;
+            }
+            PumpStart::Job(job) => {
+                let sent = job.run();
+                return shared
+                    .app()
+                    .map_err(Lock)?
+                    .verifactu_pump_finish(sent)
+                    .map_err(App);
+            }
+        }
+    }
+}
+
+/// Tick de la remisión Verifactu (E5, D250): cada vez que la cola queda ociosa (cada pocos
+/// segundos) reenvía el lote abierto o remite los pendientes cuando ya pasó la espera; la
+/// primera pasada tras arrancar reintenta enseguida (D281). Nunca abre una ventana de
+/// certificado (D280). Devuelve si hizo una remisión; un error solo se muestra, no detiene la
+/// cola.
+fn resume_verifactu<R: Runtime>(shared: &SharedState, handle: &AppHandle<R>) -> bool {
+    match drive_verifactu_pump(shared, false, false) {
+        Ok(
+            PumpReport::Idle
+            | PumpReport::Busy
+            | PumpReport::Waiting { .. }
+            | PumpReport::Halted
+            | PumpReport::AuthorizationRejected { .. }
+            | PumpReport::EnvironmentUnavailable { .. },
+        ) => false,
+        Ok(_) => {
+            changed(handle);
+            true
+        }
+        Err(error) => {
+            eprintln!("no se pudo completar la remisión de Verifactu: {error}");
+            false
+        }
+    }
 }
 
 /// Espera hasta cinco segundos a que haya algo que hacer: el aviso `wake` o una petición de

@@ -27,6 +27,7 @@ Código afectado habitualmente: `crates/verifactu/src/` (registros, huella, XML,
 - [ ] Un 3000 solo cuenta como aceptado si el lote ya se había enviado antes de verdad. Los intentos que fallaron antes de escribir el cuerpo (certificado, clave, PIN, saludo TLS, caída a TLS 1.2) no se anotan como envío o se anotan aparte y no cuentan (D280). Compruebe en el diff que el certificado y la clave se obtienen **antes** de `begin_verifactu_attempt`.
 - [ ] Un solo lote abierto por obligado; un lote nunca mezcla obligados ni dos registros de la misma factura (D257).
 - [ ] Cerrar un lote dos veces da `conflict` y no repite efectos; la subsanación es idempotente (D253).
+- [ ] Un intento que el transporte declara no escrito (`NotSent`) se anula con una fila de `verifactu_unsent_attempts` (nunca se borra ni se actualiza) y `attempts_of` y `was_sent_before` solo cuentan los no anulados; el certificado se obtiene sin el cerrojo de la aplicación (`CredentialJob`) y el diálogo solo se abre desde «Remitir ahora».
 - [ ] La clasificación de `Fault` de D281 se mantiene: autorización (4112, 4105, 4117, 4123, 4124) para solo a ese obligado y no se reintenta; técnico (4108, 4110, 4134, 4141) se reintenta como mucho cada hora y nunca para; esquema para con aviso.
 
 ## La emisión nunca espera a la red (D250)
@@ -66,7 +67,7 @@ Código afectado habitualmente: `crates/verifactu/src/` (registros, huella, XML,
 
 ## Certificado y datos personales
 
-- [ ] Nada del certificado ni de su titular (contenido, contraseña, PIN, NIF, nombre, huella ni subject) llega a la base, al historial, a los registros de log, a los mensajes de error, a los avisos de la ventana ni a los artefactos. Los errores son códigos: `certificate_missing`, `certificate_expired`, `certificate_needs_user`, `certificate_key_unsupported`, `certificate_rejected`, `authorization_rejected`.
+- [ ] Nada del certificado ni de su titular (contenido, contraseña, PIN, NIF, nombre ni subject) llega a la base, al historial, a los registros de log, a los mensajes de error, a los avisos de la ventana ni a los artefactos. Solo se guarda el origen (`CertificateSource`: la huella SHA-256 pública del almacén o la referencia opaca del PFX, D278) y la huella de los certificados que solo negocian TLS 1.2 (`verifactu_tls12_preferences`, D279); el `Representante` configurado va en la base y en el `header_json` de los lotes, y su NIF y nombre no van al historial. Los errores son códigos: `certificate_missing`, `certificate_expired`, `certificate_needs_user`, `certificate_key_unsupported`, `certificate_rejected`, `authorization_rejected`.
 - [ ] Prueba con centinelas: un certificado sintético con un NIF y un nombre inconfundibles, y una búsqueda de esos textos en la base, el historial y las salidas de error y de registro.
 - [ ] El PFX va en un archivo DPAPI de usuario con entropía por instalación y `CRYPTPROTECT_UI_FORBIDDEN`, nunca en el Administrador de credenciales; los secretos pasan por `zeroize` y no se clonan sin necesidad (D278).
 - [ ] La aplicación nunca pide ni guarda el PIN; si la clave lo necesita, el registro queda en `certificate_needs_user` hasta «Remitir ahora».

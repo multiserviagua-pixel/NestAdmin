@@ -685,6 +685,13 @@ function verifactuStatus(): VerifactuStatusView {
     rejected: countStatus("rejected"),
     unexpected_duplicates: countStatus("unexpected_duplicate"),
     last_error: null,
+    oldest_pending_at: null,
+    oldest_pending_age_seconds: null,
+    incident_open: false,
+    last_unsent: null,
+    authorization_rejected: false,
+    authorization_code: null,
+    needs_certificate: false,
   };
 }
 
@@ -695,7 +702,7 @@ function verifactuPump(): VerifactuPumpReport {
   if (nextSendAt !== null && now < nextSendAt) return { state: "waiting", seconds: Math.ceil((nextSendAt - now) / 1000), until: nextSendAt };
   const batch = nextBatch++;
   nextSendAt = now + WAIT_SECONDS * 1000;
-  const base = { id: batch, environment: "simulador", record_count: open.length, started_at: now, attempts: 1 };
+  const base = { id: batch, environment: "simulador", record_count: open.length, started_at: now, attempts: 1, unsent_attempts: 0 };
   if (forceNoNetwork) {
     forceNoNetwork = false;
     for (const r of open) recordStates.set(r.id, { ...stateOf(r.id), status: "sending", batch });
@@ -776,7 +783,7 @@ export const salesMutating = new Set<string>();
     at(6, { status: "unexpected_duplicate", code: 3000, description: "Registro duplicado" });
     at(7, { status: "sending", batch: 2 });
     nextBatch = 3;
-    lastBatch = { id: 1, environment: "simulador", record_count: 4, started_at: now - 120_000, attempts: 1, outcome: "responded", send_state: "ParcialmenteCorrecto", error_code: null, error_description: null, wait_seconds: WAIT_SECONDS, csv: "CSV-DEMO-0001", finished_at: now - 118_000 };
+    lastBatch = { id: 1, environment: "simulador", record_count: 4, started_at: now - 120_000, attempts: 1, unsent_attempts: 0, outcome: "responded", send_state: "ParcialmenteCorrecto", error_code: null, error_description: null, wait_seconds: WAIT_SECONDS, csv: "CSV-DEMO-0001", finished_at: now - 118_000 };
     nextSendAt = now + 45_000;
   }
 }

@@ -309,3 +309,15 @@ test("la firma del estado cambia cuando cambia un registro o el lote", () => {
   assert.notEqual(statusSignature(base), statusSignature({ ...base, last_batch: batch({ id: 5 }) }));
   assert.equal(statusSignature(null), "");
 });
+
+test("los resultados de remisión con certificado tienen su texto y no cuentan como intento (D280, D281)", () => {
+  const rejected = pumpReportText({ state: "authorization_rejected", code: 4112 });
+  assert.equal(rejected.tone, "error");
+  assert.match(rejected.text, /4112.*parada.*no se reintenta/);
+  const needsUser = pumpReportText({ state: "needs_user", batch_id: 3 });
+  assert.equal(needsUser.tone, "warn");
+  assert.match(needsUser.text, /PIN.*lote 3 sigue pendiente/);
+  const notSent = pumpReportText({ state: "not_sent", batch_id: 2, code: "network_disabled", message: "Sin red real." });
+  assert.equal(notSent.tone, "warn");
+  assert.match(notSent.text, /lote 2.*No cuenta como intento/);
+});

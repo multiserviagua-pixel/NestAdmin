@@ -508,12 +508,13 @@ fn without_network_the_issue_does_not_wait_for_the_pump_and_the_record_stays_sen
     let status = h.app.verifactu_status().unwrap();
     let batch = status.last_batch.unwrap();
     assert_eq!(batch.outcome, None, "el lote sin respuesta no se cierra");
-    assert_eq!(batch.attempts, 1);
+    // Sin red el cuerpo no llegó a escribirse: no cuenta como intento de envío (D280).
+    assert_eq!((batch.attempts, batch.unsent_attempts), (0, 1));
     assert_eq!(status.next_send_at, Some(h.clock.now_ms() + 60_000));
     // La tarea queda fallida y reintentable, con el motivo.
     let task = h.submit_tasks().pop().unwrap();
     assert_eq!(task.state, TaskState::Failed);
-    assert_eq!(task.error.as_ref().unwrap().code, "unavailable");
+    assert_eq!(task.error.as_ref().unwrap().code, "connect_failed");
 
     // Dentro de la espera no hay otro intento, y otra emisión no espera a nada.
     let doc2 = h.emit();
@@ -529,7 +530,7 @@ fn without_network_the_issue_does_not_wait_for_the_pump_and_the_record_stays_sen
             .last_batch
             .unwrap()
             .attempts,
-        1
+        0
     );
 
     // Pasada la espera, vuelve la red: se reenvía el MISMO lote y la misma tarea.
@@ -538,7 +539,8 @@ fn without_network_the_issue_does_not_wait_for_the_pump_and_the_record_stays_sen
     let report = h.app.verifactu_pump(false).unwrap();
     assert_eq!(sent_counts(&report), (1, 0, 0));
     let batch = h.app.verifactu_status().unwrap().last_batch.unwrap();
-    assert_eq!((batch.id, batch.attempts, batch.record_count), (1, 2, 1));
+    assert_eq!((batch.id, batch.attempts, batch.record_count), (1, 1, 1));
+    assert_eq!(batch.unsent_attempts, 1);
     assert_eq!(h.view(alta).status, "accepted");
     assert_eq!(h.view(h.alta(doc2)).status, "pending");
     assert_eq!(
@@ -939,6 +941,7 @@ fn a_cut_halfway_leaves_nothing_duplicated_when_reopening() {
     let job = match h.app.verifactu_pump_begin(false).unwrap() {
         PumpStart::Job(job) => job,
         PumpStart::Idle(report) => panic!("{report:?}"),
+        PumpStart::Credentials(_) => panic!("el simulador no necesita certificado"),
     };
     let sent = job.run();
     assert_eq!(
@@ -961,12 +964,7 @@ fn a_cut_halfway_leaves_nothing_duplicated_when_reopening() {
     assert_eq!(tasks[0].state, TaskState::Queued);
     assert!(h.app.process_next().unwrap().is_none());
     assert_eq!(h.view(h.alta(doc)).status, "sending");
-    // La bomba reenvía el mismo lote: la espera del último intento aún no ha pasado.
-    assert!(matches!(
-        h.app.verifactu_pump(false).unwrap(),
-        PumpReport::Waiting { .. }
-    ));
-    h.wait();
+    // Al arrancar, la bomba reintenta enseguida (D281): reenvía el mismo lote sin esperar.
     let report = h.app.verifactu_pump(false).unwrap();
     assert_eq!(sent_counts(&report), (1, 0, 0));
     assert_eq!(h.view(h.alta(doc)).status, "accepted");
@@ -1009,6 +1007,7 @@ fn only_one_pass_runs_at_a_time() {
     let job = match h.app.verifactu_pump_begin(false).unwrap() {
         PumpStart::Job(job) => job,
         PumpStart::Idle(report) => panic!("{report:?}"),
+        PumpStart::Credentials(_) => panic!("el simulador no necesita certificado"),
     };
     // Mientras la pasada está en curso, el tick y el botón no abren otra.
     assert_eq!(h.app.verifactu_pump(false).unwrap(), PumpReport::Busy);

@@ -81,7 +81,7 @@ Plan por etapas (cambio de alcance del 2026-11-12, R35–R38); cada una acaba co
 2. **B1** `crates/certs`: validación pura y multiplataforma de certificados (tipo, vigencia, `clientAuth`, NIF del titular y del representado, avisos de caducidad) con certificados de `rcgen` (T18c).
 3. **B2** CNG, PFX (también antiguo) y DPAPI con `cfg(windows)`: archivo DPAPI con entropía, `zeroize`, `rustls-cng` fijado, `cargo tree -i aws-lc-rs` vacío (T09b, T18c). Revisión del arquitecto.
 4. **B3** Trait `SoapTransport` con TLS mutuo, simulador con TLS mutuo, caída a TLS 1.2 y endpoints constantes (T18d).
-5. **D1** Intentos sin envío (D280), clasificación de `Fault` (D281), `Incidencia` al abrir el lote (D282) y `Representante` (D283) (T18d). Revisión del arquitecto.
+5. **D1** Intentos sin envío (D280), clasificación de `Fault` (D281), `Incidencia` al abrir el lote (D282) y `Representante` (D283) (T18d). Revisión del arquitecto. (Implementado en dos cortes, D1a almacén y migración 17 y D1b bomba, transporte, simulador y estado; revisión del arquitecto pendiente.)
 6. **C1** Perfiles de datos y traslado de la base actual al perfil de pruebas, con pruebas de corte en cada paso (D271, D272, D275; T18g). Revisión del arquitecto.
 7. **C2** Registro de obligados, base por obligado y bomba sobre todos (D273, D274; T18f).
 8. **D2** Productor y declaración compilados, barrera, permanencia, fechas y reloj (D276, D277, D284; T18e). Revisión del arquitecto.

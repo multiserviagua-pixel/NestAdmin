@@ -1541,7 +1541,10 @@ export interface VerifactuBatchView {
   record_count: number;
   /** Milisegundos Unix. */
   started_at: number;
+  /** Intentos que cuentan como envío (D252, D280). */
   attempts: number;
+  /** Intentos sin envío: el cuerpo no llegó a escribirse y no cuentan (D280). */
+  unsent_attempts: number;
   /** `null` mientras el lote está abierto (sin respuesta). */
   outcome: "responded" | "fault" | null;
   send_state: string | null;
@@ -1571,6 +1574,27 @@ export interface VerifactuStatusView {
   unexpected_duplicates: number;
   /** Último error de preparación o de transporte; `null` si no hay. Solo en memoria. */
   last_error: VerifactuIssueView | null;
+  /** Milisegundos Unix en que se generó el registro más antiguo sin respuesta (pendiente o en un lote abierto) y su antigüedad en segundos (D281). */
+  oldest_pending_at: number | null;
+  oldest_pending_age_seconds: number | null;
+  /** Hay una incidencia técnica de remisión abierta (D282). */
+  incident_open: boolean;
+  /** El último intento sin envío y su motivo (D280). */
+  last_unsent: VerifactuUnsentView | null;
+  /** La remisión está parada por un `Fault` de autorización hasta que el usuario cambie el certificado o la configuración, o declare que lo arregló (D281). */
+  authorization_rejected: boolean;
+  authorization_code: number | null;
+  /** El certificado pide la intervención del usuario: «Remitir ahora» abre el diálogo (D280). */
+  needs_certificate: boolean;
+}
+
+/** Un intento sin envío: el cuerpo no llegó a escribirse y no cuenta como envío (D280). */
+export interface VerifactuUnsentView {
+  batch_id: number;
+  /** Código estable del motivo (`certificate_needs_user`, `connect_failed`...). */
+  code: string;
+  /** Milisegundos Unix. */
+  at: number;
 }
 
 /** Error de la remisión (código estable y texto), con cuántas veces seguidas se repitió. */
@@ -1588,6 +1612,9 @@ export type VerifactuPumpReport =
   | { state: "busy" }
   | { state: "waiting"; seconds: number; until: number }
   | { state: "halted" }
+  | { state: "authorization_rejected"; code: number }
+  | { state: "needs_user"; batch_id: number }
+  | { state: "not_sent"; batch_id: number; code: string; message: string }
   | { state: "environment_unavailable"; environment: string }
   | { state: "sent"; batch_id: number; accepted: number; accepted_with_errors: number; rejected: number; unexpected_duplicates: number; missing: number; wait_seconds: number }
   | { state: "fault"; batch_id: number; code: number | null; description: string }

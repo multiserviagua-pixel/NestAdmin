@@ -1,6 +1,7 @@
-//! Remisión de los registros Verifactu al simulador local de la AEAT (etapa E5, encargo B,
-//! D247-D260): entorno vigente, simulador en proceso, transporte SOAP, «bomba» de remisión con
-//! su tarea `submit_verifactu`, recuperación al abrir y estado para la interfaz.
+//! Remisión de los registros Verifactu (etapa E5, encargo B, D247-D260, y T18b-D1, D278-D283):
+//! entorno vigente, simulador en proceso, transporte SOAP detrás de `SoapTransport`, «bomba» de
+//! remisión con su tarea `submit_verifactu`, certificado de remisión, intentos sin envío,
+//! clasificación de los `Fault`, incidencias, recuperación al abrir y estado para la interfaz.
 //!
 //! La remisión es la obligación de la modalidad VERI*FACTU, no una acción discrecional (D250,
 //! excepción de R07). Garantías, escritas y probadas en `tests/sales_remission.rs`:
@@ -17,23 +18,40 @@
 //! Un lote sin respuesta nunca se cierra (D252): un fallo de red, un 5xx, una respuesta ilegible
 //! o un tiempo agotado dejan el lote abierto y la siguiente pasada lo reenvía idéntico. Solo una
 //! respuesta entendida o un `Fault` SOAP lo cierran.
+//!
+//! Orden de cada pasada para un lote (D280): resolver la configuración; si el entorno lo exige
+//! (`preproduccion` y `produccion`), obtener el certificado en silencio y sin el cerrojo de la
+//! aplicación (`CredentialJob`); anotar el intento (`begin_verifactu_attempt`); llamar al
+//! transporte. Si el certificado falla, no se anota ningún intento. Si el transporte dice que el
+//! cuerpo no llegó a escribirse (`NotSent`), el intento se ANULA con una fila aparte
+//! (`void_verifactu_attempt`; nunca se borra) y no cuenta para considerar propio un duplicado
+//! 3000 (D50, D252). Un `Fault` de autorización (D281) para la remisión hasta que el usuario
+//! cambia la configuración o declara que lo arregló; uno técnico no para nunca.
 
 use std::collections::HashMap;
+use std::io::{Read, Write};
+use std::net::{TcpStream, ToSocketAddrs};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
+use nestadmin_certs::{
+    AeatEnvironment, CertError, CertificateKind, CertificateSource, ClientCredentials, Endpoint,
+    MutualTlsTransport, NoResponseReason, NotSentReason, SendOutcome, SoapTransport, TlsPreference,
+    TransportReport, MAX_RESPONSE_BYTES,
+};
 use nestadmin_core::sales::{
-    BatchClosure, BatchOutcome, RecordEnvironment, SalesStoreError, VerifactuBatch,
-    VerifactuBatchSummary, VerifactuEnvironment, VerifactuKind, VerifactuRecordState,
-    VerifactuStatus, VerifactuSubsanation, CODE_BATCH_OPEN, CODE_BATCH_REJECTED,
-    CODE_ENVIRONMENT_BUSY, CODE_RECORD_INVALID, MAX_AUTOMATIC_FAULTS,
+    BatchClosure, BatchOutcome, FaultClass, RecordEnvironment, SalesStoreError, SenderCapacity,
+    VerifactuBatch, VerifactuBatchSummary, VerifactuEnvironment, VerifactuKind,
+    VerifactuRecordState, VerifactuStatus, VerifactuSubsanation, WaitMode,
+    CODE_AUTHORIZATION_REJECTED, CODE_BATCH_OPEN, CODE_BATCH_REJECTED, CODE_ENVIRONMENT_BUSY,
+    CODE_RECORD_INVALID, MAX_AUTOMATIC_FAULTS,
 };
 use nestadmin_core::{Task, TaskState};
 #[cfg(debug_assertions)]
 use nestadmin_verifactu::simulador::ErrorForzado;
 use nestadmin_verifactu::simulador::{ConfigSimulador, SimuladorAeat};
 use nestadmin_verifactu::xml::{Cabecera, PersonaEs};
-use nestadmin_verifactu::{FalloSoap, RegistroFacturacion, ResultadoEnvio};
+use nestadmin_verifactu::{FalloSoap, FechaHoraHuso, RegistroFacturacion, ResultadoEnvio};
 use serde::Serialize;
 use serde_json::{json, Value};
 
@@ -58,6 +76,16 @@ pub const OTHER_ENVIRONMENT: &str = "other_environment";
 /// Variable que fuerza respuestas del simulador (solo compilaciones de depuración y entorno
 /// `simulador`, D254).
 pub const SIM_VARIABLE: &str = "NESTADMIN_VERIFACTU_SIM";
+/// Código del intento sin envío cuando la compilación no incluye la red real de la AEAT
+/// (`aeat-red`, D285).
+pub const CODE_NETWORK_DISABLED: &str = "network_disabled";
+/// Código del motivo cuando el certificado pide la intervención del usuario (D278): el registro
+/// queda pendiente hasta «Remitir ahora».
+pub const CODE_CERTIFICATE_NEEDS_USER: &str = "certificate_needs_user";
+/// Declaración con la que el usuario reanuda la remisión parada por autorización (D281).
+pub const AUTHORIZATION_DECLARATION: &str = "usuario_declara_autorizacion";
+/// Tiempo que se espera a que un proveedor de claves conteste en modo silencioso (D280).
+const SILENT_ACQUIRE_TIMEOUT: Duration = Duration::from_secs(5);
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
@@ -82,28 +110,262 @@ fn transport_error(code: &'static str, message: impl Into<String>) -> TransportE
     }
 }
 
-/// `POST` del sobre SOAP y clasificación de lo que vuelva: una respuesta entendida o un `Fault`
-/// SOAP son resultado; el resto es un error del transporte (el lote sigue abierto).
-fn post_soap(url: &str, body: &str) -> Result<ResultadoEnvio, TransportError> {
-    let agent: ureq::Agent = ureq::Agent::config_builder()
-        .timeout_global(Some(REQUEST_TIMEOUT))
-        .timeout_connect(Some(CONNECT_TIMEOUT))
-        .http_status_as_error(false)
-        .proxy(None)
-        .build()
-        .into();
-    let mut response = agent
-        .post(url)
-        .header("Content-Type", "text/xml; charset=utf-8")
-        .header("SOAPAction", "")
-        .send(body)
-        .map_err(|e| transport_error(TRANSPORT_UNAVAILABLE, format!("sin conexión: {e}")))?;
-    let status = response.status().as_u16();
-    let text = response
-        .body_mut()
-        .read_to_string()
-        .map_err(|e| transport_error(TRANSPORT_UNAVAILABLE, format!("respuesta cortada: {e}")))?;
-    classify_response(status, &text)
+/// Credenciales de remisión ya obtenidas: la cadena y la clave de firma del TLS mutuo, el tipo de
+/// certificado (para elegir el endpoint, D279) y su huella (para recordar si solo negocia
+/// TLS 1.2). Su `Debug` no muestra nada del certificado.
+pub struct SenderCredentials {
+    pub credentials: ClientCredentials,
+    pub kind: CertificateKind,
+    /// Huella SHA-256 del certificado, en hexadecimal.
+    pub fingerprint: String,
+}
+
+impl std::fmt::Debug for SenderCredentials {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SenderCredentials")
+            .field("kind", &self.kind)
+            .finish_non_exhaustive()
+    }
+}
+
+/// De dónde sale el certificado de remisión (D278, D280): el escritorio inyecta el de Windows
+/// (almacén o PFX); las pruebas, uno sintético. Sin proveedor, o sin certificado vinculado, el
+/// resultado es `certificate_missing`.
+pub trait CertificateProvider: Send + Sync {
+    /// Obtiene la clave de firma. Con `interactive = false` nunca muestra una ventana ni pide un
+    /// PIN: si hace falta, devuelve [`CertError::NeedsUser`]. Con `interactive = true` (solo
+    /// «Remitir ahora») Windows puede mostrar su diálogo. `now_ms` es el reloj de la aplicación.
+    fn acquire(
+        &self,
+        source: &CertificateSource,
+        interactive: bool,
+        now_ms: i64,
+    ) -> Result<SenderCredentials, CertError>;
+}
+
+/// Proveedor de Windows: almacén de certificados (CNG) o PFX custodiado con DPAPI (D278).
+#[cfg(windows)]
+pub struct WindowsCertificateProvider {
+    store_dir: std::path::PathBuf,
+    entropy: Vec<u8>,
+}
+
+#[cfg(windows)]
+impl WindowsCertificateProvider {
+    /// `store_dir`: la carpeta de datos del usuario donde `import_pfx` guarda los PFX;
+    /// `entropy`: la entropía por instalación con la que se cifraron.
+    pub fn new(store_dir: std::path::PathBuf, entropy: Vec<u8>) -> Self {
+        Self { store_dir, entropy }
+    }
+}
+
+#[cfg(windows)]
+impl CertificateProvider for WindowsCertificateProvider {
+    fn acquire(
+        &self,
+        source: &CertificateSource,
+        interactive: bool,
+        now_ms: i64,
+    ) -> Result<SenderCredentials, CertError> {
+        use nestadmin_certs::AcquireMode;
+        let signer = if interactive {
+            nestadmin_certs::acquire(
+                source,
+                &self.store_dir,
+                &self.entropy,
+                AcquireMode::Interactive,
+                now_ms,
+            )?
+        } else {
+            nestadmin_certs::acquire_with_timeout(
+                source,
+                &self.store_dir,
+                &self.entropy,
+                AcquireMode::Silent,
+                now_ms,
+                SILENT_ACQUIRE_TIMEOUT,
+            )?
+        };
+        Ok(SenderCredentials {
+            credentials: ClientCredentials::from(&signer),
+            kind: signer.info.kind,
+            fingerprint: signer.info.fingerprint.clone(),
+        })
+    }
+}
+
+fn not_sent(reason: NotSentReason) -> TransportReport {
+    TransportReport {
+        outcome: SendOutcome::NotSent(reason),
+        needs_tls12: false,
+    }
+}
+
+fn no_response(reason: NoResponseReason) -> TransportReport {
+    TransportReport {
+        outcome: SendOutcome::SentNoResponse(reason),
+        needs_tls12: false,
+    }
+}
+
+/// Transporte del entorno `simulador` (D254): un `POST` HTTP/1.1 plano contra el simulador local
+/// en 127.0.0.1, detrás del mismo trait que el TLS mutuo. Distingue sin ambigüedad lo que nunca
+/// se escribió (`NotSent`: DNS, conexión) de lo que pudo llegar sin respuesta completa
+/// (`SentNoResponse`), igual que `MutualTlsTransport`. Ignora el endpoint de la AEAT y las
+/// credenciales: solo habla con la URL que se le dio, que es siempre local.
+#[derive(Debug, Clone)]
+pub struct SimulatorTransport {
+    url: String,
+}
+
+impl SimulatorTransport {
+    pub fn new(url: impl Into<String>) -> Self {
+        Self { url: url.into() }
+    }
+
+    /// Un único `POST` del cuerpo, con tiempo de conexión de 3 s y plazo total de 10 s.
+    pub fn post(&self, body: &[u8]) -> TransportReport {
+        let Some((authority, path)) = split_http_url(&self.url) else {
+            return not_sent(NotSentReason::Connect);
+        };
+        let addr = match authority.to_socket_addrs() {
+            Ok(mut addrs) => match addrs.next() {
+                Some(addr) => addr,
+                None => return not_sent(NotSentReason::Dns),
+            },
+            Err(_) => return not_sent(NotSentReason::Dns),
+        };
+        let started = Instant::now();
+        let mut stream = match TcpStream::connect_timeout(&addr, CONNECT_TIMEOUT) {
+            Ok(stream) => stream,
+            Err(error) if is_timeout(&error) => return not_sent(NotSentReason::ConnectTimeout),
+            Err(_) => return not_sent(NotSentReason::Connect),
+        };
+        let _ = stream.set_nodelay(true);
+        let remaining = || REQUEST_TIMEOUT.saturating_sub(started.elapsed());
+        let _ = stream.set_write_timeout(Some(remaining().max(Duration::from_millis(1))));
+        let mut request = format!(
+            "POST {path} HTTP/1.1\r\nHost: {authority}\r\nContent-Type: text/xml; charset=utf-8\r\n\
+             SOAPAction: \"\"\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        )
+        .into_bytes();
+        request.extend_from_slice(body);
+        if let Err(error) = stream.write_all(&request).and_then(|_| stream.flush()) {
+            return no_response(if is_timeout(&error) {
+                NoResponseReason::WriteTimeout
+            } else {
+                NoResponseReason::WriteFailed
+            });
+        }
+        read_plain_response(&mut stream, &remaining)
+    }
+}
+
+impl SoapTransport for SimulatorTransport {
+    fn send(
+        &self,
+        _endpoint: Endpoint,
+        body: &[u8],
+        _credentials: &ClientCredentials,
+        _tls: TlsPreference,
+    ) -> TransportReport {
+        self.post(body)
+    }
+}
+
+fn is_timeout(error: &std::io::Error) -> bool {
+    matches!(
+        error.kind(),
+        std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
+    )
+}
+
+/// `http://host:puerto/ruta` -> (`host:puerto`, `/ruta`). Solo HTTP plano: el simulador es local.
+fn split_http_url(url: &str) -> Option<(&str, String)> {
+    let rest = url.strip_prefix("http://")?;
+    let (authority, path) = match rest.split_once('/') {
+        Some((authority, path)) => (authority, format!("/{path}")),
+        None => (rest, "/".to_owned()),
+    };
+    (!authority.is_empty()).then_some((authority, path))
+}
+
+/// Lee la respuesta HTTP/1.1 (`Content-Length` o hasta el cierre) con el plazo que quede.
+fn read_plain_response(
+    stream: &mut TcpStream,
+    remaining: &dyn Fn() -> Duration,
+) -> TransportReport {
+    let mut buffer: Vec<u8> = Vec::new();
+    let mut chunk = [0u8; 8192];
+    // (fin de la cabecera, estado, longitud del cuerpo si se declaró)
+    let mut head: Option<(usize, u16, Option<usize>)> = None;
+    loop {
+        if head.is_none() {
+            if let Some(end) = buffer.windows(4).position(|w| w == b"\r\n\r\n") {
+                let text = String::from_utf8_lossy(&buffer[..end]).into_owned();
+                let mut lines = text.lines();
+                let status = lines
+                    .next()
+                    .and_then(|line| line.split_whitespace().nth(1))
+                    .and_then(|code| code.parse::<u16>().ok());
+                let Some(status) = status else {
+                    return no_response(NoResponseReason::ResponseInvalid);
+                };
+                let mut length = None;
+                for line in lines {
+                    if let Some((name, value)) = line.split_once(':') {
+                        let name = name.trim();
+                        if name.eq_ignore_ascii_case("content-length") {
+                            length = value.trim().parse::<usize>().ok();
+                        } else if name.eq_ignore_ascii_case("transfer-encoding") {
+                            return no_response(NoResponseReason::ResponseInvalid);
+                        }
+                    }
+                }
+                if length.is_some_and(|l| l > MAX_RESPONSE_BYTES) {
+                    return no_response(NoResponseReason::ResponseTooLarge);
+                }
+                head = Some((end + 4, status, length));
+            }
+        }
+        if let Some((start, status, Some(length))) = head {
+            if buffer.len() >= start + length {
+                let body = buffer[start..start + length].to_vec();
+                return TransportReport {
+                    outcome: SendOutcome::Response { status, body },
+                    needs_tls12: false,
+                };
+            }
+        }
+        if buffer.len() > MAX_RESPONSE_BYTES + 16 * 1024 {
+            return no_response(NoResponseReason::ResponseTooLarge);
+        }
+        let left = remaining();
+        if left.is_zero() {
+            return no_response(NoResponseReason::ReadTimeout);
+        }
+        let _ = stream.set_read_timeout(Some(left));
+        match stream.read(&mut chunk) {
+            Ok(0) => {
+                return match head {
+                    // Sin `Content-Length`, el cierre marca el fin del cuerpo.
+                    Some((start, status, None)) => TransportReport {
+                        outcome: SendOutcome::Response {
+                            status,
+                            body: buffer[start..].to_vec(),
+                        },
+                        needs_tls12: false,
+                    },
+                    _ => no_response(NoResponseReason::ConnectionClosed),
+                };
+            }
+            Ok(n) => buffer.extend_from_slice(&chunk[..n]),
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(error) if is_timeout(&error) => return no_response(NoResponseReason::ReadTimeout),
+            Err(_) => return no_response(NoResponseReason::ConnectionClosed),
+        }
+    }
 }
 
 fn classify_response(status: u16, text: &str) -> Result<ResultadoEnvio, TransportError> {
@@ -156,11 +418,16 @@ pub enum SimMode {
     SchemaFault,
     /// El primer registro del siguiente envío se acepta con errores (2000).
     AcceptWithErrors,
+    /// El siguiente envío recibe un `Fault` de autorización (4112, D281): la remisión se para.
+    AuthorizationFault,
+    /// El siguiente envío recibe un `Fault` técnico (4108, D281): nunca para; se reintenta con
+    /// espera creciente.
+    TechnicalFault,
 }
 
 impl SimMode {
     /// Valor de `NESTADMIN_VERIFACTU_SIM`: `rechazar-siguiente`, `sin-red`, `perder-respuesta`,
-    /// `fault-esquema` o `aceptado-con-errores`.
+    /// `fault-esquema`, `aceptado-con-errores`, `fault-autorizacion` o `fault-tecnico`.
     pub fn parse(text: &str) -> Option<Self> {
         match text.trim() {
             "rechazar-siguiente" => Some(Self::RejectNext),
@@ -168,6 +435,8 @@ impl SimMode {
             "perder-respuesta" => Some(Self::LoseNextResponse),
             "fault-esquema" => Some(Self::SchemaFault),
             "aceptado-con-errores" => Some(Self::AcceptWithErrors),
+            "fault-autorizacion" => Some(Self::AuthorizationFault),
+            "fault-tecnico" => Some(Self::TechnicalFault),
             _ => None,
         }
     }
@@ -189,11 +458,24 @@ pub(crate) struct RemissionRuntime {
     simulator: Option<Arc<SimuladorAeat>>,
     /// Último error al preparar o enviar una pasada (en memoria): lo ve la interfaz.
     last_error: Option<RemissionIssue>,
+    /// De dónde sale el certificado de remisión (D278): lo inyecta el escritorio. Sin él, la
+    /// remisión a la AEAT da `certificate_missing`.
+    certificates: Option<Arc<dyn CertificateProvider>>,
+    /// La última pasada terminó en `certificate_needs_user`: el registro espera a «Remitir
+    /// ahora» (el worker nunca abre una ventana, D280).
+    needs_certificate: bool,
+    /// Aún no hubo ninguna pasada desde que se abrió la aplicación: la primera reintenta
+    /// enseguida, sin esperar la espera que dejaron los fallos anteriores (D281).
+    startup_pending: bool,
     #[cfg(debug_assertions)]
     sim_mode: Option<SimMode>,
     /// Servidor de pruebas que sustituye al simulador (solo depuración).
     #[cfg(debug_assertions)]
     endpoint: Option<String>,
+    /// Transporte de pruebas que sustituye al TLS mutuo en preproducción y producción (solo
+    /// depuración): los endpoints de la AEAT son constantes y nada los cambia (D279).
+    #[cfg(debug_assertions)]
+    transport: Option<Arc<dyn SoapTransport>>,
 }
 
 impl RemissionRuntime {
@@ -203,12 +485,17 @@ impl RemissionRuntime {
             requested: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             simulator: None,
             last_error: None,
+            certificates: None,
+            needs_certificate: false,
+            startup_pending: true,
             #[cfg(debug_assertions)]
             sim_mode: std::env::var(SIM_VARIABLE)
                 .ok()
                 .and_then(|v| SimMode::parse(&v)),
             #[cfg(debug_assertions)]
             endpoint: None,
+            #[cfg(debug_assertions)]
+            transport: None,
         }
     }
 }
@@ -263,9 +550,25 @@ pub enum PumpReport {
         /// Instante permitido (milisegundos Unix).
         until: i64,
     },
-    /// Tres `Fault` seguidos: la remisión automática está parada hasta «Remitir ahora» (D259).
+    /// Tres `Fault` de esquema seguidos: la remisión automática está parada hasta «Remitir
+    /// ahora» (D259, D281).
     Halted,
-    /// El entorno vigente no tiene transporte (solo `simulador` en E5, D247).
+    /// La AEAT respondió con un `Fault` de autorización (4112, 4105, 4117, 4123 o 4124): la
+    /// remisión de esta base está parada y no se reintenta hasta que el usuario cambie el
+    /// certificado o la configuración, o declare que lo arregló (D281).
+    AuthorizationRejected { code: u32 },
+    /// El certificado pide la intervención del usuario (PIN, tarjeta, confirmación): no se anotó
+    /// ningún intento y el registro queda pendiente hasta «Remitir ahora» (D278, D280).
+    NeedsUser { batch_id: i64 },
+    /// El cuerpo no llegó a escribirse (certificado ausente, caducado o rechazado, sin red, saludo
+    /// TLS rechazado, `network_disabled`...): no cuenta como intento de envío (D280). `code` es
+    /// el motivo estable.
+    NotSent {
+        batch_id: i64,
+        code: String,
+        message: String,
+    },
+    /// El entorno vigente no tiene transporte.
     EnvironmentUnavailable { environment: String },
     /// La AEAT respondió y el lote se cerró.
     Sent {
@@ -324,7 +627,10 @@ pub struct VerifactuBatchView {
     pub environment: String,
     pub record_count: u32,
     pub started_at: i64,
+    /// Intentos que cuentan como envío (D252, D280).
     pub attempts: u32,
+    /// Intentos sin envío: el cuerpo no llegó a escribirse y no cuentan (D280).
+    pub unsent_attempts: u32,
     /// `None` mientras el lote está abierto (sin respuesta).
     pub outcome: Option<String>,
     pub send_state: Option<String>,
@@ -364,6 +670,52 @@ pub struct VerifactuStatusView {
     /// Último error de preparación o de transporte (código estable y texto), hasta el siguiente
     /// envío bien resuelto o hasta que no quede nada pendiente. Solo se guarda en memoria.
     pub last_error: Option<VerifactuIssueView>,
+    /// Momento (milisegundos Unix) en que se generó el registro más antiguo del entorno vigente
+    /// que aún no obtuvo respuesta (pendiente o en un lote abierto sin enviar) y su antigüedad en
+    /// segundos según el reloj de la aplicación (D281).
+    pub oldest_pending_at: Option<i64>,
+    pub oldest_pending_age_seconds: Option<u64>,
+    /// Hay una incidencia técnica de remisión abierta (D282): los registros generados ahora irán
+    /// en un lote con `Incidencia = S`.
+    pub incident_open: bool,
+    /// El último intento sin envío y su motivo (D280).
+    pub last_unsent: Option<VerifactuUnsentView>,
+    /// La remisión de esta base está parada por un `Fault` de autorización y no se reintenta
+    /// hasta que el usuario cambie el certificado o la configuración, o declare que lo arregló
+    /// (D281). `authorization_code` es el código de la AEAT.
+    pub authorization_rejected: bool,
+    pub authorization_code: Option<u32>,
+    /// El certificado pide la intervención del usuario: «Remitir ahora» abre el diálogo (D280).
+    pub needs_certificate: bool,
+}
+
+/// Un intento sin envío tal como lo ve la interfaz (D280).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct VerifactuUnsentView {
+    pub batch_id: i64,
+    /// Código estable del motivo (`certificate_needs_user`, `connect_failed`...).
+    pub code: String,
+    /// Milisegundos Unix.
+    pub at: i64,
+}
+
+/// Configuración de la remisión de esta base (D278, D283).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct VerifactuRemissionSettingsView {
+    /// Origen del certificado (huella pública o referencia opaca), si hay uno vinculado.
+    pub certificate: Option<CertificateSource>,
+    /// `taxpayer`, `representative`, `attorney` o `collaborator`.
+    pub sender_capacity: String,
+    /// Representante configurado expresamente (D283): `(nombre, NIF)`.
+    pub representative: Option<VerifactuRepresentativeView>,
+    pub changed_at: i64,
+}
+
+/// Quien remite con su propio certificado en nombre del obligado (`Cabecera/Representante`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct VerifactuRepresentativeView {
+    pub name: String,
+    pub nif: String,
 }
 
 /// Error de la remisión tal como lo ve la interfaz.
@@ -381,15 +733,35 @@ pub struct VerifactuIssueView {
 // Trabajo de una pasada (se parte para no tener el cerrojo de la aplicación durante la red)
 // ---------------------------------------------------------------------------------------------
 
-/// Trabajo de red de una pasada ya preparado: se ejecuta sin tocar la aplicación.
+/// Cómo sale el cuerpo de esta pasada.
+enum Wire {
+    /// El simulador local (D254), con HTTP plano en 127.0.0.1.
+    Simulator {
+        transport: SimulatorTransport,
+        /// Modo de depuración `sin-red`: no se llega a conectar.
+        no_network: bool,
+    },
+    /// TLS mutuo hacia la AEAT, o el transporte de pruebas que lo sustituye (D279).
+    Remote {
+        transport: Arc<dyn SoapTransport>,
+        credentials: ClientCredentials,
+        endpoint: Endpoint,
+        tls: TlsPreference,
+        fingerprint: String,
+    },
+}
+
+/// Trabajo de red de una pasada ya preparado, con el intento ya anotado (D252): se ejecuta sin
+/// tocar la aplicación.
 pub struct VerifactuJob {
     lease: PumpLease,
     task_id: i64,
     batch_id: i64,
-    url: String,
+    /// Intento anotado antes de la llamada: se anula si el cuerpo no llegó a escribirse (D280).
+    attempt_id: i64,
     body: String,
     started_ms: i64,
-    no_network: bool,
+    wire: Wire,
     simulator: Option<Arc<SimuladorAeat>>,
     cleanup: Vec<Cleanup>,
 }
@@ -399,20 +771,31 @@ pub struct VerifactuSent {
     lease: PumpLease,
     task_id: i64,
     batch_id: i64,
+    attempt_id: i64,
     started_ms: i64,
-    outcome: Result<ResultadoEnvio, TransportError>,
+    report: TransportReport,
+    /// Huella del certificado usado, para recordar si solo negoció TLS 1.2 (D279).
+    fingerprint: Option<String>,
 }
 
 impl VerifactuJob {
     /// Hace la llamada (sin la aplicación) y deshace lo que se forzó en el simulador.
     pub fn run(self) -> VerifactuSent {
-        let outcome = if self.no_network {
-            Err(transport_error(
-                TRANSPORT_UNAVAILABLE,
-                "sin red (simulado)".to_owned(),
-            ))
-        } else {
-            post_soap(&self.url, &self.body)
+        let (report, fingerprint) = match &self.wire {
+            Wire::Simulator {
+                no_network: true, ..
+            } => (not_sent(NotSentReason::Connect), None),
+            Wire::Simulator { transport, .. } => (transport.post(self.body.as_bytes()), None),
+            Wire::Remote {
+                transport,
+                credentials,
+                endpoint,
+                tls,
+                fingerprint,
+            } => (
+                transport.send(*endpoint, self.body.as_bytes(), credentials, *tls),
+                Some(fingerprint.clone()),
+            ),
         };
         if let Some(sim) = &self.simulator {
             for undo in &self.cleanup {
@@ -430,8 +813,61 @@ impl VerifactuJob {
             lease: self.lease,
             task_id: self.task_id,
             batch_id: self.batch_id,
+            attempt_id: self.attempt_id,
             started_ms: self.started_ms,
-            outcome,
+            report,
+            fingerprint,
+        }
+    }
+}
+
+/// Primera fase de una pasada con certificado (`preproduccion` y `produccion`): obtener la clave
+/// de firma ANTES de anotar el intento (D280). Puede tardar (una tarjeta, un proveedor en la
+/// nube), así que se hace sin el cerrojo de la aplicación.
+pub struct CredentialJob {
+    lease: PumpLease,
+    task_id: i64,
+    batch_id: i64,
+    body: String,
+    started_ms: i64,
+    /// «Remitir ahora»: si el modo silencioso da `NeedsUser`, se reintenta con diálogo.
+    manual: bool,
+    source: CertificateSource,
+    provider: Arc<dyn CertificateProvider>,
+    transport: Arc<dyn SoapTransport>,
+    aeat: AeatEnvironment,
+}
+
+/// Lo que dio la obtención del certificado, listo para [`App::verifactu_pump_attempt`].
+pub struct CredentialsFetched {
+    lease: PumpLease,
+    task_id: i64,
+    batch_id: i64,
+    body: String,
+    started_ms: i64,
+    transport: Arc<dyn SoapTransport>,
+    aeat: AeatEnvironment,
+    result: Result<SenderCredentials, CertError>,
+}
+
+impl CredentialJob {
+    /// Obtiene el certificado en silencio (sin ventana ni PIN). Solo con «Remitir ahora», y solo
+    /// si hace falta al usuario, vuelve a pedirlo con el diálogo de Windows: el worker nunca
+    /// abre una ventana (D280).
+    pub fn run(self) -> CredentialsFetched {
+        let mut result = self.provider.acquire(&self.source, false, self.started_ms);
+        if self.manual && matches!(result, Err(CertError::NeedsUser)) {
+            result = self.provider.acquire(&self.source, true, self.started_ms);
+        }
+        CredentialsFetched {
+            lease: self.lease,
+            task_id: self.task_id,
+            batch_id: self.batch_id,
+            body: self.body,
+            started_ms: self.started_ms,
+            transport: self.transport,
+            aeat: self.aeat,
+            result,
         }
     }
 }
@@ -440,7 +876,10 @@ impl VerifactuJob {
 pub enum PumpStart {
     /// No hay nada que enviar ahora (y por qué).
     Idle(PumpReport),
-    /// Hay una llamada que hacer.
+    /// Hay que obtener el certificado (sin el cerrojo de la aplicación) y después anotar el
+    /// intento con [`App::verifactu_pump_attempt`].
+    Credentials(CredentialJob),
+    /// Hay una llamada que hacer: el intento ya está anotado.
     Job(VerifactuJob),
 }
 
@@ -466,6 +905,7 @@ fn batch_view(summary: &VerifactuBatchSummary) -> VerifactuBatchView {
         record_count: summary.record_count,
         started_at: summary.started_at,
         attempts: summary.attempts,
+        unsent_attempts: summary.unsent_attempts,
         outcome: result.map(|r| match r.outcome {
             BatchOutcome::Responded => "responded".to_owned(),
             BatchOutcome::Fault => "fault".to_owned(),
@@ -621,6 +1061,12 @@ impl App {
                         undo.push(Cleanup::Censo(state.config.censo.clone()));
                         state.config.censo = Some(Vec::new());
                     }
+                    SimMode::AuthorizationFault => {
+                        sim.estado().fallo_soap_siguiente = Some(4112);
+                    }
+                    SimMode::TechnicalFault => {
+                        sim.estado().fallo_soap_siguiente = Some(4108);
+                    }
                     SimMode::NoNetwork => {}
                 }
             }
@@ -649,12 +1095,21 @@ impl App {
 
     /// Una pasada completa de la remisión: reenvía de forma idéntica un lote abierto sin
     /// resultado o, si hay pendientes y ya pasó la espera, abre uno nuevo y lo envía. Con
-    /// `manual` (el botón «Remitir ahora») se salta el paro por `Fault` seguidos, pero no la
-    /// espera (D251). Se llama tras emitir y anular, en el tick periódico y con el botón.
+    /// `manual` (el botón «Remitir ahora») se salta el paro por `Fault` de esquema seguidos,
+    /// pero no la espera por fallos que sí llegaron a la AEAT (D251) ni el paro por autorización
+    /// (D281: ese lo levanta [`App::verifactu_declare_authorization_fixed`]). Se llama tras emitir
+    /// y anular, en el tick periódico y con el botón.
     pub fn verifactu_pump(&mut self, manual: bool) -> AppResult<PumpReport> {
-        match self.verifactu_pump_begin(manual)? {
-            PumpStart::Idle(report) => Ok(report),
-            PumpStart::Job(job) => self.verifactu_pump_finish(job.run()),
+        let mut start = self.verifactu_pump_begin(manual)?;
+        loop {
+            match start {
+                PumpStart::Idle(report) => return Ok(report),
+                PumpStart::Credentials(job) => {
+                    let fetched = job.run();
+                    start = self.verifactu_pump_attempt(fetched)?;
+                }
+                PumpStart::Job(job) => return self.verifactu_pump_finish(job.run()),
+            }
         }
     }
 
@@ -676,9 +1131,11 @@ impl App {
             .swap(false, std::sync::atomic::Ordering::SeqCst)
     }
 
-    /// Primera mitad de la pasada: decide, abre o recupera el lote, crea la tarea y anota el
-    /// intento. No hace ninguna llamada de red; devuelve el trabajo para hacerla sin tener la
-    /// aplicación (el escritorio suelta su cerrojo durante la llamada).
+    /// Primera fase de la pasada: decide, abre o recupera el lote y crea la tarea. En el
+    /// simulador anota ya el intento y devuelve el trabajo de red; con certificado devuelve
+    /// primero la obtención de la clave (`PumpStart::Credentials`), que el llamador hace sin la
+    /// aplicación y entrega a [`App::verifactu_pump_attempt`]. Ninguna fase hace llamadas de red
+    /// con el cerrojo de la aplicación tomado.
     pub fn verifactu_pump_begin(&mut self, manual: bool) -> AppResult<PumpStart> {
         let started = self.pump_begin_inner(manual);
         match &started {
@@ -688,6 +1145,19 @@ impl App {
             }
             Ok(PumpStart::Idle(PumpReport::Idle)) => self.remission.last_error = None,
             Ok(_) => {}
+        }
+        started
+    }
+
+    /// Segunda fase de la pasada con certificado: con la clave obtenida, anota el intento
+    /// ANTES de la llamada (D252) y devuelve el trabajo de red. Si el certificado falló, no se
+    /// anota ningún intento (D280): queda un intento sin envío con el motivo, la tarea fallida y
+    /// reintentable y el lote abierto.
+    pub fn verifactu_pump_attempt(&mut self, fetched: CredentialsFetched) -> AppResult<PumpStart> {
+        let started = self.attempt_inner(fetched);
+        if let Err(error) = &started {
+            let (code, message) = (error.code().to_owned(), error.to_string());
+            self.note_issue(&code, message);
         }
         started
     }
@@ -712,14 +1182,18 @@ impl App {
             return Ok(PumpStart::Idle(PumpReport::Busy));
         };
         let environment = self.store.verifactu_environment()?;
-        if environment != VerifactuEnvironment::Simulador {
-            return Ok(PumpStart::Idle(PumpReport::EnvironmentUnavailable {
-                environment: environment.as_str().to_owned(),
-            }));
-        }
         let now = self.remission_now_ms()?;
+        // La primera pasada tras abrir la aplicación reintenta enseguida (D281).
+        let startup = std::mem::replace(&mut self.remission.startup_pending, false);
         self.settle_submit_tasks();
         let open = self.store.unfinished_verifactu_batch()?;
+        // Un `Fault` de autorización para la remisión de esta base: no se reintenta hasta que el
+        // usuario cambie el certificado o la configuración, o declare que lo arregló (D281).
+        if let Some(halt) = self.store.verifactu_authorization_halt()? {
+            return Ok(PumpStart::Idle(PumpReport::AuthorizationRejected {
+                code: halt.error_code,
+            }));
+        }
         let faults = self.store.verifactu_consecutive_faults(environment)?;
         // El paro frena abrir lotes nuevos, no reenviar el abierto: un lote sin respuesta se
         // reenvía idéntico aunque haya tres `Fault` seguidos (D252, D259).
@@ -734,7 +1208,14 @@ impl App {
         if !has_pending {
             return Ok(PumpStart::Idle(PumpReport::Idle));
         }
-        if let Some(until) = self.store.verifactu_next_send_at(environment)? {
+        let mode = if manual {
+            WaitMode::Manual
+        } else if startup {
+            WaitMode::Startup
+        } else {
+            WaitMode::Automatic
+        };
+        if let Some(until) = self.store.verifactu_next_send_at_mode(environment, mode)? {
             if now < until {
                 let seconds = u64::try_from((until - now + 999) / 1000).unwrap_or(0);
                 return Ok(PumpStart::Idle(PumpReport::Waiting { seconds, until }));
@@ -765,16 +1246,19 @@ impl App {
             .envio
             .a_soap()
             .map_err(|e| sales_error(CODE_RECORD_INVALID, format!("el lote no es válido: {e}")))?;
-        let simulator = self.ensure_simulator()?;
+        let simulator = match environment {
+            VerifactuEnvironment::Simulador => Some(self.ensure_simulator()?),
+            _ => None,
+        };
         let task = self.claim_submit_task(&batch)?;
+        let Some(simulator) = simulator else {
+            return self.credentials_phase(lease, task.id, &batch, body, now, manual, environment);
+        };
         // El intento se anota ANTES de la llamada (D252).
-        if let Err(error) = self.store.begin_verifactu_attempt(batch.id, now) {
-            let _ = self.store.fail(
-                task.id,
-                &task_error(error.code(), "no se pudo anotar el intento", true),
-            );
-            return Err(error.into());
-        }
+        let ticket = match self.store.begin_verifactu_attempt_ticket(batch.id, now) {
+            Ok(ticket) => ticket,
+            Err(error) => return Err(self.fail_task_with(task.id, error)),
+        };
         #[cfg(debug_assertions)]
         let overridden = self.remission.endpoint.clone();
         #[cfg(not(debug_assertions))]
@@ -788,44 +1272,279 @@ impl App {
             lease,
             task_id: task.id,
             batch_id: batch.id,
-            url,
+            attempt_id: ticket.attempt_id,
             body,
             started_ms: now,
-            no_network,
+            wire: Wire::Simulator {
+                transport: SimulatorTransport::new(url),
+                no_network,
+            },
             simulator: Some(simulator),
             cleanup,
         }))
     }
 
-    /// Segunda mitad: guarda lo que devolvió la llamada. Con respuesta o `Fault` cierra el lote
+    /// Falla la tarea de remisión con el error de almacenamiento y lo devuelve.
+    fn fail_task_with(&mut self, task_id: i64, error: SalesStoreError) -> AppError {
+        let _ = self.store.fail(
+            task_id,
+            &task_error(error.code(), "no se pudo anotar el intento", true),
+        );
+        error.into()
+    }
+
+    /// Prepara la pasada de un entorno con certificado (D280): el transporte, la configuración y
+    /// la obtención de la clave, antes de anotar ningún intento.
+    #[allow(clippy::too_many_arguments)]
+    fn credentials_phase(
+        &mut self,
+        lease: PumpLease,
+        task_id: i64,
+        batch: &VerifactuBatch,
+        body: String,
+        now: i64,
+        manual: bool,
+        environment: VerifactuEnvironment,
+    ) -> AppResult<PumpStart> {
+        let aeat = match environment {
+            VerifactuEnvironment::Produccion => AeatEnvironment::Production,
+            _ => AeatEnvironment::Preproduction,
+        };
+        // Sin la red real compilada no se abre ningún socket ni se toca el certificado.
+        let transport = match self.remote_transport(aeat) {
+            Ok(transport) => transport,
+            Err(code) => {
+                let report = self.finish_unsent(task_id, batch.id, code, None, now);
+                return Ok(PumpStart::Idle(report));
+            }
+        };
+        let settings = match self.store.verifactu_remission_settings() {
+            Ok(settings) => settings,
+            Err(error) => return Err(self.fail_task_with(task_id, error)),
+        };
+        let source = match settings.certificate_source.as_deref() {
+            None => None,
+            Some(json) => match serde_json::from_str::<CertificateSource>(json) {
+                Ok(source) => Some(Ok(source)),
+                Err(_) => Some(Err(CertError::Invalid)),
+            },
+        };
+        let (source, provider) = match (source, self.remission.certificates.clone()) {
+            (Some(Ok(source)), Some(provider)) => (source, provider),
+            (Some(Err(error)), _) => {
+                let report = self.finish_unsent(task_id, batch.id, error.code(), None, now);
+                return Ok(PumpStart::Idle(report));
+            }
+            _ => {
+                let code = CertError::Missing.code();
+                let report = self.finish_unsent(task_id, batch.id, code, None, now);
+                return Ok(PumpStart::Idle(report));
+            }
+        };
+        Ok(PumpStart::Credentials(CredentialJob {
+            lease,
+            task_id,
+            batch_id: batch.id,
+            body,
+            started_ms: now,
+            manual,
+            source,
+            provider,
+            transport,
+            aeat,
+        }))
+    }
+
+    /// El transporte hacia la AEAT: el TLS mutuo (solo con la característica `aeat-red`, D285) o,
+    /// en depuración, el de pruebas. `Err` lleva el código del motivo (`network_disabled`).
+    fn remote_transport(
+        &self,
+        aeat: AeatEnvironment,
+    ) -> Result<Arc<dyn SoapTransport>, &'static str> {
+        #[cfg(debug_assertions)]
+        if let Some(transport) = &self.remission.transport {
+            return Ok(Arc::clone(transport));
+        }
+        MutualTlsTransport::aeat(aeat)
+            .map(|transport| Arc::new(transport) as Arc<dyn SoapTransport>)
+            .map_err(|error| error.code())
+    }
+
+    fn attempt_inner(&mut self, fetched: CredentialsFetched) -> AppResult<PumpStart> {
+        let CredentialsFetched {
+            lease,
+            task_id,
+            batch_id,
+            body,
+            started_ms,
+            transport,
+            aeat,
+            result,
+        } = fetched;
+        let now = self.remission_now_ms().unwrap_or(started_ms);
+        let credentials = match result {
+            Ok(credentials) => credentials,
+            Err(error) => {
+                // La clave no estaba disponible: no se anota ningún intento (D280).
+                let report = self.finish_unsent(task_id, batch_id, error.code(), None, now);
+                drop(lease);
+                return Ok(PumpStart::Idle(report));
+            }
+        };
+        let tls = if self
+            .store
+            .verifactu_tls12_preferred(&credentials.fingerprint)
+            .unwrap_or(false)
+        {
+            TlsPreference::Tls12
+        } else {
+            TlsPreference::Auto
+        };
+        let endpoint = Endpoint::for_certificate(aeat, credentials.kind);
+        // El intento se anota ANTES de la llamada (D252), con la clave ya en la mano.
+        let ticket = match self.store.begin_verifactu_attempt_ticket(batch_id, now) {
+            Ok(ticket) => ticket,
+            Err(error) => return Err(self.fail_task_with(task_id, error)),
+        };
+        Ok(PumpStart::Job(VerifactuJob {
+            lease,
+            task_id,
+            batch_id,
+            attempt_id: ticket.attempt_id,
+            body,
+            started_ms: now,
+            wire: Wire::Remote {
+                transport,
+                credentials: credentials.credentials,
+                endpoint,
+                tls,
+                fingerprint: credentials.fingerprint,
+            },
+            simulator: None,
+            cleanup: Vec::new(),
+        }))
+    }
+
+    /// El cuerpo no llegó a escribirse: no cuenta como intento de envío (D280). Si el intento ya
+    /// estaba anotado se anula (una fila aparte; nunca se borra) y, si no, se anota el motivo
+    /// sin intento. El lote sigue abierto, la tarea queda fallida y reintentable y se abre una
+    /// incidencia (D282).
+    fn finish_unsent(
+        &mut self,
+        task_id: i64,
+        batch_id: i64,
+        code: &str,
+        voided_attempt: Option<i64>,
+        now: i64,
+    ) -> PumpReport {
+        let noted = match voided_attempt {
+            Some(attempt_id) => self.store.void_verifactu_attempt(attempt_id, code, now),
+            None => self
+                .store
+                .note_verifactu_unsent_attempt(batch_id, code, now),
+        };
+        if let Err(error) = noted {
+            let note = json!({ "batch_id": batch_id, "code": error.code() });
+            let _ = self.store.record_note("verifactu.unsent", "error", &note);
+        }
+        let message = unsent_message(code);
+        let note = json!({ "batch_id": batch_id, "code": code });
+        let _ = self.store.record_note("verifactu.unsent", "error", &note);
+        let _ = self
+            .store
+            .fail(task_id, &task_error(code, message.clone(), true));
+        self.note_issue(code, message.clone());
+        self.remission.needs_certificate = code == CODE_CERTIFICATE_NEEDS_USER;
+        if code == CODE_CERTIFICATE_NEEDS_USER {
+            PumpReport::NeedsUser { batch_id }
+        } else {
+            PumpReport::NotSent {
+                batch_id,
+                code: code.to_owned(),
+                message,
+            }
+        }
+    }
+
+    /// Sin respuesta entendida (el cuerpo pudo llegar): el lote sigue abierto, la tarea queda
+    /// fallida y reintentable con el motivo visible y se abre una incidencia (D282).
+    fn finish_no_response(
+        &mut self,
+        task_id: i64,
+        batch_id: i64,
+        error: TransportError,
+        reason: &str,
+        now: i64,
+    ) -> PumpReport {
+        let note = json!({ "batch_id": batch_id, "code": error.code });
+        let _ = self
+            .store
+            .record_note("verifactu.transport", "error", &note);
+        let _ = self.store.fail(
+            task_id,
+            &task_error(error.code, error.message.clone(), true),
+        );
+        let _ = self
+            .store
+            .open_verifactu_incident(Some(batch_id), reason, now);
+        self.note_issue(error.code, error.message.clone());
+        PumpReport::NoResponse {
+            batch_id,
+            code: error.code.to_owned(),
+            message: error.message,
+        }
+    }
+
+    /// Tercera fase: guarda lo que devolvió la llamada. Con respuesta o `Fault` cierra el lote
     /// (una sola vez, D252) y completa o falla la tarea; sin respuesta deja el lote abierto y la
-    /// tarea fallida y reintentable, con el motivo visible.
+    /// tarea fallida y reintentable, con el motivo visible; si el cuerpo no llegó a escribirse,
+    /// anula el intento (D280).
     pub fn verifactu_pump_finish(&mut self, sent: VerifactuSent) -> AppResult<PumpReport> {
         let VerifactuSent {
             lease: _lease,
             task_id,
             batch_id,
+            attempt_id,
             started_ms,
-            outcome,
+            report,
+            fingerprint,
         } = sent;
         // Sin hora fiable se usa la del inicio de la pasada: no se inventa otra.
         let now = self.remission_now_ms().unwrap_or(started_ms);
+        self.remission.needs_certificate = false;
+        if report.needs_tls12 {
+            if let Some(fingerprint) = &fingerprint {
+                if let Err(error) = self.store.remember_verifactu_tls12(fingerprint, now) {
+                    let note = json!({ "code": error.code() });
+                    let _ = self.store.record_note("verifactu.tls12", "error", &note);
+                }
+            }
+        }
+        let outcome = match report.outcome {
+            SendOutcome::NotSent(reason) => {
+                return Ok(self.finish_unsent(
+                    task_id,
+                    batch_id,
+                    reason.code(),
+                    Some(attempt_id),
+                    now,
+                ));
+            }
+            SendOutcome::SentNoResponse(reason) => {
+                let error = transport_error(
+                    TRANSPORT_UNAVAILABLE,
+                    format!("sin respuesta completa del servicio ({})", reason.code()),
+                );
+                return Ok(self.finish_no_response(task_id, batch_id, error, reason.code(), now));
+            }
+            SendOutcome::Response { status, body } => {
+                classify_response(status, &String::from_utf8_lossy(&body))
+            }
+        };
         match outcome {
             Err(error) => {
-                let note = json!({ "batch_id": batch_id, "code": error.code });
-                let _ = self
-                    .store
-                    .record_note("verifactu.transport", "error", &note);
-                let _ = self.store.fail(
-                    task_id,
-                    &task_error(error.code, error.message.clone(), true),
-                );
-                self.note_issue(error.code, error.message.clone());
-                Ok(PumpReport::NoResponse {
-                    batch_id,
-                    code: error.code.to_owned(),
-                    message: error.message,
-                })
+                let reason = error.code;
+                Ok(self.finish_no_response(task_id, batch_id, error, reason, now))
             }
             Ok(result) => {
                 let closure = match self.store.close_verifactu_batch(batch_id, &result, now) {
@@ -849,7 +1568,14 @@ impl App {
     /// respuesta normal borra el error anterior.
     fn note_result_issue(&mut self, closure: &BatchClosure, result: &ResultadoEnvio) {
         match result {
-            ResultadoEnvio::Fallo(f) => self.note_issue(CODE_SOAP_FAULT, f.faultstring.clone()),
+            ResultadoEnvio::Fallo(f) => {
+                let code = if FaultClass::of(f.codigo) == FaultClass::Authorization {
+                    CODE_AUTHORIZATION_REJECTED
+                } else {
+                    CODE_SOAP_FAULT
+                };
+                self.note_issue(code, f.faultstring.clone());
+            }
             ResultadoEnvio::Respuesta(r)
                 if closure.accepted
                     + closure.accepted_with_errors
@@ -878,8 +1604,25 @@ impl App {
         result: &ResultadoEnvio,
     ) -> AppResult<PumpReport> {
         match (closure.outcome, result) {
-            (BatchOutcome::Fault, ResultadoEnvio::Fallo(FalloSoap { faultstring, .. })) => {
+            (
+                BatchOutcome::Fault,
+                ResultadoEnvio::Fallo(FalloSoap {
+                    faultstring,
+                    codigo,
+                    ..
+                }),
+            ) => {
                 let description = faultstring.clone();
+                if FaultClass::of(*codigo) == FaultClass::Authorization {
+                    // La remisión de esta base queda parada (lo guardó el cierre del lote, D281).
+                    self.store.fail(
+                        task_id,
+                        &task_error(CODE_AUTHORIZATION_REJECTED, description, false),
+                    )?;
+                    return Ok(PumpReport::AuthorizationRejected {
+                        code: codigo.unwrap_or(0),
+                    });
+                }
                 self.store.fail(
                     task_id,
                     &task_error(CODE_SOAP_FAULT, description.clone(), false),
@@ -956,7 +1699,101 @@ impl App {
                     "no consta la razón social del emisor para la cabecera del envío",
                 )
             })?;
-        Ok(Cabecera::new(PersonaEs::new(&name, &nif)))
+        let mut header = Cabecera::new(PersonaEs::new(&name, &nif));
+        // El `Representante` se configura expresamente y nunca se deduce (D283).
+        header.representante = self.store.verifactu_remission_settings()?.representative;
+        Ok(header)
+    }
+
+    // --- Certificado y configuración de la remisión (D278, D283) ---
+
+    /// Inyecta de dónde sale el certificado de remisión (el escritorio pone el de Windows, las
+    /// pruebas uno sintético). Sin proveedor, la remisión a la AEAT da `certificate_missing`.
+    pub fn set_certificate_provider(&mut self, provider: Arc<dyn CertificateProvider>) {
+        self.remission.certificates = Some(provider);
+    }
+
+    /// Transporte que sustituye al TLS mutuo en preproducción y producción (solo depuración:
+    /// los endpoints de la AEAT son constantes y nada los cambia, D279). `None` lo quita.
+    #[cfg(debug_assertions)]
+    pub fn set_verifactu_transport(&mut self, transport: Option<Arc<dyn SoapTransport>>) {
+        self.remission.transport = transport;
+    }
+
+    /// Configuración vigente de la remisión de esta base: origen del certificado, calidad de
+    /// quien remite y representante, si se configuró (D278, D283).
+    pub fn verifactu_remission_settings(&self) -> AppResult<VerifactuRemissionSettingsView> {
+        let settings = self.store.verifactu_remission_settings()?;
+        let certificate = match settings.certificate_source.as_deref() {
+            None => None,
+            Some(json) => Some(
+                serde_json::from_str::<CertificateSource>(json).map_err(|_| {
+                    AppError::Sales(SalesStoreError::Corrupt(
+                        "el origen del certificado guardado no es legible".into(),
+                    ))
+                })?,
+            ),
+        };
+        Ok(VerifactuRemissionSettingsView {
+            certificate,
+            sender_capacity: settings.sender_capacity.as_str().to_owned(),
+            representative: settings
+                .representative
+                .map(|person| VerifactuRepresentativeView {
+                    name: person.nombre_razon,
+                    nif: person.nif,
+                }),
+            changed_at: settings.changed_at,
+        })
+    }
+
+    /// Cambia la configuración de la remisión (una fila nueva del historial) y devuelve si
+    /// cambió algo. Cambiarla reanuda la remisión parada por autorización (D281) y pide una
+    /// pasada. El representante se configura expresamente y nunca se deduce (D283); `None` lo
+    /// quita. En el historial constan la calidad y si hay certificado y representante, nunca sus
+    /// valores.
+    pub fn set_verifactu_remission_settings(
+        &mut self,
+        certificate: Option<&CertificateSource>,
+        sender_capacity: SenderCapacity,
+        representative: Option<&PersonaEs>,
+        authorization: &str,
+    ) -> AppResult<bool> {
+        let now = self.remission_now_ms()?;
+        let json = certificate
+            .map(serde_json::to_string)
+            .transpose()
+            .map_err(|_| {
+                AppError::Sales(SalesStoreError::invalid(
+                    "certificate",
+                    "el origen del certificado no se puede guardar",
+                ))
+            })?;
+        let changed = self.store.set_verifactu_remission_settings(
+            json.as_deref(),
+            sender_capacity,
+            representative,
+            authorization,
+            now,
+        )?;
+        if changed {
+            self.pump_after_write();
+        }
+        Ok(changed)
+    }
+
+    /// El usuario declara que ya arregló la autorización (nuevo certificado, apoderamiento o
+    /// colaboración dados de alta) y la remisión parada por un `Fault` de autorización se
+    /// reanuda (D281). Devuelve si estaba parada. Consta en el historial.
+    pub fn verifactu_declare_authorization_fixed(&mut self) -> AppResult<bool> {
+        let now = self.remission_now_ms()?;
+        let resumed = self
+            .store
+            .resume_verifactu_authorization(AUTHORIZATION_DECLARATION, now)?;
+        if resumed {
+            self.pump_after_write();
+        }
+        Ok(resumed)
     }
 
     // --- Tarea `submit_verifactu` ---
@@ -1149,8 +1986,37 @@ impl App {
                 environment: stored.as_str().to_owned(),
             });
         }
-        let pending = u32::try_from(self.store.verifactu_pending_records(environment)?.len())
-            .unwrap_or(u32::MAX);
+        let pending_rows = self.store.verifactu_pending_records(environment)?;
+        let pending = u32::try_from(pending_rows.len()).unwrap_or(u32::MAX);
+        // El registro sin respuesta más antiguo (pendiente o en un lote abierto que aún no obtuvo
+        // respuesta), por la hora con la que se generó (D281).
+        let in_open_batch = self.store.unfinished_verifactu_batch()?.map(|b| {
+            b.envio
+                .registros
+                .iter()
+                .map(|r| r.fecha_hora_huso_gen_registro().unix())
+                .min()
+        });
+        let oldest_pending_at = pending_rows
+            .iter()
+            .filter_map(|row| row.generated_at.parse::<FechaHoraHuso>().ok())
+            .map(|at| at.unix())
+            .chain(in_open_batch.flatten())
+            .min()
+            .map(|seconds| seconds.saturating_mul(1000));
+        let oldest_pending_age_seconds = match (oldest_pending_at, self.remission_now_ms()) {
+            (Some(at), Ok(now)) => Some(u64::try_from((now - at).max(0) / 1000).unwrap_or(0)),
+            _ => None,
+        };
+        let halt = self.store.verifactu_authorization_halt()?;
+        let last_unsent =
+            self.store
+                .verifactu_last_unsent_attempt()?
+                .map(|unsent| VerifactuUnsentView {
+                    batch_id: unsent.batch_id,
+                    code: unsent.reason_code,
+                    at: unsent.attempted_at,
+                });
         let next_send_at = self.store.verifactu_next_send_at(environment)?;
         let wait_remaining_seconds = match (next_send_at, self.remission_now_ms()) {
             (Some(at), Ok(now)) => Some(u64::try_from((at - now + 999) / 1000).unwrap_or(0)),
@@ -1189,8 +2055,42 @@ impl App {
                     at: e.at,
                     occurrences: e.occurrences,
                 }),
+            oldest_pending_at,
+            oldest_pending_age_seconds,
+            incident_open: self.store.verifactu_incident_open()?,
+            last_unsent,
+            authorization_rejected: halt.is_some(),
+            authorization_code: halt.map(|h| h.error_code),
+            needs_certificate: self.remission.needs_certificate,
         })
     }
+}
+
+/// Texto fijo de un intento sin envío, sin NIF, nombre ni texto del sistema (D278, D280).
+fn unsent_message(code: &str) -> String {
+    match code {
+        "certificate_missing" => "No hay un certificado vinculado para remitir a la AEAT.",
+        "certificate_expired" => "El certificado de remisión está caducado o aún no es válido.",
+        "certificate_needs_user" => {
+            "El certificado necesita su intervención (PIN, tarjeta o confirmación): pulse «Remitir ahora»."
+        }
+        "certificate_key_unsupported" => "La clave del certificado no es admitida por el servicio.",
+        "certificate_rejected" => "El certificado no es apto o fue rechazado.",
+        "certificate_invalid" => "El certificado vinculado no es un X.509 válido.",
+        "network_disabled" => {
+            "Esta compilación no incluye la red real de la AEAT: el registro queda pendiente."
+        }
+        "dns_failed" | "connect_failed" | "connect_timeout" => {
+            "No se pudo conectar con el servicio: el registro queda pendiente."
+        }
+        "server_certificate_invalid" => "El certificado del servidor no es de confianza.",
+        "tls_handshake_failed" | "tls_timeout" => {
+            "No se pudo establecer la conexión segura: el registro queda pendiente."
+        }
+        "wrong_environment" => "El transporte no corresponde al entorno de la remisión.",
+        _ => "El envío no llegó a salir: el registro queda pendiente.",
+    }
+    .to_owned()
 }
 
 /// Lote al que se refiere una tarea de remisión (`input_ref`).
@@ -1245,7 +2145,44 @@ mod tests {
             SimMode::parse("aceptado-con-errores"),
             Some(SimMode::AcceptWithErrors)
         );
+        assert_eq!(
+            SimMode::parse("fault-autorizacion"),
+            Some(SimMode::AuthorizationFault)
+        );
+        assert_eq!(
+            SimMode::parse("fault-tecnico"),
+            Some(SimMode::TechnicalFault)
+        );
         assert_eq!(SimMode::parse("cualquier-cosa"), None);
+    }
+
+    #[test]
+    fn http_urls_split_into_authority_and_path() {
+        assert_eq!(
+            split_http_url("http://127.0.0.1:8080/a/b"),
+            Some(("127.0.0.1:8080", "/a/b".to_owned()))
+        );
+        assert_eq!(
+            split_http_url("http://localhost:1"),
+            Some(("localhost:1", "/".to_owned()))
+        );
+        assert_eq!(split_http_url("https://127.0.0.1/x"), None);
+        assert_eq!(split_http_url("http:///x"), None);
+    }
+
+    #[test]
+    fn unsent_messages_never_carry_system_text() {
+        for code in [
+            "certificate_missing",
+            "certificate_needs_user",
+            "network_disabled",
+            "connect_failed",
+            "tls_handshake_failed",
+            "algo_desconocido",
+        ] {
+            let text = unsent_message(code);
+            assert!(!text.is_empty() && !text.contains(code), "{code}: {text}");
+        }
     }
 
     #[test]

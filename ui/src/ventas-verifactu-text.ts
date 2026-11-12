@@ -286,6 +286,12 @@ export function pumpReportText(report: VerifactuPumpReport, now: number = Date.n
       return { tone: "info", text: `Todavía no toca enviar: la AEAT pide una espera entre lotes y faltan ${waitText(report.seconds)}.`, expiresAt: now + Math.max(0, report.seconds) * 1000 };
     case "halted":
       return { tone: "warn", text: "La remisión está parada porque la AEAT devolvió varios errores de esquema (Fault) seguidos. Revise el último lote antes de insistir." };
+    case "authorization_rejected":
+      return { tone: "error", text: `La AEAT no autoriza este certificado o este representante (código ${report.code}). La remisión de esta base está parada y no se reintenta hasta que cambie el certificado o la configuración, o declare que ya lo arregló.` };
+    case "needs_user":
+      return { tone: "warn", text: `El certificado necesita su intervención (PIN, tarjeta o confirmación). El lote ${report.batch_id} sigue pendiente; no se ha enviado nada.` };
+    case "not_sent":
+      return { tone: "warn", text: `No se pudo enviar el lote ${report.batch_id}: ${report.message} No cuenta como intento y el lote se reenviará igual.` };
     case "environment_unavailable":
       return { tone: "warn", text: `El entorno «${report.environment}» todavía no tiene remisión disponible: hoy solo funciona el simulador.` };
     case "sent": {
