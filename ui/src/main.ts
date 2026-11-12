@@ -320,7 +320,7 @@ import {
   triageNotices,
 } from "./triage-text";
 import { AI_SETTING_ACTION, AI_SETTING_ACTION_LABEL, aiSettingAuditText, aiSettingStatusLabel } from "./ai-settings-text";
-import type { AssistantConsentView, AssistantPreview, AssistantProgress, AssistantSentCall, AssistantStoredTurn, AssistantTurn, ProposalCard, QuestionAnswer, SearchHit } from "./types";
+import type { AssistantConsentView, AssistantPreview, AssistantProgress, AssistantSentCall, AssistantStoredTurn, AssistantTurn, Grounding, ProposalCard, QuestionAnswer, SearchHit } from "./types";
 import {
   AMOUNTS_CHECKED_LABEL,
   AMOUNTS_REQUIRED_HINT,
@@ -336,7 +336,10 @@ import {
   unknownRuleValues,
   OTHER_DOCUMENTS_REQUIRED_HINT,
   OTHER_DOCUMENTS_TITLE,
+  groundingNotice,
+  knownGrounding,
   linksRemovedText,
+  unsourcedNotice,
   otherDocumentKindText,
   otherDocumentsIntro,
   otherDocumentsOf,
@@ -6837,6 +6840,11 @@ interface AiView {
   dropped: number;
   /** Enlaces o marcas que la aplicación retiró de la respuesta (D264). */
   linksRemoved: number;
+  /** De dónde pudo salir la respuesta (D269); `null` sin respuesta del modelo o en un turno anterior a D269. */
+  grounding: Grounding | null;
+  /** Cifras de la respuesta que no salen de sus documentos (hasta cinco) y cuántas hay (D269). */
+  unsourced: string[];
+  unsourcedTotal: number;
   withheld: number;
   /** Vista a la que se ha llevado a la persona; solo en el turno recién hecho. */
   navigated: string | null;
@@ -6882,6 +6890,9 @@ function aiFromTurn(t: AssistantTurn, question: string, navigated: string | null
     citations: t.citations,
     dropped: t.dropped_citations,
     linksRemoved: t.links_removed ?? 0,
+    grounding: knownGrounding(t.grounding),
+    unsourced: t.unsourced ?? [],
+    unsourcedTotal: t.unsourced_total ?? 0,
     withheld: t.withheld,
     navigated,
     provider: t.provider,
@@ -6903,6 +6914,9 @@ function aiFromStored(t: AssistantStoredTurn, question: string): AiView {
     citations: t.citations,
     dropped: t.dropped_citations,
     linksRemoved: t.links_removed ?? 0,
+    grounding: knownGrounding(t.grounding),
+    unsourced: t.unsourced ?? [],
+    unsourcedTotal: t.unsourced_total ?? 0,
     withheld: t.withheld,
     navigated: null,
     provider: t.provider,
@@ -7777,6 +7791,9 @@ function aiTurn(v: AiView, index: number, last: boolean): HTMLElement {
   const answered = v.outcome === "answered";
   const who = answered ? whoAnswered(v) : "";
   const notes = answered ? [linksRemovedText(v.linksRemoved), droppedCitationsText(v.dropped), withheldText(v.withheld)].filter((n): n is string => n !== null) : [];
+  // D269: el aviso de respaldo y las cifras sin origen solo van con una respuesta del modelo.
+  const groundingText = answered ? groundingNotice(v.grounding) : null;
+  const unsourcedText = answered ? unsourcedNotice(v.unsourcedTotal, v.unsourced) : null;
   const sendHint = v.outcome === "consent_required" || v.outcome === "not_configured";
   // Con un proveedor externo el dato protegido nunca llega a la IA: la respuesta trae su marca y se dice dónde verlo.
   const maskedNoteText = answered ? maskedNote(maskedMarksIn(v.text)) : null;
@@ -7790,6 +7807,11 @@ function aiTurn(v: AiView, index: number, last: boolean): HTMLElement {
     v.citations.length ? h("ul", { class: "chat-cards" }, ...v.citations.map((hit) => chatCard(hit, `chat:card:${index}:${hit.task_id}`))) : null,
     v.proposals.length ? h("div", { class: "proposal-list" }, ...v.proposals.map(proposalCard)) : null,
     who ? h("p", { class: "chat-notice chat-source" }, who) : null,
+    groundingText ? h("p", { class: "chat-notice chat-grounding", role: "note" }, groundingText) : null,
+    groundingText && v.question
+      ? h("div", { class: "buttons" }, h("button", { type: "button", "data-focus-key": `chat:grounding-words:${index}`, disabled: state.chat.busy, onclick: () => void searchByWords(v.question) }, WORDS_BUTTON))
+      : null,
+    unsourcedText ? h("p", { class: "chat-notice chat-unsourced", role: "note" }, unsourcedText) : null,
     ...notes.map((note) => h("p", { class: "chat-notice" }, note)),
     sendHint
       ? h("div", { class: "buttons" }, h("button", { type: "button", "data-focus-key": `chat:settings:${index}`, onclick: goToAssistantSettings }, SETTINGS_BUTTON))

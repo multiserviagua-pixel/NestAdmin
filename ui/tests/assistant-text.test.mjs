@@ -771,3 +771,52 @@ test("D268: los valores de regla que no aparecen en sus documentos se rotulan y 
   assert.equal(T.UNKNOWN_VALUES_TITLE, "No aparece en sus documentos");
   assert.ok(T.UNKNOWN_VALUES_REQUIRED_HINT.includes("marque antes"));
 });
+
+test("D269: solo uncited y none llevan aviso de respaldo, con los textos fijos", () => {
+  assert.equal(T.groundingNotice("uncited"), "Esta respuesta no cita ninguno de sus documentos");
+  assert.equal(T.groundingNotice("none"), "Para esta respuesta no se consultó ningún documento ni dato de NestAdmin");
+  assert.equal(T.UNCITED_NOTICE, T.groundingNotice("uncited"));
+  assert.equal(T.NO_CONSULT_NOTICE, T.groundingNotice("none"));
+  for (const quiet of ["documents", "data", "no_results", null, undefined, "", "otro", 3, {}]) {
+    assert.equal(T.groundingNotice(quiet), null, String(quiet));
+    assert.equal(T.groundingOffersWords(quiet), false, String(quiet));
+  }
+  assert.equal(T.groundingOffersWords("uncited"), true);
+  assert.equal(T.groundingOffersWords("none"), true);
+});
+
+test("D269: un estado desconocido o un turno anterior a D269 no inventa un aviso", () => {
+  for (const g of ["documents", "data", "no_results", "uncited", "none"]) assert.equal(T.knownGrounding(g), g);
+  for (const g of ["", "Documents", "sin_respaldo", null, undefined, 0, [], {}]) assert.equal(T.knownGrounding(g), null);
+});
+
+test("D269: las cifras sin origen dicen cuántas son y las enumeran, hasta cinco", () => {
+  assert.equal(T.unsourcedNotice(0, []), null);
+  assert.equal(T.unsourcedNotice(undefined, undefined), null);
+  assert.equal(T.unsourcedNotice(null, null), null);
+  assert.equal(T.unsourcedNotice(1, ["9:00"]), "Contiene 1 dato que no sale de sus documentos: 9:00.");
+  assert.equal(T.unsourcedNotice(2, ["9:00", "14:00"]), "Contiene 2 datos que no salen de sus documentos: 9:00, 14:00.");
+  assert.equal(
+    T.unsourcedNotice(7, ["9:00", "14:00", "350,00 EUR", "F-2026-999", "15/04/2026"]),
+    "Contiene 7 datos que no salen de sus documentos: 9:00, 14:00, 350,00 EUR, F-2026-999, 15/04/2026 y 2 más.",
+  );
+  // Nunca más de cinco en la lista, aunque lleguen más.
+  const six = ["1", "2", "3", "4", "5", "6"].map((n) => `${n}0:00`);
+  assert.equal(T.unsourcedNotice(6, six), "Contiene 6 datos que no salen de sus documentos: 10:00, 20:00, 30:00, 40:00, 50:00 y 1 más.");
+  // El recuento sin lista (un turno guardado con el total y sin los textos) sigue avisando.
+  assert.equal(T.unsourcedNotice(3, []), "Contiene 3 datos que no salen de sus documentos.");
+  // Valores raros: se ignoran los que no son texto y se recortan los largos.
+  assert.equal(T.unsourcedNotice(2, ["9:00", 4, null, "  "]), "Contiene 2 datos que no salen de sus documentos: 9:00 y 1 más.");
+  assert.ok(T.unsourcedNotice(1, ["x".repeat(200)]).length < 130);
+  assert.equal(T.unsourcedNotice(Number.NaN, []), null);
+  assert.equal(T.unsourcedNotice(-4, []), null);
+});
+
+test("D269: el aviso y la lista de cifras no usan el mismo texto que las demás notas de la respuesta", () => {
+  const notes = [T.linksRemovedText(1), T.droppedCitationsText(1), T.withheldText(1)];
+  for (const notice of [T.groundingNotice("uncited"), T.groundingNotice("none"), T.unsourcedNotice(1, ["9:00"])]) {
+    assert.ok(notice && !notes.includes(notice));
+    // Texto llano en español de usted, sin marcado ni enlaces.
+    assert.ok(!/[<>`*_]|https?:/.test(notice), notice);
+  }
+});

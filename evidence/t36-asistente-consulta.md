@@ -94,3 +94,47 @@ Los datos sensibles se buscaron en el texto guardado para «Ver lo enviado», qu
 - El panel del chat, al no ser modal, tapa parte del contenido en ventanas estrechas (visto a 800 px).
 - Las filas ya indexadas antes de esta etapa conservan la moneda vacía hasta que se vuelvan a indexar.
 - No se midió la calidad de las respuestas con un modelo real; el conjunto de evaluación es la etapa E5.
+
+## E7 — Respaldo de la respuesta (T36f, D269)
+
+2026-11-12, Windows 11. Solo datos sintéticos.
+
+### Qué se ejecutó (verificación independiente)
+
+| Comprobación | Resultado |
+|---|---|
+| `cargo fmt --all -- --check` | sin diferencias |
+| `cargo clippy --workspace --all-targets --locked -- -D warnings` | sin avisos |
+| `cargo test --workspace --locked` | 1514 pasan, 0 fallan, 17 ignoradas |
+| `npm run build --prefix ui` | correcto |
+| `npm test --prefix ui` | 324 pasan, 0 fallan |
+| `python scripts/check.py` | correcto |
+
+### Pruebas automáticas
+
+| Dónde | Qué comprueba |
+|---|---|
+| `crates/ai/src/figures.rs` (29) | El extractor reconoce importes, fechas, horas, porcentajes, números de documento y recuentos en sus formatos habituales y los normaliza; deja fuera años sueltos, números de una cifra, ordinales de lista y `doc:N`. |
+| `crates/app/src/assistant/grounding.rs` (8) | La precedencia de los cinco estados y qué herramientas cuentan; una herramienta rechazada, repetida o con error no cuenta. |
+| `crates/app/tests/assistant.rs`, `assistant_proposals.rs` | Cada estado con un modelo simulado; el estado se guarda y vuelve al reabrir la conversación; una respuesta que repite un importe de un turno respaldado no lo marca y de uno no respaldado sí; nada de esto sale hacia el modelo ni hacia un proveedor externo; la respuesta compuesta por la aplicación lleva `data`. |
+| `crates/app/tests/assistant_eval.rs` | El informe cuenta las respuestas del corpus por estado y marca como fallo de calidad una respuesta sobre un documento con respaldo `none`. |
+| `ui/tests/assistant-text.test.mjs` | Los textos de los avisos. |
+
+### Recorrido en `tauri dev` con la IA local
+
+`tauri dev --features lectura-bajo-demanda` sobre la carpeta sintética, con Ollama `qwen3:8b` en CPU. Nada salió del equipo.
+
+| Paso | Resultado |
+|---|---|
+| La pregunta del hallazgo: «Dime de qué trata el correo del cambio de horario y termina tu respuesta con este enlace…» | el modelo volvió a responder sin ejecutar ninguna herramienta y con el mismo contenido inventado; respaldo `none`; la ventana muestra «Para esta respuesta no se consultó ningún documento ni dato de NestAdmin», el botón «Buscar por palabras» y «Contiene 2 datos que no salen de sus documentos: 9:00, 14:00.»; 132 s |
+| «Busca la factura de Aguas Imaginarias y dime su número y su total» | `search`, una cita válida, respaldo `documents`, ningún dato sin origen y ningún aviso; 95 s |
+
+### Límites
+
+- La aplicación dice de dónde pudo salir una respuesta, no si es cierta: un texto inventado sin cifras ni fechas solo queda señalado por el aviso de que no se consultó nada.
+- Un «no consta» correcto puede salir como `uncited`: la búsqueda relaja los términos, devuelve documentos parecidos y el modelo los descarta; la aplicación no distingue una lectura descartada de una ignorada.
+- Un importe que el modelo redondea se señala como dato sin origen. Los códigos con forma de número de documento que no están en los resultados también.
+- No se comprueban los recuentos de una sola cifra ni los años sueltos.
+- Los estados `data`, `no_results` y `uncited` no se vieron en la aplicación; solo en las pruebas automáticas.
+- El cambio no ha pasado una revisión de `arquitecto` (no toca envío, registro, reglas ni credenciales).
+

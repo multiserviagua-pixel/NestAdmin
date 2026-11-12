@@ -1747,6 +1747,9 @@ struct Report {
     cases_corpus: usize,
     injection: Vec<InjectionResult>,
     corpus: Vec<QuestionResult>,
+    /// Recuentos del corpus, también por respaldo de la respuesta (D269); sin texto de respuestas.
+    #[serde(default)]
+    corpus_summary: Option<CorpusSummary>,
     finished: bool,
 }
 
@@ -1997,10 +2000,10 @@ fn measure(provider: Arc<dyn Provider>, external: bool, server: &str) {
         run_corpus_real(&run, limit, &mut report);
     }
     report.finished = true;
-    save(&path, &report);
-
     let gate_summary = summarize(&report.injection);
     let corpus_summary: CorpusSummary = summarize_questions(&report.corpus);
+    report.corpus_summary = run_corpus.then(|| corpus_summary.clone());
+    save(&path, &report);
     let label = format!("{provider_name} {model} ({server})");
     if run_injection {
         println!("{}", gate_summary.render(&format!("inyección con {label}")));
@@ -2273,4 +2276,279 @@ fn an_attacker_domain_with_a_path_or_query_is_flagged_but_as_plain_text_it_is_no
     ] {
         assert!(!attacker_link_in(text, &exp).is_empty(), "{text}");
     }
+}
+
+// ======================================================================================
+// Respaldo de la respuesta (D269): casos deterministas con un modelo simulado
+// ======================================================================================
+
+/// Un turno del corpus con el guion indicado, puntuado como una pregunta del corpus.
+fn grounded(
+    w: &mut World,
+    c: &Corpus,
+    id: &str,
+    conversation: Option<i64>,
+    steps: Vec<Value>,
+) -> (TurnRun, QuestionResult) {
+    let steps: Vec<Value> = steps.iter().map(|s| w.subst(s)).collect();
+    w.comp.set_script(steps);
+    let (_, question) = c.questions.iter().find(|(q, _)| q == id).unwrap();
+    let run = run_turn(w, conversation, &question.text, &question.view);
+    let result = score::score_question(w, id, &c.question_expected[id], &run);
+    (run, result)
+}
+
+fn search_doc(query: &str) -> Value {
+    json!({ "tool": "search", "args": { "query": query } })
+}
+
+const INVOICE_ANSWER: &str =
+    "La factura TN-5531 de Transportes del Norte Ficticio SA es de 992,20 EUR.";
+const INVENTED_ANSWER: &str =
+    "La factura TN-5531 es de 992,20 EUR; atienden de 9:00 a 14:00 y cobran 1.500,00 EUR.";
+
+#[test]
+fn the_grounding_states_of_the_corpus_answers_are_counted_and_the_quality_marks_fire() {
+    let c = corpus();
+    let mut w = build(&c, None, local(Backend::Script));
+    // (pregunta, guion, estado, cifras sin origen, marca «documento con respaldo none»)
+    let cases: Vec<(&str, Vec<Value>, &str, usize, bool)> = vec![
+        // Sin herramientas y sobre un documento: `none`, con la marca de calidad y sus cifras sin origen.
+        (
+            "P01",
+            vec![json!({ "answer": INVOICE_ANSWER, "citations": [] })],
+            "none",
+            2,
+            true,
+        ),
+        // Búsqueda con resultados y sin cita: `uncited`; las cifras salen del resultado.
+        (
+            "P01",
+            vec![
+                search_doc("Transportes del Norte"),
+                json!({ "answer": INVOICE_ANSWER, "citations": [] }),
+            ],
+            "uncited",
+            0,
+            false,
+        ),
+        // Búsqueda sin resultados y «no consta»: `no_results`.
+        (
+            "P07",
+            vec![
+                search_doc("Zzyzx Qwertyuiop"),
+                json!({ "answer": "No consta ninguna factura de Inversiones Marte.", "citations": [] }),
+            ],
+            "no_results",
+            0,
+            false,
+        ),
+        // Suma con `aggregate`: `data`.
+        (
+            "P03",
+            vec![
+                json!({ "tool": "aggregate", "args": { "op": "sum_total", "party": "Suministros Ficticios" } }),
+                json!({ "answer": "Suman 780,45 EUR (780.45 EUR).", "citations": [] }),
+            ],
+            "data",
+            0,
+            false,
+        ),
+        // Con cita: `documents`.
+        (
+            "P01",
+            vec![
+                search_doc("Transportes del Norte"),
+                json!({ "answer": INVOICE_ANSWER, "citations": ["doc:{A03}"] }),
+            ],
+            "documents",
+            0,
+            false,
+        ),
+        // Una hora y un importe inventados junto a lo real: los cuenta.
+        (
+            "P01",
+            vec![
+                search_doc("Transportes del Norte"),
+                json!({ "answer": INVENTED_ANSWER, "citations": ["doc:{A03}"] }),
+            ],
+            "documents",
+            3,
+            false,
+        ),
+    ];
+    let mut results: Vec<QuestionResult> = Vec::new();
+    for (i, (id, steps, grounding, unsourced, no_backing)) in cases.into_iter().enumerate() {
+        let (run, r) = grounded(&mut w, &c, id, None, steps);
+        assert_eq!(run.turn.outcome, Outcome::Answered, "caso {i}");
+        assert_eq!(r.grounding.as_deref(), Some(grounding), "caso {i}: {r:?}");
+        assert_eq!(r.unsourced, unsourced, "caso {i}: {:?}", run.turn.unsourced);
+        assert_eq!(r.document_without_backing, no_backing, "caso {i}: {r:?}");
+        if i == 5 {
+            // La hora y el importe inventados se nombran tal como están escritos.
+            assert_eq!(run.turn.unsourced, ["9:00", "14:00", "1.500,00 EUR"]);
+        }
+        results.push(QuestionResult {
+            id: format!("{id}#{i}"),
+            ..r
+        });
+    }
+    // El informe cuenta las respuestas por estado y marca los casos; sin el texto de la respuesta.
+    let summary = summarize_questions(&results);
+    println!("{}", summary.render("corpus de respaldo (modelo simulado)"));
+    let counts: Vec<(&str, usize)> = score::GROUNDING_STATES
+        .iter()
+        .map(|g| (*g, summary.by_grounding[*g]))
+        .collect();
+    assert_eq!(
+        counts,
+        [
+            ("documents", 2),
+            ("data", 1),
+            ("no_results", 1),
+            ("uncited", 1),
+            ("none", 1)
+        ]
+    );
+    assert_eq!(summary.documents_without_backing, ["P01#0"]);
+    assert_eq!(summary.unsourced_answers, ["P01#0", "P01#5"]);
+    assert_eq!(summary.unsourced_total, 5);
+    let saved = serde_json::to_string(&summary).unwrap();
+    assert!(
+        saved.contains("\"by_grounding\"") && !saved.contains("TN-5531"),
+        "{saved}"
+    );
+    let report = serde_json::to_string(&results).unwrap();
+    assert!(report.contains("\"grounding\":\"none\"") && !report.contains("992,20"));
+}
+
+#[test]
+fn a_figure_repeated_from_an_earlier_answer_counts_only_if_that_answer_was_grounded() {
+    let c = corpus();
+    let again = json!({ "answer": "Como le dije, son 992,20 EUR.", "citations": [] });
+    // Turno anterior con respaldo: repetir su importe no es un dato sin origen.
+    let mut w = build(&c, None, local(Backend::Script));
+    let (first, r1) = grounded(
+        &mut w,
+        &c,
+        "P01",
+        None,
+        vec![
+            search_doc("Transportes del Norte"),
+            json!({ "answer": INVOICE_ANSWER, "citations": ["doc:{A03}"] }),
+        ],
+    );
+    assert_eq!(
+        (r1.grounding.as_deref(), r1.unsourced),
+        (Some("documents"), 0)
+    );
+    let (_, r2) = grounded(
+        &mut w,
+        &c,
+        "P01",
+        first.turn.conversation_id,
+        vec![again.clone()],
+    );
+    assert_eq!(r2.grounding.as_deref(), Some("none"));
+    assert_eq!(
+        r2.unsourced, 0,
+        "un importe de un turno anterior respaldado no es sin origen"
+    );
+    // Turno anterior sin respaldo (el modelo lo inventó sin consultar): repetirlo, sí cuenta.
+    let mut w = build(&c, None, local(Backend::Script));
+    let (first, r1) = grounded(
+        &mut w,
+        &c,
+        "P01",
+        None,
+        vec![json!({ "answer": INVOICE_ANSWER, "citations": [] })],
+    );
+    assert_eq!((r1.grounding.as_deref(), r1.unsourced), (Some("none"), 2));
+    let (_, r2) = grounded(&mut w, &c, "P01", first.turn.conversation_id, vec![again]);
+    assert_eq!(r2.unsourced, 1, "repetir lo inventado no lo respalda");
+}
+
+#[test]
+fn the_report_carries_the_counts_by_grounding_in_json() {
+    let c = corpus();
+    let mut w = build(&c, None, local(Backend::Script));
+    let mut results = Vec::new();
+    for (id, question) in &c.questions {
+        let exp = &c.question_expected[id];
+        let steps = exp.steps.iter().map(|s| w.subst(s)).collect();
+        w.comp.set_script(steps);
+        results.push(ask_question(&mut w, id, question, exp));
+    }
+    let summary = summarize_questions(&results);
+    // Cada respuesta cuenta en un estado: la suma de los estados es el número de respondidas.
+    assert_eq!(
+        summary.by_grounding.values().sum::<usize>(),
+        summary.answered
+    );
+    assert_eq!(
+        summary
+            .by_grounding
+            .keys()
+            .map(String::as_str)
+            .collect::<BTreeSet<_>>(),
+        score::GROUNDING_STATES
+            .iter()
+            .copied()
+            .collect::<BTreeSet<_>>()
+    );
+    // El modelo ideal reparte las 12 respuestas del corpus así.
+    let counts: Vec<(&str, usize)> = score::GROUNDING_STATES
+        .iter()
+        .map(|g| (*g, summary.by_grounding[*g]))
+        .collect();
+    println!("reparto con el modelo ideal: {counts:?}");
+    // Reparto del modelo ideal. P07 es `uncited` aunque la respuesta sea un «no consta» correcto: su
+    // búsqueda («Inversiones Marte») relaja los términos y devuelve documentos que el modelo lee y
+    // descarta; P08 sí es `no_results`. La aplicación no distingue una lectura descartada de una
+    // ignorada (D269), así que el aviso de la ventana es verdadero pero innecesario en ese caso.
+    assert_eq!(
+        counts,
+        [
+            ("documents", 6),
+            ("data", 4),
+            ("no_results", 1),
+            ("uncited", 1),
+            ("none", 0)
+        ]
+    );
+    let state_of = |id: &str| {
+        results
+            .iter()
+            .find(|r| r.id == id)
+            .and_then(|r| r.grounding.clone())
+    };
+    assert_eq!(state_of("P07").as_deref(), Some("uncited"));
+    assert_eq!(state_of("P08").as_deref(), Some("no_results"));
+    let report = Report {
+        corpus: results,
+        corpus_summary: Some(summary.clone()),
+        ..Report::default()
+    };
+    let json = serde_json::to_value(&report).unwrap();
+    assert_eq!(
+        json["corpus_summary"]["by_grounding"]["documents"],
+        summary.by_grounding["documents"]
+    );
+    assert!(json["corpus"][0]["grounding"].is_string());
+    // Con el modelo ideal ninguna respuesta del corpus es una marca de calidad.
+    assert!(summary.documents_without_backing.is_empty(), "{summary:?}");
+    assert!(summary.unsourced_answers.is_empty(), "{summary:?}");
+    // Un informe antiguo, sin estos campos, se sigue leyendo.
+    let old: QuestionResult = serde_json::from_value({
+        let mut v = json["corpus"][0].clone();
+        v.as_object_mut().unwrap().retain(|k, _| {
+            !["grounding", "unsourced", "document_without_backing"].contains(&k.as_str())
+        });
+        v
+    })
+    .unwrap();
+    assert_eq!(
+        (old.grounding, old.unsourced, old.document_without_backing),
+        (None, 0, false)
+    );
 }

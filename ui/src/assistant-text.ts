@@ -322,6 +322,52 @@ export function linksRemovedText(n: number | null | undefined): string | null {
   return count === 1 ? "Se retiró 1 enlace de la respuesta." : `Se retiraron ${count} enlaces de la respuesta.`;
 }
 
+/** De dónde pudo salir la respuesta, calculado por la aplicación (D269). */
+export type Grounding = "documents" | "data" | "no_results" | "uncited" | "none";
+
+const GROUNDINGS: readonly string[] = ["documents", "data", "no_results", "uncited", "none"];
+
+export const UNCITED_NOTICE = "Esta respuesta no cita ninguno de sus documentos";
+export const NO_CONSULT_NOTICE = "Para esta respuesta no se consultó ningún documento ni dato de NestAdmin";
+
+/** El estado si es uno de los cinco conocidos; cualquier otra cosa (turno anterior a D269, valor desconocido) es `null`. */
+export function knownGrounding(value: unknown): Grounding | null {
+  return typeof value === "string" && GROUNDINGS.includes(value) ? (value as Grounding) : null;
+}
+
+/** Aviso junto a la respuesta: solo con `uncited` y `none`; `documents`, `data` y `no_results` no llevan aviso. */
+export function groundingNotice(grounding: unknown): string | null {
+  switch (knownGrounding(grounding)) {
+    case "uncited":
+      return UNCITED_NOTICE;
+    case "none":
+      return NO_CONSULT_NOTICE;
+    default:
+      return null;
+  }
+}
+
+/** ¿Ofrece el aviso «Buscar por palabras» con la pregunta? Igual que el aviso: solo con `uncited` y `none`. */
+export function groundingOffersWords(grounding: unknown): boolean {
+  return groundingNotice(grounding) !== null;
+}
+
+/** Cifras de la respuesta que no salen de sus documentos (D269): «Contiene N datos que no salen de sus documentos» y la lista, como mucho cinco. `null` si no hay ninguna. */
+export function unsourcedNotice(total: unknown, items: unknown): string | null {
+  const list = (Array.isArray(items) ? items : [])
+    .filter((i): i is string => typeof i === "string")
+    .map((i) => i.replace(/\s+/g, " ").trim().slice(0, 60))
+    .filter((i) => i !== "")
+    .slice(0, 5);
+  const given = typeof total === "number" && Number.isFinite(total) ? Math.trunc(total) : 0;
+  const n = Math.max(given, list.length);
+  if (n <= 0) return null;
+  const head = n === 1 ? "Contiene 1 dato que no sale de sus documentos" : `Contiene ${n} datos que no salen de sus documentos`;
+  if (list.length === 0) return `${head}.`;
+  const more = n - list.length;
+  return `${head}: ${list.join(", ")}${more > 0 ? ` y ${more} más` : ""}.`;
+}
+
 export function withheldText(n: number): string | null {
   if (n <= 0) return null;
   return n === 1

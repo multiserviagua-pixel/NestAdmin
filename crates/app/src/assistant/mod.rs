@@ -18,6 +18,7 @@
 //! local si el resolvedor `assistant_local` (que no arranca procesos) la da ya en marcha.
 
 pub mod consent;
+pub mod grounding;
 pub mod proposals;
 pub mod tools;
 
@@ -35,6 +36,7 @@ use nestadmin_core::{NewCall, SearchHit, SentCall};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
+use self::grounding::{classify, unsourced, Grounding, ToolRecord};
 use self::proposals::ProposalCard;
 use self::tools::{
     fragment_count, split_masked, strip_fragments, ToolCall, ToolOutput, WITHHELD_MARK,
@@ -216,6 +218,9 @@ pub struct AssistantRun {
     close_reason: Option<String>,
     /// Clases de acción abiertas en este turno (D263), para guardar las que quedaron sin usar.
     actions: Actions,
+    /// Herramientas ejecutadas en este turno y lo que devolvieron (D269): de ahí salen el respaldo
+    /// de la respuesta y el origen de sus cifras. Solo viven en memoria hasta cerrar el turno.
+    records: Vec<ToolRecord>,
     _guard: TurnGuard,
 }
 
@@ -307,6 +312,14 @@ pub struct AssistantTurn {
     /// Enlaces o marcas (direcciones web, sintaxis de enlace o imagen, etiquetas) que la aplicación
     /// retiró de la respuesta antes de guardarla (D264).
     pub links_removed: u32,
+    /// De dónde pudo salir la respuesta, calculado por la aplicación (D269). `None` si el turno no
+    /// tiene respuesta del modelo (error, cancelado, sin permiso o sin IA): no hay nada que avisar.
+    pub grounding: Option<Grounding>,
+    /// Hasta cinco cifras de la respuesta que no salen de los resultados del turno, de los
+    /// documentos citados, de la pregunta ni de una respuesta anterior respaldada (D269).
+    pub unsourced: Vec<String>,
+    /// Cuántas cifras distintas hay sin origen (puede superar `unsourced.len()`).
+    pub unsourced_total: usize,
 }
 
 /// Lo que se guarda de un turno junto a su texto (en `meta_json`).
@@ -341,6 +354,15 @@ pub struct TurnMeta {
     pub composed: bool,
     /// Enlaces o marcas retirados de la respuesta (D264).
     pub links_removed: u32,
+    /// Respaldo de la respuesta (D269). Falta en los turnos guardados antes de D269 y en los que no
+    /// tienen respuesta del modelo: en ambos casos no se muestra aviso.
+    pub grounding: Option<Grounding>,
+    /// Cifras sin origen que se muestran (como mucho cinco) y cuántas hay (D269).
+    pub unsourced: Vec<String>,
+    pub unsourced_total: usize,
+    /// Todas las claves normalizadas de esas cifras: solo local, para que una respuesta posterior no
+    /// se apoye en ellas. No sale hacia el modelo ni hacia la ventana.
+    pub unsourced_keys: Vec<String>,
     /// Clases de acción abiertas en este turno que no se usaron (no creó propuestas): la
     /// respuesta a una aclaración corta las hereda (D263).
     pub open_actions: Vec<String>,
@@ -583,6 +605,7 @@ impl AssistantJob {
             proposed: HashSet::new(),
             close_reason: None,
             actions,
+            records: Vec::new(),
             _guard: guard,
         };
         let external = matches!(route, Route::External { .. });
@@ -806,6 +829,10 @@ impl AssistantJob {
                         external,
                     };
                     let out = tools(&call);
+                    state.records.push(ToolRecord {
+                        name: name.clone(),
+                        value: out.value.clone(),
+                    });
                     state.withheld += out.withheld;
                     state.known_refs.extend(out.refs.iter().cloned());
                     if out.navigate.is_some() {
@@ -1060,6 +1087,7 @@ impl App {
             proposed: _,
             close_reason,
             actions,
+            records,
             _guard,
         } = run;
         let mut turn = AssistantTurn {
@@ -1083,7 +1111,12 @@ impl App {
             proposals: Vec::new(),
             composed: false,
             links_removed: 0,
+            grounding: None,
+            unsourced: Vec::new(),
+            unsourced_total: 0,
         };
+        // Claves de las cifras sin origen, para guardarlas con el turno (D269).
+        let mut unsourced_keys: Vec<String> = Vec::new();
         let audit_status = match status {
             RunStatus::Answered => {
                 // Solo valen las referencias que una herramienta devolvió en este turno.
@@ -1108,6 +1141,25 @@ impl App {
                 turn.links_removed = removed;
                 turn.dropped_citations = dropped;
                 turn.citations = cards;
+                // D269: el respaldo lo calcula la aplicación con lo que ocurrió en el turno. Una
+                // respuesta compuesta por la aplicación lleva el respaldo de sus datos y no tiene
+                // cifras del modelo que comprobar.
+                turn.grounding = Some(classify(turn.citations.len(), &records));
+                if !turn.composed {
+                    let earlier = match conversation_id {
+                        Some(id) => self
+                            .store
+                            .assistant_conversation(id)?
+                            .map(|c| c.turns)
+                            .unwrap_or_default(),
+                        None => Vec::new(),
+                    };
+                    let found =
+                        unsourced(&turn.answer, &records, &turn.citations, &question, &earlier);
+                    turn.unsourced = found.shown;
+                    turn.unsourced_total = found.total;
+                    unsourced_keys = found.keys;
+                }
                 if turn.fallback.is_some() {
                     "fallback"
                 } else {
@@ -1200,6 +1252,10 @@ impl App {
                 ref_targets,
                 composed: turn.composed,
                 links_removed: turn.links_removed,
+                grounding: turn.grounding,
+                unsourced: turn.unsourced.clone(),
+                unsourced_total: turn.unsourced_total,
+                unsourced_keys,
                 // Solo una respuesta sin propuestas deja clases abiertas sin usar.
                 open_actions: if turn.outcome == Outcome::Answered && proposal_ids.is_empty() {
                     actions
@@ -1243,6 +1299,8 @@ impl App {
                 "proposals": turn.proposals.len(),
                 "composed": turn.composed,
                 "links_removed": turn.links_removed,
+                "grounding": turn.grounding.map(Grounding::as_str),
+                "unsourced": turn.unsourced_total,
                 "close_reason": close_reason,
             }),
         )?;
@@ -1266,6 +1324,7 @@ impl App {
             let mut meta: TurnMeta = serde_json::from_value(turn.meta).unwrap_or_default();
             // Las huellas de las sugerencias no salen hacia la ventana.
             meta.ref_targets.clear();
+            meta.unsourced_keys.clear();
             let ids: Vec<i64> = meta
                 .citation_refs
                 .iter()

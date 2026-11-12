@@ -2714,7 +2714,10 @@ const handlers: Record<string, (a: any, options?: any) => unknown> = {
   //  - con permiso: «factura de Suministros» (respuesta con citas), «respaldo» (contesta la IA local por
   //    un fallo del proveedor), «error» (fallo del proveedor), «lento» (6 s, se puede cancelar),
   //    «llévame a reglas|historial|configuración|tareas|correo» (navega), «sensible» (referencia descartada y
-  //    fragmentos retenidos).
+  //    fragmentos retenidos);
+  //  - respaldo de la respuesta (D269): «sin consulta» (`none`, con una hora inventada), «sin citar»
+  //    (`uncited`), «suma» (`data`, con `aggregate`), «inventa cifras» (`documents` con siete cifras sin
+  //    origen), «inexistente» (`no_results`); la búsqueda corriente da `documents` y «propón…», `data`.
   assistant_turn: ({ conversationId, text }: { conversationId: number | null; text: string; view: string }): AssistantTurn | Promise<AssistantTurn> => {
     const question = String(text ?? "").trim();
     if (!question) throw "Escriba una pregunta.";
@@ -2729,7 +2732,7 @@ const handlers: Record<string, (a: any, options?: any) => unknown> = {
     const found = words.page.results.slice(0, 3);
     const base: AssistantTurn = {
       conversation_id: conversationId, turn_id: null, outcome: "answered", error_code: null, answer: "", citations: [], dropped_citations: 0, links_removed: 0, withheld: 0,
-      navigate: null, ...external, steps: 0, tools: [], words: null, proposals: [],
+      navigate: null, ...external, steps: 0, tools: [], words: null, proposals: [], grounding: null, unsourced: [], unsourced_total: 0,
     };
     // Guarda el turno (y, si se indica, lo enviado) y deja el evento del historial, sin el texto.
     const finish = (turn: AssistantTurn, calls: AssistantSentCall[], saved: boolean): AssistantTurn => {
@@ -2744,6 +2747,7 @@ const handlers: Record<string, (a: any, options?: any) => unknown> = {
         const reply = stored("assistant", turn.answer || "Sin respuesta.", {
           outcome: turn.outcome, provider: turn.provider, model: turn.model, local: turn.local, fallback: turn.fallback, steps: turn.steps, tools: turn.tools,
           dropped_citations: turn.dropped_citations, links_removed: turn.links_removed ?? 0, withheld: turn.withheld, navigate: turn.navigate, citations: turn.citations, citation_refs: turn.citations.map((c) => `doc:${c.task_id}`),
+          grounding: turn.grounding ?? null, unsourced: turn.unsourced ?? [], unsourced_total: turn.unsourced_total ?? 0,
         });
         conversation.turns.push(reply);
         if (turn.proposals.length) proposalsByTurn.set(reply.id, turn.proposals.map((c) => c.id));
@@ -2774,7 +2778,7 @@ const handlers: Record<string, (a: any, options?: any) => unknown> = {
       return new Promise<AssistantTurn>((resolve) => {
         const timer = setTimeout(() => {
           assistantCancel = null;
-          resolve(finish({ ...base, answer: "Respuesta lenta de ejemplo: no hay nada más que contar.", steps: 1 }, [sentFor(1, false)], true));
+          resolve(finish({ ...base, answer: "Respuesta lenta de ejemplo: no hay nada más que contar.", steps: 1, grounding: "none" }, [sentFor(1, false)], true));
         }, 6000);
         assistantCancel = () => {
           clearTimeout(timer);
@@ -2785,23 +2789,42 @@ const handlers: Record<string, (a: any, options?: any) => unknown> = {
     const view = /llevame|llevarme|abre/.test(flat)
       ? flat.includes("regla") ? "rules" : flat.includes("histor") ? "history" : flat.includes("config") ? "settings" : flat.includes("tarea") ? "tasks" : flat.includes("correo") || flat.includes("cuenta") ? "mail" : "review"
       : null;
-    if (view) return finish({ ...base, answer: "Abro esa pantalla. No hago nada más en ella.", steps: 1, tools: ["open_view"], navigate: view }, [sentFor(1, false)], true);
+    if (view) return finish({ ...base, answer: "Abro esa pantalla. No hago nada más en ella.", steps: 1, tools: ["open_view"], navigate: view, grounding: "none" }, [sentFor(1, false)], true);
+    // Respaldo de la respuesta (D269). El modelo contesta sobre un correo sin leerlo: `none`, con una hora inventada.
+    if (flat.includes("sin consulta"))
+      return finish({ ...base, answer: "El correo trata de un horario de atención de 9:00 a 14:00.", steps: 1, grounding: "none", unsourced: ["9:00", "14:00"], unsourced_total: 2 }, [sentFor(1, false)], true);
+    // Leyó documentos y no cita ninguno: `uncited`.
+    if (flat.includes("sin citar"))
+      return finish({ ...base, answer: "Hay documentos de muestra con lo que pregunta, pero esta respuesta no los cita.", steps: 2, tools: ["search"], grounding: "uncited" }, [sentFor(1, false), sentFor(2, false)], true);
+    // Una suma con `aggregate`: `data`, sin aviso; el importe es del resultado.
+    if (flat.includes("suma"))
+      return finish({ ...base, answer: "Suman 1.234,56 EUR en 1 factura.", steps: 2, tools: ["aggregate"], grounding: "data" }, [sentFor(1, false), sentFor(2, false)], true);
+    // Una búsqueda sin resultados y un «no consta»: `no_results`, sin aviso.
+    if (flat.includes("inexistente"))
+      return finish({ ...base, answer: "No consta ningún documento con esos datos.", steps: 2, tools: ["search"], grounding: "no_results" }, [sentFor(1, false), sentFor(2, false)], true);
+    // Con cita pero con siete cifras que no salen de los resultados: se muestran cinco y se cuenta el total.
+    if (flat.includes("inventa cifras"))
+      return finish(
+        { ...base, answer: "Encontré documentos de muestra; atienden de 9:00 a 14:00, cobran 350,00 EUR y la F-2026-999 vence el 15/04/2026 (21 %).", citations: structuredClone(found), steps: 2, tools: ["search"], grounding: "documents", unsourced: ["9:00", "14:00", "350,00 EUR", "F-2026-999", "15/04/2026"], unsourced_total: 7 },
+        [sentFor(1, false), sentFor(2, false)],
+        true,
+      );
     if (flat.includes("respaldo"))
       return finish(
-        { ...base, answer: found.length ? `Encontré ${found.length} documento(s) de muestra.\nEsta respuesta la ha redactado la IA local.` : "No encuentro ningún documento con esos datos.", citations: structuredClone(found), steps: 2, tools: ["search"], provider: "ollama", model: "gemma3:4b", local: true, fallback: { from: provider, reason: "timeout" } },
+        { ...base, answer: found.length ? `Encontré ${found.length} documento(s) de muestra.\nEsta respuesta la ha redactado la IA local.` : "No encuentro ningún documento con esos datos.", citations: structuredClone(found), steps: 2, tools: ["search"], grounding: found.length ? "documents" : "no_results", provider: "ollama", model: "gemma3:4b", local: true, fallback: { from: provider, reason: "timeout" } },
         [sentFor(1, false), sentFor(2, true)],
         true,
       );
     // Datos protegidos: con un proveedor externo la respuesta trae las marcas de enmascarado (D183).
     if (/protegid|iban|telefono/.test(flat))
       return finish(
-        { ...base, answer: "El IBAN de Suministros Ejemplo S.L. es [IBAN] y su teléfono de contacto es [TELÉFONO].", citations: structuredClone(found), steps: 2, tools: ["search", "get_document"] },
+        { ...base, answer: "El IBAN de Suministros Ejemplo S.L. es [IBAN] y su teléfono de contacto es [TELÉFONO].", citations: structuredClone(found), steps: 2, tools: ["search", "get_document"], grounding: found.length ? "documents" : "uncited" },
         [sentFor(1, false), sentFor(2, false)],
         true,
       );
     // «estados»: una tarjeta en cada estado final (hecha, ya constaba, descartada, caducada, obsoleta, fallida).
     if (flat.includes("estados"))
-      return finish({ ...base, answer: "Estas son propuestas de ejemplo ya resueltas.", steps: 1, tools: ["list_tasks"], proposals: mockFinalStateCards() }, [sentFor(1, false)], true);
+      return finish({ ...base, answer: "Estas son propuestas de ejemplo ya resueltas.", steps: 1, tools: ["list_tasks"], proposals: mockFinalStateCards(), grounding: "data" }, [sentFor(1, false)], true);
     // Reglas, sugerencias e importación (E4): «prepara una regla / acepta la sugerencia / importar…».
     if (/regla|sugerencia|importar|archivos/.test(flat) && /propon|prepara/.test(flat)) {
       const kinds = new Set<string>();
@@ -2812,7 +2835,7 @@ const handlers: Record<string, (a: any, options?: any) => unknown> = {
       if (/importar|archivos/.test(flat)) kinds.add("import");
       if (!kinds.size) ["accept", "discard", "create", "edit", "import"].forEach((k) => kinds.add(k));
       return finish(
-        { ...base, answer: "He preparado las propuestas. Ninguna regla se activa desde aquí: se activan en Reglas.", steps: 3, tools: ["list_suggestions", "list_rules", "propose_create_rule"], proposals: newMockRuleProposals(kinds) },
+        { ...base, answer: "He preparado las propuestas. Ninguna regla se activa desde aquí: se activan en Reglas.", steps: 3, tools: ["list_suggestions", "list_rules", "propose_create_rule"], proposals: newMockRuleProposals(kinds), grounding: "data" },
         [sentFor(1, false), sentFor(2, false)],
         true,
       );
@@ -2828,7 +2851,7 @@ const handlers: Record<string, (a: any, options?: any) => unknown> = {
       if (!kinds.size) ["send", "invoice", "edit"].forEach((k) => kinds.add(k));
       return finish(
         // El texto del modelo puede afirmar que algo se ha hecho: la línea fija de la tarjeta manda.
-        { ...base, answer: "Ya he enviado la respuesta y he registrado la factura, como pidió.\nNota: es un texto de ejemplo del modelo; la tarjeta dice lo que ocurre de verdad.", steps: 4, tools: ["list_tasks", "propose_approve"], proposals: newMockProposals(kinds) },
+        { ...base, answer: "Ya he enviado la respuesta y he registrado la factura, como pidió.\nNota: es un texto de ejemplo del modelo; la tarjeta dice lo que ocurre de verdad.", steps: 4, tools: ["list_tasks", "propose_approve"], proposals: newMockProposals(kinds), grounding: "data" },
         [sentFor(1, false), sentFor(2, false)],
         true,
       );
@@ -2841,6 +2864,7 @@ const handlers: Record<string, (a: any, options?: any) => unknown> = {
           ? `Encontré ${found.length} documento(s) de muestra con lo que pregunta.\n\nLa referencia está en [enlace retirado] (la aplicación retira las direcciones web de la respuesta).`
           : "No encuentro ningún documento con esos datos.",
         citations: structuredClone(found),
+        grounding: found.length ? "documents" : "no_results",
         dropped_citations: sensitive ? 1 : 0,
         // D264: el modelo escribió una dirección web y la aplicación la retiró antes de mostrarla.
         links_removed: found.length ? 1 : 0,

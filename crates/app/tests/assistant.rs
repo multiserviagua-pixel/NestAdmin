@@ -1901,3 +1901,542 @@ fn a_suggestion_name_with_an_address_goes_masked_to_an_external_provider_and_loc
     });
     assert!(!masked.value.to_string().contains(DOC_EMAIL));
 }
+
+// ======================================================================================
+// Respaldo de la respuesta y cifras sin origen (D269)
+// ======================================================================================
+
+use nestadmin_app::assistant::grounding::Grounding;
+
+/// Un turno con su guion propio (la cuenta de llamadas del proveedor es de toda la prueba).
+fn ask_with(
+    w: &mut World,
+    conversation: Option<i64>,
+    steps: Vec<Value>,
+    text: &str,
+    view: &str,
+) -> AssistantTurn {
+    script_from_now(w, steps);
+    ask(&mut w.app, conversation, text, view)
+}
+
+#[test]
+fn each_answer_carries_the_grounding_the_app_computed_from_what_really_happened() {
+    let mut w = world(ProviderKind::Ollama);
+    let alfa = seed(&mut w.app, "alfa.txt", "Alfa SL", "F-1", 100, "uno");
+    let by = |t: &AssistantTurn| (t.grounding, t.unsourced_total);
+    let search = || tool("search", json!({ "query": "Alfa" }));
+
+    // Cita un documento que una herramienta devolvió: `documents`.
+    let t = ask_with(
+        &mut w,
+        None,
+        vec![search(), cited(&[format!("doc:{alfa}")])],
+        "¿Qué hay de Alfa?",
+        "other",
+    );
+    assert_eq!(by(&t), (Some(Grounding::Documents), 0));
+    // Leyó documentos y no cita ninguno: `uncited`. Si todas las citas se descartan, también.
+    let t = ask_with(
+        &mut w,
+        None,
+        vec![search(), answer("Es de Alfa.")],
+        "¿Qué hay de Alfa?",
+        "other",
+    );
+    assert_eq!(t.grounding, Some(Grounding::Uncited));
+    let t = ask_with(
+        &mut w,
+        None,
+        vec![search(), cited(&["doc:999999".to_owned()])],
+        "¿Qué hay de Alfa?",
+        "other",
+    );
+    assert_eq!(
+        (t.grounding, t.dropped_citations),
+        (Some(Grounding::Uncited), 1)
+    );
+    // `get_document` también lee un documento.
+    let t = ask_with(
+        &mut w,
+        None,
+        vec![
+            search(),
+            tool("get_document", json!({ "ref": format!("doc:{alfa}") })),
+            answer("Es de Alfa."),
+        ],
+        "¿Qué hay de Alfa?",
+        "other",
+    );
+    assert_eq!(t.grounding, Some(Grounding::Uncited));
+    // Una suma o un recuento sin citas: `data`. También las tareas, reglas, historial y estado de IA.
+    for (name, args, view) in [
+        ("aggregate", json!({ "op": "sum_total" }), "other"),
+        ("list_tasks", json!({}), "review"),
+        ("list_rules", json!({}), "rules"),
+        ("list_suggestions", json!({}), "rules"),
+        ("history", json!({ "ref": format!("doc:{alfa}") }), "review"),
+        ("mail_accounts", json!({}), "mail"),
+        ("ai_status", json!({}), "settings"),
+    ] {
+        let t = ask_with(
+            &mut w,
+            None,
+            vec![tool(name, args), answer("Aquí lo tiene.")],
+            "pregunta",
+            view,
+        );
+        assert_eq!(t.grounding, Some(Grounding::Data), "{name}: {t:?}");
+    }
+    // Buscó y no había nada: `no_results`; «no consta» está respaldado.
+    let t = ask_with(
+        &mut w,
+        None,
+        vec![
+            tool("search", json!({ "query": "inexistente" })),
+            answer("No consta ningún documento de Gamma."),
+        ],
+        "¿Hay algo de Gamma?",
+        "other",
+    );
+    assert_eq!(by(&t), (Some(Grounding::NoResults), 0));
+    // Sin ninguna herramienta, o solo con una navegación: `none`.
+    let t = ask_with(
+        &mut w,
+        None,
+        vec![answer("El horario es de 9:00 a 14:00.")],
+        "¿De qué trata el correo?",
+        "other",
+    );
+    assert_eq!(t.grounding, Some(Grounding::None));
+    let t = ask_with(
+        &mut w,
+        None,
+        vec![
+            tool("open_view", json!({ "view": "rules" })),
+            answer("Abro las reglas."),
+        ],
+        "llévame a reglas",
+        "other",
+    );
+    assert_eq!(t.grounding, Some(Grounding::None));
+}
+
+#[test]
+fn precedence_when_several_things_happened_in_one_turn() {
+    let mut w = world(ProviderKind::Ollama);
+    seed(&mut w.app, "alfa.txt", "Alfa SL", "F-1", 100, "uno");
+    let search = |q: &str| tool("search", json!({ "query": q }));
+    let sum = tool("aggregate", json!({ "op": "sum_total" }));
+    // Buscó con resultados y además sumó, sin citar: se leyeron documentos y no se citan.
+    let t = ask_with(
+        &mut w,
+        None,
+        vec![search("Alfa"), sum.clone(), answer("Suman 121,00 EUR.")],
+        "suma",
+        "other",
+    );
+    assert_eq!(t.grounding, Some(Grounding::Uncited));
+    // Buscó sin resultados y además sumó: los datos de la suma respaldan la respuesta.
+    let t = ask_with(
+        &mut w,
+        None,
+        vec![search("inexistente"), sum, answer("Suman 121,00 EUR.")],
+        "suma",
+        "other",
+    );
+    assert_eq!(t.grounding, Some(Grounding::Data));
+    // Una búsqueda con resultados y otra sin ellos: se leyeron documentos.
+    let t = ask_with(
+        &mut w,
+        None,
+        vec![search("inexistente"), search("Alfa"), answer("Sí.")],
+        "¿hay?",
+        "other",
+    );
+    assert_eq!(t.grounding, Some(Grounding::Uncited));
+}
+
+#[test]
+fn a_rejected_repeated_or_failed_tool_is_not_a_read() {
+    let mut w = world(ProviderKind::Ollama);
+    let alfa = seed(&mut w.app, "alfa.txt", "Alfa SL", "F-1", 100, "uno");
+    // Sin su argumento obligatorio: no se ejecuta.
+    let t = ask_with(
+        &mut w,
+        None,
+        vec![json!({ "tool": "search" }), answer("Creo que es de Alfa.")],
+        "¿qué es?",
+        "other",
+    );
+    assert_eq!(t.grounding, Some(Grounding::None));
+    // Del catálogo pero no de los bloques de la vista: se rechaza.
+    let t = ask_with(
+        &mut w,
+        None,
+        vec![tool("list_rules", json!({})), answer("No sé.")],
+        "pregunta",
+        "settings",
+    );
+    assert_eq!(t.grounding, Some(Grounding::None));
+    // Una herramienta que se ejecuta y falla (documento inexistente): no es una lectura.
+    let t = ask_with(
+        &mut w,
+        None,
+        vec![
+            tool("get_document", json!({ "ref": "doc:999999" })),
+            answer("Trata de un horario de 9:00 a 14:00."),
+        ],
+        "¿de qué trata?",
+        "other",
+    );
+    assert_eq!(t.grounding, Some(Grounding::None));
+    assert_eq!(t.unsourced, ["9:00", "14:00"]);
+    // Una llamada repetida no se ejecuta otra vez, pero la primera, que sí se ejecutó, cuenta.
+    let t = ask_with(
+        &mut w,
+        None,
+        vec![
+            tool("history", json!({ "ref": format!("doc:{alfa}") })),
+            tool("history", json!({ "ref": format!("doc:{alfa}") })),
+            answer("Esto es su historial."),
+        ],
+        "historial",
+        "review",
+    );
+    assert_eq!(t.grounding, Some(Grounding::Data));
+}
+
+#[test]
+fn answers_without_a_model_answer_have_no_grounding_and_no_warning() {
+    // Error del proveedor.
+    let mut w = world(ProviderKind::Ollama);
+    w.ext.fail_with(AiError::Unavailable("sin red".into()));
+    let t = ask(&mut w.app, None, "pregunta", "other");
+    assert_eq!(t.outcome, Outcome::Error);
+    assert_eq!((t.grounding, t.unsourced_total), (None, 0));
+    let saved = w.app.assistant_conversation(None).unwrap().unwrap();
+    assert_eq!(saved.turns[1].meta.grounding, None);
+    assert!(saved.turns[1].meta.unsourced.is_empty());
+    // Cancelado.
+    let mut w = world(ProviderKind::Ollama);
+    w.ext.steps(vec![
+        tool("list_tasks", json!({})),
+        answer("No llega 9:00."),
+    ]);
+    let job = w
+        .app
+        .begin_assistant_turn(None, "pregunta", "review")
+        .unwrap();
+    let run = job.run(&mut |call| {
+        w.app.assistant_cancel();
+        w.app.assistant_tool(call)
+    });
+    let t = w.app.finish_assistant_turn(run).unwrap();
+    assert_eq!(t.outcome, Outcome::Cancelled);
+    assert_eq!((t.grounding, t.unsourced_total), (None, 0));
+    // Sin permiso y sin IA utilizable.
+    let mut w = world(ProviderKind::OllamaCloud);
+    let t = ask(&mut w.app, None, "Dime la factura de Alfa de 9:00", "other");
+    assert_eq!(t.outcome, Outcome::ConsentRequired);
+    assert_eq!((t.grounding, t.unsourced_total), (None, 0));
+    grant(&mut w.app);
+    w.app.set_ai_wait(Some(AiWait::NeedsKey));
+    let t = ask(&mut w.app, None, "factura de Alfa", "other");
+    assert_eq!(t.outcome, Outcome::NotConfigured);
+    assert_eq!((t.grounding, t.unsourced_total), (None, 0));
+    let saved = w.app.assistant_conversation(None).unwrap().unwrap();
+    assert!(saved.turns.iter().all(|t| t.meta.grounding.is_none()));
+}
+
+#[test]
+fn invented_figures_are_named_and_what_comes_from_the_turn_is_not() {
+    let mut w = world(ProviderKind::Ollama);
+    let alfa = seed(&mut w.app, "alfa.txt", "Alfa SL", "F-2026-014", 100, "uno");
+    // Todo sale de la búsqueda: importe (121.00), número de factura y fecha (2026-10-05).
+    let t = ask_with(
+        &mut w,
+        None,
+        vec![
+            tool("search", json!({ "query": "Alfa" })),
+            json!({ "answer": "La factura F-2026-014 de Alfa SL es de 121,00 EUR (121 euros con 00), del 5 de octubre de 2026 (05/10/2026 o 2026-10-05).",
+                    "citations": [format!("doc:{alfa}")] }),
+        ],
+        "¿Qué hay de Alfa?",
+        "other",
+    );
+    assert_eq!(t.grounding, Some(Grounding::Documents));
+    assert_eq!(
+        (t.unsourced.clone(), t.unsourced_total),
+        (Vec::<String>::new(), 0)
+    );
+    // Una hora y un importe inventados, y un número de factura que no existe: se nombran.
+    let t = ask_with(
+        &mut w,
+        None,
+        vec![
+            tool("search", json!({ "query": "Alfa" })),
+            json!({ "answer": "La F-2026-014 es de 121,00 EUR. Atienden de 9:00 a 14:00, cobran 350,00 EUR y la F-2026-999 está pendiente.",
+                    "citations": [format!("doc:{alfa}")] }),
+        ],
+        "¿Qué hay de Alfa?",
+        "other",
+    );
+    assert_eq!(t.grounding, Some(Grounding::Documents));
+    assert_eq!(t.unsourced, ["9:00", "14:00", "350,00 EUR", "F-2026-999"]);
+    assert_eq!(t.unsourced_total, 4);
+    // Un importe redondeado por el modelo no sale de los resultados: se registra como sin origen.
+    let t = ask_with(
+        &mut w,
+        None,
+        vec![
+            tool("aggregate", json!({ "op": "sum_total" })),
+            answer("Suman unos 120 euros en 1 factura."),
+        ],
+        "suma",
+        "other",
+    );
+    assert_eq!(t.grounding, Some(Grounding::Data));
+    assert_eq!(t.unsourced, ["120 euros"]);
+    // La suma exacta de `aggregate` sí está respaldada, en cualquier formato.
+    let t = ask_with(
+        &mut w,
+        None,
+        vec![
+            tool("aggregate", json!({ "op": "sum_total" })),
+            answer("Suman 121,00 € (121.00 EUR, 121,0 euros)."),
+        ],
+        "suma",
+        "other",
+    );
+    assert_eq!(t.unsourced_total, 0, "{t:?}");
+    // La pregunta de la persona también respalda: lo que escribió no lo inventó el modelo.
+    let t = ask_with(
+        &mut w,
+        None,
+        vec![answer(
+            "Entiendo: la de 500,00 € del 3/11/2026 a las 18:15.",
+        )],
+        "¿Hay una de 500 € del 3 de noviembre de 2026 a las 18:15?",
+        "other",
+    );
+    assert_eq!((t.grounding, t.unsourced_total), (Some(Grounding::None), 0));
+}
+
+#[test]
+fn an_earlier_answer_backs_a_figure_only_if_it_was_itself_grounded() {
+    let mut w = world(ProviderKind::Ollama);
+    let alfa = seed(&mut w.app, "alfa.txt", "Alfa SL", "F-1", 100, "uno");
+    // Turno 1, con respaldo (`documents`): su importe es de los resultados; el 350,00 no lo es.
+    let first = ask_with(
+        &mut w,
+        None,
+        vec![
+            tool("search", json!({ "query": "Alfa" })),
+            json!({ "answer": "Es de 121,00 EUR y además 350,00 EUR.", "citations": [format!("doc:{alfa}")] }),
+        ],
+        "¿Qué hay de Alfa?",
+        "other",
+    );
+    assert_eq!(first.unsourced, ["350,00 EUR"]);
+    let conversation = first.conversation_id;
+    // Turno 2, sin herramientas (`none`): repite el importe de un turno anterior respaldado y el
+    // que el turno anterior ya dio sin origen, y añade uno nuevo.
+    let second = ask_with(
+        &mut w,
+        conversation,
+        vec![answer(
+            "Como dije, 121,00 EUR; también 350,00 EUR y 99,00 EUR.",
+        )],
+        "repítamelo",
+        "other",
+    );
+    assert_eq!(second.grounding, Some(Grounding::None));
+    assert_eq!(second.unsourced, ["350,00 EUR", "99,00 EUR"]);
+    // Turno 3: ni el turno `none` ni el anterior sin origen respaldan al 99,00; el 121,00 sigue
+    // respaldado por el turno 1.
+    let third = ask_with(
+        &mut w,
+        conversation,
+        vec![answer("Otra vez 99,00 EUR, 121,00 EUR y 350,00 EUR.")],
+        "otra vez",
+        "other",
+    );
+    assert_eq!(third.unsourced, ["99,00 EUR", "350,00 EUR"]);
+    // Un turno `data` posterior sí respalda a los siguientes.
+    let fourth = ask_with(
+        &mut w,
+        conversation,
+        vec![
+            tool("aggregate", json!({ "op": "sum_total" })),
+            answer("Suman 121,00 EUR en total."),
+        ],
+        "suma",
+        "other",
+    );
+    assert_eq!(fourth.grounding, Some(Grounding::Data));
+    let fifth = ask_with(
+        &mut w,
+        conversation,
+        vec![answer("Recuerde: 121,00 EUR.")],
+        "recuérdemelo",
+        "other",
+    );
+    assert_eq!(fifth.unsourced_total, 0);
+    // Lo que escribió la persona en un turno anterior tampoco lo inventó el modelo.
+    let sixth = ask_with(
+        &mut w,
+        conversation,
+        vec![answer("La de 77,00 EUR de la que hablaba.")],
+        "¿y la de 77 euros?",
+        "other",
+    );
+    assert_eq!(sixth.unsourced_total, 0);
+    let seventh = ask_with(
+        &mut w,
+        conversation,
+        vec![answer("Esa de 77,00 EUR, sí.")],
+        "ok",
+        "other",
+    );
+    assert_eq!(seventh.unsourced_total, 0);
+}
+
+#[test]
+fn grounding_and_unsourced_are_saved_with_the_turn_and_come_back_on_reopening() {
+    let mut w = world(ProviderKind::Ollama);
+    let alfa = seed(&mut w.app, "alfa.txt", "Alfa SL", "F-1", 100, "uno");
+    let one = ask_with(
+        &mut w,
+        None,
+        vec![
+            tool("search", json!({ "query": "Alfa" })),
+            answer("Atienden de 9:00 a 14:00."),
+        ],
+        "¿Qué hay de Alfa?",
+        "other",
+    );
+    let two = ask_with(
+        &mut w,
+        one.conversation_id,
+        vec![
+            tool("search", json!({ "query": "Alfa" })),
+            cited(&[format!("doc:{alfa}")]),
+        ],
+        "otra",
+        "other",
+    );
+    assert_eq!(
+        (one.grounding, two.grounding),
+        (Some(Grounding::Uncited), Some(Grounding::Documents))
+    );
+    for found in [
+        w.app.assistant_conversation(None).unwrap().unwrap(),
+        w.app
+            .assistant_conversation(one.conversation_id)
+            .unwrap()
+            .unwrap(),
+    ] {
+        assert_eq!(found.turns[1].meta.grounding, Some(Grounding::Uncited));
+        assert_eq!(found.turns[1].meta.unsourced, ["9:00", "14:00"]);
+        assert_eq!(found.turns[1].meta.unsourced_total, 2);
+        assert_eq!(found.turns[3].meta.grounding, Some(Grounding::Documents));
+        assert!(found.turns[3].meta.unsourced.is_empty());
+        // Las claves normalizadas son solo locales: no llegan a la ventana.
+        assert!(found.turns.iter().all(|t| t.meta.unsourced_keys.is_empty()));
+        // Los turnos de la persona no llevan respaldo.
+        assert_eq!(found.turns[0].meta.grounding, None);
+        let json = serde_json::to_value(&found.turns[1]).unwrap();
+        assert_eq!(json["grounding"], "uncited");
+        assert_eq!(json["unsourced"], json!(["9:00", "14:00"]));
+    }
+    // El turno recién hecho se serializa con el mismo estado cerrado.
+    assert_eq!(serde_json::to_value(&one).unwrap()["grounding"], "uncited");
+    assert_eq!(serde_json::to_value(&one).unwrap()["unsourced_total"], 2);
+    // El historial guarda el estado, sin el texto de la respuesta ni sus cifras.
+    let (_, detail) = last_audit(&w.app, "assistant_turn");
+    assert!(detail.contains("\"grounding\":\"documents\""), "{detail}");
+    assert!(!detail.contains("9:00"), "{detail}");
+}
+
+#[test]
+fn nothing_of_the_grounding_goes_to_the_model_or_to_an_external_provider() {
+    let mut w = world(ProviderKind::OllamaCloud);
+    seed(&mut w.app, "alfa.txt", "Alfa SL", "F-1", 100, "uno");
+    grant(&mut w.app);
+    let one = ask_with(
+        &mut w,
+        None,
+        vec![
+            tool("search", json!({ "query": "Alfa" })),
+            answer("Atienden de 9:00 a 14:00 y cobran 350,00 EUR."),
+        ],
+        "¿Qué hay de Alfa?",
+        "other",
+    );
+    assert_eq!(one.grounding, Some(Grounding::Uncited));
+    assert_eq!(one.unsourced_total, 3);
+    let two = ask_with(
+        &mut w,
+        one.conversation_id,
+        vec![answer("Nada más.")],
+        "¿Y algo más?",
+        "other",
+    );
+    assert_eq!(two.grounding, Some(Grounding::None));
+    // El turno anterior sale como texto de la respuesta, tal cual, y ninguna petición lleva el
+    // estado, las cifras sin origen ni el texto del aviso de la ventana.
+    let requests = w.ext.requests();
+    assert_eq!(requests.len(), 3);
+    for request in &requests {
+        let sent = sent_text(request).to_lowercase();
+        for banned in [
+            "grounding",
+            "unsourced",
+            "uncited",
+            "no_results",
+            "no cita ninguno",
+            "no salen de sus documentos",
+            "no se consultó ningún documento",
+            "sin origen",
+        ] {
+            assert!(!sent.contains(banned), "{banned}: {sent}");
+        }
+    }
+    assert!(blocks(&requests[2].content)
+        .iter()
+        .any(|b| b == "Atienden de 9:00 a 14:00 y cobran 350,00 EUR."));
+    // Lo guardado para «Ver lo enviado» es lo mismo.
+    let sent = w.app.assistant_sent(two.turn_id.unwrap()).unwrap();
+    assert!(sent
+        .iter()
+        .all(|c| !c.sent_text.to_lowercase().contains("unsourced")));
+}
+
+#[test]
+fn the_results_kept_for_the_check_belong_to_the_turn_that_made_them() {
+    let mut w = world(ProviderKind::Ollama);
+    seed(&mut w.app, "alfa.txt", "Alfa SL", "F-1", 100, "uno");
+    let one = ask_with(
+        &mut w,
+        None,
+        vec![
+            tool("aggregate", json!({ "op": "sum_total" })),
+            answer("Suman 121,00 EUR."),
+        ],
+        "suma",
+        "other",
+    );
+    assert_eq!(one.unsourced_total, 0);
+    // Otra conversación nueva que repite el importe sin herramientas: no hay turno anterior ni
+    // resultado de este turno que lo respalde.
+    let two = ask_with(
+        &mut w,
+        None,
+        vec![answer("Suman 121,00 EUR.")],
+        "suma",
+        "other",
+    );
+    assert_eq!(two.grounding, Some(Grounding::None));
+    assert_eq!(two.unsourced, ["121,00 EUR"]);
+}

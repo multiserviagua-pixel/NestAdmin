@@ -3424,3 +3424,65 @@ fn a_rule_value_that_is_not_in_the_documents_needs_its_checkbox_but_is_not_refus
         w.app.proposal_dismiss(card.id).unwrap();
     }
 }
+
+// ---- Respaldo de la respuesta (D269): propuestas y cierre compuesto por la aplicación ----
+
+#[test]
+fn a_created_proposal_gives_the_answer_the_grounding_data_and_is_saved_with_it() {
+    use nestadmin_app::assistant::grounding::Grounding;
+    let mut w = world();
+    let mail = first_mail(&mut w);
+    // Leyó el documento y no lo cita: sin propuesta sería `uncited`; con la tarjeta, que la
+    // aplicación compone con datos reales, el respaldo es `data`.
+    let turn = propose(&mut w, None, &[mail], vec![approve(mail)], "review");
+    assert_eq!(turn.outcome, Outcome::Answered);
+    assert!(!turn.composed && turn.citations.is_empty());
+    assert_eq!(turn.proposals.len(), 1);
+    assert_eq!(turn.grounding, Some(Grounding::Data));
+    let saved = w
+        .app
+        .assistant_conversation(turn.conversation_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(saved.turns[1].meta.grounding, Some(Grounding::Data));
+    let (_, detail) = {
+        let e = last_turn_note(&w);
+        (e.status, e.detail.unwrap_or_default())
+    };
+    assert!(detail.contains("\"grounding\":\"data\""), "{detail}");
+}
+
+#[test]
+fn a_rejected_proposal_call_is_not_a_read_and_the_composed_closing_keeps_the_grounding_of_its_data()
+{
+    use nestadmin_app::assistant::grounding::Grounding;
+    let mut w = world();
+    let mail = first_mail(&mut w);
+    // Una propuesta de una clase que la persona no pidió se rechaza: no cuenta como lectura.
+    w.ext.turn(vec![
+        approve(mail),
+        approve(mail),
+        approve(mail),
+        answer("Nada que hacer."),
+    ]);
+    let turn = ask(&mut w, None, "Hola", "review");
+    assert!(turn.proposals.is_empty());
+    assert_eq!(turn.grounding, Some(Grounding::None), "{turn:?}");
+    // El caso real de E6: lee, propone y repite hasta el tope; la aplicación cierra con su texto.
+    w.ext.turn(vec![
+        tool("get_document", json!({ "ref": doc(mail) })),
+        approve(mail),
+    ]);
+    let turn = ask(&mut w, None, "Prepárala para registrarla", "review");
+    assert!(turn.composed);
+    assert_eq!(turn.grounding, Some(Grounding::Data));
+    // Su texto lo compuso la aplicación: no hay cifras del modelo que comprobar.
+    assert!(turn.unsourced.is_empty() && turn.unsourced_total == 0);
+    let saved = w
+        .app
+        .assistant_conversation(turn.conversation_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(saved.turns[1].meta.grounding, Some(Grounding::Data));
+    assert!(saved.turns[1].meta.composed);
+}

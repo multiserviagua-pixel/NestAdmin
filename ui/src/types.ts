@@ -1153,6 +1153,9 @@ export interface QuestionAnswer {
 /** Paso en curso del asistente (D182): un código cerrado, nunca contenido. */
 export type AssistantProgress = { kind: "thinking" } | { kind: "tool"; name: string };
 
+/** De dónde pudo salir la respuesta (D269): con citas, con datos de NestAdmin, sin resultados, con documentos leídos pero sin citar o sin consulta. */
+export type Grounding = "documents" | "data" | "no_results" | "uncited" | "none";
+
 export type AssistantOutcome = "answered" | "consent_required" | "not_configured" | "cancelled" | "error";
 
 /** Un turno del asistente tal como lo devuelve `assistant_turn`. */
@@ -1191,6 +1194,11 @@ export interface AssistantTurn {
   composed?: boolean;
   /** Enlaces o marcas (direcciones web, enlaces, imágenes, etiquetas) que la aplicación retiró de la respuesta (D264). */
   links_removed?: number;
+  /** De dónde pudo salir la respuesta, calculado por la aplicación (D269); `null` si el turno no tiene respuesta del modelo. */
+  grounding?: Grounding | null;
+  /** Hasta cinco cifras de la respuesta que no salen de sus documentos, y cuántas hay (D269). */
+  unsourced?: string[];
+  unsourced_total?: number;
 }
 
 // ---- Propuestas del asistente (E3, D185) ----
@@ -1277,6 +1285,10 @@ export interface AssistantStoredTurn {
   citation_refs: string[];
   /** Enlaces o marcas retirados de la respuesta al guardarla (D264). */
   links_removed?: number;
+  /** Respaldo de la respuesta y cifras sin origen (D269); faltan en los turnos anteriores a D269 y en los que no tienen respuesta del modelo. */
+  grounding?: Grounding | null;
+  unsourced?: string[];
+  unsourced_total?: number;
   dropped_citations: number;
   withheld: number;
   navigate: string | null;

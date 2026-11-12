@@ -7,6 +7,7 @@
 pub mod anthropic;
 pub mod assistant;
 pub mod credentials;
+pub mod figures;
 mod http;
 pub mod learn;
 pub mod models;

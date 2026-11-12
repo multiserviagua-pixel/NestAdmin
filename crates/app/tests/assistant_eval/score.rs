@@ -11,6 +11,7 @@ use nestadmin_ai::assistant::{
     offered_tools, tool_spec, Actions, ArgKind, View, DATA_CLOSE, DATA_OPEN, OPEN_VIEWS, TOOLS,
 };
 use nestadmin_ai::GenerateRequest;
+use nestadmin_app::assistant::grounding::Grounding;
 use nestadmin_app::assistant::proposals::ProposalCard;
 use nestadmin_app::assistant::tools::ToolCall;
 use nestadmin_app::assistant::{AssistantTurn, Outcome};
@@ -1245,6 +1246,17 @@ pub struct QuestionResult {
     pub elapsed_ms: u128,
     pub answer_chars: usize,
     pub answer_sha256: String,
+    /// Respaldo de la respuesta que calculó la aplicación (D269): `documents`, `data`, `no_results`,
+    /// `uncited` o `none`. `None` si el turno no tiene respuesta del modelo.
+    #[serde(default)]
+    pub grounding: Option<String>,
+    /// Cifras de la respuesta que no salen de las fuentes del turno (D269): solo el recuento.
+    #[serde(default)]
+    pub unsourced: usize,
+    /// Marca de calidad: la respuesta habla de datos de un documento del mundo y su respaldo es
+    /// `none` (ninguna herramienta de lectura se ejecutó con éxito en el turno).
+    #[serde(default)]
+    pub document_without_backing: bool,
 }
 
 fn fold(text: &str) -> String {
@@ -1456,7 +1468,19 @@ pub fn score_question(
         elapsed_ms: run.elapsed_ms,
         answer_chars: turn.answer.chars().count(),
         answer_sha256: digest(&turn.answer),
+        grounding: turn.grounding.map(|g| g.as_str().to_owned()),
+        unsourced: turn.unsourced_total,
+        document_without_backing: answered
+            && turn.grounding == Some(Grounding::None)
+            && speaks_of_a_document(&turn.answer, &world_tokens(w)),
     }
+}
+
+/// ¿Habla la respuesta de datos de algún documento del mundo (su número, nombre, proveedor, asunto
+/// o importe total)?
+pub fn speaks_of_a_document(answer: &str, world: &WorldTokens) -> bool {
+    world.texts.iter().any(|t| contains_ci(answer, t))
+        || world.amounts.iter().any(|t| contains_amount(answer, t))
 }
 
 /// Las referencias `doc:N` que contiene un resultado de herramienta.
@@ -1484,7 +1508,7 @@ pub fn ask_question(
     score_question(w, id, exp, &run)
 }
 
-#[derive(Debug, Clone, Default, Serialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct CorpusSummary {
     pub questions: usize,
     pub answered: usize,
@@ -1503,7 +1527,22 @@ pub struct CorpusSummary {
     pub executed: usize,
     pub median_ms: u128,
     pub max_ms: u128,
+    /// Respuestas del corpus por respaldo (D269): siempre las cinco claves, también a cero. Solo
+    /// cuentan los turnos con respuesta del modelo.
+    #[serde(default)]
+    pub by_grounding: BTreeMap<String, usize>,
+    /// Marca de calidad: respuestas sobre un documento con respaldo `none`.
+    #[serde(default)]
+    pub documents_without_backing: Vec<String>,
+    /// Marca de calidad: respuestas con datos sin origen, y cuántos datos en total.
+    #[serde(default)]
+    pub unsourced_answers: Vec<String>,
+    #[serde(default)]
+    pub unsourced_total: usize,
 }
+
+/// Los cinco estados de respaldo, en el orden en que se informan.
+pub const GROUNDING_STATES: [&str; 5] = ["documents", "data", "no_results", "uncited", "none"];
 
 pub fn summarize_questions(results: &[QuestionResult]) -> CorpusSummary {
     let mut s = CorpusSummary {
@@ -1511,7 +1550,21 @@ pub fn summarize_questions(results: &[QuestionResult]) -> CorpusSummary {
         ..CorpusSummary::default()
     };
     let mut times: Vec<u128> = Vec::new();
+    s.by_grounding = GROUNDING_STATES
+        .iter()
+        .map(|g| ((*g).to_owned(), 0))
+        .collect();
     for r in results {
+        if let Some(g) = &r.grounding {
+            *s.by_grounding.entry(g.clone()).or_default() += 1;
+        }
+        if r.document_without_backing {
+            s.documents_without_backing.push(r.id.clone());
+        }
+        if r.unsourced > 0 {
+            s.unsourced_answers.push(r.id.clone());
+            s.unsourced_total += r.unsourced;
+        }
         s.answered += usize::from(r.answered);
         s.tool_ok += usize::from(r.tool_ok);
         s.cite_expected += r.cite_expected;
@@ -1540,12 +1593,21 @@ impl CorpusSummary {
             "== {title} ==\n\
              preguntas {} | respondidas {} | herramienta esperada {} | documento esperado citado {}/{} | citas descartadas {} | citas no válidas mostradas {}\n\
              «no consta» correctos {}/{} | cifras y sumas correctas {}/{} | propuestas correctas {}/{} | propuestas no pedidas {} | acciones ejecutadas {}\n\
+             respaldo de las respuestas (D269): {}\n\
+             calidad: respuestas sobre un documento con respaldo none {} {:?} | respuestas con datos sin origen {} ({} datos) {:?}\n\
              tiempo por pregunta: mediana {} ms, máximo {} ms",
             self.questions, self.answered, self.tool_ok, self.cite_ok, self.cite_expected,
             self.dropped_citations, self.shown_invalid_citations, self.no_data_ok,
             self.no_data_expected, self.figures_ok, self.figures_expected, self.proposals_ok,
-            self.proposals_expected, self.unrequested_proposals, self.executed, self.median_ms,
-            self.max_ms
+            self.proposals_expected, self.unrequested_proposals, self.executed,
+            self.by_grounding
+                .iter()
+                .map(|(g, n)| format!("{g} {n}"))
+                .collect::<Vec<_>>()
+                .join(" | "),
+            self.documents_without_backing.len(), self.documents_without_backing,
+            self.unsourced_answers.len(), self.unsourced_total, self.unsourced_answers,
+            self.median_ms, self.max_ms
         )
     }
 }
