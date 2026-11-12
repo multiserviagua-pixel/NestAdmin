@@ -33,6 +33,26 @@ use crate::{
     action_kind, check_rule, task_is_initial_read, App, AppError, AppResult, EMAIL, INVOICE,
 };
 
+/// Datos de otros documentos que enumera como mucho la tarjeta de un borrador (D266).
+pub const MAX_OTHER_SHOWN: usize = 5;
+/// Caracteres mínimos de un dato de otro documento para contar (evita falsos positivos).
+pub const MIN_OTHER_CHARS: usize = 4;
+
+/// Texto en minúsculas y sin tildes, para comparar nombres.
+fn fold(text: &str) -> String {
+    nestadmin_ai::assistant::plain(text)
+}
+
+/// ¿Está `needle` en `haystack` como palabra entera (sin letras ni cifras pegadas por los lados)?
+/// Los dos van ya sin tildes ni mayúsculas.
+fn contains_word(haystack: &str, needle: &str) -> bool {
+    haystack.match_indices(needle).any(|(start, found)| {
+        let before = haystack[..start].chars().next_back();
+        let after = haystack[start + found.len()..].chars().next();
+        !before.is_some_and(char::is_alphanumeric) && !after.is_some_and(char::is_alphanumeric)
+    })
+}
+
 /// Propuestas nuevas como mucho por turno.
 pub const MAX_PER_TURN: usize = 3;
 /// Propuestas pendientes (sin caducar) como mucho por conversación.
@@ -485,7 +505,7 @@ fn document_name(task: &Task, r: &Value) -> Option<String> {
 
 /// Resumen de la aprobación de un correo: lo mismo que la pantalla de revisión antes de enviar.
 /// `draft_flags` se recalcula con el cuerpo actual del borrador.
-fn email_summary(task: &Task, draft_flags: &[&str]) -> Value {
+fn email_summary(task: &Task, draft_flags: &[&str], other: &[Value]) -> Value {
     let r = task.result.clone().unwrap_or(Value::Null);
     let mut issues: Vec<&str> = Vec::new();
     if let Some(code) = recovery_code(&r) {
@@ -509,6 +529,9 @@ fn email_summary(task: &Task, draft_flags: &[&str]) -> Value {
         "category": r["category"],
         "issues": issues,
         "draft_flags": draft_flags,
+        // D266 (ampliado a aprobar): datos de otros documentos que el borrador guardado ya lleva.
+        "other_documents": other.iter().take(MAX_OTHER_SHOWN).collect::<Vec<_>>(),
+        "other_documents_total": other.len(),
         "recipient_signals": r["recipient_signals"],
         "review_reason": r["review_reason"],
     })
@@ -741,6 +764,56 @@ impl App {
         let (profile, _) = self.store.business_profile().ok().flatten()?;
         let text = crate::profile::compose(&profile);
         (!text.trim().is_empty()).then_some(text)
+    }
+
+    /// Datos de OTROS documentos que aparecen en el texto de un borrador propuesto (D266): números
+    /// de factura, nombres de archivo y nombres de proveedor o remitente de otras tareas del
+    /// índice local que no están en la tarea del correo ni en su hilo. Sin IA. Cada elemento es
+    /// `{"kind": "invoice_number" | "file_name" | "party", "value": <texto del índice>}`; los
+    /// términos de menos de `MIN_OTHER_CHARS` caracteres no cuentan y un importe suelto tampoco.
+    fn other_documents_in(&self, task: &Task, body: &str) -> Result<Vec<Value>, &'static str> {
+        let identities = self
+            .store
+            .index_identities(Some(task.id))
+            .map_err(|_| "unavailable")?;
+        // Lo que es del correo y de su hilo: su resultado SIN el borrador (el borrador es justo lo
+        // que se examina, y el actual no puede dar por buenos sus propios datos).
+        let mut own_result = task.result.clone().unwrap_or(Value::Null);
+        if let Some(map) = own_result.as_object_mut() {
+            map.remove("draft");
+            map.remove("drafts");
+        }
+        let own = fold(&format!("{own_result} {}", task.input_ref));
+        let text = fold(body);
+        let mut found: Vec<Value> = Vec::new();
+        let mut seen: HashSet<String> = HashSet::new();
+        for identity in identities {
+            let mut candidates: Vec<(&str, String)> = Vec::new();
+            if identity.kind == nestadmin_core::SearchKind::Invoice {
+                candidates.push(("invoice_number", identity.number.clone()));
+                candidates.push(("file_name", identity.title.clone()));
+            }
+            // Un remitente puede venir como «Nombre <dirección>»: se mira entero, el nombre y la
+            // dirección por separado.
+            candidates.push(("party", identity.party.clone()));
+            if let Some((name, rest)) = identity.party.split_once('<') {
+                candidates.push(("party", name.to_owned()));
+                candidates.push(("party", rest.trim_end_matches('>').to_owned()));
+            }
+            for (kind, value) in candidates {
+                let value = value.trim();
+                let key = fold(value);
+                if key.chars().count() < MIN_OTHER_CHARS
+                    || !contains_word(&text, &key)
+                    || contains_word(&own, &key)
+                    || !seen.insert(key)
+                {
+                    continue;
+                }
+                found.push(json!({ "kind": kind, "value": value }));
+            }
+        }
+        Ok(found)
     }
 
     /// Recuentos de reglas activas que envían y que registran: lo que pueden hacer sin revisión.
@@ -1063,7 +1136,8 @@ impl App {
                 } else {
                     let body = r["draft"]["body"].as_str().unwrap_or_default();
                     let flags = self.outgoing_flags(&r, body);
-                    (effect_of(task), email_summary(task, &flags))
+                    let other = self.other_documents_in(task, body)?;
+                    (effect_of(task), email_summary(task, &flags, &other))
                 }
             }
             Kind::Reject => (
@@ -1097,6 +1171,8 @@ impl App {
             ),
             Kind::EditDraft => {
                 let new_body = args["body"].as_str().unwrap_or_default();
+                let found = self.other_documents_in(task, new_body)?;
+                let shown: Vec<&Value> = found.iter().take(MAX_OTHER_SHOWN).collect();
                 (
                     Effect::NoEffect,
                     json!({
@@ -1108,6 +1184,8 @@ impl App {
                         "current_body": r["draft"]["body"],
                         "new_body": new_body,
                         "draft_flags": self.outgoing_flags(&r, new_body),
+                        "other_documents": shown,
+                        "other_documents_total": found.len(),
                     }),
                 )
             }
@@ -1182,23 +1260,13 @@ impl App {
                     .get("action")
                     .and_then(Value::as_str)
                     .ok_or("bad_value")?;
+                // D265: el modelo no da el nombre; el catálogo ya rechaza `name` y aquí se vuelve a
+                // cerrar por si algo llamara a esta función sin pasar por él.
+                if args.contains_key("name") {
+                    return Err("bad_value");
+                }
                 let conditions = rule_conditions(action, args)?;
-                let name = match args.get("name").and_then(Value::as_str) {
-                    Some(raw) => {
-                        if has_invisible(raw) {
-                            return Err("invisible_chars");
-                        }
-                        Some(raw.trim())
-                            .filter(|n| {
-                                !n.is_empty()
-                                    && n.chars().count() <= 80
-                                    && !n.chars().any(char::is_control)
-                            })
-                            .ok_or("bad_value")?
-                            .to_owned()
-                    }
-                    None => default_rule_name(action, &conditions),
-                };
+                let name = default_rule_name(action, &conditions);
                 Ok(json!({ "action": action, "name": name, "conditions": conditions }))
             }
             Kind::EditRule => {
@@ -1248,7 +1316,7 @@ impl App {
                 }
                 let label = Some(raw.trim())
                     .filter(|l| !l.is_empty() && l.chars().count() <= 60)
-                    .filter(|l| !l.chars().any(char::is_control))
+                    .filter(|l| !l.chars().any(char::is_control) && !carries_web_markup(l))
                     .ok_or("bad_value")?;
                 let view = self.mail_accounts();
                 let account = view.accounts.get(index - 1).ok_or("account_not_found")?;
@@ -1605,8 +1673,11 @@ impl App {
         &mut self,
         id: i64,
         amounts_checked: bool,
+        other_documents_checked: bool,
     ) -> AppResult<ProposalReceipt> {
-        self.with_chat_origin(|app| app.confirm_proposal(id, amounts_checked))
+        self.with_chat_origin(|app| {
+            app.confirm_proposal(id, amounts_checked, other_documents_checked)
+        })
     }
 
     /// Ejecuta `f` con el origen `chat` en el historial. El origen se restablece SIEMPRE al salir:
@@ -1633,7 +1704,12 @@ impl App {
         }
     }
 
-    fn confirm_proposal(&mut self, id: i64, amounts_checked: bool) -> AppResult<ProposalReceipt> {
+    fn confirm_proposal(
+        &mut self,
+        id: i64,
+        amounts_checked: bool,
+        other_documents_checked: bool,
+    ) -> AppResult<ProposalReceipt> {
         let row = self.store.proposal(id)?.ok_or_else(not_found)?;
         match row.status.as_str() {
             "confirmed" => {
@@ -1707,12 +1783,27 @@ impl App {
             }
             // Lo que hay ahora tiene que ser lo que mostró la tarjeta: estado, versión, hora de la
             // tarea y resumen. Si no, la tarjeta ya no describe el efecto y no se ejecuta.
-            let same = self
-                .current_view(&row)?
-                .is_some_and(|(_, _, fp)| row.seen_fp.as_deref() == Some(&fp));
+            let view = self.current_view(&row)?;
+            let same = view
+                .as_ref()
+                .is_some_and(|(_, _, fp)| row.seen_fp.as_deref() == Some(fp));
             if !same {
                 self.settle_status(&row, &["pending"], "stale", None);
                 return Err(self.stale_error(&row)?);
+            }
+            // D266: un borrador con datos de otros documentos exige la casilla de «lo he
+            // revisado». La propuesta sigue pendiente para volver a pulsar con ella marcada.
+            let other_documents = view
+                .as_ref()
+                .and_then(|(_, summary, _)| summary["other_documents_total"].as_u64())
+                .unwrap_or(0);
+            let sends_text = row.kind == Kind::EditDraft.as_str()
+                || (row.kind == Kind::Approve.as_str() && row.task_id.is_some());
+            if sends_text && other_documents > 0 && !other_documents_checked {
+                return Err(AppError::Proposal {
+                    code: "other_documents_ack_required",
+                    message: "el borrador contiene datos de otros documentos: confirme antes que ha revisado que deben ir en la respuesta".into(),
+                });
             }
             if !self
                 .store
@@ -2347,7 +2438,7 @@ fn rule_conditions(action: &str, args: &Map<String, Value>) -> Result<Value, &'s
             if has_invisible(value) {
                 return Err("invisible_chars");
             }
-            if value.chars().any(char::is_control) {
+            if value.chars().any(char::is_control) || carries_web_markup(value) {
                 return Err("bad_value");
             }
         }
@@ -2406,7 +2497,13 @@ fn rule_conditions(action: &str, args: &Map<String, Value>) -> Result<Value, &'s
     Ok(conditions)
 }
 
-/// Nombre que lleva la regla si el modelo no da uno: de sus condiciones, sin texto libre extra.
+/// ¿Lleva el texto una dirección web, una sintaxis de enlace o una etiqueta (D264)? Los valores que
+/// el modelo escribe y la tarjeta muestra (proveedor, nombre de cuenta) no pueden llevarlas.
+fn carries_web_markup(text: &str) -> bool {
+    nestadmin_ai::assistant::strip_links(text).1 > 0
+}
+
+/// Nombre de la regla, siempre compuesto por la aplicación con sus condiciones (D265).
 fn default_rule_name(action: &str, conditions: &Value) -> String {
     let text = |key: &str| conditions[key].as_str().unwrap_or_default();
     let name = if action == crate::rules::REGISTER_INVOICE {

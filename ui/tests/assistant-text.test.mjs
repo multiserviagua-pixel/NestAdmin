@@ -706,3 +706,49 @@ test("la tarjeta de una regla muestra también las condiciones que no son de las
   assert.deepEqual(T.ruleConditionLines({ supplier: "Alfa SL", currency: null }), [["Proveedor", "Alfa SL"]]);
   assert.deepEqual(T.ruleConditionLines({ max_total: 5 }), [["Importe máximo (EUR)", "5"]]);
 });
+
+test("D264: la nota de enlaces retirados distingue singular y plural y no sale con cero", () => {
+  assert.equal(T.linksRemovedText(0), null);
+  assert.equal(T.linksRemovedText(undefined), null);
+  assert.equal(T.linksRemovedText(null), null);
+  assert.equal(T.linksRemovedText(-2), null);
+  assert.equal(T.linksRemovedText(1), "Se retiró 1 enlace de la respuesta.");
+  assert.equal(T.linksRemovedText(3), "Se retiraron 3 enlaces de la respuesta.");
+});
+
+test("D266: el aviso de datos de otros documentos lee lo que la aplicación halló, sin fiarse de la forma", () => {
+  const summary = {
+    other_documents: [
+      { kind: "invoice_number", value: "F-2026-101" },
+      { kind: "file_name", value: "factura-101.txt" },
+      { kind: "party", value: "Suministros Ficticios SL" },
+      { kind: "party", value: "   " },
+      null,
+      { kind: "party" },
+    ],
+    other_documents_total: 7,
+  };
+  const found = T.otherDocumentsOf(summary);
+  assert.equal(found.items.length, 3);
+  assert.equal(found.total, 7);
+  assert.deepEqual(T.otherDocumentsOf({}), { items: [], total: 0 });
+  assert.deepEqual(T.otherDocumentsOf(null), { items: [], total: 0 });
+  assert.deepEqual(T.otherDocumentsOf({ other_documents: [], other_documents_total: 0 }), { items: [], total: 0 });
+  // Sin total, cuenta los que enseña; el total nunca es menor que lo enseñado.
+  assert.equal(T.otherDocumentsOf({ other_documents: [{ kind: "party", value: "Alfa SL" }] }).total, 1);
+  assert.equal(T.otherDocumentsOf({ other_documents: [{ kind: "party", value: "Alfa SL" }], other_documents_total: 0 }).total, 1);
+  assert.equal(T.otherDocumentKindText("invoice_number"), "Número de factura");
+  assert.equal(T.otherDocumentKindText("file_name"), "Nombre de archivo");
+  assert.equal(T.otherDocumentKindText("party"), "Proveedor o remitente");
+  assert.equal(T.otherDocumentKindText("otra"), "Dato");
+});
+
+test("D266: la frase del aviso dice cuántos hay y cuántos se enseñan, y la casilla pide revisarlos", () => {
+  assert.ok(T.otherDocumentsIntro(1, 1).startsWith("La aplicación halló 1 dato de otro documento que no está en este correo"));
+  const many = T.otherDocumentsIntro(7, 5);
+  assert.ok(many.includes("7 datos de otros documentos") && many.includes("(se enseñan 5)"));
+  assert.ok(!T.otherDocumentsIntro(3, 3).includes("se enseñan"));
+  assert.equal(T.OTHER_DOCUMENTS_CHECKED_LABEL, "He revisado que estos datos deben ir en la respuesta");
+  assert.ok(T.OTHER_DOCUMENTS_REQUIRED_HINT.includes("marque antes"));
+  assert.ok(T.OTHER_DOCUMENTS_TITLE.includes("otros documentos"));
+});

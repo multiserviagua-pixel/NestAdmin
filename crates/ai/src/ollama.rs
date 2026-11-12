@@ -224,6 +224,7 @@ mod context_tests {
             &[],
             "¿Qué hay pendiente?",
             &[],
+            crate::assistant::Actions::NONE,
         );
         let local = local_chat_body("modelo", &request);
         assert_eq!(local["options"]["num_ctx"], ASSISTANT_NUM_CTX);

@@ -2396,13 +2396,21 @@ function newMockProposals(kinds: ReadonlySet<string>): ProposalCard[] {
     });
   }
   let shared: Task | null = null;
-  if (kinds.has("edit")) {
+  if (kinds.has("edit") || kinds.has("editother")) {
     shared = mockProposalEmail("Cambio de horario", "logistica@transportes-delta.test", "El horario de recogida cambia a partir del lunes.", "Recibido, gracias.");
+    // «datos de otros documentos»: el borrador menciona una factura y un proveedor que no están en este correo (D266).
+    const foreign = kinds.has("editother");
     cards.push({
       ...base, id: nextProposal++, kind: "edit_draft", task_id: shared.id, seen_version: 1, effect: "none",
       summary: {
         type: "edit_draft", version: 1, task: block(shared, "Cambio de horario"), to: ["logistica@transportes-delta.test"], subject: "Re: Cambio de horario",
-        current_body: "Recibido, gracias.", new_body: "Recibido, gracias. Tomamos nota del nuevo horario de recogida a partir del lunes.\n\nUn saludo.",
+        current_body: "Recibido, gracias.",
+        new_body: foreign
+          ? "Recibido, gracias. Le recordamos que la factura F-2026-101 de Suministros Ficticios SL sigue pendiente.\n\nUn saludo."
+          : "Recibido, gracias. Tomamos nota del nuevo horario de recogida a partir del lunes.\n\nUn saludo.",
+        draft_flags: [],
+        other_documents: foreign ? [{ kind: "invoice_number", value: "F-2026-101" }, { kind: "party", value: "Suministros Ficticios SL" }] : [],
+        other_documents_total: foreign ? 2 : 0,
       },
     });
   }
@@ -2720,7 +2728,7 @@ const handlers: Record<string, (a: any, options?: any) => unknown> = {
     const words = handlers.search_question({ text: question }) as QuestionAnswer;
     const found = words.page.results.slice(0, 3);
     const base: AssistantTurn = {
-      conversation_id: conversationId, turn_id: null, outcome: "answered", error_code: null, answer: "", citations: [], dropped_citations: 0, withheld: 0,
+      conversation_id: conversationId, turn_id: null, outcome: "answered", error_code: null, answer: "", citations: [], dropped_citations: 0, links_removed: 0, withheld: 0,
       navigate: null, ...external, steps: 0, tools: [], words: null, proposals: [],
     };
     // Guarda el turno (y, si se indica, lo enviado) y deja el evento del historial, sin el texto.
@@ -2735,7 +2743,7 @@ const handlers: Record<string, (a: any, options?: any) => unknown> = {
         conversation.turns.push(stored("user", question));
         const reply = stored("assistant", turn.answer || "Sin respuesta.", {
           outcome: turn.outcome, provider: turn.provider, model: turn.model, local: turn.local, fallback: turn.fallback, steps: turn.steps, tools: turn.tools,
-          dropped_citations: turn.dropped_citations, withheld: turn.withheld, navigate: turn.navigate, citations: turn.citations, citation_refs: turn.citations.map((c) => `doc:${c.task_id}`),
+          dropped_citations: turn.dropped_citations, links_removed: turn.links_removed ?? 0, withheld: turn.withheld, navigate: turn.navigate, citations: turn.citations, citation_refs: turn.citations.map((c) => `doc:${c.task_id}`),
         });
         conversation.turns.push(reply);
         if (turn.proposals.length) proposalsByTurn.set(reply.id, turn.proposals.map((c) => c.id));
@@ -2814,7 +2822,8 @@ const handlers: Record<string, (a: any, options?: any) => unknown> = {
       const kinds = new Set<string>();
       if (/enviar|envio|correo|responder/.test(flat)) kinds.add("send");
       if (/factura|importe|registr/.test(flat)) kinds.add("invoice");
-      if (/borrador|edit|cambi/.test(flat)) kinds.add("edit");
+      if (/otros documentos|datos ajenos/.test(flat)) kinds.add("editother");
+      else if (/borrador|edit|cambi/.test(flat)) kinds.add("edit");
       if (/descart/.test(flat)) kinds.add("reject");
       if (!kinds.size) ["send", "invoice", "edit"].forEach((k) => kinds.add(k));
       return finish(
@@ -2829,10 +2838,12 @@ const handlers: Record<string, (a: any, options?: any) => unknown> = {
       {
         ...base,
         answer: found.length
-          ? `Encontré ${found.length} documento(s) de muestra con lo que pregunta.\n\nLa referencia está en https://ejemplo.test/facturas (se muestra como texto, no como enlace).`
+          ? `Encontré ${found.length} documento(s) de muestra con lo que pregunta.\n\nLa referencia está en [enlace retirado] (la aplicación retira las direcciones web de la respuesta).`
           : "No encuentro ningún documento con esos datos.",
         citations: structuredClone(found),
         dropped_citations: sensitive ? 1 : 0,
+        // D264: el modelo escribió una dirección web y la aplicación la retiró antes de mostrarla.
+        links_removed: found.length ? 1 : 0,
         withheld: sensitive ? 2 : 0,
         steps: 2,
         tools: ["search"],
@@ -2857,7 +2868,7 @@ const handlers: Record<string, (a: any, options?: any) => unknown> = {
     const ids = conversation ? conversation.turns.flatMap((t) => proposalsByTurn.get(t.id) ?? []) : [];
     return ids.flatMap((id) => { const c = currentProposal(id); return c ? [structuredClone(c)] : []; });
   },
-  proposal_confirm: ({ id, amountsChecked }: { id: number; amountsChecked?: boolean }): ProposalReceipt => {
+  proposal_confirm: ({ id, amountsChecked, otherDocumentsChecked }: { id: number; amountsChecked?: boolean; otherDocumentsChecked?: boolean }): ProposalReceipt => {
     const card = currentProposal(id);
     if (!card) throw "la propuesta no existe";
     if (card.status === "confirmed" && card.receipt) return structuredClone(card.receipt);
@@ -2869,6 +2880,9 @@ const handlers: Record<string, (a: any, options?: any) => unknown> = {
     // Como el fondo (D186): sin la casilla de importes, una factura dudosa no se registra y la propuesta sigue pendiente.
     if (card.kind === "approve" && card.summary.amount_review && !amountsChecked)
       throw "hay importes que no se leen sin duda: confirme antes los importes con el documento";
+    // Como el fondo (D266): un borrador con datos de otros documentos exige la casilla y, sin ella, sigue pendiente.
+    if ((card.kind === "edit_draft" || (card.kind === "approve" && card.summary.type === "email")) && Number(card.summary.other_documents_total) > 0 && !otherDocumentsChecked)
+      throw "el borrador propuesto contiene datos de otros documentos: confirme antes que ha revisado que deben ir en la respuesta";
     // Si la tarea cambió de versión desde que se preparó la propuesta, queda obsoleta y no se ejecuta.
     const target = card.task_id === null ? undefined : tasks.find((t) => t.id === card.task_id);
     // Como la huella del fondo: no solo la versión, también el estado que mostraba la tarjeta.

@@ -238,6 +238,10 @@ fn answer(text: &str) -> Value {
     json!({ "answer": text, "citations": [] })
 }
 
+/// Lo que pide la persona en los turnos de estas pruebas: abre las clases de acción que usan (D263).
+const ASKED: &str =
+    "Prepare lo que le pido: cree una regla, edite la regla, acepte la sugerencia, descarte la sugerencia e importe estos archivos";
+
 fn ask(w: &mut World, conversation: Option<i64>, text: &str, view: &str) -> AssistantTurn {
     let job = w
         .app
@@ -253,7 +257,7 @@ fn turn(w: &mut World, conversation: Option<i64>, mut steps: Vec<Value>) -> Assi
         "He preparado la propuesta; la decide usted en la tarjeta.",
     ));
     w.ext.turn(steps);
-    ask(w, conversation, "Prepare lo que le pido", "rules")
+    ask(w, conversation, ASKED, "rules")
 }
 
 /// Llama a las herramientas directamente dentro de un turno (sin pasar por la validación de pasos
@@ -265,7 +269,7 @@ fn direct(
 ) -> (Vec<Value>, AssistantTurn) {
     let job = w
         .app
-        .begin_assistant_turn(conversation, "Prepare lo que le pido", "rules")
+        .begin_assistant_turn(conversation, ASKED, "rules")
         .unwrap();
     let outs: Vec<Value> = calls
         .into_iter()
@@ -520,7 +524,7 @@ fn confirming_create_makes_one_inactive_audited_rule_and_twice_gives_the_same_re
     assert_eq!(card.summary["coverage"]["covered"], json!(0));
     assert_eq!(w.app.rules().unwrap().len(), 0);
 
-    let receipt = w.app.proposal_confirm(card.id, false).unwrap();
+    let receipt = w.app.proposal_confirm(card.id, false, false).unwrap();
     assert_eq!(receipt.outcome, ReceiptOutcome::Done);
     assert_eq!(receipt.effect, Effect::RuleInactive);
     let id = chat_rule_id(&idem_key(&w, card.id));
@@ -545,7 +549,7 @@ fn confirming_create_makes_one_inactive_audited_rule_and_twice_gives_the_same_re
     );
 
     // Confirmar otra vez: el mismo recibo y una sola regla.
-    let again = w.app.proposal_confirm(card.id, false).unwrap();
+    let again = w.app.proposal_confirm(card.id, false, false).unwrap();
     assert_eq!(again, receipt);
     assert_eq!(w.app.rules().unwrap().len(), 1);
 }
@@ -555,14 +559,14 @@ fn a_cut_between_creating_the_rule_and_noting_it_is_reconciled_without_a_second_
     let mut w = world();
     let first = turn(&mut w, None, create_steps("Delta SL"));
     let card = card_of(&first, "create_rule");
-    let receipt = w.app.proposal_confirm(card.id, false).unwrap();
+    let receipt = w.app.proposal_confirm(card.id, false, false).unwrap();
     assert_eq!(w.app.rules().unwrap().len(), 1);
     // Como si el proceso se hubiera cortado tras crear la regla y antes de anotar el recibo.
     w.sql(&format!(
         "UPDATE assistant_proposals SET status = 'executing', receipt_json = NULL, resolved_at = NULL WHERE id = {}",
         card.id
     ));
-    let again = w.app.proposal_confirm(card.id, false).unwrap();
+    let again = w.app.proposal_confirm(card.id, false, false).unwrap();
     assert!(again.reconciled, "{again:?}");
     assert_eq!(again.rule_id, receipt.rule_id);
     assert_eq!(
@@ -595,7 +599,7 @@ fn accepting_a_suggestion_uses_accept_suggestion_and_leaves_the_rule_inactive() 
     let card = card_of(&proposed, "accept_suggestion");
     assert_eq!(w.app.rules().unwrap().len(), 0);
 
-    let receipt = w.app.proposal_confirm(card.id, false).unwrap();
+    let receipt = w.app.proposal_confirm(card.id, false, false).unwrap();
     assert_eq!(receipt.outcome, ReceiptOutcome::Done);
     let rules = w.app.rules().unwrap();
     assert_eq!(rules.len(), 1);
@@ -615,7 +619,10 @@ fn accepting_a_suggestion_uses_accept_suggestion_and_leaves_the_rule_inactive() 
         "conserva el origen y el rodaje"
     );
     assert!(w.app.rule_suggestions().unwrap().candidates.is_empty());
-    assert_eq!(w.app.proposal_confirm(card.id, false).unwrap(), receipt);
+    assert_eq!(
+        w.app.proposal_confirm(card.id, false, false).unwrap(),
+        receipt
+    );
     assert_eq!(w.app.rules().unwrap().len(), 1);
 }
 
@@ -641,7 +648,7 @@ fn a_suggestion_that_changed_between_proposing_and_confirming_leaves_the_card_st
         w.app.proposals(first.conversation_id.unwrap()).unwrap()[0].status,
         "stale"
     );
-    let error = w.app.proposal_confirm(card.id, false).unwrap_err();
+    let error = w.app.proposal_confirm(card.id, false, false).unwrap_err();
     assert_eq!(code(&error), "stale");
     assert_eq!(w.app.rules().unwrap().len(), 0, "sin regla");
     // Volver a listar da la misma referencia con lo nuevo, y esa propuesta sí vale.
@@ -659,7 +666,10 @@ fn a_suggestion_that_changed_between_proposing_and_confirming_leaves_the_card_st
     let fresh = card_of(&again, "accept_suggestion");
     assert_ne!(fresh.id, card.id);
     assert_eq!(
-        w.app.proposal_confirm(fresh.id, false).unwrap().outcome,
+        w.app
+            .proposal_confirm(fresh.id, false, false)
+            .unwrap()
+            .outcome,
         ReceiptOutcome::Done
     );
     assert_eq!(w.app.rules().unwrap().len(), 1);
@@ -686,7 +696,7 @@ fn discarding_a_suggestion_records_it_and_an_already_discarded_one_is_not_propos
         1,
         "proponer no descarta"
     );
-    let receipt = w.app.proposal_confirm(card.id, false).unwrap();
+    let receipt = w.app.proposal_confirm(card.id, false, false).unwrap();
     assert_eq!(receipt.outcome, ReceiptOutcome::Done);
     assert!(w.app.rule_suggestions().unwrap().candidates.is_empty());
     assert_eq!(
@@ -736,7 +746,7 @@ fn editing_an_active_rule_stays_active_only_when_it_narrows() {
     let narrow = card_of(&first, "edit_rule");
     assert_eq!(narrow.summary["was_active"], json!(true));
     assert_eq!(narrow.summary["stays_active"], json!(true));
-    let receipt = w.app.proposal_confirm(narrow.id, false).unwrap();
+    let receipt = w.app.proposal_confirm(narrow.id, false, false).unwrap();
     assert_eq!(receipt.outcome, ReceiptOutcome::Done);
     assert_eq!(receipt.rule_id.as_deref(), Some("regla-alfa"));
     let rule = w.app.rules().unwrap().remove(0);
@@ -756,7 +766,7 @@ fn editing_an_active_rule_stays_active_only_when_it_narrows() {
     let wide = card_of(&second, "edit_rule");
     assert_eq!(wide.summary["stays_active"], json!(false));
     assert_eq!(wide.summary["before"]["max_total"], "300.00");
-    let receipt = w.app.proposal_confirm(wide.id, false).unwrap();
+    let receipt = w.app.proposal_confirm(wide.id, false, false).unwrap();
     assert_eq!(receipt.result["deactivated_by_edit"], json!(true));
     assert!(
         !w.app.rules().unwrap()[0].active,
@@ -796,7 +806,7 @@ fn a_rule_changed_from_the_panel_leaves_the_edit_card_stale() {
         w.app.proposals(first.conversation_id.unwrap()).unwrap()[0].status,
         "stale"
     );
-    let error = w.app.proposal_confirm(card.id, false).unwrap_err();
+    let error = w.app.proposal_confirm(card.id, false, false).unwrap_err();
     assert_eq!(code(&error), "stale");
     let rule = w.app.rules().unwrap().remove(0);
     assert_eq!(
@@ -827,12 +837,12 @@ fn a_cut_after_editing_the_rule_is_reconciled_without_editing_it_again() {
         ],
     );
     let card = card_of(&first, "edit_rule");
-    w.app.proposal_confirm(card.id, false).unwrap();
+    w.app.proposal_confirm(card.id, false, false).unwrap();
     w.sql(&format!(
         "UPDATE assistant_proposals SET status = 'executing', receipt_json = NULL WHERE id = {}",
         card.id
     ));
-    let again = w.app.proposal_confirm(card.id, false).unwrap();
+    let again = w.app.proposal_confirm(card.id, false, false).unwrap();
     assert!(again.reconciled);
     assert_eq!(
         w.app.rules().unwrap()[0].version,
@@ -1000,10 +1010,28 @@ fn proposals_that_break_the_closed_rules_are_refused_with_a_closed_code_and_crea
             json!({ "action": "register_invoice", "supplier": "Ga\u{200B}mma" }),
             "invisible_chars",
         ),
+        // D265: el nombre lo compone la aplicación; un `name` nunca se admite, ni limpio ni con
+        // caracteres invisibles.
         (
             "propose_create_rule",
             json!({ "action": "register_invoice", "supplier": "Gamma", "name": "Nom\u{2066}bre" }),
-            "invisible_chars",
+            "bad_value",
+        ),
+        (
+            "propose_create_rule",
+            json!({ "action": "register_invoice", "supplier": "Gamma", "name": "Mi regla" }),
+            "bad_value",
+        ),
+        // Un proveedor con una dirección web o una etiqueta no entra en una tarjeta.
+        (
+            "propose_create_rule",
+            json!({ "action": "register_invoice", "supplier": "Gamma https://atacante.example/x" }),
+            "bad_value",
+        ),
+        (
+            "propose_create_rule",
+            json!({ "action": "register_invoice", "supplier": "<b>Gamma</b>" }),
+            "bad_value",
         ),
         (
             "propose_create_rule",
@@ -1093,7 +1121,7 @@ fn no_tool_activates_a_rule_and_every_confirmation_leaves_the_new_rules_inactive
         ],
     );
     for card in &first.proposals {
-        w.app.proposal_confirm(card.id, false).unwrap();
+        w.app.proposal_confirm(card.id, false, false).unwrap();
     }
     let rules = w.app.rules().unwrap();
     assert_eq!(rules.len(), 2);
@@ -1122,7 +1150,7 @@ fn confirming_an_import_through_the_app_crate_is_a_closed_error_and_nothing_is_i
     let mut w = world();
     let card = import_card(&mut w);
     let tasks = w.app.tasks().unwrap().len();
-    let error = w.app.proposal_confirm(card.id, false).unwrap_err();
+    let error = w.app.proposal_confirm(card.id, false, false).unwrap_err();
     assert_eq!(code(&error), "import_needs_dialog");
     assert_eq!(w.status_of(card.id), "pending");
     assert_eq!(w.app.tasks().unwrap().len(), tasks);
@@ -1174,7 +1202,10 @@ fn finishing_an_import_confirms_it_with_the_counts_and_confirming_again_returns_
         ImportStart::Done(original) => assert_eq!(*original, receipt),
         ImportStart::Started(_) => panic!("ya estaba confirmada"),
     }
-    assert_eq!(w.app.proposal_confirm(card.id, false).unwrap(), receipt);
+    assert_eq!(
+        w.app.proposal_confirm(card.id, false, false).unwrap(),
+        receipt
+    );
     // Sin ninguna importada no consta como hecho.
     let other = import_card(&mut w);
     let guard = started(w.app.proposal_import_begin(other.id).unwrap());
@@ -1197,7 +1228,7 @@ fn an_import_found_executing_after_a_cut_is_never_run_again_and_becomes_failed()
     );
     assert_eq!(w.status_of(card.id), "failed");
     assert_eq!(
-        code(&w.app.proposal_confirm(card.id, false).unwrap_err()),
+        code(&w.app.proposal_confirm(card.id, false, false).unwrap_err()),
         "failed"
     );
     // Por el camino de la aplicación también: no se repite sola.
@@ -1207,7 +1238,7 @@ fn an_import_found_executing_after_a_cut_is_never_run_again_and_becomes_failed()
         next.id
     ));
     assert_eq!(
-        code(&w.app.proposal_confirm(next.id, false).unwrap_err()),
+        code(&w.app.proposal_confirm(next.id, false, false).unwrap_err()),
         "failed"
     );
     assert_eq!(w.status_of(next.id), "failed");
@@ -1339,7 +1370,7 @@ fn the_rule_id_comes_from_the_idempotency_key_and_is_not_reused_after_deleting_e
     let mut w = world();
     let first = turn(&mut w, None, create_steps("Gamma SL"));
     let a = card_of(&first, "create_rule");
-    let receipt_a = w.app.proposal_confirm(a.id, false).unwrap();
+    let receipt_a = w.app.proposal_confirm(a.id, false, false).unwrap();
     let id_a = receipt_a.rule_id.clone().unwrap();
     assert_eq!(id_a, chat_rule_id(&idem_key(&w, a.id)));
     assert!(id_a.starts_with("chat-") && id_a.len() == 17, "{id_a}");
@@ -1360,7 +1391,7 @@ fn the_rule_id_comes_from_the_idempotency_key_and_is_not_reused_after_deleting_e
         a.id,
         b.id
     );
-    let receipt_b = w.app.proposal_confirm(b.id, false).unwrap();
+    let receipt_b = w.app.proposal_confirm(b.id, false, false).unwrap();
     assert_ne!(
         receipt_b.rule_id, receipt_a.rule_id,
         "no apunta a la regla antigua"
@@ -1399,7 +1430,7 @@ fn a_panel_rule_with_the_derived_id_is_never_taken_for_the_one_this_proposal_cre
                 card.id
             ));
         }
-        let error = w.app.proposal_confirm(card.id, false).unwrap_err();
+        let error = w.app.proposal_confirm(card.id, false, false).unwrap_err();
         assert_eq!(code(&error), "other", "{error:?}");
         assert_eq!(w.status_of(card.id), "failed", "{same} {executing}");
         let rules = w.app.rules().unwrap();
@@ -1530,7 +1561,7 @@ fn a_cut_before_editing_and_the_same_edit_made_from_the_panel_is_not_credited_to
             &json!({ "supplier": "Alfa SL", "max_total": "300.00" }),
         )
         .unwrap();
-    let error = w.app.proposal_confirm(card.id, false).unwrap_err();
+    let error = w.app.proposal_confirm(card.id, false, false).unwrap_err();
     assert_eq!(code(&error), "stale");
     assert_eq!(w.status_of(card.id), "stale", "no se atribuye al chat");
     assert_eq!(
@@ -1555,10 +1586,6 @@ fn misleading_invisible_characters_and_non_ascii_senders_are_refused_with_a_clos
         calls.push((
             "propose_create_rule",
             json!({ "action": "register_invoice", "supplier": format!("Ga{c}mma") }),
-        ));
-        calls.push((
-            "propose_create_rule",
-            json!({ "action": "register_invoice", "supplier": "Gamma", "name": format!("N{c}") }),
         ));
     }
     let n = calls.len();
@@ -1731,13 +1758,13 @@ fn a_cut_between_executing_and_noting_is_reconciled_for_accepting_and_discarding
         ],
     );
     let card = card_of(&first, "accept_suggestion");
-    let receipt = w.app.proposal_confirm(card.id, false).unwrap();
+    let receipt = w.app.proposal_confirm(card.id, false, false).unwrap();
     assert_eq!(w.app.rules().unwrap().len(), 1);
     w.sql(&format!(
         "UPDATE assistant_proposals SET status = 'executing', receipt_json = NULL, resolved_at = NULL WHERE id = {}",
         card.id
     ));
-    let again = w.app.proposal_confirm(card.id, false).unwrap();
+    let again = w.app.proposal_confirm(card.id, false, false).unwrap();
     assert!(again.reconciled);
     assert_eq!(again.rule_id, receipt.rule_id);
     assert_eq!(
@@ -1762,12 +1789,12 @@ fn a_cut_between_executing_and_noting_is_reconciled_for_accepting_and_discarding
         ],
     );
     let card = card_of(&first, "discard_suggestion");
-    w.app.proposal_confirm(card.id, false).unwrap();
+    w.app.proposal_confirm(card.id, false, false).unwrap();
     w.sql(&format!(
         "UPDATE assistant_proposals SET status = 'executing', receipt_json = NULL, resolved_at = NULL WHERE id = {}",
         card.id
     ));
-    let again = w.app.proposal_confirm(card.id, false).unwrap();
+    let again = w.app.proposal_confirm(card.id, false, false).unwrap();
     assert!(again.reconciled);
     assert_eq!(w.status_of(card.id), "confirmed");
     assert!(w.app.rule_suggestions().unwrap().candidates.is_empty());
@@ -1796,7 +1823,7 @@ fn a_cut_between_executing_and_noting_is_reconciled_for_accepting_and_discarding
         "UPDATE assistant_proposals SET status = 'executing' WHERE id = {}",
         card.id
     ));
-    let error = w.app.proposal_confirm(card.id, false).unwrap_err();
+    let error = w.app.proposal_confirm(card.id, false, false).unwrap_err();
     assert_eq!(code(&error), "stale");
     assert_eq!(w.app.rules().unwrap().len(), 1, "solo la del panel");
 }
@@ -1874,7 +1901,7 @@ fn a_hostile_email_that_orders_a_send_rule_gets_a_literal_inactive_card_and_chan
     assert_eq!(card.effect, Effect::RuleInactive);
     assert_eq!(w.app.rules().unwrap(), before, "preparar no cambia nada");
     // Tras confirmar, la regla existe inactiva y ninguna otra cambió.
-    let receipt = w.app.proposal_confirm(card.id, false).unwrap();
+    let receipt = w.app.proposal_confirm(card.id, false, false).unwrap();
     let rules = w.app.rules().unwrap();
     assert_eq!(rules.len(), before.len() + 1);
     let created = rules

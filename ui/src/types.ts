@@ -1189,6 +1189,8 @@ export interface AssistantTurn {
   proposals: ProposalCard[];
   /** El texto de `answer` lo compuso la aplicación (cierre del turno con propuestas ya preparadas), no el modelo. */
   composed?: boolean;
+  /** Enlaces o marcas (direcciones web, enlaces, imágenes, etiquetas) que la aplicación retiró de la respuesta (D264). */
+  links_removed?: number;
 }
 
 // ---- Propuestas del asistente (E3, D185) ----
@@ -1265,6 +1267,8 @@ export interface AssistantStoredTurn {
   created_at: number;
   outcome: AssistantOutcome | null;
   citation_refs: string[];
+  /** Enlaces o marcas retirados de la respuesta al guardarla (D264). */
+  links_removed?: number;
   dropped_citations: number;
   withheld: number;
   navigate: string | null;

@@ -248,7 +248,8 @@ fn assistant_proposals(
 /// Confirma una propuesta del asistente (D185): SOLO lo invoca el botón de la tarjeta y no figura
 /// entre las herramientas del asistente. Ejecuta el mismo método de `App` que la pantalla
 /// correspondiente, con origen `chat` en el historial; confirmar otra vez devuelve el recibo
-/// original. Ausente, `amounts_checked` equivale a «no confirmado» (D186). Consultar el correo
+/// original. Ausentes, `amounts_checked` y `other_documents_checked` equivalen a «no confirmado»
+/// (D186, D266). Consultar el correo
 /// puede tardar, así que se hace fuera del hilo de la ventana.
 #[tauri::command]
 async fn proposal_confirm<R: Runtime>(
@@ -256,6 +257,7 @@ async fn proposal_confirm<R: Runtime>(
     handle: AppHandle<R>,
     id: i64,
     amounts_checked: Option<bool>,
+    other_documents_checked: Option<bool>,
 ) -> CmdResult<ProposalReceipt> {
     let shared = Arc::clone(shared.inner());
     // Importar abre el diálogo del sistema: se hace aquí, con el cerrojo de la aplicación suelto
@@ -268,7 +270,11 @@ async fn proposal_confirm<R: Runtime>(
     let receipt = tauri::async_runtime::spawn_blocking(move || {
         worker
             .app()?
-            .proposal_confirm(id, amounts_checked.unwrap_or(false))
+            .proposal_confirm(
+                id,
+                amounts_checked.unwrap_or(false),
+                other_documents_checked.unwrap_or(false),
+            )
             .map_err(self::text)
     })
     .await

@@ -39,8 +39,8 @@ pub use rule_panel::{
 };
 pub use rules::Rule;
 pub use search::{
-    SearchDoc, SearchFilters, SearchHit, SearchKind, SearchPage, SearchQuery, SearchStatus,
-    SEARCH_PAGE_SIZE, SNIPPET_CHARS,
+    IndexIdentity, SearchDoc, SearchFilters, SearchHit, SearchKind, SearchPage, SearchQuery,
+    SearchStatus, SEARCH_PAGE_SIZE, SNIPPET_CHARS,
 };
 pub use store::Store;
 pub use templates::{active_since, TaskTemplate};

@@ -315,6 +315,13 @@ export function droppedCitationsText(n: number): string | null {
     : `Se descartaron ${n} referencias que no venían de sus documentos.`;
 }
 
+/** Nota discreta cuando la aplicación quitó enlaces o marcas de la respuesta (D264); `null` si no quitó ninguno. */
+export function linksRemovedText(n: number | null | undefined): string | null {
+  const count = typeof n === "number" && Number.isFinite(n) ? Math.trunc(n) : 0;
+  if (count <= 0) return null;
+  return count === 1 ? "Se retiró 1 enlace de la respuesta." : `Se retiraron ${count} enlaces de la respuesta.`;
+}
+
 export function withheldText(n: number): string | null {
   if (n <= 0) return null;
   return n === 1
@@ -605,6 +612,9 @@ export const CONDITIONS_LABEL = "Condiciones";
 export const PROPOSAL_LIVE_LABEL = "Estado de la propuesta";
 export const AMOUNTS_CHECKED_LABEL = "He comprobado los importes con el documento";
 export const AMOUNTS_REQUIRED_HINT = "Para registrar la factura, marque antes que ha comprobado los importes con el documento.";
+export const OTHER_DOCUMENTS_TITLE = "El texto propuesto incluye datos de otros documentos";
+export const OTHER_DOCUMENTS_CHECKED_LABEL = "He revisado que estos datos deben ir en la respuesta";
+export const OTHER_DOCUMENTS_REQUIRED_HINT = "Para continuar, marque antes que ha revisado que esos datos de otros documentos deben ir en la respuesta.";
 export const BODY_LABEL = "Texto completo del correo";
 export const CURRENT_TEXT_LABEL = "Texto actual";
 export const NEW_TEXT_LABEL = "Texto propuesto por la IA";
@@ -1013,6 +1023,32 @@ export function proposalOverlapLines(overlaps: unknown): string[] {
 export function editedRuleStateText(summary: Record<string, any> = {}): string {
   if (!summary.was_active) return "La regla está inactiva y seguirá así: solo la activa usted en Reglas.";
   return summary.stays_active ? "La regla está activa y seguirá activa: el cambio la estrecha." : "La regla está activa y quedará inactiva: el cambio no la estrecha.";
+}
+
+/** Qué clase de dato de otro documento es, para la lista del aviso de un borrador (D266). */
+export function otherDocumentKindText(kind: unknown): string {
+  if (kind === "invoice_number") return "Número de factura";
+  if (kind === "file_name") return "Nombre de archivo";
+  if (kind === "party") return "Proveedor o remitente";
+  return "Dato";
+}
+
+/** Los datos de otros documentos que la aplicación halló en el borrador propuesto: hasta cinco y el total. */
+export function otherDocumentsOf(summary: Record<string, any> | null | undefined): { items: Array<{ kind: string; value: string }>; total: number } {
+  const raw = Array.isArray(summary?.other_documents) ? summary!.other_documents : [];
+  const items = raw
+    .filter((i: any) => i && typeof i.value === "string" && i.value.trim() !== "")
+    .map((i: any) => ({ kind: String(i.kind ?? ""), value: String(i.value) }));
+  const total = typeof summary?.other_documents_total === "number" ? Math.max(summary.other_documents_total, items.length) : items.length;
+  return { items, total };
+}
+
+/** Frase del aviso: cuántos datos hay y, si no caben todos, cuántos se enseñan. */
+export function otherDocumentsIntro(total: number, shown: number): string {
+  const base = total === 1 ? "La aplicación halló 1 dato de otro documento" : `La aplicación halló ${total} datos de otros documentos`;
+  const rest = total > shown ? ` (se enseñan ${shown})` : "";
+  const where = total === 1 ? "que no está en este correo ni en su hilo" : "que no están en este correo ni en su hilo";
+  return `${base}${rest} ${where}. Compruebe que deben ir en la respuesta.`;
 }
 
 const trimmedReason = (error: unknown): string => String(error ?? "").trim().replace(/[.\s]+$/, "");

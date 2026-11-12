@@ -133,6 +133,18 @@ pub struct SearchHit {
     pub snippet: String,
 }
 
+/// Lo que identifica a un documento o correo en el índice: sin texto ni importes (D266).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IndexIdentity {
+    pub task_id: i64,
+    pub kind: SearchKind,
+    /// Nombre del documento o asunto del correo.
+    pub title: String,
+    /// Proveedor o remitente.
+    pub party: String,
+    pub number: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SearchPage {
     pub results: Vec<SearchHit>,
@@ -533,6 +545,27 @@ impl Store {
             no_text: by_status("no_text")?,
             failed: by_status("failed")?,
         })
+    }
+
+    /// Identificadores (nombre, proveedor o remitente, número) de todo lo indexado, de las tareas
+    /// que no son `except`. Solo lectura y sin IA: la usa el aviso de datos de otros documentos
+    /// de un borrador propuesto (D266).
+    pub fn index_identities(&self, except: Option<i64>) -> Result<Vec<IndexIdentity>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT task_id, kind, title, party, number FROM search_index
+             WHERE (?1 IS NULL OR task_id <> ?1) ORDER BY task_id",
+        )?;
+        let rows = stmt.query_map([except], |r| {
+            let kind: String = r.get(1)?;
+            Ok(IndexIdentity {
+                task_id: r.get(0)?,
+                kind: SearchKind::parse(&kind).ok_or_else(|| parse_failure(1, "tipo de índice"))?,
+                title: r.get(2)?,
+                party: r.get(3)?,
+                number: r.get(4)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
     /// Fila del índice de una tarea, si existe.

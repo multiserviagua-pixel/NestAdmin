@@ -6,7 +6,7 @@
 
 use std::sync::atomic::Ordering;
 
-use nestadmin_ai::assistant::View;
+use nestadmin_ai::assistant::{requested_actions, View};
 use nestadmin_ai::ProviderKind;
 use nestadmin_core::{SearchHit, SearchKind, SearchStatus, TaskState};
 use serde::{Deserialize, Serialize};
@@ -154,6 +154,7 @@ impl App {
         let request = compose(
             "assistant-sample",
             View::Other,
+            requested_actions(SAMPLE_QUESTION, None),
             &[],
             SAMPLE_QUESTION,
             &entries,

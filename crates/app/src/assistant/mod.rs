@@ -27,8 +27,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use nestadmin_ai::assistant::{
-    assistant_request, doc_id, parse_step, skills_for, tool_spec, tools_for, Entry, HistoryTurn,
-    Notice, Rejection, Step, View,
+    assistant_request, doc_id, offered_tools, parse_step, requested_actions, strip_links,
+    tool_spec, Actions, Entry, HistoryTurn, Notice, Rejection, Step, View,
 };
 use nestadmin_ai::{AiError, GenerateRequest, GenerateResult, Provider, ProviderKind};
 use nestadmin_core::{NewCall, SearchHit, SentCall};
@@ -162,6 +162,9 @@ pub struct AssistantJob {
     conversation_id: Option<i64>,
     question: String,
     view: View,
+    /// Clases de acción que piden las palabras de la persona (D263), calculadas al empezar el turno
+    /// con su pregunta y su turno anterior guardado; nunca con texto de documentos ni del modelo.
+    actions: Actions,
     history: Vec<HistoryTurn>,
     /// Turnos anteriores que no salieron por no superar el enmascarado.
     history_withheld: usize,
@@ -294,6 +297,9 @@ pub struct AssistantTurn {
     pub proposals: Vec<ProposalCard>,
     /// El texto de `answer` lo compuso la aplicación, no el modelo (cierre con propuestas).
     pub composed: bool,
+    /// Enlaces o marcas (direcciones web, sintaxis de enlace o imagen, etiquetas) que la aplicación
+    /// retiró de la respuesta antes de guardarla (D264).
+    pub links_removed: u32,
 }
 
 /// Lo que se guarda de un turno junto a su texto (en `meta_json`).
@@ -326,6 +332,8 @@ pub struct TurnMeta {
     pub ref_targets: std::collections::BTreeMap<String, Value>,
     /// El texto del turno lo compuso la aplicación, no el modelo.
     pub composed: bool,
+    /// Enlaces o marcas retirados de la respuesta (D264).
+    pub links_removed: u32,
 }
 
 /// Un turno de una conversación guardada.
@@ -396,6 +404,7 @@ fn fit(
 pub(crate) fn compose(
     request_id: &str,
     view: View,
+    actions: Actions,
     history: &[HistoryTurn],
     question: &str,
     entries: &[StoredEntry],
@@ -426,7 +435,7 @@ pub(crate) fn compose(
     }
     prepared.reverse();
     let (history, prepared) = fit(history.to_vec(), question, prepared);
-    assistant_request(request_id, view, &history, question, &prepared)
+    assistant_request(request_id, view, &history, question, &prepared, actions)
 }
 
 /// Texto literal de una llamada, tal como se guarda para «Ver lo enviado».
@@ -483,6 +492,7 @@ impl AssistantJob {
             conversation_id,
             question,
             view,
+            actions,
             history,
             history_withheld,
             route,
@@ -539,7 +549,7 @@ impl AssistantJob {
             state.provider = local.kind();
             state.model = local.model().to_owned();
         }
-        let offered: Vec<&'static str> = tools_for(&skills_for(view, &question))
+        let offered: Vec<&'static str> = offered_tools(view, &question, actions)
             .into_iter()
             .map(|t| t.name)
             .collect();
@@ -566,6 +576,7 @@ impl AssistantJob {
             let request = compose(
                 &format!("assistant-{}-{}", now_ms(), state.steps),
                 view,
+                actions,
                 &history,
                 &question,
                 &entries,
@@ -680,7 +691,8 @@ impl AssistantJob {
                 }
                 Step::Tool { name, args } => {
                     if !offered.contains(&name.as_str()) {
-                        // Del catálogo, pero no de los bloques de esta vista: también es no válida.
+                        // Del catálogo, pero no de los bloques de esta vista o de una clase de
+                        // acción que la persona no pidió (D263): también es no válida.
                         invalid += 1;
                         state.error_detail = Some("tool_not_offered".to_owned());
                         if invalid >= MAX_INVALID {
@@ -904,6 +916,14 @@ impl App {
             }
         };
         let external = matches!(route, Route::External { .. });
+        // D263: lo que la persona pidió, con su pregunta y su turno anterior en esta conversación
+        // tal como lo guardó la aplicación (nunca un texto que el modelo pudiera escribir).
+        let previous_user_turn = stored
+            .iter()
+            .rev()
+            .find(|turn| turn.role == "user")
+            .map(|turn| turn.text.clone());
+        let actions = requested_actions(question, previous_user_turn.as_deref());
         let (history, history_withheld) = history_for(stored, external);
         self.assistant.cancel.store(false, Ordering::SeqCst);
         let info = (self.provider.kind(), self.provider.model().to_owned());
@@ -911,6 +931,7 @@ impl App {
             conversation_id,
             question: question.to_owned(),
             view: View::parse(view),
+            actions,
             history,
             history_withheld,
             route,
@@ -975,6 +996,7 @@ impl App {
             words: None,
             proposals: Vec::new(),
             composed: false,
+            links_removed: 0,
         };
         let audit_status = match status {
             RunStatus::Answered => {
@@ -993,7 +1015,11 @@ impl App {
                 dropped += ids.len() - cards.len();
                 turn.outcome = Outcome::Answered;
                 turn.composed = close_reason.is_some();
-                turn.answer = answer;
+                // D264: la respuesta no lleva enlaces ni marcado, ni la del modelo ni la compuesta
+                // por la aplicación; se limpia antes de guardarla y de devolverla.
+                let (clean, removed) = strip_links(&answer);
+                turn.answer = clean;
+                turn.links_removed = removed;
                 turn.dropped_citations = dropped;
                 turn.citations = cards;
                 if turn.fallback.is_some() {
@@ -1087,6 +1113,7 @@ impl App {
                 returned_refs,
                 ref_targets,
                 composed: turn.composed,
+                links_removed: turn.links_removed,
             };
             let saved = self.store.assistant_save_exchange(
                 conversation_id,
@@ -1119,6 +1146,7 @@ impl App {
                 "error_detail": turn.error_detail,
                 "proposals": turn.proposals.len(),
                 "composed": turn.composed,
+                "links_removed": turn.links_removed,
                 "close_reason": close_reason,
             }),
         )?;

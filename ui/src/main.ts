@@ -324,6 +324,13 @@ import type { AssistantConsentView, AssistantPreview, AssistantProgress, Assista
 import {
   AMOUNTS_CHECKED_LABEL,
   AMOUNTS_REQUIRED_HINT,
+  OTHER_DOCUMENTS_CHECKED_LABEL,
+  OTHER_DOCUMENTS_REQUIRED_HINT,
+  OTHER_DOCUMENTS_TITLE,
+  linksRemovedText,
+  otherDocumentKindText,
+  otherDocumentsIntro,
+  otherDocumentsOf,
   BODY_LABEL,
   CHAT_ORIGIN_LABEL,
   CURRENT_TEXT_LABEL,
@@ -588,7 +595,7 @@ const state = {
     // «Ver lo enviado»: vista del propio panel con «Volver»; guarda el desplazamiento al que volver.
     sent: null as null | { turnId: number; calls: AssistantSentCall[] | null; error: string | null; scroll: number },
     // E3 (D185): estado de pantalla de cada tarjeta de propuesta (casilla de importes, ejecución en curso, aviso).
-    proposalUi: {} as Record<number, { checked: boolean; busy: boolean; note: string | null }>,
+    proposalUi: {} as Record<number, { checked: boolean; checkedOther: boolean; busy: boolean; note: string | null }>,
   },
   // Opción del asistente en Configuración (D183).
   assistantConsent: null as AssistantConsentView | null,
@@ -6819,6 +6826,8 @@ interface AiView {
   outcome: AssistantTurn["outcome"];
   citations: SearchHit[];
   dropped: number;
+  /** Enlaces o marcas que la aplicación retiró de la respuesta (D264). */
+  linksRemoved: number;
   withheld: number;
   /** Vista a la que se ha llevado a la persona; solo en el turno recién hecho. */
   navigated: string | null;
@@ -6863,6 +6872,7 @@ function aiFromTurn(t: AssistantTurn, question: string, navigated: string | null
     outcome: t.outcome,
     citations: t.citations,
     dropped: t.dropped_citations,
+    linksRemoved: t.links_removed ?? 0,
     withheld: t.withheld,
     navigated,
     provider: t.provider,
@@ -6883,6 +6893,7 @@ function aiFromStored(t: AssistantStoredTurn, question: string): AiView {
     outcome,
     citations: t.citations,
     dropped: t.dropped_citations,
+    linksRemoved: t.links_removed ?? 0,
     withheld: t.withheld,
     navigated: null,
     provider: t.provider,
@@ -7256,7 +7267,7 @@ function chatCard(hit: SearchHit, key: string): HTMLElement {
 const propKey = (id: number, part: string) => `chat:prop:${id}:${part}`;
 
 function proposalUi(id: number) {
-  return (state.chat.proposalUi[id] ??= { checked: false, busy: false, note: null });
+  return (state.chat.proposalUi[id] ??= { checked: false, checkedOther: false, busy: false, note: null });
 }
 
 function proposalById(id: number): ProposalCard | null {
@@ -7292,11 +7303,17 @@ function proposalNeedsAck(card: ProposalCard): boolean {
   return card.kind === "approve" && card.summary?.type === "invoice" && Boolean(card.summary?.amount_review);
 }
 
+/** Un borrador propuesto con datos de otros documentos exige la casilla de «lo he revisado» (D266). */
+function proposalNeedsOtherAck(card: ProposalCard): boolean {
+  return (card.kind === "edit_draft" || (card.kind === "approve" && card.summary?.type === "email")) && otherDocumentsOf(card.summary).total > 0;
+}
+
 async function confirmProposal(card: ProposalCard) {
   const ui = proposalUi(card.id);
   if (ui.busy || !proposalIsOpen(card.status)) return;
   const ack = proposalNeedsAck(card);
-  if (ack && !ui.checked) return;
+  const otherAck = proposalNeedsOtherAck(card);
+  if ((ack && !ui.checked) || (otherAck && !ui.checkedOther)) return;
   ui.busy = true;
   ui.note = null;
   // El foco pasa al estado de la propia tarjeta (no al botón): quien usa el teclado no pierde su sitio.
@@ -7305,7 +7322,7 @@ async function confirmProposal(card: ProposalCard) {
   let confirmed = false;
   let cancelled = false;
   try {
-    const receipt = await api.proposalConfirm(card.id, ack ? ui.checked : undefined);
+    const receipt = await api.proposalConfirm(card.id, ack ? ui.checked : undefined, otherAck ? ui.checkedOther : undefined);
     // Con el resultado real: si la acción no se hizo, la tarjeta queda `failed` con su motivo.
     card.status = receipt.outcome === "not_done" ? "failed" : "confirmed";
     card.receipt = receipt;
@@ -7358,7 +7375,7 @@ function proposalAmount(value: unknown, currency: unknown): Child {
   return code && !text.includes(code) && !/[€$£]/.test(text) ? `${text} ${code}` : text;
 }
 
-function proposalEmail(s: Record<string, any>): Child[] {
+function proposalEmail(card: ProposalCard, s: Record<string, any>, ui: { checkedOther: boolean; busy: boolean }): Child[] {
   const to: string[] = Array.isArray(s.to) ? s.to : [];
   const body = String(s.body ?? "");
   const issues = ((s.issues ?? []) as string[]).map((code) => emailIssueText(code, s.version)).filter((t): t is string => t !== null);
@@ -7374,6 +7391,7 @@ function proposalEmail(s: Record<string, any>): Child[] {
       ...proposalRow("Asunto", s.subject ?? null),
     ),
     ...notices.map((text) => h("p", { class: "notice warn proposal-notice" }, text)),
+    proposalOtherDocuments(card, s, ui),
     h("p", { class: "meta" }, BODY_LABEL),
     body ? proposalText(BODY_LABEL, body) : missing("Sin texto"),
   ];
@@ -7454,6 +7472,39 @@ function proposalInvoice(card: ProposalCard, s: Record<string, any>, ui: { check
   ];
 }
 
+/** Aviso destacado de un borrador propuesto con datos de otros documentos, su lista y la casilla de «lo he revisado» (D266). */
+function proposalOtherDocuments(card: ProposalCard, s: Record<string, any>, ui: { checkedOther: boolean; busy: boolean }): HTMLElement | null {
+  const { items, total } = otherDocumentsOf(s);
+  if (total <= 0) return null;
+  const ackId = `chat-prop-other-${card.id}`;
+  const open = proposalIsOpen(card.status);
+  return h(
+    "div",
+    { class: "amount-review proposal-other-documents", role: "group", "aria-label": OTHER_DOCUMENTS_TITLE },
+    h("strong", {}, OTHER_DOCUMENTS_TITLE),
+    h("p", {}, otherDocumentsIntro(total, items.length)),
+    h("ul", {}, ...items.map((i) => h("li", {}, `${otherDocumentKindText(i.kind)}: ${i.value}`))),
+    open
+      ? h(
+          "label",
+          { class: "confirm", for: ackId },
+          h("input", {
+            type: "checkbox",
+            id: ackId,
+            "data-focus-key": propKey(card.id, "other-ack"),
+            ...(ui.checkedOther ? { checked: "" } : {}),
+            ...(ui.busy ? { disabled: "" } : {}),
+            onchange: (e: Event) => {
+              proposalUi(card.id).checkedOther = (e.target as HTMLInputElement).checked;
+              renderChat();
+            },
+          }),
+          ` ${OTHER_DOCUMENTS_CHECKED_LABEL}`,
+        )
+      : null,
+  );
+}
+
 /** Detalle de una tarjeta de regla o sugerencia: acción, condiciones exactas (antes y después al editar), casos cubiertos y solapamientos. */
 function proposalRuleDetail(s: Record<string, any>, editing: boolean): Child[] {
   const category = (code: string) => CATEGORY_LABEL[code] ?? code;
@@ -7474,16 +7525,17 @@ function proposalRuleDetail(s: Record<string, any>, editing: boolean): Child[] {
   ].flat() as Child[];
 }
 
-function proposalDetail(card: ProposalCard, ui: { checked: boolean; busy: boolean }): Child[] {
+function proposalDetail(card: ProposalCard, ui: { checked: boolean; checkedOther: boolean; busy: boolean }): Child[] {
   const s = card.summary ?? {};
   switch (s.type) {
     case "email":
-      return proposalEmail(s);
+      return proposalEmail(card, s, ui);
     case "invoice":
       return proposalInvoice(card, s, ui);
     case "edit_draft":
       return [
         h("dl", { class: "origin" }, ...proposalRow("Para", Array.isArray(s.to) && s.to.length ? s.to.join(", ") : null), ...proposalRow("Asunto", s.subject ?? null)),
+        proposalOtherDocuments(card, s, ui),
         h("h5", {}, CURRENT_TEXT_LABEL),
         proposalText(CURRENT_TEXT_LABEL, String(s.current_body ?? "")),
         h("h5", {}, NEW_TEXT_LABEL),
@@ -7553,6 +7605,7 @@ function proposalCard(card: ProposalCard): HTMLElement {
   const stuck = card.status === "executing" && !ui.busy;
   const needsAck = proposalNeedsAck(card);
   const blockedByAck = needsAck && !ui.checked;
+  const blockedByOther = proposalNeedsOtherAck(card) && !ui.checkedOther;
   const final = proposalFinalText(card);
   const receipt = proposalReceiptLines(card);
   const rulesNotice = proposalRulesText(card.kind, card.effect, card.summary ?? {});
@@ -7576,7 +7629,7 @@ function proposalCard(card: ProposalCard): HTMLElement {
     ...proposalDetail(card, ui),
     open ? h("p", { class: "proposal-effect" }, proposalEffectText(card.kind, card.effect, card.summary ?? {})) : null,
     open && rulesNotice ? h("p", { class: "notice warn proposal-notice" }, rulesNotice) : null,
-    open && blockedByAck ? h("p", { class: "meta", id: hintId }, AMOUNTS_REQUIRED_HINT) : null,
+    open && (blockedByAck || blockedByOther) ? h("p", { class: "meta", id: hintId }, blockedByAck ? AMOUNTS_REQUIRED_HINT : OTHER_DOCUMENTS_REQUIRED_HINT) : null,
     open
       ? h(
           "div",
@@ -7588,8 +7641,8 @@ function proposalCard(card: ProposalCard): HTMLElement {
               ...(tone === "plain" ? {} : { class: tone }),
               "data-focus-key": propKey(card.id, "confirm"),
               "aria-label": proposalButtonName(card),
-              ...(blockedByAck ? { "aria-describedby": hintId } : {}),
-              disabled: ui.busy || blockedByAck,
+              ...(blockedByAck || blockedByOther ? { "aria-describedby": hintId } : {}),
+              disabled: ui.busy || blockedByAck || blockedByOther,
               onclick: () => void confirmProposal(card),
             },
             proposalVerb(card.kind, card.effect),
@@ -7659,7 +7712,7 @@ function wordsBlock(text: string, answer: QuestionAnswer, index: number, last: b
 function aiTurn(v: AiView, index: number, last: boolean): HTMLElement {
   const answered = v.outcome === "answered";
   const who = answered ? whoAnswered(v) : "";
-  const notes = answered ? [droppedCitationsText(v.dropped), withheldText(v.withheld)].filter((n): n is string => n !== null) : [];
+  const notes = answered ? [linksRemovedText(v.linksRemoved), droppedCitationsText(v.dropped), withheldText(v.withheld)].filter((n): n is string => n !== null) : [];
   const sendHint = v.outcome === "consent_required" || v.outcome === "not_configured";
   // Con un proveedor externo el dato protegido nunca llega a la IA: la respuesta trae su marca y se dice dónde verlo.
   const maskedNoteText = answered ? maskedNote(maskedMarksIn(v.text)) : null;
