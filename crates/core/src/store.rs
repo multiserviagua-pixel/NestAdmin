@@ -166,13 +166,20 @@ impl Store {
         Ok(())
     }
 
-    /// Cierra la base de forma ordenada: vuelca el WAL al archivo principal y suelta el archivo,
-    /// de modo que quede un único archivo listo para renombrarse.
+    /// Cierra la base de forma ordenada: vuelca el WAL al archivo principal (el checkpoint no puede
+    /// dejar nada pendiente: `busy = 0`) y suelta el archivo, de modo que quede un único archivo
+    /// listo para renombrarse.
     pub(crate) fn finish(self) -> Result<()> {
         // Una base en memoria no tiene WAL y el pragma devuelve una fila igualmente.
-        let _busy: i64 = self
+        let busy: i64 = self
             .conn
             .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |r| r.get(0))?;
+        if busy != 0 {
+            return Err(CoreError::Profile {
+                code: "wal_pending",
+                message: "el registro de escritura de la base no se pudo volcar".into(),
+            });
+        }
         self.conn.close().map_err(|(_, e)| CoreError::Storage(e))
     }
 

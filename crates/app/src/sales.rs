@@ -21,7 +21,7 @@ use nestadmin_core::sales::{
     is_sendable, ChainStatus, Company, Customer, CustomerData, DraftInput, Letterhead,
     LetterheadMargins, NewSalesSend, ReceivedDeliveryNote, RecurringRecord, RecurringRun,
     SalesDocument, SalesFilter, SalesSend, SalesStoreError, VerifactuContext, VerifactuRecordRow,
-    SEND_SALES_DOCUMENT,
+    DEFAULT_TAXPAYER_ID, SEND_SALES_DOCUMENT,
 };
 use nestadmin_core::{
     ActionRequest, Authorization, Connector, ConnectorError, CoreError, Rule, Task,
@@ -1068,7 +1068,9 @@ impl App {
 
     /// Envíos confirmados de un documento, del más antiguo al más reciente (D239).
     pub fn sales_document_sends(&self, document_id: i64) -> AppResult<Vec<SalesSend>> {
-        Ok(self.store.sales_document_sends(document_id)?)
+        Ok(self
+            .store
+            .sales_document_sends(DEFAULT_TAXPAYER_ID, document_id)?)
     }
 
     /// La tarea de envío abierta de un documento (en revisión, en curso o fallida), si la hay.
@@ -1126,6 +1128,7 @@ impl App {
         }
         let result = self.build_send(document_id, None, false)?;
         let task = self.store.enqueue_sales_send(
+            DEFAULT_TAXPAYER_ID,
             document_id,
             &result,
             "envío por correo preparado; pendiente de revisión",
@@ -1617,7 +1620,10 @@ impl App {
         // La tarea pasa a ser la de la revisión vigente. Si esa revisión ya tiene otra abierta o un
         // envío registrado, esta se cancela: nunca dos tareas abiertas para el mismo documento
         // (D244).
-        if !self.store.repoint_sales_send(task.id, latest.id)? {
+        if !self
+            .store
+            .repoint_sales_send(DEFAULT_TAXPAYER_ID, task.id, latest.id)?
+        {
             return Ok(self.store.cancel_with_reason(
                 task.id,
                 "document_revised: la revisión vigente ya tiene su propio envío",
@@ -1655,6 +1661,7 @@ impl App {
         let attachment = result["draft"]["attachments"][0].clone();
         let send = (|| {
             Some(NewSalesSend {
+                taxpayer_id: DEFAULT_TAXPAYER_ID,
                 document_id: result["document"]["id"].as_i64()?,
                 task_id,
                 version,
@@ -1826,6 +1833,7 @@ impl App {
             result["review_reason"] = json!(reason);
         }
         let Some(task) = self.store.enqueue_sales_send(
+            DEFAULT_TAXPAYER_ID,
             doc.id,
             &result,
             "envío preparado al emitir; pendiente de revisión",

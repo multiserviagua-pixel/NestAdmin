@@ -184,6 +184,7 @@ pub fn build_legacy(dir: &Path, spec: LegacySpec) -> Facts {
             // Envío por correo del documento: tarea de envío, disparo y envío cerrado.
             let task = store
                 .enqueue_sales_send(
+                    1,
                     invoice,
                     &json!({"type": SEND_SALES_DOCUMENT, "version": 1}),
                     "preparado",
@@ -196,6 +197,7 @@ pub fn build_legacy(dir: &Path, spec: LegacySpec) -> Facts {
                     task.id,
                     &json!({"type": SEND_SALES_DOCUMENT, "version": 1, "sent": true}),
                     &NewSalesSend {
+                        taxpayer_id: 1,
                         document_id: invoice,
                         task_id: task.id,
                         version: 1,
@@ -290,6 +292,20 @@ pub fn dump_all(path: &Path) -> BTreeMap<String, Vec<String>> {
         out.insert(name, rows);
     }
     out
+}
+
+/// Copia una carpeta entera (bases cerradas y documentos) a otra que ya existe.
+pub fn copy_dir_all(from: &Path, to: &Path) {
+    fs::create_dir_all(to).unwrap();
+    for entry in fs::read_dir(from).unwrap() {
+        let entry = entry.unwrap();
+        let target = to.join(entry.file_name());
+        if entry.path().is_dir() {
+            copy_dir_all(&entry.path(), &target);
+        } else {
+            fs::copy(entry.path(), &target).unwrap();
+        }
+    }
 }
 
 pub fn count(path: &Path, table: &str) -> i64 {

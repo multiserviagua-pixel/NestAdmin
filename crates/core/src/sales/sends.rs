@@ -70,6 +70,8 @@ pub struct SalesSend {
 /// Lo que se escribe al confirmarse el recibo; `id` y `sent_at` los pone la base.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NewSalesSend {
+    /// Obligado cuya base guarda el documento (D287).
+    pub taxpayer_id: i64,
     pub document_id: i64,
     pub task_id: i64,
     pub version: i64,
@@ -84,6 +86,10 @@ pub struct NewSalesSend {
     pub authorization: String,
     pub sent_message_id: Option<String>,
 }
+
+/// Obligado único de las bases anteriores a los perfiles (D287). Mientras la aplicación no lleve
+/// varias bases, quien llama pasa este identificador.
+pub const DEFAULT_TAXPAYER_ID: i64 = 1;
 
 /// Resultado de cerrar una tarea de envío.
 #[derive(Debug, Clone, PartialEq)]
@@ -168,6 +174,7 @@ impl Store {
     /// sin crear nada.
     pub fn enqueue_sales_send(
         &mut self,
+        taxpayer_id: i64,
         document_id: i64,
         result: &Value,
         reason: &str,
@@ -179,8 +186,9 @@ impl Store {
         load_document(&tx, document_id)?;
         if on_issue {
             let fired: i64 = tx.query_row(
-                "SELECT count(*) FROM sales_send_triggers WHERE document_id = ?1",
-                [document_id],
+                "SELECT count(*) FROM sales_send_triggers \
+                 WHERE taxpayer_id = ?1 AND document_id = ?2",
+                [taxpayer_id, document_id],
                 |r| r.get(0),
             )?;
             if fired > 0 {
@@ -204,9 +212,9 @@ impl Store {
         .map_err(core)?;
         if on_issue {
             tx.execute(
-                "INSERT INTO sales_send_triggers (document_id, task_id, created_at) \
-                 VALUES (?1, ?2, ?3)",
-                params![document_id, task.id, now_ms()],
+                "INSERT INTO sales_send_triggers (taxpayer_id, document_id, task_id, created_at) \
+                 VALUES (?1, ?2, ?3, ?4)",
+                params![taxpayer_id, document_id, task.id, now_ms()],
             )?;
         }
         tx.commit()?;
@@ -217,7 +225,12 @@ impl Store {
     /// revisión ya tiene otra tarea de envío abierta o un envío registrado, no cambia nada y
     /// devuelve `false`: quien llama cancela la tarea en lugar de dejar dos abiertas. Una sola
     /// transacción.
-    pub fn repoint_sales_send(&mut self, task_id: i64, new_document_id: i64) -> SalesResult<bool> {
+    pub fn repoint_sales_send(
+        &mut self,
+        taxpayer_id: i64,
+        task_id: i64,
+        new_document_id: i64,
+    ) -> SalesResult<bool> {
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -227,8 +240,9 @@ impl Store {
             .into_iter()
             .any(|id| id != task_id);
         let sent: i64 = tx.query_row(
-            "SELECT count(*) FROM sales_document_sends WHERE document_id = ?1",
-            [new_document_id],
+            "SELECT count(*) FROM sales_document_sends \
+             WHERE taxpayer_id = ?1 AND document_id = ?2",
+            [taxpayer_id, new_document_id],
             |r| r.get(0),
         )?;
         if others || sent > 0 {
@@ -272,11 +286,12 @@ impl Store {
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         let task = queue::load(&tx, task_id).map_err(core)?;
         let inserted = tx.execute(
-            "INSERT OR IGNORE INTO sales_document_sends (document_id, task_id, version, \
+            "INSERT OR IGNORE INTO sales_document_sends (taxpayer_id, document_id, task_id, version, \
              idempotency_key, account, account_address, recipient, subject, attachment_name, \
              attachment_size, attachment_sha256, authorization, sent_message_id, sent_at) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
             params![
+                send.taxpayer_id,
                 send.document_id,
                 send.task_id,
                 send.version,
@@ -386,14 +401,19 @@ impl Store {
     }
 
     /// Envíos confirmados de un documento, del más antiguo al más reciente.
-    pub fn sales_document_sends(&self, document_id: i64) -> SalesResult<Vec<SalesSend>> {
+    pub fn sales_document_sends(
+        &self,
+        taxpayer_id: i64,
+        document_id: i64,
+    ) -> SalesResult<Vec<SalesSend>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, document_id, task_id, version, idempotency_key, account, account_address, \
              recipient, subject, attachment_name, attachment_size, attachment_sha256, \
              authorization, sent_message_id, sent_at \
-             FROM sales_document_sends WHERE document_id = ?1 ORDER BY sent_at, id",
+             FROM sales_document_sends WHERE taxpayer_id = ?1 AND document_id = ?2 \
+             ORDER BY sent_at, id",
         )?;
-        let rows = stmt.query_map([document_id], |r| {
+        let rows = stmt.query_map([taxpayer_id, document_id], |r| {
             Ok(SalesSend {
                 id: r.get(0)?,
                 document_id: r.get(1)?,

@@ -3,16 +3,20 @@
 //! (recuentos, huellas de la cadena, mismos identificadores de tareas y ningún envío ni tarea
 //! duplicados) y la base antigua queda intacta salvo el marcador y el renombrado final. Solo
 //! datos sintéticos.
+//!
+//! Para que la suite sea rápida, la base de partida de cada caso se construye una sola vez, la
+//! referencia se calcula una vez y cada punto de corte se recorre en su propia carpeta temporal,
+//! en paralelo (por tandas).
 
 mod profiles_common;
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use nestadmin_core::profiles::migrate::{migrate_with_hook, MigrationState};
 use nestadmin_core::profiles::{read_pointer, startup_state, Decision, StartupState};
 use nestadmin_core::CoreError;
 use profiles_common::{
-    build_legacy, dump_all, files_under, outcome, Billing, LegacySpec, SIMULATOR,
+    build_legacy, copy_dir_all, dump_all, files_under, outcome, Billing, LegacySpec, SIMULATOR,
 };
 
 const HEREDADO: LegacySpec = LegacySpec {
@@ -28,6 +32,9 @@ const EMPTY: LegacySpec = LegacySpec {
     heredado: false,
 };
 
+/// Cuántos puntos de corte se recorren a la vez dentro de un caso.
+const BATCH: usize = 8;
+
 fn is_interrupted(result: &Result<MigrationState, CoreError>) -> bool {
     matches!(
         result,
@@ -39,7 +46,7 @@ fn is_interrupted(result: &Result<MigrationState, CoreError>) -> bool {
 }
 
 /// La base antigua, esté ya renombrada o no.
-fn legacy_path(dir: &Path) -> std::path::PathBuf {
+fn legacy_path(dir: &Path) -> PathBuf {
     let plain = dir.join("nestadmin.db");
     if plain.exists() {
         plain
@@ -54,6 +61,7 @@ fn assert_clean(dir: &Path) {
         .filter(|f| {
             f.ends_with(".part")
                 || f.ends_with(".tmp")
+                || f.ends_with(".cerrojo")
                 || f.ends_with("-wal")
                 || f.ends_with("-shm")
         })
@@ -61,10 +69,33 @@ fn assert_clean(dir: &Path) {
     assert!(bad.is_empty(), "restos: {bad:?}");
 }
 
+/// Una base de partida ya construida: se copia, no se rehace.
+struct Template {
+    dir: tempfile::TempDir,
+}
+
+impl Template {
+    fn new(spec: LegacySpec) -> Self {
+        let dir = tempfile::tempdir().unwrap();
+        build_legacy(dir.path(), spec);
+        Self { dir }
+    }
+
+    /// Una copia nueva en su propia carpeta temporal.
+    fn copy(&self) -> tempfile::TempDir {
+        let target = tempfile::tempdir().unwrap();
+        copy_dir_all(self.dir.path(), target.path());
+        target
+    }
+
+    fn before(&self) -> std::collections::BTreeMap<String, Vec<String>> {
+        dump_all(&self.dir.path().join("nestadmin.db"))
+    }
+}
+
 /// Traslado de referencia sin cortes: su huella y las etiquetas de todos los puntos de corte.
-fn reference(spec: LegacySpec, decision: Option<Decision>) -> (String, Vec<String>) {
-    let dir = tempfile::tempdir().unwrap();
-    build_legacy(dir.path(), spec);
+fn reference(template: &Template, decision: Option<Decision>) -> (String, Vec<String>) {
+    let dir = template.copy();
     let mut labels = Vec::new();
     let end = migrate_with_hook(dir.path(), decision, &mut |label| {
         labels.push(label.to_owned());
@@ -76,54 +107,78 @@ fn reference(spec: LegacySpec, decision: Option<Decision>) -> (String, Vec<Strin
     (outcome(dir.path()), labels)
 }
 
+/// Corta en el punto `index`, comprueba el estado del corte y retoma sin cortes.
+fn cut_at(
+    template: &Template,
+    decision: Option<Decision>,
+    index: usize,
+    label: &str,
+    expected: &str,
+    before: &std::collections::BTreeMap<String, Vec<String>>,
+) {
+    let dir = template.copy();
+    let data = dir.path();
+
+    let mut calls = 0usize;
+    let cut = migrate_with_hook(data, decision, &mut |_| {
+        let hit = calls == index;
+        calls += 1;
+        hit
+    });
+    assert!(is_interrupted(&cut), "corte {index} ({label}): {cut:?}");
+
+    // En el corte, la base antigua está intacta y el puntero solo existe si ya se renombró.
+    assert_eq!(
+        &dump_all(&legacy_path(data)),
+        before,
+        "corte {index} ({label})"
+    );
+    let pointer_written = label.starts_with("step6:pointer-renamed")
+        || label.starts_with("step6:done")
+        || label.starts_with("step7")
+        || label == "new:done";
+    assert_eq!(
+        read_pointer(data).unwrap().is_some(),
+        pointer_written,
+        "corte {index} ({label})"
+    );
+    if !pointer_written {
+        assert_ne!(startup_state(data).unwrap(), StartupState::Ready, "{label}");
+    }
+
+    // Retomar da el mismo resultado.
+    let end = migrate_with_hook(data, decision, &mut |_| false).unwrap();
+    assert_eq!(end, MigrationState::Done, "corte {index} ({label})");
+    assert_clean(data);
+    assert_eq!(outcome(data), expected, "corte {index} ({label})");
+    assert_eq!(
+        &dump_all(&legacy_path(data)),
+        before,
+        "corte {index} ({label})"
+    );
+    assert_eq!(startup_state(data).unwrap(), StartupState::Ready);
+}
+
 /// Corta en cada punto, una vez, y retoma sin cortes.
 fn cut_everywhere(spec: LegacySpec, decision: Option<Decision>) {
-    let (expected, labels) = reference(spec, decision);
+    let template = Template::new(spec);
+    let before = template.before();
+    let (expected, labels) = reference(&template, decision);
     assert!(labels.len() >= 4, "{labels:?}");
-    for (index, label) in labels.iter().enumerate() {
-        let dir = tempfile::tempdir().unwrap();
-        let data = dir.path();
-        build_legacy(data, spec);
-        let before = dump_all(&data.join("nestadmin.db"));
-
-        let mut calls = 0usize;
-        let cut = migrate_with_hook(data, decision, &mut |_| {
-            let hit = calls == index;
-            calls += 1;
-            hit
+    let indexed: Vec<(usize, &String)> = labels.iter().enumerate().collect();
+    for batch in indexed.chunks(BATCH) {
+        std::thread::scope(|scope| {
+            let handles: Vec<_> = batch
+                .iter()
+                .map(|(index, label)| {
+                    let (template, expected, before) = (&template, &expected, &before);
+                    scope.spawn(move || cut_at(template, decision, *index, label, expected, before))
+                })
+                .collect();
+            for handle in handles {
+                handle.join().unwrap();
+            }
         });
-        assert!(is_interrupted(&cut), "corte {index} ({label}): {cut:?}");
-
-        // En el corte, la base antigua está intacta y el puntero solo existe si ya se renombró.
-        assert_eq!(
-            dump_all(&legacy_path(data)),
-            before,
-            "corte {index} ({label})"
-        );
-        let pointer_written = label.starts_with("step6:pointer-renamed")
-            || label.starts_with("step6:done")
-            || label.starts_with("step7")
-            || label == "new:done";
-        assert_eq!(
-            read_pointer(data).unwrap().is_some(),
-            pointer_written,
-            "corte {index} ({label})"
-        );
-        if !pointer_written {
-            assert_ne!(startup_state(data).unwrap(), StartupState::Ready, "{label}");
-        }
-
-        // Retomar da el mismo resultado.
-        let end = migrate_with_hook(data, decision, &mut |_| false).unwrap();
-        assert_eq!(end, MigrationState::Done, "corte {index} ({label})");
-        assert_clean(data);
-        assert_eq!(outcome(data), expected, "corte {index} ({label})");
-        assert_eq!(
-            dump_all(&legacy_path(data)),
-            before,
-            "corte {index} ({label})"
-        );
-        assert_eq!(startup_state(data).unwrap(), StartupState::Ready);
     }
 }
 
@@ -204,11 +259,11 @@ fn cut_everywhere_in_a_new_installation() {
 fn a_storm_of_cuts_still_converges_to_the_same_result() {
     // Cada intento muere un punto más tarde que el anterior: ninguna combinación de reintentos
     // deja un resultado distinto ni duplica nada.
-    let (expected, _) = reference(SIMULATOR, Some(Decision::Real));
-    let dir = tempfile::tempdir().unwrap();
+    let template = Template::new(SIMULATOR);
+    let before = template.before();
+    let (expected, _) = reference(&template, Some(Decision::Real));
+    let dir = template.copy();
     let data = dir.path();
-    build_legacy(data, SIMULATOR);
-    let before = dump_all(&data.join("nestadmin.db"));
     let mut attempt = 0usize;
     loop {
         let mut calls = 0usize;
@@ -237,10 +292,10 @@ fn a_storm_of_cuts_still_converges_to_the_same_result() {
 
 #[test]
 fn a_cut_while_waiting_for_the_decision_resumes_to_the_same_result() {
-    let (expected, _) = reference(SIMULATOR, Some(Decision::Real));
-    let dir = tempfile::tempdir().unwrap();
+    let template = Template::new(SIMULATOR);
+    let (expected, _) = reference(&template, Some(Decision::Real));
+    let dir = template.copy();
     let data = dir.path();
-    build_legacy(data, SIMULATOR);
     // Se detiene en el paso 3, y un corte en el paso 2 antes de eso no cambia nada.
     let mut calls = 0usize;
     let cut = migrate_with_hook(data, None, &mut |_| {

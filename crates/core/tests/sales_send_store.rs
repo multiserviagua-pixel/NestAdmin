@@ -102,6 +102,7 @@ fn sha(tag: char) -> String {
 
 fn send(document: i64, task: i64, version: i64, tag: char) -> NewSalesSend {
     NewSalesSend {
+        taxpayer_id: 1,
         document_id: document,
         task_id: task,
         version,
@@ -190,7 +191,7 @@ fn a_version_14_database_migrates_to_15_with_a_copy_and_keeps_its_documents() {
     assert_eq!(doc.number.as_deref(), Some("P-2026-0001"));
     assert_eq!(doc.status, Status::Issued);
     let task = store
-        .enqueue_sales_send(id, &result(id), "preparado", false)
+        .enqueue_sales_send(1, id, &result(id), "preparado", false)
         .unwrap()
         .unwrap();
     assert_eq!(task.state, TaskState::AwaitingReview);
@@ -205,7 +206,7 @@ fn the_send_history_and_triggers_are_insert_only() {
     let customer = setup(&mut store);
     let id = issue(&mut store, DocumentKind::Quote, customer);
     let task = store
-        .enqueue_sales_send(id, &result(id), "preparado", true)
+        .enqueue_sales_send(1, id, &result(id), "preparado", true)
         .unwrap()
         .unwrap();
     store
@@ -230,7 +231,7 @@ fn closing_a_send_twice_inserts_one_row_and_changes_the_status_once() {
     let customer = setup(&mut store);
     let id = issue(&mut store, DocumentKind::Quote, customer);
     let task = store
-        .enqueue_sales_send(id, &result(id), "preparado", false)
+        .enqueue_sales_send(1, id, &result(id), "preparado", false)
         .unwrap()
         .unwrap();
     let new = send(id, task.id, 1, 'a');
@@ -262,7 +263,7 @@ fn closing_a_send_twice_inserts_one_row_and_changes_the_status_once() {
             .unwrap()
             .inserted
     );
-    let rows = store.sales_document_sends(id).unwrap();
+    let rows = store.sales_document_sends(1, id).unwrap();
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].recipient, "cliente@example.test");
     assert_eq!(rows[0].attachment_sha256, sha('a'));
@@ -285,14 +286,14 @@ fn a_document_goes_to_sent_only_from_issued() {
     // Un presupuesto ya enviado se reenvía sin cambiar su estado: dos filas, un `sent`.
     let quote = issue(&mut store, DocumentKind::Quote, customer);
     let first = store
-        .enqueue_sales_send(quote, &result(quote), "preparado", false)
+        .enqueue_sales_send(1, quote, &result(quote), "preparado", false)
         .unwrap()
         .unwrap();
     store
         .complete_sales_send(first.id, &result(quote), &send(quote, first.id, 1, 'a'))
         .unwrap();
     let second = store
-        .enqueue_sales_send(quote, &result(quote), "preparado", false)
+        .enqueue_sales_send(1, quote, &result(quote), "preparado", false)
         .unwrap()
         .unwrap();
     let done = store
@@ -302,7 +303,7 @@ fn a_document_goes_to_sent_only_from_issued() {
     assert!(!done.status_changed);
     assert_eq!(done.status_error, None);
     assert_eq!(store.sales_document(quote).unwrap().status, Status::Sent);
-    assert_eq!(store.sales_document_sends(quote).unwrap().len(), 2);
+    assert_eq!(store.sales_document_sends(1, quote).unwrap().len(), 2);
 
     // Un presupuesto aceptado tampoco cambia: el estado no retrocede ni se toca.
     let accepted = issue(&mut store, DocumentKind::Quote, customer);
@@ -310,7 +311,7 @@ fn a_document_goes_to_sent_only_from_issued() {
         .transition_sales_document(accepted, Status::Accepted)
         .unwrap();
     let task = store
-        .enqueue_sales_send(accepted, &result(accepted), "preparado", false)
+        .enqueue_sales_send(1, accepted, &result(accepted), "preparado", false)
         .unwrap()
         .unwrap();
     let done = store
@@ -328,7 +329,7 @@ fn a_document_goes_to_sent_only_from_issued() {
         .transition_sales_document(note, Status::Delivered)
         .unwrap();
     let task = store
-        .enqueue_sales_send(note, &result(note), "preparado", false)
+        .enqueue_sales_send(1, note, &result(note), "preparado", false)
         .unwrap()
         .unwrap();
     store
@@ -373,7 +374,7 @@ fn only_one_send_task_is_open_per_document_and_the_issue_trigger_fires_once() {
     let id = issue(&mut store, DocumentKind::Quote, customer);
 
     let first = store
-        .enqueue_sales_send(id, &result(id), "preparado", false)
+        .enqueue_sales_send(1, id, &result(id), "preparado", false)
         .unwrap()
         .unwrap();
     assert_eq!(
@@ -381,7 +382,7 @@ fn only_one_send_task_is_open_per_document_and_the_issue_trigger_fires_once() {
         first.id
     );
     let blocked = store
-        .enqueue_sales_send(id, &result(id), "preparado", false)
+        .enqueue_sales_send(1, id, &result(id), "preparado", false)
         .unwrap_err();
     assert_eq!(blocked.code(), CODE_SEND_IN_PROGRESS);
     // Cerrada la tarea, otro envío manual es posible (reenviar).
@@ -391,16 +392,16 @@ fn only_one_send_task_is_open_per_document_and_the_issue_trigger_fires_once() {
     // El disparo de la regla al emitir: una sola vez por documento, aunque la tarea se cierre.
     let issued = issue(&mut store, DocumentKind::Quote, customer);
     let task = store
-        .enqueue_sales_send(issued, &result(issued), "al emitir", true)
+        .enqueue_sales_send(1, issued, &result(issued), "al emitir", true)
         .unwrap()
         .unwrap();
     assert!(store
-        .enqueue_sales_send(issued, &result(issued), "al emitir", true)
+        .enqueue_sales_send(1, issued, &result(issued), "al emitir", true)
         .unwrap()
         .is_none());
     store.cancel(task.id).unwrap();
     assert!(store
-        .enqueue_sales_send(issued, &result(issued), "al emitir", true)
+        .enqueue_sales_send(1, issued, &result(issued), "al emitir", true)
         .unwrap()
         .is_none());
     let tasks = store
@@ -412,7 +413,7 @@ fn only_one_send_task_is_open_per_document_and_the_issue_trigger_fires_once() {
     assert_eq!(tasks, 1, "el disparo no creó otra tarea");
     // El botón manual sigue disponible.
     assert!(store
-        .enqueue_sales_send(issued, &result(issued), "manual", false)
+        .enqueue_sales_send(1, issued, &result(issued), "manual", false)
         .unwrap()
         .is_some());
 }
@@ -425,7 +426,7 @@ fn a_send_attempt_without_a_close_blocks_voiding_and_a_review_only_task_is_cance
     // Solo en revisión, sin intento: anular la factura cancela la tarea.
     let quiet = issue(&mut store, DocumentKind::Invoice, customer);
     let review = store
-        .enqueue_sales_send(quiet, &result(quiet), "preparado", false)
+        .enqueue_sales_send(1, quiet, &result(quiet), "preparado", false)
         .unwrap()
         .unwrap();
     let voided = store.void_sales_invoice_registered(quiet, &ctx()).unwrap();
@@ -435,7 +436,7 @@ fn a_send_attempt_without_a_close_blocks_voiding_and_a_review_only_task_is_cance
     // Con un intento sin cerrar (el envío falló sin saberse si salió): no se anula.
     let id = issue(&mut store, DocumentKind::Invoice, customer);
     let task = store
-        .enqueue_sales_send(id, &result(id), "preparado", false)
+        .enqueue_sales_send(1, id, &result(id), "preparado", false)
         .unwrap()
         .unwrap();
     let request = ActionRequest {
@@ -479,7 +480,7 @@ fn a_confirmed_action_whose_task_is_still_open_also_blocks_voiding() {
     let customer = setup(&mut store);
     let id = issue(&mut store, DocumentKind::Invoice, customer);
     let task = store
-        .enqueue_sales_send(id, &result(id), "preparado", false)
+        .enqueue_sales_send(1, id, &result(id), "preparado", false)
         .unwrap()
         .unwrap();
     struct Sends;

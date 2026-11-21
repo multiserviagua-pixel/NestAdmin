@@ -6,9 +6,14 @@ mod profiles_common;
 
 use std::path::Path;
 
+use std::collections::BTreeSet;
+
+use nestadmin_core::profiles::classify::{tables_of, TableClass};
+use nestadmin_core::profiles::migrate::{migrate_step_with_hook, migrate_with_hook};
 use nestadmin_core::profiles::{
-    migrate, migrate_step, read_pointer, startup_state, write_pointer, DbIdentity, Decision,
-    MigrationState, ProfileDirs, ProfileKind, StartupState, POINTER_FILE,
+    finish_pending_rename, migrate, migrate_step, migration_report, principal_import_tables,
+    read_pointer, startup_state, write_pointer, DbIdentity, Decision, MigrationState, ProfileDirs,
+    ProfileKind, StartupState, POINTER_FILE, PRINCIPAL_EXCLUDED,
 };
 use nestadmin_core::sales::{ChainStatus, VerifactuEnvironment};
 use nestadmin_core::{CoreError, Store};
@@ -87,7 +92,7 @@ fn a_simulator_installation_moves_whole_to_the_test_profile_and_keeps_the_master
     assert!(!legacy.exists());
     let renamed = data.join("nestadmin.trasladada.db");
     assert_eq!(dump_all(&renamed), before);
-    assert_eq!(marker(&renamed), (7, Some("real".into()), "ok".into()));
+    assert_eq!(marker(&renamed), (6, Some("real".into()), "ok".into()));
 
     // Perfil de pruebas: copia entera del obligado 1, con su cadena y sus envíos.
     let test = pruebas(data);
@@ -307,7 +312,7 @@ fn a_fictitious_company_stays_only_in_the_test_profile() {
     assert_eq!(count(&test_ledger, "verifactu_records"), 2);
     assert_eq!(
         marker(&data.join("nestadmin.trasladada.db")),
-        (7, Some("ficticia".into()), "ok".into())
+        (6, Some("ficticia".into()), "ok".into())
     );
     assert_no_leftovers(data);
 }
@@ -329,7 +334,7 @@ fn an_installation_without_billing_data_skips_the_copy_and_the_question() {
     assert!(!data.join("nestadmin.db").exists());
     assert_eq!(
         marker(&data.join("nestadmin.trasladada.db")),
-        (7, None, "empty".into())
+        (6, None, "empty".into())
     );
     assert_no_leftovers(data);
 }
@@ -591,4 +596,297 @@ fn the_normal_profile_never_gets_a_test_environment_after_the_move() {
     assert!(insert(&normal(data).ledger_db(1), "simulador").is_err());
     assert!(insert(&pruebas(data).ledger_db(1), "produccion").is_err());
     insert(&pruebas(data).ledger_db(1), "preproduccion").unwrap();
+}
+
+#[test]
+fn the_test_copy_never_keeps_production_as_its_current_environment() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = dir.path();
+    build_legacy(data, SIMULATOR);
+    raw(&data.join("nestadmin.db"))
+        .execute(
+            "INSERT INTO verifactu_environment_changes (environment, authorization, changed_at) \
+             VALUES ('produccion', 'prueba', 1)",
+            [],
+        )
+        .unwrap();
+    migrate(data, Some(Decision::Real)).unwrap();
+    let test_ledger = pruebas(data).ledger_db(1);
+    let store =
+        Store::open_as(&test_ledger, &DbIdentity::obligado(ProfileKind::Pruebas, 1)).unwrap();
+    assert_eq!(
+        store.verifactu_environment().unwrap(),
+        VerifactuEnvironment::Simulador
+    );
+    drop(store);
+    // La historia se conserva y la fila nueva consta como del traslado.
+    assert_eq!(
+        query_strings(
+            &test_ledger,
+            "SELECT environment, authorization FROM verifactu_environment_changes ORDER BY id"
+        ),
+        vec![
+            "Text(\"produccion\")|Text(\"prueba\")".to_owned(),
+            "Text(\"simulador\")|Text(\"traslado (D272)\")".to_owned()
+        ]
+    );
+}
+
+#[test]
+fn accepted_production_records_abort_the_move_before_anything_is_written() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = dir.path();
+    build_legacy(data, SIMULATOR);
+    let legacy = data.join("nestadmin.db");
+    raw(&legacy)
+        .execute_batch(
+            "DROP TRIGGER verifactu_record_environments_no_update; \
+             UPDATE verifactu_record_environments SET environment = 'produccion' WHERE record_id = 1; \
+             CREATE TRIGGER verifactu_record_environments_no_update \
+             BEFORE UPDATE ON verifactu_record_environments \
+             BEGIN SELECT RAISE(ABORT, 'el entorno de un registro Verifactu no se modifica'); END; \
+             INSERT INTO verifactu_batches (environment, idempotency_key, header_json, record_count, \
+             authorization, started_at) VALUES ('produccion', 'lote-1', '{}', 1, 'x', 1); \
+             INSERT INTO verifactu_record_results (batch_id, record_id, status) \
+             VALUES (1, 1, 'accepted');",
+        )
+        .unwrap();
+    let err = migrate(data, Some(Decision::Real)).err().unwrap();
+    assert!(
+        matches!(
+            err,
+            CoreError::Profile {
+                code: "production_history_present",
+                ..
+            }
+        ),
+        "{err}"
+    );
+    assert_eq!(
+        count(&legacy, "profile_migration"),
+        0,
+        "sin marcador: no se empezó"
+    );
+    assert!(read_pointer(data).unwrap().is_none());
+    assert!(!data.join("perfiles").exists());
+    assert!(!normal(data).principal_db().exists());
+    assert_no_leftovers(data);
+}
+
+#[test]
+fn principal_tables_are_exactly_the_imported_ones_plus_the_explicitly_excluded() {
+    let imported = principal_import_tables();
+    let mut all: BTreeSet<&str> = imported.iter().copied().collect();
+    assert_eq!(all.len(), imported.len(), "una tabla importada dos veces");
+    for table in PRINCIPAL_EXCLUDED {
+        assert!(
+            all.insert(table),
+            "{table} está importada y excluida a la vez"
+        );
+    }
+    // `audit_log` es de todas las bases: se importa filtrada y no figura entre las principales.
+    assert!(all.remove("audit_log"));
+    let principal: BTreeSet<&str> = tables_of(TableClass::Principal).collect();
+    assert_eq!(all, principal);
+}
+
+#[test]
+fn the_report_says_what_the_move_left_out() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = dir.path();
+    assert_eq!(migration_report(data).unwrap(), None);
+    build_legacy(data, SIMULATOR);
+    assert_eq!(migration_report(data).unwrap(), None, "sin marcador aún");
+    migrate(data, Some(Decision::Real)).unwrap();
+    let report = migration_report(data).unwrap().unwrap();
+    assert_eq!(report.decision, Some(Decision::Real));
+    assert_eq!(
+        report.discarded_send_tasks.get("completed").copied(),
+        Some(1),
+        "{report:?}"
+    );
+    assert!(report.discarded_sales_audit_rows > 0);
+    assert_eq!(report.deactivated_recurring_templates, 1);
+
+    let dir = tempfile::tempdir().unwrap();
+    build_legacy(dir.path(), SIMULATOR);
+    migrate(dir.path(), Some(Decision::Ficticia)).unwrap();
+    let report = migration_report(dir.path()).unwrap().unwrap();
+    assert_eq!(report.decision, Some(Decision::Ficticia));
+    assert_eq!(report.deactivated_recurring_templates, 0);
+
+    let dir = tempfile::tempdir().unwrap();
+    build_legacy(dir.path(), EMPTY);
+    migrate(dir.path(), None).unwrap();
+    let report = migration_report(dir.path()).unwrap().unwrap();
+    assert_eq!(report.decision, None);
+    assert!(report.discarded_send_tasks.is_empty());
+    assert_eq!(report.discarded_sales_audit_rows, 0);
+}
+
+#[test]
+fn a_second_attempt_while_the_first_runs_is_refused_with_migration_locked() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = dir.path();
+    build_legacy(data, SIMULATOR);
+    let mut refused = Vec::new();
+    let end = migrate_with_hook(data, Some(Decision::Real), &mut |label| {
+        if label == "step2:copy-written" {
+            refused.push(migrate_step(data, Some(Decision::Real)));
+            refused.push(migrate(data, Some(Decision::Real)));
+            refused.push(migrate_step_with_hook(data, None, &mut |_| false));
+        }
+        false
+    })
+    .unwrap();
+    assert_eq!(end, MigrationState::Done);
+    assert_eq!(refused.len(), 3);
+    for result in refused {
+        assert!(
+            matches!(
+                result,
+                Err(CoreError::Profile {
+                    code: "migration_locked",
+                    ..
+                })
+            ),
+            "{result:?}"
+        );
+    }
+    // El cerrojo se suelta al terminar y el resultado no se resintió.
+    assert_no_leftovers(data);
+    assert_eq!(migrate_step(data, None).unwrap(), MigrationState::Done);
+    assert_eq!(count(&pruebas(data).ledger_db(1), "verifactu_records"), 2);
+}
+
+#[cfg(windows)]
+#[test]
+fn a_locked_old_database_does_not_block_startup_and_the_rename_finishes_later() {
+    use std::os::windows::fs::OpenOptionsExt;
+
+    let dir = tempfile::tempdir().unwrap();
+    let data = dir.path();
+    build_legacy(data, SIMULATOR);
+    let legacy = data.join("nestadmin.db");
+    let before = dump_all(&legacy);
+    // Un handle que no comparte el borrado ni el renombrado (como un antivirus o el indexador).
+    let held = std::fs::OpenOptions::new()
+        .read(true)
+        .share_mode(3)
+        .open(&legacy)
+        .unwrap();
+    let err = migrate(data, Some(Decision::Real))
+        .err()
+        .expect("el paso 7 no puede renombrar");
+    assert!(matches!(err, CoreError::Io(_)), "{err}");
+
+    // El puntero ya está: se arranca con el perfil normal y la base antigua sigue en su sitio.
+    assert_eq!(startup_state(data).unwrap(), StartupState::Ready);
+    assert!(legacy.is_file());
+    assert!(
+        !finish_pending_rename(data).unwrap(),
+        "bloqueada: no espera ni falla"
+    );
+    assert!(legacy.is_file());
+
+    drop(held);
+    assert!(finish_pending_rename(data).unwrap());
+    assert!(!legacy.exists());
+    let renamed = data.join("nestadmin.trasladada.db");
+    assert_eq!(dump_all(&renamed), before);
+    assert_eq!(
+        marker(&renamed).0,
+        6,
+        "la base archivada no se vuelve a escribir"
+    );
+    assert!(
+        finish_pending_rename(data).unwrap(),
+        "ya no queda nada pendiente"
+    );
+    assert_no_leftovers(data);
+}
+
+#[test]
+fn startup_is_ready_with_a_pointer_even_if_the_old_database_is_still_there() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = dir.path();
+    build_legacy(data, SIMULATOR);
+    // Se corta justo después de escribir el puntero: la base antigua queda sin renombrar.
+    let cut = migrate_with_hook(data, Some(Decision::Real), &mut |label| {
+        label == "step6:pointer-renamed"
+    });
+    assert!(cut.is_err());
+    assert_eq!(startup_state(data).unwrap(), StartupState::Ready);
+    assert!(data.join("nestadmin.db").is_file());
+    assert!(finish_pending_rename(data).unwrap());
+    assert!(!data.join("nestadmin.db").exists());
+    assert_eq!(marker(&data.join("nestadmin.trasladada.db")).0, 6);
+    // Sin puntero no hay nada que cerrar.
+    let other = tempfile::tempdir().unwrap();
+    build_legacy(other.path(), SIMULATOR);
+    assert!(!finish_pending_rename(other.path()).unwrap());
+    assert!(other.path().join("nestadmin.db").is_file());
+}
+
+#[test]
+fn rows_still_in_the_wal_of_the_old_database_reach_the_copy_and_the_principal() {
+    let dir = tempfile::tempdir().unwrap();
+    let a = dir.path().join("a");
+    build_legacy(&a, SIMULATOR);
+    let b = dir.path().join("b");
+    std::fs::create_dir_all(&b).unwrap();
+    // Escribe tras el último checkpoint y copia la base con su `-wal` sin cerrar la conexión:
+    // es lo que deja un proceso que murió.
+    let mut store = Store::open(&a.join("nestadmin.db")).unwrap();
+    for n in 0..3 {
+        store
+            .enqueue("email_triage", &format!(r#"{{"mail":"WAL-{n}"}}"#))
+            .unwrap();
+    }
+    std::fs::copy(a.join("nestadmin.db"), b.join("nestadmin.db")).unwrap();
+    std::fs::copy(a.join("nestadmin.db-wal"), b.join("nestadmin.db-wal")).unwrap();
+    drop(store);
+    assert!(
+        b.join("nestadmin.db-wal").is_file(),
+        "el montaje necesita un -wal real"
+    );
+    // Sanidad: el archivo principal por sí solo no tiene esas filas.
+    let only_main = b.join("solo-principal.db");
+    std::fs::copy(b.join("nestadmin.db"), &only_main).unwrap();
+    assert_eq!(
+        count_wal_rows(&only_main),
+        0,
+        "las filas están solo en el -wal"
+    );
+    std::fs::remove_file(&only_main).unwrap();
+
+    migrate(&b, Some(Decision::Real)).unwrap();
+    assert_no_leftovers(&b);
+    // 2 de correo + 3 del WAL (la tarea de envío no pasa a la principal).
+    assert_eq!(count(&normal(&b).principal_db(), "tasks"), 5);
+    // La copia de pruebas tiene además la tarea de envío.
+    assert_eq!(count(&pruebas(&b).ledger_db(1), "tasks"), 6);
+    assert_eq!(count_wal_rows(&pruebas(&b).ledger_db(1)), 3);
+}
+
+fn count_wal_rows(path: &Path) -> i64 {
+    raw(path)
+        .query_row(
+            "SELECT count(*) FROM tasks WHERE input_ref LIKE '%WAL-%'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap()
+}
+
+#[test]
+fn folders_with_spaces_accents_and_percent_work_with_the_attach() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = dir.path().join("Carpeta ñandú 100% prueba");
+    build_legacy(&data, SIMULATOR);
+    migrate(&data, Some(Decision::Real)).unwrap();
+    assert_no_leftovers(&data);
+    assert_eq!(count(&normal(&data).ledger_db(1), "customers"), 1);
+    assert_eq!(count(&normal(&data).principal_db(), "tasks"), 2);
+    assert_eq!(count(&pruebas(&data).ledger_db(1), "verifactu_records"), 2);
 }

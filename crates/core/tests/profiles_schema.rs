@@ -6,7 +6,7 @@ mod profiles_common;
 use std::collections::BTreeSet;
 
 use nestadmin_core::profiles::classify::{
-    class_of, is_derived, role_guard_name, tables_of, TableClass, CLASSIFICATION,
+    class_of, is_derived, role_guard_names, tables_of, TableClass, CLASSIFICATION,
 };
 use nestadmin_core::profiles::{
     create_ledger, create_principal, DbIdentity, DbRole, ProfileDirs, ProfileKind,
@@ -92,7 +92,7 @@ fn an_unclassified_table_is_detected() {
 }
 
 #[test]
-fn every_principal_and_ledger_table_has_its_role_trigger_and_no_other_has_one() {
+fn every_principal_and_ledger_table_has_its_three_role_triggers_and_no_other_has_one() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("x.db");
     drop(Store::open(&path).unwrap());
@@ -100,10 +100,12 @@ fn every_principal_and_ledger_table_has_its_role_trigger_and_no_other_has_one() 
     let all = triggers(&conn);
     for class in [TableClass::Principal, TableClass::Obligado] {
         for table in tables_of(class) {
-            assert!(
-                all.contains(&role_guard_name(table)),
-                "{table} ({class:?}) no tiene su trigger de papel"
-            );
+            for name in role_guard_names(table) {
+                assert!(
+                    all.contains(&name),
+                    "{table} ({class:?}) no tiene su trigger {name}"
+                );
+            }
         }
     }
     let guarded: BTreeSet<String> = all
@@ -112,12 +114,61 @@ fn every_principal_and_ledger_table_has_its_role_trigger_and_no_other_has_one() 
         .collect();
     let expected: BTreeSet<String> = tables_of(TableClass::Principal)
         .chain(tables_of(TableClass::Obligado))
-        .map(role_guard_name)
+        .flat_map(role_guard_names)
         .collect();
     assert_eq!(guarded, expected);
     // Las compartidas y el andamiaje no se guardan.
     for table in ["audit_log", "database_identity", "profile_migration"] {
-        assert!(!guarded.contains(&role_guard_name(table)), "{table}");
+        for name in role_guard_names(table) {
+            assert!(!guarded.contains(&name), "{table}");
+        }
+    }
+}
+
+#[test]
+fn role_guards_also_block_updates_and_deletes_of_existing_rows() {
+    // Una base con filas del otro papel (la copia de la base antigua en pruebas) y con identidad:
+    // ni se modifican ni se borran.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("o.db");
+    let mut store = Store::open(&path).unwrap();
+    store.enqueue("email_triage", "{}").unwrap();
+    drop(store);
+    let conn = raw(&path);
+    conn.execute(
+        "INSERT INTO company (id, name, updated_at) VALUES (1, 'Empresa Ficticia SL', 1)",
+        [],
+    )
+    .unwrap();
+    // Sin identidad se puede escribir, modificar y borrar como siempre.
+    conn.execute("UPDATE company SET name = 'Otra SL'", [])
+        .unwrap();
+    conn.execute("INSERT INTO database_identity (id, profile, role, taxpayer_id, created_at) VALUES (1, 'pruebas', 'obligado', 1, 1)", [])
+        .unwrap();
+    for sql in [
+        "UPDATE tasks SET attempts = attempts + 1",
+        "DELETE FROM tasks",
+    ] {
+        let message = error_text(conn.execute(sql, []));
+        assert!(message.contains("wrong_database"), "{sql}: {message}");
+    }
+    // Lo propio del obligado sigue siendo escribible.
+    conn.execute("UPDATE company SET name = 'Empresa Ficticia 2 SL'", [])
+        .unwrap();
+
+    let path = dir.path().join("p.db");
+    drop(Store::open(&path).unwrap());
+    let conn = raw(&path);
+    conn.execute(
+        "INSERT INTO company (id, name, updated_at) VALUES (1, 'Empresa Ficticia SL', 1)",
+        [],
+    )
+    .unwrap();
+    conn.execute("INSERT INTO database_identity (id, profile, role, taxpayer_id, created_at) VALUES (1, 'normal', 'principal', NULL, 1)", [])
+        .unwrap();
+    for sql in ["UPDATE company SET name = 'x'", "DELETE FROM company"] {
+        let message = error_text(conn.execute(sql, []));
+        assert!(message.contains("wrong_database"), "{sql}: {message}");
     }
 }
 
@@ -522,7 +573,7 @@ fn migration_18_over_a_database_with_sends_keeps_every_count_and_uses_taxpayer_1
     assert!(ids[0].starts_with("Integer(1)|"), "{ids:?}");
     // Las consultas de siempre siguen funcionando con ese obligado.
     let invoice = facts.invoice.unwrap();
-    let sends = store.sales_document_sends(invoice).unwrap();
+    let sends = store.sales_document_sends(1, invoice).unwrap();
     assert_eq!(sends.len(), 1);
     assert_eq!(sends[0].task_id, facts.send_task.unwrap());
     // Sin la clave foránea hacia los documentos (D287): el documento vive en la base del obligado.

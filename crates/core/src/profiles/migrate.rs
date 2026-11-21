@@ -19,7 +19,7 @@
 //! 7. Renombrar la base anterior a `nestadmin.trasladada.db`.
 
 use std::collections::BTreeMap;
-use std::fs;
+use std::fs::{self, File, OpenOptions};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -28,9 +28,9 @@ use sha2::{Digest, Sha256};
 
 use super::classify::is_derived;
 use super::{
-    attach_read_only, build_ledger, build_principal, import_table, part_path, publish,
-    read_pointer, remove_db_files, write_pointer_with, DbIdentity, ProfileDirs, ProfileKind,
-    LEGACY_DB, LEGACY_RENAMED_DB,
+    attach_read_only, build_ledger, build_principal, ensure_no_wal, import_table, part_path,
+    publish, read_pointer, remove_db_files, write_pointer_with, DbIdentity, ProfileDirs,
+    ProfileKind, LEGACY_DB, LEGACY_RENAMED_DB,
 };
 use crate::error::{CoreError, Result};
 use crate::sales::ChainStatus;
@@ -75,13 +75,29 @@ pub enum MigrationState {
 /// Qué hacer al arrancar según los archivos de la carpeta de datos.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StartupState {
-    /// Con puntero: se abre el perfil normal.
+    /// Con puntero: se abre el perfil normal, aunque la base antigua siga sin renombrar (el
+    /// renombrado se completa después con [`finish_pending_rename`]).
     Ready,
-    /// Sin puntero y con `nestadmin.db` (o con el traslado a falta de su cierre): hay que hacerlo
-    /// o retomarlo.
+    /// Sin puntero y con `nestadmin.db`: hay que hacer o retomar el traslado.
     NeedsMigration,
     /// Ni puntero ni base anterior: instalación nueva.
     NewInstallation,
+}
+
+/// Lo que el traslado dejó fuera o cambió, para que la aplicación lo muestre: la ausencia de
+/// datos es explícita.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MigrationReport {
+    /// La decisión «¿la empresa y los clientes son reales?» ya guardada, si se llegó a tomar.
+    pub decision: Option<Decision>,
+    /// Tareas de envío de documentos de venta que no pasaron a la base principal, por estado
+    /// (las pendientes de revisión o aprobadas no se envían: el documento vive en el perfil de
+    /// pruebas).
+    pub discarded_send_tasks: BTreeMap<String, i64>,
+    /// Filas de auditoría de ventas (`sales.*` y `verifactu.*`) que no pasaron a la principal.
+    pub discarded_sales_audit_rows: i64,
+    /// Plantillas recurrentes importadas desactivadas al obligado del perfil normal.
+    pub deactivated_recurring_templates: i64,
 }
 
 fn failure(code: &'static str, message: impl Into<String>) -> CoreError {
@@ -91,52 +107,107 @@ fn failure(code: &'static str, message: impl Into<String>) -> CoreError {
     }
 }
 
-/// Estado de arranque según los archivos.
+/// Estado de arranque según los archivos. Con puntero es siempre `Ready`: una base antigua sin
+/// renombrar no impide arrancar.
 pub fn startup_state(data_dir: &Path) -> Result<StartupState> {
-    let pointer = read_pointer(data_dir)?.is_some();
-    let legacy = data_dir.join(LEGACY_DB);
-    Ok(match (pointer, legacy.is_file()) {
-        (false, false) => StartupState::NewInstallation,
-        (false, true) => StartupState::NeedsMigration,
-        (true, false) => StartupState::Ready,
-        (true, true) => match read_legacy_marker(&legacy)? {
-            Some(marker) if marker.step >= 5 => StartupState::NeedsMigration,
-            _ => StartupState::Ready,
-        },
+    if read_pointer(data_dir)?.is_some() {
+        return Ok(StartupState::Ready);
+    }
+    Ok(if data_dir.join(LEGACY_DB).is_file() {
+        StartupState::NeedsMigration
+    } else {
+        StartupState::NewInstallation
+    })
+}
+
+/// Cerrojo entre procesos del traslado: un archivo en la carpeta de datos abierto en exclusiva
+/// mientras dura (en Windows, sin compartir; en otros sistemas, creado con `create_new`).
+struct MigrationLock {
+    file: Option<File>,
+    path: PathBuf,
+}
+
+const LOCK_FILE: &str = "migrar.cerrojo";
+
+impl MigrationLock {
+    /// `None` si otro proceso (u otro intento de este) lo tiene.
+    fn try_acquire(dir: &Path) -> Result<Option<Self>> {
+        fs::create_dir_all(dir)?;
+        let path = dir.join(LOCK_FILE);
+        let mut options = OpenOptions::new();
+        options.write(true);
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::OpenOptionsExt;
+            options.create(true).share_mode(0);
+        }
+        #[cfg(not(windows))]
+        options.create_new(true);
+        match options.open(&path) {
+            Ok(file) => Ok(Some(Self {
+                file: Some(file),
+                path,
+            })),
+            Err(e) if is_lock_conflict(&e) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+}
+
+fn is_lock_conflict(e: &std::io::Error) -> bool {
+    // 32 y 33: ERROR_SHARING_VIOLATION y ERROR_LOCK_VIOLATION en Windows.
+    matches!(
+        e.kind(),
+        std::io::ErrorKind::AlreadyExists | std::io::ErrorKind::PermissionDenied
+    ) || matches!(e.raw_os_error(), Some(32) | Some(33))
+}
+
+impl Drop for MigrationLock {
+    fn drop(&mut self) {
+        drop(self.file.take());
+        // Si otro proceso lo abrió entre medias, el borrado falla y no pasa nada.
+        let _ = fs::remove_file(&self.path);
+    }
+}
+
+fn lock_or_fail(dir: &Path) -> Result<MigrationLock> {
+    MigrationLock::try_acquire(dir)?.ok_or_else(|| {
+        failure(
+            "migration_locked",
+            "otro proceso está trasladando los datos; espere a que termine",
+        )
     })
 }
 
 /// Ejecuta el siguiente paso pendiente. Sin base anterior ni puntero crea una instalación nueva;
-/// con puntero solo cierra un traslado a medias (paso 7). `decision` solo se usa en el paso 3 y,
-/// una vez guardada en el marcador, no puede cambiar.
+/// con puntero intenta además cerrar un traslado a medias (paso 7). `decision` solo se usa en el
+/// paso 3 y, una vez guardada en el marcador, no puede cambiar. Con el cerrojo tomado por otro
+/// proceso devuelve `migration_locked`.
 pub fn migrate_step(data_dir: &Path, decision: Option<Decision>) -> Result<MigrationState> {
-    run_step(&mut Ctx::new(data_dir, &mut |_| false), decision)
+    step_inner(data_dir, decision, &mut |_| false)
 }
 
-/// Ejecuta pasos hasta terminar o hasta que falte la decisión.
+/// Ejecuta pasos hasta terminar o hasta que falte la decisión, con el cerrojo tomado todo el
+/// tiempo.
 pub fn migrate(data_dir: &Path, decision: Option<Decision>) -> Result<MigrationState> {
-    migrate_with_hook(data_dir, decision, &mut |_| false)
+    migrate_inner(data_dir, decision, &mut |_| false)
 }
 
-/// Como [`migrate_step`], con un gancho que se llama en cada punto de corte con su etiqueta; si
-/// devuelve `true` el paso se interrumpe con el error `interrupted`, como un corte del proceso.
-/// Solo para pruebas de recuperación.
-#[doc(hidden)]
-pub fn migrate_step_with_hook(
+fn step_inner(
     data_dir: &Path,
     decision: Option<Decision>,
     hook: &mut dyn FnMut(&str) -> bool,
 ) -> Result<MigrationState> {
+    let _lock = lock_or_fail(data_dir)?;
     run_step(&mut Ctx::new(data_dir, hook), decision)
 }
 
-/// Como [`migrate`], con el gancho de [`migrate_step_with_hook`].
-#[doc(hidden)]
-pub fn migrate_with_hook(
+fn migrate_inner(
     data_dir: &Path,
     decision: Option<Decision>,
     hook: &mut dyn FnMut(&str) -> bool,
 ) -> Result<MigrationState> {
+    let _lock = lock_or_fail(data_dir)?;
     let mut ctx = Ctx::new(data_dir, hook);
     loop {
         match run_step(&mut ctx, decision)? {
@@ -144,6 +215,112 @@ pub fn migrate_with_hook(
             other => return Ok(other),
         }
     }
+}
+
+/// Como [`migrate_step`], con un gancho que se llama en cada punto de corte con su etiqueta; si
+/// devuelve `true` el paso se interrumpe con el error `interrupted`, como un corte del proceso.
+/// Solo para pruebas de recuperación (característica `test-hooks`).
+#[cfg(feature = "test-hooks")]
+pub fn migrate_step_with_hook(
+    data_dir: &Path,
+    decision: Option<Decision>,
+    hook: &mut dyn FnMut(&str) -> bool,
+) -> Result<MigrationState> {
+    step_inner(data_dir, decision, hook)
+}
+
+/// Como [`migrate`], con el gancho de [`migrate_step_with_hook`].
+#[cfg(feature = "test-hooks")]
+pub fn migrate_with_hook(
+    data_dir: &Path,
+    decision: Option<Decision>,
+    hook: &mut dyn FnMut(&str) -> bool,
+) -> Result<MigrationState> {
+    migrate_inner(data_dir, decision, hook)
+}
+
+/// Intenta una sola vez, sin esperar, el renombrado del paso 7 si el puntero ya existe y la base
+/// antigua sigue sin renombrar con el marcador en el paso 5 o más. Devuelve `true` si no queda
+/// nada pendiente. Un archivo bloqueado, un cerrojo tomado o cualquier fallo devuelven `false`:
+/// la aplicación arranca igual y lo vuelve a intentar en el siguiente arranque.
+pub fn finish_pending_rename(data_dir: &Path) -> Result<bool> {
+    if read_pointer(data_dir)?.is_none() {
+        return Ok(false);
+    }
+    let legacy = data_dir.join(LEGACY_DB);
+    if !legacy.is_file() {
+        return Ok(true);
+    }
+    let Some(_lock) = MigrationLock::try_acquire(data_dir)? else {
+        return Ok(false);
+    };
+    Ok(finish_after_pointer(data_dir, &legacy))
+}
+
+/// Cierra un traslado con puntero y sin renombrar; `true` si lo consiguió. No falla.
+fn finish_after_pointer(data_dir: &Path, legacy: &Path) -> bool {
+    let Ok(Some(marker)) = read_legacy_marker(legacy) else {
+        return false;
+    };
+    if marker.step < 5 {
+        return false;
+    }
+    if marker.step < 6 && set_step(legacy, 6, None).is_err() {
+        return false;
+    }
+    try_rename_legacy(legacy, &data_dir.join(LEGACY_RENAMED_DB)).is_ok()
+}
+
+/// Lo que el traslado dejó fuera, leído de la base antigua (renombrada o no). `None` si no hay
+/// base antigua o no llegó a empezar el traslado.
+pub fn migration_report(data_dir: &Path) -> Result<Option<MigrationReport>> {
+    let path = [LEGACY_DB, LEGACY_RENAMED_DB]
+        .iter()
+        .map(|n| data_dir.join(n))
+        .find(|p| p.is_file());
+    let Some(path) = path else {
+        return Ok(None);
+    };
+    let conn = Connection::open_with_flags(
+        &path,
+        OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_URI,
+    )?;
+    let Some(marker) = read_marker(&conn)? else {
+        return Ok(None);
+    };
+    let mut discarded_send_tasks = BTreeMap::new();
+    {
+        let mut stmt = conn.prepare(
+            "SELECT state, count(*) FROM tasks WHERE kind = 'send_sales_document' \
+             GROUP BY state ORDER BY state",
+        )?;
+        let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?;
+        for row in rows {
+            let (state, n) = row?;
+            discarded_send_tasks.insert(state, n);
+        }
+    }
+    let discarded_sales_audit_rows: i64 = conn.query_row(
+        "SELECT count(*) FROM audit_log WHERE action LIKE 'sales.%' OR action LIKE 'verifactu.%'",
+        [],
+        |r| r.get(0),
+    )?;
+    let deactivated_recurring_templates =
+        if marker.has_billing() && marker.decision == Some(Decision::Real) {
+            conn.query_row(
+                "SELECT count(*) FROM recurring_templates WHERE active = 1",
+                [],
+                |r| r.get(0),
+            )?
+        } else {
+            0
+        };
+    Ok(Some(MigrationReport {
+        decision: marker.decision,
+        discarded_send_tasks,
+        discarded_sales_audit_rows,
+        deactivated_recurring_templates,
+    }))
 }
 
 struct Ctx<'a> {
@@ -366,7 +543,8 @@ fn run_step(ctx: &mut Ctx<'_>, decision: Option<Decision>) -> Result<MigrationSt
         return Ok(MigrationState::Done);
     }
     if pointer {
-        // Puntero escrito y base anterior sin renombrar: solo falta cerrar el traslado.
+        // Puntero escrito y base anterior sin renombrar: solo falta el paso 7, con sus reintentos.
+        // El arranque no pasa por aquí (con puntero es `Ready` y usa `finish_pending_rename`).
         return match read_legacy_marker(&legacy)? {
             Some(marker) if marker.step >= 5 => {
                 if marker.step < 6 {
@@ -416,9 +594,55 @@ fn run_step(ctx: &mut Ctx<'_>, decision: Option<Decision>) -> Result<MigrationSt
     })
 }
 
+/// Un registro de producción aceptado por la AEAT no se puede archivar en pruebas: el traslado se
+/// detiene antes de escribir nada. (Hoy no existe: la remisión a producción llega con T18b.)
+fn ensure_no_production_history(conn: &Connection) -> Result<()> {
+    let accepted: i64 = conn.query_row(
+        "SELECT count(*) FROM verifactu_record_environments e \
+         JOIN verifactu_record_results r ON r.record_id = e.record_id \
+         JOIN verifactu_batches b ON b.id = r.batch_id \
+         WHERE e.environment = 'produccion' AND b.environment = 'produccion' \
+           AND r.status IN ('accepted', 'accepted_with_errors')",
+        [],
+        |r| r.get(0),
+    )?;
+    if accepted > 0 {
+        return Err(failure(
+            "production_history_present",
+            "la base tiene registros aceptados en producción: no se archivan en pruebas",
+        ));
+    }
+    Ok(())
+}
+
+/// La copia de pruebas no puede quedar con el entorno `produccion` vigente: si lo está, se añade
+/// una fila `simulador` (el trigger de entorno solo vigila las inserciones y la copia llevaría la
+/// última fila tal cual).
+fn ensure_test_environment(store: &Store) -> Result<()> {
+    let current: Option<String> = store
+        .conn
+        .query_row(
+            "SELECT environment FROM verifactu_environment_changes ORDER BY id DESC LIMIT 1",
+            [],
+            |r| r.get(0),
+        )
+        .optional()?;
+    if let Some(env) = current {
+        if env != "simulador" && env != "preproduccion" {
+            store.conn.execute(
+                "INSERT INTO verifactu_environment_changes (environment, authorization, \
+                 changed_at) VALUES ('simulador', 'traslado (D272)', ?1)",
+                [now_ms()],
+            )?;
+        }
+    }
+    Ok(())
+}
+
 fn step1(ctx: &mut Ctx<'_>, legacy: &Path) -> Result<()> {
     let store = Store::open(legacy)?;
     check_integrity(&store.conn)?;
+    ensure_no_production_history(&store.conn)?;
     let counts = count_tables(&store.conn)?;
     // Una cadena rota no detiene el traslado: se archiva en pruebas tal como está.
     let chain = chain_info(&store)?;
@@ -451,6 +675,11 @@ fn step2(ctx: &mut Ctx<'_>, legacy: &Path, marker: &Marker) -> Result<()> {
         remove_db_files(&target)?;
         backup_to(legacy, &part)?;
         let mut copy = Store::open(&part)?;
+        if let Err(e) = check_integrity(&copy.conn) {
+            drop(copy);
+            remove_db_files(&part)?;
+            return Err(e);
+        }
         let copied_counts = count_tables(&copy.conn)?;
         let copied_chain = chain_info(&copy)?;
         if copied_counts != marker.counts || copied_chain != marker.chain {
@@ -462,6 +691,7 @@ fn step2(ctx: &mut Ctx<'_>, legacy: &Path, marker: &Marker) -> Result<()> {
             ));
         }
         copy.set_identity(&DbIdentity::obligado(ProfileKind::Pruebas, 1))?;
+        ensure_test_environment(&copy)?;
         copy.finish()?;
         ctx.cut("step2:copy-written")?;
         publish(&part, &target)?;
@@ -561,6 +791,18 @@ fn step3(legacy: &Path, marker: &Marker, decision: Option<Decision>) -> Result<b
 /// Tablas del papel principal que se importan a la base principal normal, con su filtro. Las
 /// tareas de envío de venta y todo lo que dependa de ellas, y la auditoría de ventas, quedan
 /// fuera: viven en el obligado y en el perfil de pruebas.
+/// Tablas del papel principal que NO se importan a la principal normal: los envíos de venta y sus
+/// disparos viven en el perfil de pruebas con el documento al que se refieren (D287), y el
+/// registro de obligados se crea de nuevo (D289). Una prueba exige que las tablas `Principal` de
+/// [`super::classify`] sean exactamente la unión de las importadas y estas.
+pub const PRINCIPAL_EXCLUDED: &[&str] =
+    &["sales_document_sends", "sales_send_triggers", "taxpayers"];
+
+/// Tablas que se importan a la base principal normal.
+pub fn principal_import_tables() -> Vec<&'static str> {
+    PRINCIPAL_IMPORT.iter().map(|(t, _)| *t).collect()
+}
+
 const TASK_FILTER: &str = "task_id IN (SELECT id FROM main.tasks)";
 const PRINCIPAL_IMPORT: &[(&str, Option<&str>)] = &[
     ("tasks", Some("kind <> 'send_sales_document'")),
@@ -621,27 +863,23 @@ fn step4(ctx: &mut Ctx<'_>, legacy: &Path, marker: &Marker) -> Result<()> {
         tx.execute_batch("PRAGMA defer_foreign_keys = ON")?;
         for (table, filter) in PRINCIPAL_IMPORT {
             let inserted = import_table(&tx, table, *filter, None)? as i64;
-            if filter.is_none() {
-                let expected = marker.counts.get(*table).copied().unwrap_or(0);
-                if inserted != expected {
-                    return Err(failure(
-                        "migration_import_mismatch",
-                        format!("la importación de {table} no coincide con el recuento original"),
-                    ));
-                }
+            let original = marker.counts.get(*table).copied().unwrap_or(0);
+            // Lo insertado más lo que el filtro dejó fuera (filas de tareas excluidas o de
+            // auditoría de ventas) debe cuadrar con el recuento original.
+            let left_out: i64 = match filter {
+                None => 0,
+                Some(f) => tx.query_row(
+                    &format!("SELECT count(*) FROM old.\"{table}\" WHERE NOT COALESCE(({f}), 0)"),
+                    [],
+                    |r| r.get(0),
+                )?,
+            };
+            if inserted + left_out != original {
+                return Err(failure(
+                    "migration_import_mismatch",
+                    format!("la importación de {table} no cuadra con el recuento original"),
+                ));
             }
-        }
-        let send_tasks: i64 = tx.query_row(
-            "SELECT count(*) FROM old.tasks WHERE kind = 'send_sales_document'",
-            [],
-            |r| r.get(0),
-        )?;
-        let tasks: i64 = tx.query_row("SELECT count(*) FROM main.tasks", [], |r| r.get(0))?;
-        if tasks + send_tasks != marker.counts.get("tasks").copied().unwrap_or(0) {
-            return Err(failure(
-                "migration_import_mismatch",
-                "las tareas importadas no coinciden con las originales",
-            ));
         }
         tx.commit()?;
     }
@@ -738,7 +976,7 @@ fn step7(ctx: &mut Ctx<'_>, legacy: &Path) -> Result<()> {
     let mut last = None;
     for attempt in 0..10 {
         // Un antivirus o el indexador pueden tener el archivo un instante: se reintenta.
-        match fs::rename(legacy, &target) {
+        match try_rename_legacy(legacy, &target) {
             Ok(()) => {
                 last = None;
                 break;
@@ -752,11 +990,16 @@ fn step7(ctx: &mut Ctx<'_>, legacy: &Path) -> Result<()> {
         }
     }
     if let Some(e) = last {
-        return Err(e.into());
+        return Err(e);
     }
-    ctx.cut("step7:renamed")?;
-    // El marcador viaja con la base; anotar el último paso es solo informativo.
-    let _ = set_step(&target, 7, None);
+    // La base archivada no se vuelve a escribir: el marcador se queda en el paso 6.
+    ctx.cut("step7:renamed")
+}
+
+/// Renombra la base antigua una vez, sin dejar un `-wal` con filas sin volcar.
+fn try_rename_legacy(legacy: &Path, target: &Path) -> Result<()> {
+    ensure_no_wal(legacy)?;
+    fs::rename(legacy, target)?;
     Ok(())
 }
 

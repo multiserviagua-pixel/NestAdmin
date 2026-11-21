@@ -1078,7 +1078,7 @@ impl App {
             };
             if self
                 .store
-                .sales_document_sends(document)?
+                .sales_document_sends(nestadmin_core::sales::DEFAULT_TAXPAYER_ID, document)?
                 .iter()
                 .any(|s| s.idempotency_key == done.idempotency_key)
             {

@@ -29,7 +29,10 @@ use crate::store::now_ms;
 use crate::Store;
 
 pub use classify::{class_of, TableClass, CLASSIFICATION};
-pub use migrate::{migrate, migrate_step, startup_state, Decision, MigrationState, StartupState};
+pub use migrate::{
+    finish_pending_rename, migrate, migrate_step, migration_report, principal_import_tables,
+    startup_state, Decision, MigrationReport, MigrationState, StartupState, PRINCIPAL_EXCLUDED,
+};
 
 /// Puntero de perfil: existe cuando el traslado terminó o la instalación es nueva.
 pub const POINTER_FILE: &str = "perfiles.json";
@@ -434,8 +437,34 @@ pub(crate) fn sync_file(path: &Path) -> Result<()> {
 
 /// Fuerza a disco el archivo ya cerrado y lo renombra a su nombre definitivo.
 pub(crate) fn publish(part: &Path, target: &Path) -> Result<()> {
+    ensure_no_wal(part)?;
     sync_file(part)?;
     fs::rename(part, target)?;
+    Ok(())
+}
+
+/// Comprueba que no queda un `-wal` junto a la base: si lo hay (un proceso que murió sin cerrarla),
+/// intenta volcarlo con un checkpoint completo y, si no lo consigue, falla con `wal_pending`.
+/// Renombrar una base con un `-wal` sin volcar dejaría sus últimas filas atadas al nombre antiguo.
+pub(crate) fn ensure_no_wal(path: &Path) -> Result<()> {
+    let mut name = path.as_os_str().to_owned();
+    name.push("-wal");
+    let wal = PathBuf::from(name);
+    if !wal.exists() {
+        return Ok(());
+    }
+    let conn = Connection::open_with_flags(
+        path,
+        OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_URI,
+    )?;
+    let busy: i64 = conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |r| r.get(0))?;
+    conn.close().map_err(|(_, e)| CoreError::Storage(e))?;
+    if busy != 0 || wal.exists() {
+        return Err(CoreError::Profile {
+            code: "wal_pending",
+            message: "queda un registro de escritura sin volcar junto a la base".into(),
+        });
+    }
     Ok(())
 }
 
@@ -447,6 +476,22 @@ pub(crate) fn part_path(target: &Path) -> PathBuf {
 }
 
 // --- Creación de bases ---
+
+/// Crea en `part` una base con el esquema actual y vacía, y la abre. Las migraciones se aplican en
+/// memoria y la base se vuelca al archivo de una vez: migrar directamente sobre el archivo cuesta
+/// un commit con `fsync` por migración, que en un traslado (varias bases nuevas) y en las pruebas
+/// de recuperación se nota. Quien llama borró antes cualquier resto de `part`.
+fn create_blank(part: &Path) -> Result<Store> {
+    let memory = Store::open_in_memory()?;
+    let mut file = Connection::open(part)?;
+    {
+        let backup = rusqlite::backup::Backup::new(&memory.conn, &mut file)?;
+        backup.run_to_completion(256, std::time::Duration::ZERO, None)?;
+    }
+    file.close().map_err(|(_, e)| CoreError::Storage(e))?;
+    drop(memory);
+    Store::open(part)
+}
 
 /// Abre en `part` (borrando antes cualquier resto) una base principal nueva con su identidad.
 /// Con `first_taxpayer`, la deja con ese obligado dado de alta. Devuelve el `Store` abierto;
@@ -460,7 +505,7 @@ pub(crate) fn build_principal(
     if let Some(parent) = part.parent() {
         fs::create_dir_all(parent)?;
     }
-    let mut store = Store::open(part)?;
+    let mut store = create_blank(part)?;
     store.set_identity(&DbIdentity::principal(profile))?;
     if let Some((id, label)) = first_taxpayer {
         store.register_taxpayer(id, label)?;
@@ -479,7 +524,7 @@ pub(crate) fn build_ledger(part: &Path, profile: ProfileKind, taxpayer_id: i64) 
     if let Some(parent) = part.parent() {
         fs::create_dir_all(parent)?;
     }
-    let mut store = Store::open(part)?;
+    let mut store = create_blank(part)?;
     store.set_identity(&DbIdentity::obligado(profile, taxpayer_id))?;
     if profile == ProfileKind::Normal {
         store.conn.execute(
@@ -530,11 +575,26 @@ pub(crate) fn attach_read_only(conn: &Connection, path: &Path, alias: &str) -> R
     Ok(())
 }
 
-/// `file:` URI con `mode=ro` para una ruta del sistema.
-fn file_uri(path: &Path) -> String {
-    let text = path.to_string_lossy().replace('\\', "/");
-    let mut encoded = String::with_capacity(text.len() + 16);
-    for ch in text.trim_start_matches('/').chars() {
+/// `file:` URI con `mode=ro` para una ruta del sistema. Las barras invertidas pasan a `/`, los
+/// caracteres que no son seguros en una URI (espacios, tildes, `%`, `?`, `#`…) se escriben como
+/// `%XX` en UTF-8, una ruta con letra de unidad (`C:/…`) lleva tres barras tras `file:` y una ruta
+/// UNC (`\\servidor\recurso\…`) lleva cuatro (autoridad vacía y ruta `//servidor/recurso/…`, que es
+/// como SQLite entiende una ruta de red). El prefijo `\\?\` de las rutas extendidas se quita.
+pub(crate) fn file_uri(path: &Path) -> String {
+    let mut text = path.to_string_lossy().replace('\\', "/");
+    if let Some(rest) = text.strip_prefix("//?/UNC/") {
+        text = format!("//{rest}");
+    } else if let Some(rest) = text.strip_prefix("//?/") {
+        text = rest.to_owned();
+    }
+    let unc = text.starts_with("//");
+    let body = if unc {
+        text.as_str()
+    } else {
+        text.trim_start_matches('/')
+    };
+    let mut encoded = String::with_capacity(body.len() + 16);
+    for ch in body.chars() {
         match ch {
             'A'..='Z' | 'a'..='z' | '0'..='9' | '-' | '_' | '.' | '~' | '/' | ':' => {
                 encoded.push(ch)
@@ -547,7 +607,11 @@ fn file_uri(path: &Path) -> String {
             }
         }
     }
-    format!("file:///{encoded}?mode=ro")
+    if unc {
+        format!("file://{encoded}?mode=ro")
+    } else {
+        format!("file:///{encoded}?mode=ro")
+    }
 }
 
 /// Columnas de una tabla de la base principal de la conexión, en orden.
@@ -587,4 +651,58 @@ pub(crate) fn import_table(
         [],
     )?;
     Ok(n)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::file_uri;
+    use std::path::Path;
+
+    #[test]
+    fn drive_paths_get_three_slashes_and_forward_slashes() {
+        assert_eq!(
+            file_uri(Path::new(r"C:\Users\Ana\datos\nestadmin.db")),
+            "file:///C:/Users/Ana/datos/nestadmin.db?mode=ro"
+        );
+    }
+
+    #[test]
+    fn unix_paths_get_three_slashes() {
+        assert_eq!(
+            file_uri(Path::new("/var/datos/nestadmin.db")),
+            "file:///var/datos/nestadmin.db?mode=ro"
+        );
+    }
+
+    #[test]
+    fn unc_paths_get_an_empty_authority() {
+        assert_eq!(
+            file_uri(Path::new(r"\\servidor\recurso\carpeta\nestadmin.db")),
+            "file:////servidor/recurso/carpeta/nestadmin.db?mode=ro"
+        );
+    }
+
+    #[test]
+    fn extended_length_prefixes_are_removed() {
+        assert_eq!(
+            file_uri(Path::new(r"\\?\C:\datos\a.db")),
+            "file:///C:/datos/a.db?mode=ro"
+        );
+        assert_eq!(
+            file_uri(Path::new(r"\\?\UNC\servidor\recurso\a.db")),
+            "file:////servidor/recurso/a.db?mode=ro"
+        );
+    }
+
+    #[test]
+    fn spaces_accents_percent_and_query_characters_are_escaped_in_utf8() {
+        assert_eq!(
+            file_uri(Path::new(r"C:\Mis datos\ñandú 100%\a#b?c.db")),
+            "file:///C:/Mis%20datos/%C3%B1and%C3%BA%20100%25/a%23b%3Fc.db?mode=ro"
+        );
+        assert_eq!(
+            file_uri(Path::new(r"\\servidor\Recurso con espacio\ñ.db")),
+            "file:////servidor/Recurso%20con%20espacio/%C3%B1.db?mode=ro"
+        );
+    }
 }

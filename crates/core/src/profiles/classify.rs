@@ -1,6 +1,6 @@
 //! Clasificación de todas las tablas por papel (D287, D288). Es la fuente de verdad del reparto
 //! entre la base principal y la de cada obligado: el traslado importa según ella y la migración 18
-//! crea un trigger de papel por cada tabla `Principal` u `Obligado`. Una prueba exige que toda
+//! crea tres triggers de papel (insertar, modificar y borrar) por cada tabla `Principal` u `Obligado`. Una prueba exige que toda
 //! tabla de una base migrada esté aquí y tenga su trigger; añadir una tabla sin clasificarla hace
 //! fallar esa prueba.
 
@@ -109,7 +109,17 @@ pub fn is_derived(table: &str) -> bool {
     table == "search_fts" || table.starts_with("search_fts_")
 }
 
-/// Nombre del trigger de papel de una tabla (migración 18).
+/// Nombre del trigger de papel de una tabla para `INSERT` (migración 18).
 pub fn role_guard_name(table: &str) -> String {
     format!("role_guard_{table}")
+}
+
+/// Los tres triggers de papel de una tabla (`INSERT`, `UPDATE` y `DELETE`, D288). Sus nombres no
+/// chocan con los de inalterabilidad `<tabla>_no_update` y `<tabla>_no_delete`.
+pub fn role_guard_names(table: &str) -> [String; 3] {
+    [
+        format!("role_guard_{table}"),
+        format!("role_guard_{table}_upd"),
+        format!("role_guard_{table}_del"),
+    ]
 }
